@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: eim-api
+    runtime: python
+    rootDir: backend
+    # Pick a paid instance size so the API does not spin down when idle.
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
