@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -25,7 +25,7 @@ async function get<T>(path: string): Promise<T> {
   return res.json();
 }
 
-export default function VehicleSelector() {
+function VehicleSelectorInner() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -161,5 +161,16 @@ export default function VehicleSelector() {
 
       {error && <p className="w-full text-sm text-red-600">{error}</p>}
     </div>
+  );
+}
+
+// useSearchParams() must sit inside a Suspense boundary or the static build
+// fails, so the boundary lives here and pages can render <VehicleSelector />
+// without wrapping it themselves.
+export default function VehicleSelector() {
+  return (
+    <Suspense fallback={null}>
+      <VehicleSelectorInner />
+    </Suspense>
   );
 }
