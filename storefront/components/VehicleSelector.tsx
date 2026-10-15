@@ -1,12 +1,23 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 type Make = { id: number; name: string };
 type Model = { id: number; name: string; products: number };
+
+// Slugs match vehicle_types.slug in the database.
+const MACHINE_TYPES = [
+  { slug: "snowmobile", name: "Snowmobile" },
+  { slug: "atv", name: "ATV" },
+  { slug: "utv", name: "UTV" },
+  { slug: "dirt-bike", name: "Dirt Bike" },
+  { slug: "motorcycle", name: "Motorcycle" },
+  { slug: "pwc", name: "PWC" },
+];
+const VALID_TYPES = new Set(MACHINE_TYPES.map((t) => t.slug));
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${API}/store/fitment${path}`);
@@ -16,6 +27,14 @@ async function get<T>(path: string): Promise<T> {
 
 export default function VehicleSelector() {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // The URL is the source of truth for the machine type. An unknown value
+  // (e.g. ?type=boat) falls back to "all types".
+  const rawType = searchParams.get("type") ?? "";
+  const type = VALID_TYPES.has(rawType) ? rawType : "";
+
   const [years, setYears] = useState<number[]>([]);
   const [makes, setMakes] = useState<Make[]>([]);
   const [models, setModels] = useState<Model[]>([]);
@@ -24,34 +43,74 @@ export default function VehicleSelector() {
   const [modelId, setModelId] = useState("");
   const [error, setError] = useState("");
 
+  const typeParam = type ? `&type=${encodeURIComponent(type)}` : "";
+
+  function onTypeChange(next: string) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next) params.set("type", next);
+    else params.delete("type");
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    // The old make/model may not exist under the new type, so clear them.
+    setMakeId("");
+    setModelId("");
+    setModels([]);
+  }
+
   useEffect(() => {
     get<number[]>("/years").then(setYears).catch(() => setError("Could not load years"));
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     setMakeId("");
     setModelId("");
     setMakes([]);
     setModels([]);
     if (!year) return;
-    get<Make[]>(`/makes?year=${year}`).then(setMakes).catch(() => setError("Could not load makes"));
-  }, [year]);
+    get<Make[]>(`/makes?year=${year}${typeParam}`)
+      .then((d) => !cancelled && setMakes(d))
+      .catch(() => !cancelled && setError("Could not load makes"));
+    return () => {
+      cancelled = true;
+    };
+  }, [year, typeParam]);
 
   useEffect(() => {
+    let cancelled = false;
     setModelId("");
     setModels([]);
     if (!year || !makeId) return;
-    get<Model[]>(`/models?year=${year}&make_id=${makeId}`)
-      .then(setModels)
-      .catch(() => setError("Could not load models"));
-  }, [year, makeId]);
+    get<Model[]>(`/models?year=${year}&make_id=${makeId}${typeParam}`)
+      .then((d) => !cancelled && setModels(d))
+      .catch(() => !cancelled && setError("Could not load models"));
+    return () => {
+      cancelled = true;
+    };
+  }, [year, makeId, typeParam]);
 
+  // Fixed widths on larger screens: min-w-0 + truncate stop long option text
+  // from stretching a select. On mobile everything stacks full width.
   const selectClass =
-    "w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-400";
+    "w-full min-w-0 truncate rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-400";
 
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
-      <label className="flex-1 text-sm font-medium">
+    <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+      <label className="text-sm font-medium sm:w-40 sm:shrink-0">
+        Machine type
+        <select
+          className={selectClass}
+          value={type}
+          onChange={(e) => onTypeChange(e.target.value)}
+        >
+          <option value="">All types</option>
+          {MACHINE_TYPES.map((t) => (
+            <option key={t.slug} value={t.slug}>{t.name}</option>
+          ))}
+        </select>
+      </label>
+
+      <label className="text-sm font-medium sm:w-28 sm:shrink-0">
         Year
         <select className={selectClass} value={year} onChange={(e) => setYear(e.target.value)}>
           <option value="">Select year</option>
@@ -61,7 +120,7 @@ export default function VehicleSelector() {
         </select>
       </label>
 
-      <label className="flex-1 text-sm font-medium">
+      <label className="text-sm font-medium sm:w-56 sm:shrink-0">
         Make
         <select
           className={selectClass}
@@ -76,7 +135,7 @@ export default function VehicleSelector() {
         </select>
       </label>
 
-      <label className="flex-1 text-sm font-medium">
+      <label className="text-sm font-medium sm:w-72 sm:shrink-0">
         Model
         <select
           className={selectClass}
@@ -100,7 +159,7 @@ export default function VehicleSelector() {
         Find parts
       </button>
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && <p className="w-full text-sm text-red-600">{error}</p>}
     </div>
   );
 }

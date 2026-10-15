@@ -2,6 +2,8 @@
 Public storefront fitment lookups (Year > Make > Model > Parts).
 Read-only, no login required. Mounted at /store/fitment/*.
 """
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -13,6 +15,22 @@ router = APIRouter(prefix="/store/fitment", tags=["store"])
 # Only published products show in the store.
 PUBLISHED_FILTER = "p.is_published = true"
 
+# Machine types (vehicle_types.slug). An unknown ?type= value is ignored,
+# which means "all types", so a bad link never gives an empty store.
+VALID_TYPES = {"snowmobile", "atv", "utv", "dirt-bike", "motorcycle", "pwc"}
+
+
+def clean_type(value: Optional[str]) -> Optional[str]:
+    return value if value in VALID_TYPES else None
+
+
+@router.get("/vehicle-types")
+def vehicle_types(db: Session = Depends(get_db)):
+    rows = db.execute(
+        text("select id, name, slug from vehicle_types order by name")
+    ).all()
+    return [{"id": r.id, "name": r.name, "slug": r.slug} for r in rows]
+
 
 @router.get("/years")
 def years(db: Session = Depends(get_db)):
@@ -23,27 +41,55 @@ def years(db: Session = Depends(get_db)):
 
 
 @router.get("/makes")
-def makes(year: int, db: Session = Depends(get_db)):
+def makes(
+    year: int,
+    type: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    # Left joins so a model with no type yet still shows when no type is chosen.
     rows = db.execute(
         text(
-            "select distinct make_id, make from fitment_catalog "
-            "where year = :year order by make"
+            "select distinct fc.make_id, fc.make "
+            "from fitment_catalog fc "
+            "left join vehicle_models vm on vm.id = fc.model_id "
+            "left join vehicle_types vt on vt.id = vm.vehicle_type_id "
+            "where fc.year = :year "
+            "and (cast(:type as text) is null or vt.slug = cast(:type as text)) "
+            "order by fc.make"
         ),
-        {"year": year},
+        {"year": year, "type": clean_type(type)},
     ).all()
     return [{"id": r.make_id, "name": r.make} for r in rows]
 
 
 @router.get("/models")
-def models(year: int, make_id: int, db: Session = Depends(get_db)):
+def models(
+    year: int,
+    make_id: int,
+    type: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
     rows = db.execute(
         text(
-            "select model_id, model, products from fitment_catalog "
-            "where year = :year and make_id = :make_id order by model"
+            "select fc.model_id, fc.model, fc.products, vt.slug as vehicle_type "
+            "from fitment_catalog fc "
+            "left join vehicle_models vm on vm.id = fc.model_id "
+            "left join vehicle_types vt on vt.id = vm.vehicle_type_id "
+            "where fc.year = :year and fc.make_id = :make_id "
+            "and (cast(:type as text) is null or vt.slug = cast(:type as text)) "
+            "order by fc.model"
         ),
-        {"year": year, "make_id": make_id},
+        {"year": year, "make_id": make_id, "type": clean_type(type)},
     ).all()
-    return [{"id": r.model_id, "name": r.model, "products": r.products} for r in rows]
+    return [
+        {
+            "id": r.model_id,
+            "name": r.model,
+            "products": r.products,
+            "vehicle_type": r.vehicle_type,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/products")
