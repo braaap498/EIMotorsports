@@ -19,6 +19,10 @@ const MACHINE_TYPES = [
 ];
 const VALID_TYPES = new Set(MACHINE_TYPES.map((t) => t.slug));
 
+// The selection is remembered per browser tab so going back from a product
+// page puts the dropdowns back the way they were.
+const STORAGE_KEY = "ei-vehicle-selector";
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${API}/store/fitment${path}`);
   if (!res.ok) throw new Error(`Request failed: ${res.status}`);
@@ -42,8 +46,43 @@ function VehicleSelectorInner() {
   const [makeId, setMakeId] = useState("");
   const [modelId, setModelId] = useState("");
   const [error, setError] = useState("");
+  const [restored, setRestored] = useState(false);
 
   const typeParam = type ? `&type=${encodeURIComponent(type)}` : "";
+
+  // Restore the last selection once, on first load in this tab.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (saved.year) setYear(String(saved.year));
+        // Make and model only carry over if the machine type is unchanged.
+        if ((saved.type ?? "") === type) {
+          if (saved.makeId) setMakeId(String(saved.makeId));
+          if (saved.modelId) setModelId(String(saved.modelId));
+        }
+      }
+    } catch {
+      /* storage unavailable or unreadable: start empty */
+    }
+    setRestored(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Save the selection after every change (but not before the restore ran,
+  // or the empty starting state would overwrite what was saved).
+  useEffect(() => {
+    if (!restored) return;
+    try {
+      sessionStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ type, year, makeId, modelId })
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [restored, type, year, makeId, modelId]);
 
   function onTypeChange(next: string) {
     const params = new URLSearchParams(searchParams.toString());
@@ -57,19 +96,36 @@ function VehicleSelectorInner() {
     setModels([]);
   }
 
+  function onYearChange(next: string) {
+    setYear(next);
+    setMakeId("");
+    setModelId("");
+    setModels([]);
+  }
+
+  function onMakeChange(next: string) {
+    setMakeId(next);
+    setModelId("");
+    setModels([]);
+  }
+
   useEffect(() => {
     get<number[]>("/years").then(setYears).catch(() => setError("Could not load years"));
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    setMakeId("");
-    setModelId("");
-    setMakes([]);
-    setModels([]);
-    if (!year) return;
+    if (!year) {
+      setMakes([]);
+      return;
+    }
     get<Make[]>(`/makes?year=${year}${typeParam}`)
-      .then((d) => !cancelled && setMakes(d))
+      .then((d) => {
+        if (cancelled) return;
+        setMakes(d);
+        // Drop a remembered make that isn't in this list.
+        setMakeId((cur) => (d.some((m) => String(m.id) === cur) ? cur : ""));
+      })
       .catch(() => !cancelled && setError("Could not load makes"));
     return () => {
       cancelled = true;
@@ -78,25 +134,32 @@ function VehicleSelectorInner() {
 
   useEffect(() => {
     let cancelled = false;
-    setModelId("");
-    setModels([]);
-    if (!year || !makeId) return;
+    if (!year || !makeId) {
+      setModels([]);
+      return;
+    }
     get<Model[]>(`/models?year=${year}&make_id=${makeId}${typeParam}`)
-      .then((d) => !cancelled && setModels(d))
+      .then((d) => {
+        if (cancelled) return;
+        setModels(d);
+        // Drop a remembered model that isn't in this list.
+        setModelId((cur) => (d.some((m) => String(m.id) === cur) ? cur : ""));
+      })
       .catch(() => !cancelled && setError("Could not load models"));
     return () => {
       cancelled = true;
     };
   }, [year, makeId, typeParam]);
 
-  // Fixed widths on larger screens: min-w-0 + truncate stop long option text
-  // from stretching a select. On mobile everything stacks full width.
+  // min-w-0 + truncate stop long option text from stretching a select.
   const selectClass =
     "w-full min-w-0 truncate rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-400";
 
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
-      <label className="text-sm font-medium sm:w-40 sm:shrink-0">
+    // Four equal columns on larger screens (minmax(0,1fr) keeps them equal no
+    // matter how long the option text is), then the button. Stacked on mobile.
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-[repeat(4,minmax(0,1fr))_auto] sm:items-end">
+      <label className="min-w-0 text-sm font-medium">
         Machine type
         <select
           className={selectClass}
@@ -110,9 +173,9 @@ function VehicleSelectorInner() {
         </select>
       </label>
 
-      <label className="text-sm font-medium sm:w-28 sm:shrink-0">
+      <label className="min-w-0 text-sm font-medium">
         Year
-        <select className={selectClass} value={year} onChange={(e) => setYear(e.target.value)}>
+        <select className={selectClass} value={year} onChange={(e) => onYearChange(e.target.value)}>
           <option value="">Select year</option>
           {years.map((y) => (
             <option key={y} value={y}>{y}</option>
@@ -120,13 +183,13 @@ function VehicleSelectorInner() {
         </select>
       </label>
 
-      <label className="text-sm font-medium sm:w-56 sm:shrink-0">
+      <label className="min-w-0 text-sm font-medium">
         Make
         <select
           className={selectClass}
           value={makeId}
           disabled={!year}
-          onChange={(e) => setMakeId(e.target.value)}
+          onChange={(e) => onMakeChange(e.target.value)}
         >
           <option value="">Select make</option>
           {makes.map((m) => (
@@ -135,7 +198,7 @@ function VehicleSelectorInner() {
         </select>
       </label>
 
-      <label className="text-sm font-medium sm:w-72 sm:shrink-0">
+      <label className="min-w-0 text-sm font-medium">
         Model
         <select
           className={selectClass}
@@ -159,7 +222,7 @@ function VehicleSelectorInner() {
         Find parts
       </button>
 
-      {error && <p className="w-full text-sm text-red-600">{error}</p>}
+      {error && <p className="text-sm text-red-600 sm:col-span-full">{error}</p>}
     </div>
   );
 }
