@@ -56,9 +56,16 @@ function VehicleSelectorInner() {
       const raw = sessionStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved = JSON.parse(raw);
+        // Coming back via a plain "/" link drops ?type= from the URL, so put
+        // the remembered type back. A type already in the URL wins.
+        let effectiveType = type;
+        if (!type && VALID_TYPES.has(saved.type)) {
+          effectiveType = saved.type;
+          setTypeInUrl(saved.type);
+        }
         if (saved.year) setYear(String(saved.year));
         // Make and model only carry over if the machine type is unchanged.
-        if ((saved.type ?? "") === type) {
+        if ((saved.type ?? "") === effectiveType) {
           if (saved.makeId) setMakeId(String(saved.makeId));
           if (saved.modelId) setModelId(String(saved.modelId));
         }
@@ -84,12 +91,16 @@ function VehicleSelectorInner() {
     }
   }, [restored, type, year, makeId, modelId]);
 
-  function onTypeChange(next: string) {
+  function setTypeInUrl(next: string) {
     const params = new URLSearchParams(searchParams.toString());
     if (next) params.set("type", next);
     else params.delete("type");
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }
+
+  function onTypeChange(next: string) {
+    setTypeInUrl(next);
     // The old make/model may not exist under the new type, so clear them.
     setMakeId("");
     setModelId("");
