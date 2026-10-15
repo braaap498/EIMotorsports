@@ -15,6 +15,23 @@ type Detail = {
   specifics: { name: string; value: string }[];
 };
 
+type Search = Promise<{ year?: string; model_id?: string }>;
+
+// Goes back to the parts list this product was opened from. If the page was
+// opened directly (no year/model in the link), it falls back to the search.
+async function BackLink({ searchParams }: { searchParams: Search }) {
+  const { year, model_id } = await searchParams;
+  const toResults = Boolean(year && model_id);
+  const href = toResults
+    ? `/shop?year=${encodeURIComponent(year!)}&model_id=${encodeURIComponent(model_id!)}`
+    : "/";
+  return (
+    <Link href={href} className="text-sm text-gray-600 underline">
+      &larr; {toResults ? "Back to parts" : "Back to search"}
+    </Link>
+  );
+}
+
 async function Product({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const res = await fetch(
@@ -80,14 +97,18 @@ async function Product({ params }: { params: Promise<{ slug: string }> }) {
 
 export default function ProductPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ slug: string }>;
+  searchParams: Search;
 }) {
   return (
     <main className="mx-auto max-w-5xl p-6">
-      <Link href="/" className="text-sm text-gray-600 underline">
-        &larr; Back to search
-      </Link>
+      <Suspense
+        fallback={<span className="text-sm text-gray-600">&larr; Back</span>}
+      >
+        <BackLink searchParams={searchParams} />
+      </Suspense>
       <Suspense fallback={<p className="mt-4 text-gray-600">Loading...</p>}>
         <Product params={params} />
       </Suspense>

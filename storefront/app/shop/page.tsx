@@ -52,7 +52,7 @@ async function Results({ searchParams }: { searchParams: Params }) {
         {products.map((p, i) => (
           <Link
             key={p.id ?? i}
-            href={`/shop/${p.slug}`}
+            href={`/shop/${p.slug}?year=${encodeURIComponent(year ?? "")}&model_id=${encodeURIComponent(model_id ?? "")}`}
             className="rounded border border-gray-200 p-3 hover:shadow"
           >
             {p.image_url && (
