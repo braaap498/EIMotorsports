@@ -100,10 +100,11 @@ def update_type(type_id: int, body: NameIn, db: Session = Depends(get_db)):
     try:
         row = db.execute(
             text(
-                "update vehicle_types set name = :n, slug = :s where id = :id "
-                "returning id, name, slug"
+                "update vehicle_types set name = :n, slug = coalesce(cast(:s as text), slug) "
+                "where id = :id returning id, name, slug"
             ),
-            {"n": body.name.strip(), "s": body.slug or slugify(body.name), "id": type_id},
+            # Slug only changes when sent explicitly; a rename keeps the old slug.
+            {"n": body.name.strip(), "s": body.slug or None, "id": type_id},
         ).first()
     except IntegrityError:
         conflict(db, "A type with that name or slug already exists")
@@ -160,10 +161,11 @@ def update_make(make_id: int, body: NameIn, db: Session = Depends(get_db)):
     try:
         row = db.execute(
             text(
-                "update vehicle_makes set name = :n, slug = :s where id = :id "
-                "returning id, name, slug"
+                "update vehicle_makes set name = :n, slug = coalesce(cast(:s as text), slug) "
+                "where id = :id returning id, name, slug"
             ),
-            {"n": body.name.strip(), "s": body.slug or slugify(body.name), "id": make_id},
+            # Slug only changes when sent explicitly; a rename keeps the old slug.
+            {"n": body.name.strip(), "s": body.slug or None, "id": make_id},
         ).first()
     except IntegrityError:
         conflict(db, "A make with that name or slug already exists")
@@ -497,6 +499,14 @@ def _product_or_404(db: Session, product_id: int):
     if not row:
         raise HTTPException(404, "Product not found")
     return row
+
+
+@router.get("/categories")
+def list_categories(db: Session = Depends(get_db)):
+    rows = db.execute(
+        text("select id, parent_id, name, sort_order from categories order by sort_order, name")
+    ).all()
+    return [dict(r._mapping) for r in rows]
 
 
 @router.get("/products")
