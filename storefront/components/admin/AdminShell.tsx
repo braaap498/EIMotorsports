@@ -32,7 +32,7 @@ function LoginForm() {
   }
 
   return (
-    <div className="mx-auto mt-24 w-full max-w-sm rounded-lg border border-gray-200 bg-white p-6 shadow-sm">
+    <div className="mx-auto mt-24 w-full max-w-sm rounded-lg border border-gray-200 bg-white p-6 text-gray-900 shadow-sm">
       <h1 className="mb-4 text-xl font-semibold">Admin sign in</h1>
       <form onSubmit={submit} className="space-y-3">
         <Field label="Email">
