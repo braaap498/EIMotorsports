@@ -59,7 +59,15 @@ export default function AdminShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true;
-    const sb = getSupabase();
+    let sb: ReturnType<typeof getSupabase>;
+    try {
+      sb = getSupabase();
+    } catch (e) {
+      // Usually: the NEXT_PUBLIC_SUPABASE_* variables are missing on Vercel.
+      setProblem(errMsg(e));
+      setStatus("error");
+      return;
+    }
 
     async function check(hasSession: boolean) {
       if (!hasSession) {
@@ -107,7 +115,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         {status === "forbidden" ? (
           <Notice kind="error">This account does not have admin access.</Notice>
         ) : (
-          <Notice kind="error">Could not reach the API: {problem}</Notice>
+          <Notice kind="error">The admin could not start: {problem}</Notice>
         )}
         <div className="flex gap-2">
           {status === "error" && (
