@@ -100,18 +100,26 @@ def products(
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
+    # Universal products fit every machine, so they are always included.
     base = f"""
-        from product_fitment pf
-        join vehicles v on v.id = pf.vehicle_id
-        join products p on p.id = pf.product_id
-        where v.model_id = :model_id and v.year = :year and {PUBLISHED_FILTER}
+        from products p
+        where {PUBLISHED_FILTER}
+          and (
+            p.is_universal
+            or exists (
+              select 1 from product_fitment pf
+              join vehicles v on v.id = pf.vehicle_id
+              where pf.product_id = p.id
+                and v.model_id = :model_id and v.year = :year
+            )
+          )
     """
     params = {"model_id": model_id, "year": year}
-    total = db.execute(text(f"select count(distinct p.id) {base}"), params).scalar()
+    total = db.execute(text(f"select count(*) {base}"), params).scalar()
     rows = db.execute(
         text(
             f"""
-            select distinct p.id, p.title, p.slug, p.list_price,
+            select p.id, p.title, p.slug, p.list_price, p.is_universal,
               (select ph.source_url from product_photos ph
                 where ph.product_id = p.id
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_source_url,
@@ -119,7 +127,7 @@ def products(
                 where ph.product_id = p.id
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_storage_path
             {base}
-            order by p.title limit :limit offset :offset
+            order by p.is_universal, p.title limit :limit offset :offset
             """
         ),
         {**params, "limit": limit, "offset": offset},
@@ -132,6 +140,7 @@ def products(
                 "title": r.title,
                 "slug": r.slug,
                 "price": f"{r.list_price:.2f}" if r.list_price is not None else None,
+                "universal": r.is_universal,
                 # Temporary: eBay's link. Switch to our own storage once photos are copied over.
                 "image_url": r.photo_source_url,
                 "storage_path": r.photo_storage_path,

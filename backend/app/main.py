@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.admin_catalog import router as admin_catalog_router
 from app.auth import AuthUser, require_staff
 from app.config import get_settings
 from app.database import get_db
@@ -49,6 +50,10 @@ def ping_db(db: Session = Depends(get_db)):
     db.execute(text("select 1"))
     return {"database": "ok"}
 
+
+# Mount sub-routers on admin_router BEFORE admin_router itself is included,
+# so they pick up the /admin prefix and the staff check.
+admin_router.include_router(admin_catalog_router)
 
 app.include_router(admin_router)
 app.include_router(fitment_router)
