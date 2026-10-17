@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.admin_catalog import router as admin_catalog_router
+from app.admin_cleanup import router as admin_cleanup_router
 from app.auth import AuthUser, require_staff
 from app.config import get_settings
 from app.database import get_db
@@ -55,6 +56,7 @@ def ping_db(db: Session = Depends(get_db)):
 # Mount sub-routers on admin_router BEFORE admin_router itself is included,
 # so they pick up the /admin prefix and the staff check.
 admin_router.include_router(admin_catalog_router)
+admin_router.include_router(admin_cleanup_router)
 
 app.include_router(admin_router)
 app.include_router(fitment_router)
