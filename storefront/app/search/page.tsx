@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import Link from "next/link";
+import ProductImage from "../../components/site/ProductImage";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 const PAGE_SIZE = 24;
@@ -11,6 +12,7 @@ type Item = {
   price: string | null;
   universal: boolean;
   image_url: string | null;
+  image_fallback: string | null;
 };
 type Params = Promise<{
   q?: string;
@@ -95,8 +97,11 @@ async function Results({ searchParams }: { searchParams: Params }) {
             className="rounded border border-gray-200 p-3 hover:shadow"
           >
             {it.image_url && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={it.image_url} alt="" className="mb-2 aspect-square w-full object-cover" />
+              <ProductImage
+                src={it.image_url}
+                fallback={it.image_fallback}
+                className="mb-2 aspect-square w-full object-cover"
+              />
             )}
             <p className="text-sm font-medium">{it.title}</p>
             {it.price != null && <p className="text-sm text-gray-700">${it.price}</p>}

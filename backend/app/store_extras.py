@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, current_user
 from app.database import get_db
+from app.images import card_image
 
 router = APIRouter(prefix="/store", tags=["store"])
 
@@ -34,9 +35,20 @@ MAX_GARAGE = 12
 @router.get("/categories")
 def categories(db: Session = Depends(get_db)):
     rows = db.execute(
-        text("select id, parent_id, name, slug, sort_order from categories order by sort_order, name")
+        text(
+            "select c.id, c.parent_id, c.name, c.slug, c.sort_order, "
+            "(select count(*) from products p "
+            f" where p.category_id = c.id and {PUBLISHED_FILTER}) as product_count "
+            "from categories c order by c.sort_order, c.name"
+        )
     ).all()
-    return [dict(r._mapping) for r in rows]
+    out = [dict(r._mapping) for r in rows]
+    # The menu hides empty categories using product_count. If nothing is
+    # published yet, leave the counts out so the whole menu is not hidden.
+    if not any(r["product_count"] for r in out):
+        for r in out:
+            del r["product_count"]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -95,9 +107,9 @@ def search(
               (select ph.source_url from product_photos ph
                 where ph.product_id = p.id
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_source_url,
-              (select ph.storage_path from product_photos ph
+              (select ph.image_key from product_photos ph
                 where ph.product_id = p.id
-                order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_storage_path
+                order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_image_key
             from products p {where}
             order by p.title limit :limit offset :offset
             """
@@ -113,8 +125,7 @@ def search(
                 "slug": r.slug,
                 "price": f"{r.list_price:.2f}" if r.list_price is not None else None,
                 "universal": r.is_universal,
-                "image_url": r.photo_source_url,
-                "storage_path": r.photo_storage_path,
+                **card_image(r.photo_image_key, r.photo_source_url),
             }
             for r in rows
         ],

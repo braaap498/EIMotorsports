@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.images import card_image, gallery
 
 router = APIRouter(prefix="/store/fitment", tags=["store"])
 
@@ -123,9 +124,9 @@ def products(
               (select ph.source_url from product_photos ph
                 where ph.product_id = p.id
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_source_url,
-              (select ph.storage_path from product_photos ph
+              (select ph.image_key from product_photos ph
                 where ph.product_id = p.id
-                order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_storage_path
+                order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_image_key
             {base}
             order by p.is_universal, p.title limit :limit offset :offset
             """
@@ -141,9 +142,7 @@ def products(
                 "slug": r.slug,
                 "price": f"{r.list_price:.2f}" if r.list_price is not None else None,
                 "universal": r.is_universal,
-                # Temporary: eBay's link. Switch to our own storage once photos are copied over.
-                "image_url": r.photo_source_url,
-                "storage_path": r.photo_storage_path,
+                **card_image(r.photo_image_key, r.photo_source_url),
             }
             for r in rows
         ],
@@ -164,7 +163,7 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Product not found")
     photos = db.execute(
         text(
-            "select source_url, storage_path from product_photos "
+            "select source_url, image_key from product_photos "
             "where product_id = :id order by is_primary desc, sort_order, id"
         ),
         {"id": p.id},
@@ -185,6 +184,6 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         "condition": p.condition,
         "part_number": p.manufacturer_part_number,
         "description": p.description,
-        "photos": [r.source_url for r in photos if r.source_url],
+        "photos": gallery(photos),
         "specifics": [{"name": s.name, "value": s.value} for s in specifics],
     }

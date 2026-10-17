@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import Link from "next/link";
+import ProductImage from "../../components/site/ProductImage";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -9,6 +10,7 @@ type Product = {
   name?: string;
   price?: number | string;
   image_url?: string;
+  image_fallback?: string | null;
   slug?: string;
 };
 
@@ -56,8 +58,11 @@ async function Results({ searchParams }: { searchParams: Params }) {
             className="rounded border border-gray-200 p-3 hover:shadow"
           >
             {p.image_url && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={p.image_url} alt="" className="mb-2 aspect-square w-full object-cover" />
+              <ProductImage
+                src={p.image_url}
+                fallback={p.image_fallback}
+                className="mb-2 aspect-square w-full object-cover"
+              />
             )}
             <p className="text-sm font-medium">{p.title ?? p.name}</p>
             {p.price != null && <p className="text-sm text-gray-700">${p.price}</p>}

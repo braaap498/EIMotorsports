@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.database import get_db
+from app.images import thumb_url
 
 # No prefix here: main.py mounts this inside admin_router, which supplies
 # "/admin" and the staff check. require_admin below is the stricter
@@ -562,12 +563,17 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
     row = _product_or_404(db, product_id)
     photos = db.execute(
         text(
-            "select id, source_url, storage_path, is_primary, sort_order from product_photos "
+            "select id, source_url, storage_path, image_key, is_primary, sort_order from product_photos "
             "where product_id = :id order by is_primary desc, sort_order, id"
         ),
         {"id": product_id},
     ).all()
-    return {**dict(row._mapping), "photos": [dict(p._mapping) for p in photos]}
+    out = []
+    for p in photos:
+        d = dict(p._mapping)
+        d["thumb"] = thumb_url(d["image_key"]) or d["source_url"]
+        out.append(d)
+    return {**dict(row._mapping), "photos": out}
 
 
 @router.post("/products", status_code=201)

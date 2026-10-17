@@ -22,6 +22,11 @@ class Settings(BaseSettings):
 
     allowed_origins: str = "http://localhost:3000"
 
+    # Public base address of the Supabase Storage bucket that holds the photos.
+    image_base_url: str = (
+        "https://ezaqtxicodbcnnirwdfa.supabase.co/storage/v1/object/public/product-images"
+    )
+
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]

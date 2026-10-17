@@ -8,7 +8,13 @@ import FitmentPanel from "./FitmentPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
 
 type Cat = { id: number; parent_id: number | null; name: string; sort_order: number };
-type Photo = { id: number; source_url: string | null; storage_path: string | null; is_primary: boolean };
+type Photo = {
+  id: number;
+  source_url: string | null;
+  storage_path: string | null;
+  thumb?: string | null;
+  is_primary: boolean;
+};
 
 type FieldDef = {
   key: string;
@@ -244,12 +250,13 @@ export default function ProductForm({ productId }: { productId?: number }) {
             <p className="text-sm text-gray-500">No photos.</p>
           ) : (
             <div className="flex flex-wrap gap-3">
-              {photos.map((ph) =>
-                ph.source_url ? (
+              {photos.map((ph) => {
+                const src = ph.thumb ?? ph.source_url;
+                return src ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img key={ph.id} src={ph.source_url} alt="" className="h-24 w-24 rounded border border-gray-200 object-cover" />
-                ) : null
-              )}
+                  <img key={ph.id} src={src} alt="" className="h-24 w-24 rounded border border-gray-200 object-cover" />
+                ) : null;
+              })}
             </div>
           )}
           <p className="text-xs text-gray-500">Read-only for now. Photo upload comes with the image storage step.</p>
