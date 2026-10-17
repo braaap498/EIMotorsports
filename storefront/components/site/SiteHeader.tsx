@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import VehicleSelector from "../VehicleSelector";
 import { useAuth } from "./AuthProvider";
 import GarageMenu from "./GarageMenu";
@@ -13,7 +13,37 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 // Flip to true once the store has a cart page at /cart.
 const SHOW_CART = false;
 
-type Cat = { id: number; parent_id: number | null; name: string; slug: string; sort_order: number };
+// product_count is optional: once /store/categories returns it (products in
+// that category itself), empty branches are hidden automatically.
+type Cat = {
+  id: number;
+  parent_id: number | null;
+  name: string;
+  slug: string;
+  sort_order: number;
+  product_count?: number;
+};
+type Node = Cat & { children: Node[]; total: number };
+
+const bySort = (a: Cat, b: Cat) => a.sort_order - b.sort_order || a.name.localeCompare(b.name);
+
+function buildTree(all: Cat[]): Node[] {
+  const byParent = new Map<number | null, Cat[]>();
+  for (const c of all) {
+    const list = byParent.get(c.parent_id) ?? [];
+    list.push(c);
+    byParent.set(c.parent_id, list);
+  }
+  const hasCounts = all.some((c) => typeof c.product_count === "number");
+  const make = (c: Cat): Node => {
+    const kids = (byParent.get(c.id) ?? []).sort(bySort).map(make);
+    const children = hasCounts ? kids.filter((k) => k.total > 0) : kids;
+    const total = (c.product_count ?? 0) + children.reduce((s, k) => s + k.total, 0);
+    return { ...c, children, total };
+  };
+  const roots = (byParent.get(null) ?? []).sort(bySort).map(make);
+  return hasCounts ? roots.filter((r) => r.total > 0) : roots;
+}
 
 export default function SiteHeader() {
   const pathname = usePathname();
@@ -22,13 +52,24 @@ export default function SiteHeader() {
   const [cats, setCats] = useState<Cat[]>([]);
   const [menu, setMenu] = useState(false);
   const [rideOpen, setRideOpen] = useState(false);
+  const [openId, setOpenId] = useState<number | null>(null); // desktop mega-menu
+  const [catsOpen, setCatsOpen] = useState(false); // mobile category list
 
   useEffect(() => {
     fetch(`${API}/store/categories`)
       .then((r) => (r.ok ? r.json() : []))
-      .then((all: Cat[]) => setCats(all.filter((c) => c.parent_id === null)))
+      .then((all: Cat[]) => setCats(all))
       .catch(() => {});
   }, []);
+
+  const tree = useMemo(() => buildTree(cats), [cats]);
+
+  // Close menus whenever the page or filters change.
+  const search = sp.toString();
+  useEffect(() => {
+    setOpenId(null);
+    setCatsOpen(false);
+  }, [pathname, search]);
 
   // The back office has its own layout.
   if (pathname.startsWith("/admin")) return null;
@@ -38,6 +79,8 @@ export default function SiteHeader() {
   const modelId = sp.get("model_id");
   const ride = year && modelId ? `&year=${encodeURIComponent(year)}&model_id=${encodeURIComponent(modelId)}` : "";
   const name = user?.email?.split("@")[0] ?? "";
+  const href = (slug: string) => `/search?category=${encodeURIComponent(slug)}${ride}`;
+  const active = tree.find((c) => c.id === openId && c.children.length > 0) ?? null;
 
   return (
     <header className="sticky top-0 z-30 shadow-md">
@@ -132,20 +175,111 @@ export default function SiteHeader() {
         </div>
       </div>
 
-      {/* Row 3: categories */}
-      {cats.length > 0 && (
-        <div className="bg-[#06bde7] text-[#04202b]">
-          <nav className="mx-auto flex max-w-7xl overflow-x-auto px-2" aria-label="Categories">
-            {cats.map((c) => (
+      {/* Row 3: categories (mega-menu on desktop, accordion on mobile) */}
+      {tree.length > 0 && (
+        <div
+          className="relative bg-[#06bde7] text-[#04202b]"
+          onMouseLeave={() => setOpenId(null)}
+          onKeyDown={(e) => e.key === "Escape" && setOpenId(null)}
+        >
+          {/* Desktop: top-level bar */}
+          <nav className="mx-auto hidden max-w-7xl flex-wrap px-2 lg:flex" aria-label="Categories">
+            {tree.map((c) => (
               <Link
                 key={c.id}
-                href={`/search?category=${encodeURIComponent(c.slug)}${ride}`}
-                className="whitespace-nowrap px-4 py-2 text-sm font-semibold hover:bg-black/10"
+                href={href(c.slug)}
+                onMouseEnter={() => setOpenId(c.children.length ? c.id : null)}
+                onFocus={() => setOpenId(c.children.length ? c.id : null)}
+                onClick={() => setOpenId(null)}
+                aria-haspopup={c.children.length > 0}
+                aria-expanded={openId === c.id}
+                className={`px-4 py-2 text-sm font-semibold hover:bg-black/10 ${openId === c.id ? "bg-black/10" : ""}`}
               >
                 {c.name}
               </Link>
             ))}
           </nav>
+
+          {/* Desktop: dropdown panel */}
+          {active && (
+            <div className="absolute inset-x-0 top-full z-40 hidden border-t border-black/10 bg-white text-gray-900 shadow-xl lg:block">
+              <div className="mx-auto max-w-7xl px-6 py-5">
+                <Link
+                  href={href(active.slug)}
+                  onClick={() => setOpenId(null)}
+                  className="mb-4 block border-b-2 border-[#06bde7] pb-1.5 text-base font-bold hover:text-[#0489ad]"
+                >
+                  Shop all {active.name}
+                </Link>
+                <div className="columns-3 gap-10 text-sm">
+                  {active.children.map((ch) => (
+                    <div key={ch.id} className="mb-2 break-inside-avoid">
+                      <Link
+                        href={href(ch.slug)}
+                        onClick={() => setOpenId(null)}
+                        className={`block py-1.5 hover:text-[#0489ad] hover:underline ${ch.children.length ? "font-bold" : ""}`}
+                      >
+                        {ch.name}
+                      </Link>
+                      {ch.children.map((g) => (
+                        <Link
+                          key={g.id}
+                          href={href(g.slug)}
+                          onClick={() => setOpenId(null)}
+                          className="block py-1 pl-3 text-gray-600 hover:text-[#0489ad] hover:underline"
+                        >
+                          {g.name}
+                        </Link>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Mobile: one button, then an accordion */}
+          <div className="lg:hidden">
+            <button
+              type="button"
+              onClick={() => setCatsOpen((o) => !o)}
+              aria-expanded={catsOpen}
+              className="flex w-full items-center justify-between px-4 py-2.5 text-sm font-semibold"
+            >
+              Shop categories
+              <ChevronIcon className={`h-4 w-4 transition ${catsOpen ? "rotate-180" : ""}`} />
+            </button>
+            {catsOpen && (
+              <div className="max-h-[65vh] overflow-y-auto bg-white text-sm text-gray-900">
+                {tree.map((c) =>
+                  c.children.length === 0 ? (
+                    <Link key={c.id} href={href(c.slug)} className="block border-t border-gray-100 px-4 py-3 font-semibold">
+                      {c.name}
+                    </Link>
+                  ) : (
+                    <details key={c.id} className="border-t border-gray-100">
+                      <summary className="cursor-pointer list-none px-4 py-3 font-semibold">{c.name}</summary>
+                      <div className="bg-gray-50 pb-2">
+                        <Link href={href(c.slug)} className="block px-6 py-2 font-medium text-[#0489ad]">
+                          Shop all {c.name}
+                        </Link>
+                        {c.children.map((ch) => (
+                          <div key={ch.id}>
+                            <Link href={href(ch.slug)} className="block px-6 py-2">{ch.name}</Link>
+                            {ch.children.map((g) => (
+                              <Link key={g.id} href={href(g.slug)} className="block px-10 py-1.5 text-gray-600">
+                                {g.name}
+                              </Link>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </header>
