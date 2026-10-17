@@ -183,7 +183,7 @@ export default function SiteHeader() {
           onKeyDown={(e) => e.key === "Escape" && setOpenId(null)}
         >
           {/* Desktop: top-level bar */}
-          <nav className="mx-auto hidden max-w-7xl flex-wrap px-2 lg:flex" aria-label="Categories">
+          <nav className="mx-auto hidden max-w-7xl flex-nowrap justify-between px-2 lg:flex" aria-label="Categories">
             {tree.map((c) => (
               <Link
                 key={c.id}
@@ -193,7 +193,7 @@ export default function SiteHeader() {
                 onClick={() => setOpenId(null)}
                 aria-haspopup={c.children.length > 0}
                 aria-expanded={openId === c.id}
-                className={`px-4 py-2 text-sm font-semibold hover:bg-black/10 ${openId === c.id ? "bg-black/10" : ""}`}
+                className={`whitespace-nowrap px-3 py-2 text-sm font-semibold hover:bg-black/10 ${openId === c.id ? "bg-black/10" : ""}`}
               >
                 {c.name}
               </Link>

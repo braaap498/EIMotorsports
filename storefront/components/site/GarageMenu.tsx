@@ -63,7 +63,7 @@ export default function GarageMenu() {
               </div>
             ) : garage.length === 0 ? (
               <p className="text-sm text-gray-600">
-                Nothing saved yet. Pick your year, make and model, then press <strong>Save to garage</strong>.
+                Nothing saved yet. Pick your year, make and model, then press <strong>+Save To Garage</strong>.
               </p>
             ) : (
               <ul className="divide-y divide-gray-100">

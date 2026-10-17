@@ -258,9 +258,9 @@ function VehicleSelectorInner() {
         type="button"
         disabled={!modelId || saving || inGarage}
         onClick={saveToGarage}
-        className="rounded border border-white/40 px-4 py-3 text-sm font-bold text-white hover:bg-white/10 disabled:opacity-40"
+        className="whitespace-nowrap rounded border border-white/40 px-4 py-3 text-sm font-bold text-white hover:bg-white/10 disabled:opacity-40"
       >
-        {inGarage ? "In your garage ✓" : saving ? "Saving…" : "+ Save to garage"}
+        {inGarage ? "In your garage ✓" : saving ? "Saving…" : "+Save To Garage"}
       </button>
 
       {error && <p className="text-sm text-red-300 sm:col-span-full">{error}</p>}
