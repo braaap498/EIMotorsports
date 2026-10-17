@@ -1,7 +1,8 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState, type ReactNode } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useAuth } from "./site/AuthProvider";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -29,10 +30,26 @@ async function get<T>(path: string): Promise<T> {
   return res.json();
 }
 
+// One numbered step of the "Select Your Ride" bar.
+function Step({ n, label, children }: { n: number; label: string; children: ReactNode }) {
+  return (
+    <label className="flex min-w-0 items-center gap-3 rounded bg-white px-3 py-1.5 shadow-sm focus-within:ring-2 focus-within:ring-[#06bde7]">
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#0b2b3a] text-sm font-bold text-white">
+        {n}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[10px] font-bold uppercase tracking-wider text-gray-500">{label}</span>
+        {children}
+      </span>
+    </label>
+  );
+}
+
 function VehicleSelectorInner() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const { user, garage, openAuth, addToGarage, pending, clearPending } = useAuth();
 
   // The URL is the source of truth for the machine type. An unknown value
   // (e.g. ?type=boat) falls back to "all types".
@@ -47,6 +64,7 @@ function VehicleSelectorInner() {
   const [modelId, setModelId] = useState("");
   const [error, setError] = useState("");
   const [restored, setRestored] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const typeParam = type ? `&type=${encodeURIComponent(type)}` : "";
 
@@ -82,14 +100,21 @@ function VehicleSelectorInner() {
   useEffect(() => {
     if (!restored) return;
     try {
-      sessionStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ type, year, makeId, modelId })
-      );
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ type, year, makeId, modelId }));
     } catch {
       /* ignore */
     }
   }, [restored, type, year, makeId, modelId]);
+
+  // A machine chosen from My Garage: fill in the dropdowns. (The garage menu
+  // also navigates with ?type= in the URL, so the machine type follows.)
+  useEffect(() => {
+    if (!pending) return;
+    setYear(String(pending.year));
+    setMakeId(String(pending.make_id));
+    setModelId(String(pending.model_id));
+    clearPending();
+  }, [pending, clearPending]);
 
   function setTypeInUrl(next: string) {
     const params = new URLSearchParams(searchParams.toString());
@@ -162,78 +187,83 @@ function VehicleSelectorInner() {
     };
   }, [year, makeId, typeParam]);
 
-  // min-w-0 + truncate stop long option text from stretching a select.
+  const inGarage = !!modelId && garage.some((g) => g.model_id === Number(modelId) && g.year === Number(year));
+
+  async function saveToGarage() {
+    if (!user) return openAuth("signin");
+    setSaving(true);
+    setError("");
+    try {
+      await addToGarage(Number(year), Number(modelId));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save to your garage");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const selectClass =
-    "w-full min-w-0 truncate rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-400";
+    "block w-full min-w-0 truncate bg-transparent text-sm font-semibold text-gray-900 outline-none disabled:text-gray-400";
 
   return (
     // Four equal columns on larger screens (minmax(0,1fr) keeps them equal no
-    // matter how long the option text is), then the button. Stacked on mobile.
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-[repeat(4,minmax(0,1fr))_auto] sm:items-end">
-      <label className="min-w-0 text-sm font-medium">
-        Machine type
-        <select
-          className={selectClass}
-          value={type}
-          onChange={(e) => onTypeChange(e.target.value)}
-        >
+    // matter how long the option text is), then the buttons. Stacked on mobile.
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-[repeat(4,minmax(0,1fr))_auto_auto] lg:items-stretch">
+      <Step n={1} label="Ride type">
+        <select className={selectClass} value={type} onChange={(e) => onTypeChange(e.target.value)}>
           <option value="">All types</option>
           {MACHINE_TYPES.map((t) => (
             <option key={t.slug} value={t.slug}>{t.name}</option>
           ))}
         </select>
-      </label>
+      </Step>
 
-      <label className="min-w-0 text-sm font-medium">
-        Year
+      <Step n={2} label="Year">
         <select className={selectClass} value={year} onChange={(e) => onYearChange(e.target.value)}>
           <option value="">Select year</option>
           {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
         </select>
-      </label>
+      </Step>
 
-      <label className="min-w-0 text-sm font-medium">
-        Make
-        <select
-          className={selectClass}
-          value={makeId}
-          disabled={!year}
-          onChange={(e) => onMakeChange(e.target.value)}
-        >
+      <Step n={3} label="Make">
+        <select className={selectClass} value={makeId} disabled={!year} onChange={(e) => onMakeChange(e.target.value)}>
           <option value="">Select make</option>
           {makes.map((m) => (
             <option key={m.id} value={m.id}>{m.name}</option>
           ))}
         </select>
-      </label>
+      </Step>
 
-      <label className="min-w-0 text-sm font-medium">
-        Model
-        <select
-          className={selectClass}
-          value={modelId}
-          disabled={!makeId}
-          onChange={(e) => setModelId(e.target.value)}
-        >
+      <Step n={4} label="Model">
+        <select className={selectClass} value={modelId} disabled={!makeId} onChange={(e) => setModelId(e.target.value)}>
           <option value="">Select model</option>
           {models.map((m) => (
             <option key={m.id} value={m.id}>{m.name}</option>
           ))}
         </select>
-      </label>
+      </Step>
 
       <button
         type="button"
         disabled={!modelId}
-        onClick={() => router.push(`/shop?year=${year}&model_id=${modelId}`)}
-        className="rounded bg-black px-5 py-2 text-sm font-semibold text-white disabled:opacity-40"
+        onClick={() => router.push(`/shop?year=${year}&model_id=${modelId}${typeParam}`)}
+        className="rounded bg-[#06bde7] px-6 py-3 text-sm font-extrabold uppercase tracking-wide text-[#04202b] hover:brightness-110 disabled:opacity-40"
       >
         Find parts
       </button>
 
-      {error && <p className="text-sm text-red-600 sm:col-span-full">{error}</p>}
+      <button
+        type="button"
+        disabled={!modelId || saving || inGarage}
+        onClick={saveToGarage}
+        className="rounded border border-white/40 px-4 py-3 text-sm font-bold text-white hover:bg-white/10 disabled:opacity-40"
+      >
+        {inGarage ? "In your garage ✓" : saving ? "Saving…" : "+ Save to garage"}
+      </button>
+
+      {error && <p className="text-sm text-red-300 sm:col-span-full">{error}</p>}
     </div>
   );
 }
