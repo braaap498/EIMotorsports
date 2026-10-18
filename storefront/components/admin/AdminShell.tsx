@@ -6,6 +6,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api, ApiError, errMsg } from "../../lib/adminApi";
 import { getSupabase } from "../../lib/supabase";
 import { Notice, btnCls, btn2Cls, inputCls, Field } from "./ui";
+import PasswordInput from "./PasswordInput";
 
 type Status = "loading" | "signedout" | "forbidden" | "error" | "ok";
 
@@ -15,6 +16,7 @@ const NAV = [
   { href: "/admin/models", label: "Models & years" },
   { href: "/admin/fitment", label: "Types & makes" },
   { href: "/admin/cleanup", label: "Parts clean-up" },
+  { href: "/admin/users", label: "Admin users" },
 ];
 
 function LoginForm() {
@@ -40,7 +42,7 @@ function LoginForm() {
           <input className={inputCls} type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required />
         </Field>
         <Field label="Password">
-          <input className={inputCls} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+          <PasswordInput autoComplete="current-password" value={password} onChange={setPassword} required />
         </Field>
         {error && <Notice kind="error">{error}</Notice>}
         <button className={`${btnCls} w-full`} disabled={busy}>

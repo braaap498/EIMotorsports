@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     # Legacy HS256 projects only. Blank = verify via the project's JWKS.
     supabase_jwt_secret: str | None = None
     supabase_jwt_audience: str = "authenticated"
+    # Secret key used ONLY by the server to add/edit staff accounts. Never put it in the browser.
+    supabase_service_key: str | None = None
 
     allowed_origins: str = "http://localhost:3000"
 
