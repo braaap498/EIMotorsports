@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { useAccess } from "./AdminAccess";
 import { Modal, Notice, btn2Cls } from "./ui";
+import PhotoPicker from "./PhotoPicker";
 
 export type Photo = {
   id: number;
@@ -16,6 +17,8 @@ export type Photo = {
 };
 
 type Listing = { photos: Photo[] };
+// What the server says a delete would do to each photo's stored file.
+type PreviewItem = { id: number; image_key: string | null; last_use: boolean; also_on: string[] };
 
 // Phone photos are often 5-10 MB. The browser shrinks each one to at most 2000 px
 // on its longest side before sending, which keeps uploads quick. The server checks
@@ -83,7 +86,8 @@ export default function PhotosPanel({
   const [tipId, setTipId] = useState<number | null>(null); // photo whose file name is showing
   const tipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selected, setSelected] = useState<number[]>([]); // photos ticked for bulk delete
-  const [pendingDelete, setPendingDelete] = useState<Photo[] | null>(null); // waiting for the confirmation dialog
+  const [pendingDelete, setPendingDelete] = useState<{ list: Photo[]; items: PreviewItem[] } | null>(null); // waiting for the confirmation dialog
+  const [showPicker, setShowPicker] = useState(false);
 
   useEffect(() => () => { if (tipTimer.current) clearTimeout(tipTimer.current); }, []);
 
@@ -166,15 +170,43 @@ export default function PhotosPanel({
     void call("Saving order…", `${base}/order`, { method: "POST", body: { photo_ids: ids } });
   }
 
-  function remove(photo: Photo) {
-    // The last photo gets its own, stronger warning (see the dialog below).
-    if (photos.length <= 1) {
-      setPendingDelete([photo]);
+  // Asks the server which stored files these deletes would remove, then either
+  // shows the warning dialog (some file is about to lose its last use) or a plain confirm.
+  async function requestDelete(list: Photo[]) {
+    setBusy("Checking…");
+    setMsg(null);
+    let items: PreviewItem[];
+    try {
+      const r = await api<{ items: PreviewItem[] }>(`${base}/photos/delete-preview`, {
+        method: "POST",
+        body: { photo_ids: list.map((p) => p.id) },
+      });
+      items = r.items;
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+      setBusy(null);
       return;
     }
-    const extra = photo.is_primary && photos.length > 1 ? " The next photo will become the main photo." : "";
-    if (!window.confirm(`Remove this photo from the product?${extra}`)) return;
-    void call("Removing photo…", `${base}/${photo.id}/delete`, { method: "POST", body: {} });
+    setBusy(null);
+    const losesFile = items.some((i) => i.last_use);
+    if (list.length === 1 && !losesFile) {
+      // One photo whose file stays in storage (or was only an eBay link): the simple question is enough.
+      const photo = list[0];
+      const info = items[0];
+      const notes = [
+        info?.also_on.length ? `The picture is also used on ${info.also_on.join(", ")}, so it stays in storage.` : "",
+        photo.id === mainPhoto?.id && photos.length > 1 ? "The next photo will become the main photo." : "",
+        photos.length <= 1 ? "The product will have no photos left." : "",
+      ].filter(Boolean);
+      if (!window.confirm(`Remove this photo from the product?${notes.length ? `\n\n${notes.join(" ")}` : ""}`)) return;
+      void deleteMany(list);
+      return;
+    }
+    setPendingDelete({ list, items });
+  }
+
+  function remove(photo: Photo) {
+    void requestDelete([photo]);
   }
 
   function toggle(id: number) {
@@ -280,9 +312,14 @@ export default function PhotosPanel({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-lg font-semibold">Photos</h2>
         {mayEdit && (
-          <button type="button" className={small} disabled={!!busy} onClick={() => addInput.current?.click()}>
-            + Add photos
-          </button>
+          <div className="flex gap-2">
+            <button type="button" className={small} disabled={!!busy} onClick={() => addInput.current?.click()}>
+              + Add photos
+            </button>
+            <button type="button" className={small} disabled={!!busy} onClick={() => setShowPicker(true)}>
+              + Add from existing photos
+            </button>
+          </div>
         )}
       </div>
       <input ref={addInput} type="file" accept="image/jpeg,image/png,image/webp" multiple hidden onChange={(e) => void addFiles(e.target.files)} />
@@ -325,7 +362,7 @@ export default function PhotosPanel({
                 type="button"
                 className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40"
                 disabled={!!busy}
-                onClick={() => setPendingDelete(selectedPhotos)}
+                onClick={() => void requestDelete(selectedPhotos)}
               >
                 Delete selected ({selectedPhotos.length})
               </button>
@@ -341,12 +378,39 @@ export default function PhotosPanel({
           {ordered.map((p, i) => renderTile(p, i))}
         </ul>
       )}
+      {showPicker && (
+        <PhotoPicker
+          productId={productId}
+          currentKeys={photos.map((p) => p.image_key).filter((k): k is string => !!k)}
+          onClose={() => setShowPicker(false)}
+          onAdded={(next, added, skipped) => {
+            onChange(next);
+            setShowPicker(false);
+            setMsg({
+              kind: "success",
+              text: `${added === 1 ? "Photo added" : `${added} photos added`}${skipped ? ` (${skipped} skipped: already on this product)` : ""}.`,
+            });
+          }}
+        />
+      )}
+
       {pendingDelete && (() => {
-        const list = pendingDelete;
+        const { list, items } = pendingDelete;
         const all = list.length >= photos.length;
-        const keys = Array.from(new Set(list.map((p) => p.image_key).filter((k): k is string => !!k)));
+        const goneKeys: string[] = Array.from(new Set<string>(items.filter((i) => i.last_use && i.image_key).map((i) => i.image_key as string)));
+        const keptItems = items.filter((i) => i.image_key && !i.last_use);
+        const keptKeys: string[] = Array.from(new Set<string>(keptItems.map((i) => i.image_key as string)));
+        const linkOnly = items.filter((i) => !i.image_key).length;
         const mainGoes = list.some((p) => p.id === mainPhoto?.id);
-        const title = all ? (list.length === 1 ? "Delete the last photo?" : `Delete ALL ${list.length} photos?`) : `Delete ${list.length} photos?`;
+        const danger = goneKeys.length > 0;
+        const title = danger
+          ? goneKeys.length === 1
+            ? "Permanently delete this stored picture?"
+            : `Permanently delete ${goneKeys.length} stored pictures?`
+          : list.length === 1
+          ? "Remove this photo?"
+          : `Remove ${list.length} photos?`;
+        const alsoOn = (key: string) => items.find((i) => i.image_key === key)?.also_on ?? [];
         return (
           <Modal title={title} onClose={() => setPendingDelete(null)}>
             <div className="space-y-4">
@@ -355,7 +419,7 @@ export default function PhotosPanel({
                   const src = p.thumb ?? p.source_url;
                   return src ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img key={p.id} src={src} alt="A photo about to be deleted" className="h-16 w-16 rounded border border-gray-200 object-cover" />
+                    <img key={p.id} src={src} alt="A photo about to be removed" className="h-16 w-16 rounded border border-gray-200 object-cover" />
                   ) : (
                     <div key={p.id} className="flex h-16 w-16 items-center justify-center rounded border border-gray-200 bg-gray-100 text-[10px] text-gray-500">
                       No picture
@@ -364,50 +428,69 @@ export default function PhotosPanel({
                 })}
                 {list.length > 8 && <div className="flex h-16 items-center text-sm text-gray-600">+{list.length - 8} more</div>}
               </div>
-              <div className="space-y-2 text-sm text-gray-800">
-                {all ? (
-                  <>
+
+              <div className="space-y-3 text-sm text-gray-800">
+                <p>
+                  {list.length === 1 ? "1 photo" : `${list.length} photos`} will be removed from this product.
+                  {all ? " The product will have no photos left." : ` The other ${photos.length - list.length} stay.`}
+                  {mainGoes && !all ? " The next remaining photo becomes the main photo." : ""}
+                </p>
+
+                {danger && (
+                  <div className="space-y-1">
                     <p className="font-semibold text-red-700">
-                      {list.length === 1 ? "This is the only photo left on this product." : "This removes every photo on this product."}
+                      {goneKeys.length === 1 ? "This picture is not used anywhere else" : `These ${goneKeys.length} pictures are not used anywhere else`}, so{" "}
+                      {goneKeys.length === 1 ? "it and its thumbnail" : "they and their thumbnails"} will be permanently deleted from storage. This cannot be undone.
                     </p>
-                    <p>After this, the product will have no pictures at all.</p>
-                  </>
-                ) : (
-                  <p>
-                    {list.length} photos will be removed from this product. The other {photos.length - list.length} stay.
-                    {mainGoes ? " The next remaining photo becomes the main photo." : ""}
-                  </p>
-                )}
-                {keys.length > 0 ? (
-                  <>
-                    <p>
-                      {keys.length === 1 ? "This stored picture and its thumbnail" : `These ${keys.length} stored pictures and their thumbnails`} will be
-                      permanently deleted from storage, unless another product uses the same picture. This cannot be undone.
-                    </p>
-                    <ul className="max-h-28 overflow-y-auto rounded border border-gray-200 bg-gray-50 p-2 font-mono text-xs break-all text-gray-700">
-                      {keys.map((k) => (
+                    <ul className="max-h-28 overflow-y-auto rounded border border-red-200 bg-red-50 p-2 font-mono text-xs break-all text-gray-800">
+                      {goneKeys.map((k) => (
                         <li key={k}>full/{k}</li>
                       ))}
                     </ul>
-                  </>
-                ) : (
-                  <p>None of these are in your storage (they are only links), so nothing will be deleted from storage.</p>
+                  </div>
+                )}
+
+                {keptKeys.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-gray-700">
+                      {keptKeys.length === 1 ? "1 picture stays" : `${keptKeys.length} pictures stay`} in storage because another listing still uses {keptKeys.length === 1 ? "it" : "them"}:
+                    </p>
+                    <ul className="max-h-24 overflow-y-auto rounded border border-gray-200 bg-gray-50 p-2 font-mono text-xs break-all text-gray-600">
+                      {keptKeys.map((k) => (
+                        <li key={k}>
+                          {k.split("/").pop()} <span className="font-sans">· also on {alsoOn(k).join(", ")}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {linkOnly > 0 && (
+                  <p className="text-gray-600">
+                    {linkOnly === 1 ? "1 photo is" : `${linkOnly} photos are`} only an eBay link, so nothing is deleted from storage for {linkOnly === 1 ? "it" : "them"}.
+                  </p>
                 )}
               </div>
+
               <div className="flex flex-wrap justify-end gap-2">
                 <button type="button" className={btn2Cls} autoFocus onClick={() => setPendingDelete(null)}>
                   Cancel, keep {list.length === 1 ? "it" : "them"}
                 </button>
                 <button
                   type="button"
-                  className="rounded bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-40"
+                  className={
+                    danger
+                      ? "rounded bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-40"
+                      : "rounded bg-black px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-40"
+                  }
                   disabled={!!busy}
                   onClick={() => {
                     setPendingDelete(null);
                     void deleteMany(list);
                   }}
                 >
-                  Delete permanently{list.length > 1 ? ` (${list.length})` : ""}
+                  {danger ? "Delete permanently" : "Remove"}
+                  {list.length > 1 ? ` (${list.length})` : ""}
                 </button>
               </div>
             </div>
