@@ -6,9 +6,11 @@ import ProductImage from "./ProductImage";
 export type GalleryPhoto = { url: string; thumb: string; fallback: string | null };
 
 /**
- * Product photos: a large photo with a strip of thumbnails. Clicking any photo
- * opens a full-screen viewer where you can step through every photo with the
- * arrow buttons, the keyboard (left / right / Esc) or a swipe on a phone.
+ * Product photos: a large photo with a strip of thumbnails. Clicking a thumbnail
+ * puts that photo in the large spot, and the arrows on the large photo (or a
+ * swipe on a phone) step through the photos. Clicking the LARGE photo opens a
+ * full-screen viewer with its own arrows, thumbnails, keyboard (left / right /
+ * Esc) and swipe.
  */
 export default function ProductGallery({ photos, title }: { photos: GalleryPhoto[]; title: string }) {
   const count = photos.length;
@@ -17,6 +19,7 @@ export default function ProductGallery({ photos, title }: { photos: GalleryPhoto
   const index = count ? Math.min(rawIndex, count - 1) : 0;
   const [open, setOpen] = useState(false);
   const touchX = useRef<number | null>(null);
+  const pageTouchX = useRef<number | null>(null);
   const closeBtn = useRef<HTMLButtonElement>(null);
   const lastFocus = useRef<HTMLElement | null>(null);
   const activeThumb = useRef<HTMLButtonElement>(null);
@@ -74,26 +77,57 @@ export default function ProductGallery({ photos, title }: { photos: GalleryPhoto
 
   return (
     <div>
-      {/* page view: the current photo plus every thumbnail */}
-      <button
-        type="button"
-        onClick={() => openAt(index)}
-        className="relative block w-full cursor-zoom-in"
-        aria-label={`View larger photo of ${title}`}
+      {/* page view: the large photo (click it to magnify) with arrows, and a thumbnail strip */}
+      <div
+        className="relative"
+        onTouchStart={(e) => {
+          pageTouchX.current = e.touches[0].clientX;
+        }}
+        onTouchEnd={(e) => {
+          if (pageTouchX.current == null || count < 2) return;
+          const dx = e.changedTouches[0].clientX - pageTouchX.current;
+          pageTouchX.current = null;
+          if (Math.abs(dx) > 50) go(index + (dx < 0 ? 1 : -1));
+        }}
       >
-        <ProductImage
-          key={current.url}
-          src={current.url}
-          fallback={current.fallback}
-          alt={title}
-          className="w-full rounded border border-gray-200"
-        />
+        <button
+          type="button"
+          onClick={() => openAt(index)}
+          className="block w-full cursor-zoom-in"
+          aria-label={`View larger photo of ${title}`}
+        >
+          <ProductImage
+            key={current.url}
+            src={current.url}
+            fallback={current.fallback}
+            alt={title}
+            className="w-full rounded border border-gray-200"
+          />
+        </button>
         {count > 1 && (
-          <span className="absolute bottom-2 right-2 rounded bg-black/70 px-2 py-0.5 text-xs font-semibold text-white">
-            {index + 1} / {count}
-          </span>
+          <>
+            <button
+              type="button"
+              onClick={() => go(index - 1)}
+              aria-label="Previous photo"
+              className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-black/50 px-3 py-2 text-2xl leading-none text-white hover:bg-black/70"
+            >
+              ‹
+            </button>
+            <button
+              type="button"
+              onClick={() => go(index + 1)}
+              aria-label="Next photo"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-black/50 px-3 py-2 text-2xl leading-none text-white hover:bg-black/70"
+            >
+              ›
+            </button>
+            <span className="pointer-events-none absolute bottom-2 right-2 rounded bg-black/70 px-2 py-0.5 text-xs font-semibold text-white">
+              {index + 1} / {count}
+            </span>
+          </>
         )}
-      </button>
+      </div>
 
       {count > 1 && (
         <div className="mt-3 grid grid-cols-4 gap-2 sm:grid-cols-5">
@@ -101,8 +135,9 @@ export default function ProductGallery({ photos, title }: { photos: GalleryPhoto
             <button
               key={ph.url}
               type="button"
-              onClick={() => openAt(i)}
-              aria-label={`View photo ${i + 1} of ${count}`}
+              onClick={() => go(i)}
+              aria-label={`Show photo ${i + 1} of ${count}`}
+              aria-current={i === index}
               className={`overflow-hidden rounded border-2 ${i === index ? "border-[#06bde7]" : "border-gray-200 hover:border-gray-400"}`}
             >
               <ProductImage src={ph.thumb} fallback={ph.fallback} className="aspect-square w-full object-cover" />
