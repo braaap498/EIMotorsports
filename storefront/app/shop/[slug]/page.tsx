@@ -70,7 +70,7 @@ async function Product({ params }: { params: Promise<{ slug: string }> }) {
 
         {p.description && (
           <div
-            className="mt-6 text-sm"
+            className="product-description mt-6 text-sm"
             dangerouslySetInnerHTML={{ __html: p.description }}
           />
         )}
