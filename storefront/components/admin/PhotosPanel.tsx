@@ -82,7 +82,8 @@ export default function PhotosPanel({
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [tipId, setTipId] = useState<number | null>(null); // photo whose file name is showing
   const tipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [lastPhoto, setLastPhoto] = useState<Photo | null>(null); // waiting for "delete the last photo" confirmation
+  const [selected, setSelected] = useState<number[]>([]); // photos ticked for bulk delete
+  const [pendingDelete, setPendingDelete] = useState<Photo[] | null>(null); // waiting for the confirmation dialog
 
   useEffect(() => () => { if (tipTimer.current) clearTimeout(tipTimer.current); }, []);
 
@@ -168,7 +169,7 @@ export default function PhotosPanel({
   function remove(photo: Photo) {
     // The last photo gets its own, stronger warning (see the dialog below).
     if (photos.length <= 1) {
-      setLastPhoto(photo);
+      setPendingDelete([photo]);
       return;
     }
     const extra = photo.is_primary && photos.length > 1 ? " The next photo will become the main photo." : "";
@@ -176,14 +177,42 @@ export default function PhotosPanel({
     void call("Removing photo…", `${base}/${photo.id}/delete`, { method: "POST", body: {} });
   }
 
+  function toggle(id: number) {
+    setSelected((sel) => (sel.includes(id) ? sel.filter((i) => i !== id) : [...sel, id]));
+  }
+
+  // Deletes one after another with the same route as a single delete, so the
+  // "keep files another row still uses" check runs for every photo.
+  async function deleteMany(list: Photo[]) {
+    setMsg(null);
+    let done = 0;
+    try {
+      for (const ph of list) {
+        setBusy(`Removing photo ${done + 1} of ${list.length}…`);
+        const r = await api<Listing>(`${base}/${ph.id}/delete`, { method: "POST", body: {} });
+        onChange(r.photos);
+        setSelected((sel) => sel.filter((i) => i !== ph.id));
+        done++;
+      }
+      setMsg({ kind: "success", text: done === 1 ? "Photo removed." : `${done} photos removed.` });
+    } catch (e) {
+      setMsg({ kind: "error", text: `Removed ${done} of ${list.length}. ${errMsg(e)}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function renderTile(photo: Photo, index: number) {
     const src = photo.thumb ?? photo.source_url;
     const isMain = photo.id === mainPhoto?.id;
     const posInOthers = others.findIndex((p) => p.id === photo.id);
+    const picked = selected.includes(photo.id);
     return (
       <li key={photo.id} className="w-36 space-y-1.5">
         <div
-          className={`relative overflow-hidden rounded border-2 ${isMain ? "border-blue-600" : "border-gray-200"}`}
+          className={`relative overflow-hidden rounded border-2 ${
+            picked ? "border-red-600" : isMain ? "border-blue-600" : "border-gray-200"
+          }`}
           onMouseEnter={() => tipStart(photo.id)}
           onMouseLeave={tipStop}
         >
@@ -199,6 +228,11 @@ export default function PhotosPanel({
             <span className="absolute left-1 top-1 rounded bg-blue-600 px-1.5 py-0.5 text-xs font-semibold text-white">
               Main photo
             </span>
+          )}
+          {mayEdit && (
+            <label className="absolute right-1 top-1 flex h-6 w-6 cursor-pointer items-center justify-center rounded bg-white/90 shadow" title="Select for deleting">
+              <input type="checkbox" className="h-4 w-4 cursor-pointer" checked={picked} disabled={!!busy} onChange={() => toggle(photo.id)} aria-label="Select this photo" />
+            </label>
           )}
         </div>
         {mayEdit && (
@@ -239,6 +273,7 @@ export default function PhotosPanel({
   }
 
   const ordered = mainPhoto ? [mainPhoto, ...others] : [];
+  const selectedPhotos = ordered.filter((p) => selected.includes(p.id));
 
   return (
     <section className={cardCls}>
@@ -273,6 +308,32 @@ export default function PhotosPanel({
         );
       })()}
 
+      {mayEdit && ordered.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          {selectedPhotos.length > 0 && <span className="font-medium text-gray-800">{selectedPhotos.length} selected</span>}
+          {selectedPhotos.length < ordered.length && (
+            <button type="button" className={small} disabled={!!busy} onClick={() => setSelected(ordered.map((p) => p.id))}>
+              Select all
+            </button>
+          )}
+          {selectedPhotos.length > 0 && (
+            <>
+              <button type="button" className={small} disabled={!!busy} onClick={() => setSelected([])}>
+                Clear
+              </button>
+              <button
+                type="button"
+                className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40"
+                disabled={!!busy}
+                onClick={() => setPendingDelete(selectedPhotos)}
+              >
+                Delete selected ({selectedPhotos.length})
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {ordered.length === 0 ? (
         <p className="text-sm text-gray-500">No photos yet.{mayEdit ? " Use “Add photos” to upload some." : ""}</p>
       ) : (
@@ -280,45 +341,73 @@ export default function PhotosPanel({
           {ordered.map((p, i) => renderTile(p, i))}
         </ul>
       )}
-      {lastPhoto && (() => {
-        const info = storageInfo(lastPhoto);
-        const src = lastPhoto.thumb ?? lastPhoto.source_url;
+      {pendingDelete && (() => {
+        const list = pendingDelete;
+        const all = list.length >= photos.length;
+        const keys = Array.from(new Set(list.map((p) => p.image_key).filter((k): k is string => !!k)));
+        const mainGoes = list.some((p) => p.id === mainPhoto?.id);
+        const title = all ? (list.length === 1 ? "Delete the last photo?" : `Delete ALL ${list.length} photos?`) : `Delete ${list.length} photos?`;
         return (
-          <Modal title="Delete the last photo?" onClose={() => setLastPhoto(null)}>
+          <Modal title={title} onClose={() => setPendingDelete(null)}>
             <div className="space-y-4">
-              <div className="flex gap-3">
-                {src && (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={src} alt="The photo about to be deleted" className="h-24 w-24 shrink-0 rounded border border-gray-200 object-cover" />
+              <div className="flex flex-wrap gap-2">
+                {list.slice(0, 8).map((p) => {
+                  const src = p.thumb ?? p.source_url;
+                  return src ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img key={p.id} src={src} alt="A photo about to be deleted" className="h-16 w-16 rounded border border-gray-200 object-cover" />
+                  ) : (
+                    <div key={p.id} className="flex h-16 w-16 items-center justify-center rounded border border-gray-200 bg-gray-100 text-[10px] text-gray-500">
+                      No picture
+                    </div>
+                  );
+                })}
+                {list.length > 8 && <div className="flex h-16 items-center text-sm text-gray-600">+{list.length - 8} more</div>}
+              </div>
+              <div className="space-y-2 text-sm text-gray-800">
+                {all ? (
+                  <>
+                    <p className="font-semibold text-red-700">
+                      {list.length === 1 ? "This is the only photo left on this product." : "This removes every photo on this product."}
+                    </p>
+                    <p>After this, the product will have no pictures at all.</p>
+                  </>
+                ) : (
+                  <p>
+                    {list.length} photos will be removed from this product. The other {photos.length - list.length} stay.
+                    {mainGoes ? " The next remaining photo becomes the main photo." : ""}
+                  </p>
                 )}
-                <div className="space-y-2 text-sm text-gray-800">
-                  <p className="font-semibold text-red-700">This is the only photo left on this product.</p>
-                  <p>After this, the product will have no pictures at all.</p>
-                  {info.inStorage ? (
+                {keys.length > 0 ? (
+                  <>
                     <p>
-                      The stored picture <span className="break-all font-mono text-xs">{info.path}</span> and its thumbnail will be
+                      {keys.length === 1 ? "This stored picture and its thumbnail" : `These ${keys.length} stored pictures and their thumbnails`} will be
                       permanently deleted from storage, unless another product uses the same picture. This cannot be undone.
                     </p>
-                  ) : (
-                    <p>This photo is not in your storage (it is only a link), so nothing will be deleted from storage.</p>
-                  )}
-                </div>
+                    <ul className="max-h-28 overflow-y-auto rounded border border-gray-200 bg-gray-50 p-2 font-mono text-xs break-all text-gray-700">
+                      {keys.map((k) => (
+                        <li key={k}>full/{k}</li>
+                      ))}
+                    </ul>
+                  </>
+                ) : (
+                  <p>None of these are in your storage (they are only links), so nothing will be deleted from storage.</p>
+                )}
               </div>
               <div className="flex flex-wrap justify-end gap-2">
-                <button type="button" className={btn2Cls} autoFocus onClick={() => setLastPhoto(null)}>
-                  Cancel, keep it
+                <button type="button" className={btn2Cls} autoFocus onClick={() => setPendingDelete(null)}>
+                  Cancel, keep {list.length === 1 ? "it" : "them"}
                 </button>
                 <button
                   type="button"
                   className="rounded bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-40"
                   disabled={!!busy}
                   onClick={() => {
-                    const id = lastPhoto.id;
-                    setLastPhoto(null);
-                    void call("Removing photo…", `${base}/${id}/delete`, { method: "POST", body: {} });
+                    setPendingDelete(null);
+                    void deleteMany(list);
                   }}
                 >
-                  Delete permanently
+                  Delete permanently{list.length > 1 ? ` (${list.length})` : ""}
                 </button>
               </div>
             </div>
