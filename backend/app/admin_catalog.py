@@ -31,6 +31,7 @@ from app.auth import AuthUser, current_user, has_perm, needs, require_route_acce
 from app.database import get_db
 from app.images import thumb_url
 from app.permissions import FIELD_PERMS, label_for
+from app.sanitize import clean_description
 
 # No prefix here: main.py mounts this inside admin_router, which supplies
 # "/admin" and the staff check. require_route_access then makes each route
@@ -644,6 +645,8 @@ def create_product(body: ProductFields, db: Session = Depends(get_db), user: Aut
     if not fields.get("sku") or not fields.get("title"):
         raise HTTPException(400, "sku and title are required")
     _require_field_perms(user, fields, _NEW_PRODUCT_DEFAULTS, covered=("products.edit_details",))
+    if "description" in fields:
+        fields["description"] = clean_description(fields["description"])
     fields["slug"] = _unique_slug(db, slugify(fields.get("slug") or fields["title"]))
     cols = ", ".join(fields)  # keys come from the model, not the client
     vals = ", ".join(f":{k}" for k in fields)
@@ -670,6 +673,11 @@ def update_product(
     if not fields:
         raise HTTPException(400, "Nothing to update")
     _require_field_perms(user, fields, current._mapping)
+    # Clean only a description that really changed. This runs after the
+    # permission check, so an employee who may not edit details can still save
+    # the form with the description untouched.
+    if "description" in fields and not _same(current._mapping.get("description"), fields["description"]):
+        fields["description"] = clean_description(fields["description"])
     for required in ("sku", "title"):
         if required in fields and not fields[required]:
             raise HTTPException(400, f"{required} cannot be empty")

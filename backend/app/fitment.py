@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.images import card_image, gallery
+from app.sanitize import clean_description
 
 router = APIRouter(prefix="/store/fitment", tags=["store"])
 
@@ -183,7 +184,7 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         "price": f"{p.list_price:.2f}" if p.list_price is not None else None,
         "condition": p.condition,
         "part_number": p.manufacturer_part_number,
-        "description": p.description,
+        "description": clean_description(p.description),
         "photos": gallery(photos),
         "specifics": [{"name": s.name, "value": s.value} for s in specifics],
     }

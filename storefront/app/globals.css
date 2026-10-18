@@ -22,3 +22,16 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
+
+/* Product descriptions arrive as cleaned HTML (see app/sanitize.py). Tailwind's
+   reset removes bullets and spacing, so they are put back here. */
+.product-description { line-height: 1.5; }
+.product-description > * + * { margin-top: 0.75rem; }
+.product-description ul { list-style: disc; padding-left: 1.25rem; }
+.product-description ol { list-style: decimal; padding-left: 1.25rem; }
+.product-description li + li { margin-top: 0.25rem; }
+.product-description h2 { font-size: 1.125rem; font-weight: 700; }
+.product-description h3, .product-description h4 { font-weight: 600; }
+.product-description a { text-decoration: underline; color: #1d4ed8; }
+.product-description table { border-collapse: collapse; }
+.product-description th, .product-description td { border: 1px solid #d1d5db; padding: 0.25rem 0.5rem; text-align: left; }
