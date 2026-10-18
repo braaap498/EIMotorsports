@@ -295,14 +295,14 @@ export default function PhotosPanel({
         const tipPhoto = tipId != null ? photos.find((p) => p.id === tipId) : null;
         const info = tipPhoto ? storageInfo(tipPhoto) : null;
         return (
-          <div className="min-h-[3.25rem] rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm" aria-live="polite">
+          <div className="h-14 overflow-hidden rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm" aria-live="polite">
             {info ? (
               <>
-                <p className="break-all font-mono font-semibold text-gray-900">{info.file}</p>
-                {info.path && <p className="break-all font-mono text-xs text-gray-500">{info.path}</p>}
+                <p className="truncate font-mono font-semibold text-gray-900" title={info.file}>{info.file}</p>
+                {info.path && <p className="truncate font-mono text-xs text-gray-500" title={info.path}>{info.path}</p>}
               </>
             ) : (
-              <p className="text-gray-500">Rest the pointer on a photo to see its file name in storage.</p>
+              <p className="truncate leading-5 text-gray-500">Rest the pointer on a photo to see its file name in storage.</p>
             )}
           </div>
         );
