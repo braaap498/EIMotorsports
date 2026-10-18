@@ -24,6 +24,7 @@ GROUPS: list[dict] = [
             ("edit_details", "Edit details (title, description, part numbers, specs)"),
             ("edit_price", "Edit price and cost"),
             ("publish", "Publish / unpublish, activate / deactivate"),
+            ("photos", "Add, replace, remove and reorder photos"),
         ],
     },
     {
@@ -53,6 +54,7 @@ IMPLIES: dict[str, list[str]] = {
     "products.edit_details": ["products.view"],
     "products.edit_price": ["products.view"],
     "products.publish": ["products.view"],
+    "products.photos": ["products.view"],
     "inventory.adjust": ["products.view"],
     "fitment.add": ["fitment.view"],
     "fitment.remove": ["fitment.view"],

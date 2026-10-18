@@ -6,18 +6,11 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import DescriptionEditor from "./DescriptionEditor";
 import FitmentPanel from "./FitmentPanel";
+import PhotosPanel, { type Photo } from "./PhotosPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
 import { useAccess } from "./AdminAccess";
 
 type Cat = { id: number; parent_id: number | null; name: string; sort_order: number };
-type Photo = {
-  id: number;
-  source_url: string | null;
-  storage_path: string | null;
-  thumb?: string | null;
-  is_primary: boolean;
-};
-
 type SimilarMatch = {
   id: number;
   sku: string;
@@ -357,25 +350,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
 
       {productId && <FitmentPanel productId={productId} isUniversal={flags.is_universal} />}
 
-      {productId && (
-        <section className={card}>
-          <h2 className="text-lg font-semibold">Photos</h2>
-          {photos.length === 0 ? (
-            <p className="text-sm text-gray-500">No photos.</p>
-          ) : (
-            <div className="flex flex-wrap gap-3">
-              {photos.map((ph) => {
-                const src = ph.thumb ?? ph.source_url;
-                return src ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img key={ph.id} src={src} alt="" className="h-24 w-24 rounded border border-gray-200 object-cover" />
-                ) : null;
-              })}
-            </div>
-          )}
-          <p className="text-xs text-gray-500">Read-only for now. Photo upload comes with the image storage step.</p>
-        </section>
-      )}
+      {productId && <PhotosPanel productId={productId} photos={photos} onChange={setPhotos} cardCls={card} />}
     </div>
   );
 }

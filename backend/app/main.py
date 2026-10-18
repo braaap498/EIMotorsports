@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.admin_catalog import router as admin_catalog_router
 from app.admin_cleanup import router as admin_cleanup_router
+from app.admin_photos import router as admin_photos_router
 from app.admin_users import router as admin_users_router
 from app.auth import AuthUser, require_staff
 from app.config import get_settings
@@ -63,6 +64,7 @@ def ping_db(db: Session = Depends(get_db)):
 # so they pick up the /admin prefix and the staff check.
 admin_router.include_router(admin_catalog_router)
 admin_router.include_router(admin_cleanup_router)
+admin_router.include_router(admin_photos_router)
 admin_router.include_router(admin_users_router)
 
 app.include_router(admin_router)
