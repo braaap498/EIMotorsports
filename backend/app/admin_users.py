@@ -7,7 +7,7 @@ project's secret key. Only this API server holds that key (the setting
 SUPABASE_SERVICE_KEY on Render); the browser never sees it.
 
   - The display name is stored on the account as user_metadata.display_name.
-    The storefront header shows it ("Hi, Ian") and falls back to the part of
+    The storefront header shows it ("Hi, Eric") and falls back to the part of
     the email before the @ when an account has none.
   - The role is stored as app_metadata.role, which a user cannot edit
     themselves.

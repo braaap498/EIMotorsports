@@ -156,7 +156,7 @@ export default function AdminUsersPage() {
         <form onSubmit={add} className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Display name (required) — shown as “Hi, …” on the site">
-              <input className={inputCls} value={displayName} maxLength={40} onChange={(e) => setDisplayName(e.target.value)} placeholder="e.g. Ian" required />
+              <input className={inputCls} value={displayName} maxLength={40} onChange={(e) => setDisplayName(e.target.value)} placeholder="e.g. Eric" required />
             </Field>
             <Field label="Email (they sign in with this)">
               <input className={inputCls} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com" required />
