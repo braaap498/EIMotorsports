@@ -4,10 +4,12 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Notice } from "../../components/admin/ui";
+import { useAccess } from "../../components/admin/AdminAccess";
 
 type Stats = { products: number; noFitment: number; untyped: number };
 
 export default function AdminDashboard() {
+  const { can, isAdmin } = useAccess();
   const [stats, setStats] = useState<Stats | null>(null);
   const [error, setError] = useState("");
 
@@ -23,7 +25,7 @@ export default function AdminDashboard() {
       .catch((e) => setError(errMsg(e)));
   }, []);
 
-  const cards = [
+  const allCards = [
     { label: "Products", value: stats?.products, href: "/admin/products", hint: "View all" },
     {
       label: "Products with no fitment",
@@ -39,6 +41,9 @@ export default function AdminDashboard() {
     },
   ];
 
+  // "Models with no type" leads to an admin-only screen.
+  const cards = allCards.filter((c) => isAdmin || c.href.startsWith("/admin/products"));
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold">Dashboard</h1>
@@ -53,12 +58,16 @@ export default function AdminDashboard() {
         ))}
       </div>
       <div className="flex gap-3">
-        <Link href="/admin/products/new" className="rounded bg-black px-4 py-2 text-sm font-semibold text-white">
-          Add product
-        </Link>
-        <Link href="/admin/models" className="rounded border border-gray-300 bg-white px-4 py-2 text-sm font-medium">
-          Manage models &amp; years
-        </Link>
+        {can("products.create") && (
+          <Link href="/admin/products/new" className="rounded bg-black px-4 py-2 text-sm font-semibold text-white">
+            Add product
+          </Link>
+        )}
+        {isAdmin && (
+          <Link href="/admin/models" className="rounded border border-gray-300 bg-white px-4 py-2 text-sm font-medium">
+            Manage models &amp; years
+          </Link>
+        )}
       </div>
     </div>
   );

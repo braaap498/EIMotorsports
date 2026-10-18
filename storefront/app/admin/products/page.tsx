@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Field, Notice, Pager, btn2Cls, inputCls } from "../../../components/admin/ui";
+import { useAccess } from "../../../components/admin/AdminAccess";
 
 type Row = {
   id: number;
@@ -22,6 +23,8 @@ type Resp = { total: number; items: Row[] };
 const LIMIT = 50;
 
 export default function ProductsPage() {
+  const { can } = useAccess();
+  const mayEdit = can("products.edit_details", "products.edit_price", "inventory.adjust", "products.publish", "fitment.add");
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
   const [published, setPublished] = useState("");
@@ -63,9 +66,11 @@ export default function ProductsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Products</h1>
-        <Link href="/admin/products/new" className="rounded bg-black px-4 py-2 text-sm font-semibold text-white">
-          Add product
-        </Link>
+        {can("products.create") && (
+          <Link href="/admin/products/new" className="rounded bg-black px-4 py-2 text-sm font-semibold text-white">
+            Add product
+          </Link>
+        )}
       </div>
       {error && <Notice kind="error">{error}</Notice>}
 
@@ -128,7 +133,7 @@ export default function ProductsPage() {
                   </span>
                 </td>
                 <td className="px-3 py-2 text-right">
-                  <Link href={`/admin/products/${p.id}`} className={btn2Cls}>Edit</Link>
+                  <Link href={`/admin/products/${p.id}`} className={btn2Cls}>{mayEdit ? "Edit" : "View"}</Link>
                 </td>
               </tr>
             ))}

@@ -13,14 +13,17 @@ Two signing modes are supported, chosen by the token header:
   * HS256         - legacy shared secret; only if SUPABASE_JWT_SECRET is set.
 Anything else (including alg=none) is rejected.
 
-Trade-off: a role change or deactivation takes effect when the user's
-current token expires (Supabase default: 1 hour), not instantly.
+Employees ("staff" role) can be given individual permissions (see
+app/permissions.py), stored the same way in `app_metadata.permissions`.
+
+Trade-off: a role or permission change, or a deactivation, takes effect when
+the user's current token expires (Supabase default: 1 hour), not instantly.
 """
 from dataclasses import dataclass
 from functools import lru_cache
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
 
@@ -37,6 +40,7 @@ class AuthUser:
     user_id: str
     email: str | None
     role: str
+    permissions: frozenset[str] = frozenset()
 
 
 @lru_cache
@@ -78,8 +82,16 @@ def current_user(
     if creds is None:
         raise _unauthorized()
     claims = decode_token(creds.credentials, settings)
-    role = (claims.get("app_metadata") or {}).get("role")
-    return AuthUser(user_id=claims["sub"], email=claims.get("email"), role=role or "")
+    meta = claims.get("app_metadata") or {}
+    perms = meta.get("permissions")
+    if not isinstance(perms, list):
+        perms = []
+    return AuthUser(
+        user_id=claims["sub"],
+        email=claims.get("email"),
+        role=meta.get("role") or "",
+        permissions=frozenset(p for p in perms if isinstance(p, str)),
+    )
 
 
 def require_staff(user: AuthUser = Depends(current_user)) -> AuthUser:
@@ -92,3 +104,39 @@ def require_admin(user: AuthUser = Depends(current_user)) -> AuthUser:
     if user.role not in ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def has_perm(user: AuthUser, key: str) -> bool:
+    """Owners and admins can do everything; employees only what they were granted."""
+    return user.role in ADMIN_ROLES or key in user.permissions
+
+
+def needs(*keys: str):
+    """
+    Mark a route as open to employees who hold ANY of these permissions
+    (owners and admins always pass). Use it under the route decorator:
+
+        @router.get("/products")
+        @needs("products.view")
+        def list_products(...): ...
+
+    A route in a router that uses `require_route_access` WITHOUT this marker is
+    admin-only. Forgetting it therefore locks employees out; it never lets
+    them in.
+    """
+
+    def mark(fn):
+        fn._needs_any = tuple(keys)
+        return fn
+
+    return mark
+
+
+def require_route_access(request: Request, user: AuthUser = Depends(require_staff)) -> AuthUser:
+    """Router-level guard that enforces the `needs(...)` marker on each route."""
+    if user.role in ADMIN_ROLES:
+        return user
+    keys = getattr(request.scope.get("endpoint"), "_needs_any", ())
+    if keys and any(k in user.permissions for k in keys):
+        return user
+    raise HTTPException(status_code=403, detail="You don't have permission to do that")

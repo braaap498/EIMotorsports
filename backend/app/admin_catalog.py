@@ -1,7 +1,12 @@
 """
 Admin back-office: vehicle fitment (types, makes, models, years) and products.
-Mounted at /admin/* via admin_router in main.py. Every route requires an
-owner/admin token (app/auth.py).
+Mounted at /admin/* via admin_router in main.py.
+
+Access: routes are admin/owner-only unless they carry a @needs(...) marker
+(app/auth.py), in which case employees holding one of those permissions
+(app/permissions.py) may use them too. Reads of the vehicle lists are open to
+anyone who can view products or fitment; everything that changes vehicle
+types, makes, models or years stays admin-only.
 
 Notes on how the data is shaped:
   * There is no "years" table. A year exists for a model when a row exists in
@@ -22,14 +27,18 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.auth import require_admin
+from app.auth import AuthUser, current_user, has_perm, needs, require_route_access
 from app.database import get_db
 from app.images import thumb_url
+from app.permissions import FIELD_PERMS, label_for
 
 # No prefix here: main.py mounts this inside admin_router, which supplies
-# "/admin" and the staff check. require_admin below is the stricter
-# owner/admin check for everything in this file.
-router = APIRouter(tags=["admin"], dependencies=[Depends(require_admin)])
+# "/admin" and the staff check. require_route_access then makes each route
+# admin-only unless it is marked with @needs(...).
+router = APIRouter(tags=["admin"], dependencies=[Depends(require_route_access)])
+
+# Who may read the vehicle / category lists (the product and fitment screens need them).
+READ_LISTS = ("products.view", "fitment.view")
 
 
 # --------------------------------------------------------------------------
@@ -72,6 +81,7 @@ class NameIn(BaseModel):
 
 
 @router.get("/vehicle-types")
+@needs(*READ_LISTS)
 def list_types(db: Session = Depends(get_db)):
     rows = db.execute(
         text(
@@ -130,6 +140,7 @@ def delete_type(type_id: int, db: Session = Depends(get_db)):
 # makes
 # --------------------------------------------------------------------------
 @router.get("/makes")
+@needs(*READ_LISTS)
 def list_makes(q: Optional[str] = None, db: Session = Depends(get_db)):
     rows = db.execute(
         text(
@@ -227,6 +238,7 @@ def _insert_years(db: Session, model_id: int, year_from: int, year_to: int) -> i
 
 
 @router.get("/models")
+@needs(*READ_LISTS)
 def list_models(
     make_id: Optional[int] = None,
     type_id: Optional[int] = None,
@@ -391,6 +403,7 @@ class YearRange(BaseModel):
 
 
 @router.get("/years")
+@needs(*READ_LISTS)
 def list_years(db: Session = Depends(get_db)):
     rows = db.execute(
         text(
@@ -402,6 +415,7 @@ def list_years(db: Session = Depends(get_db)):
 
 
 @router.get("/models/{model_id}/years")
+@needs(*READ_LISTS)
 def model_years(model_id: int, db: Session = Depends(get_db)):
     rows = db.execute(
         text(
@@ -502,7 +516,49 @@ def _product_or_404(db: Session, product_id: int):
     return row
 
 
+# A new product starts from these values, so a form that always sends them
+# (published = off, active = on, universal = off) is not treated as a change.
+_NEW_PRODUCT_DEFAULTS = {"is_published": False, "is_active": True, "is_universal": False}
+
+
+def _same(old, new) -> bool:
+    """True when saving `new` over `old` would not actually change anything."""
+    if old is None or old == "":
+        return new is None or new == ""
+    if new is None or new == "":
+        return False
+    if isinstance(old, bool) or isinstance(new, bool):
+        return old == new
+    if isinstance(old, str) and isinstance(new, str):
+        return old.strip() == new.strip()
+    try:
+        return float(old) == float(new)
+    except (TypeError, ValueError):
+        return str(old).strip() == str(new).strip()
+
+
+def _require_field_perms(user: AuthUser, fields: dict, current, covered: tuple[str, ...] = ()) -> None:
+    """
+    Employees may only change the fields they were granted. Only fields whose
+    value really changes count, so the edit form can send the whole product
+    back without tripping over fields the employee never touched. `covered`
+    lists permissions already implied by the action itself (creating a product
+    covers filling in its details).
+    """
+    need: set[str] = set()
+    for key, value in fields.items():
+        if _same(current.get(key), value):
+            continue
+        need.add(FIELD_PERMS.get(key, "products.edit_details"))
+    missing = [p for p in sorted(need) if p not in covered and not has_perm(user, p)]
+    if missing:
+        raise HTTPException(
+            403, "You don't have permission to change: " + "; ".join(label_for(p) for p in missing)
+        )
+
+
 @router.get("/categories")
+@needs(*READ_LISTS)
 def list_categories(db: Session = Depends(get_db)):
     rows = db.execute(
         text("select id, parent_id, name, sort_order from categories order by sort_order, name")
@@ -511,6 +567,7 @@ def list_categories(db: Session = Depends(get_db)):
 
 
 @router.get("/products")
+@needs(*READ_LISTS)
 def list_products(
     q: Optional[str] = None,
     category_id: Optional[int] = None,
@@ -559,7 +616,8 @@ def list_products(
 
 
 @router.get("/products/{product_id}")
-def get_product(product_id: int, db: Session = Depends(get_db)):
+@needs(*READ_LISTS)
+def get_product(product_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     row = _product_or_404(db, product_id)
     photos = db.execute(
         text(
@@ -573,14 +631,19 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
         d = dict(p._mapping)
         d["thumb"] = thumb_url(d["image_key"]) or d["source_url"]
         out.append(d)
-    return {**dict(row._mapping), "photos": out}
+    data = {**dict(row._mapping), "photos": out}
+    if not has_perm(user, "products.edit_price"):
+        data.pop("cost", None)  # what the shop paid is only shown to people who can change prices
+    return data
 
 
 @router.post("/products", status_code=201)
-def create_product(body: ProductFields, db: Session = Depends(get_db)):
+@needs("products.create")
+def create_product(body: ProductFields, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     fields = body.model_dump(exclude_unset=True)
     if not fields.get("sku") or not fields.get("title"):
         raise HTTPException(400, "sku and title are required")
+    _require_field_perms(user, fields, _NEW_PRODUCT_DEFAULTS, covered=("products.edit_details",))
     fields["slug"] = _unique_slug(db, slugify(fields.get("slug") or fields["title"]))
     cols = ", ".join(fields)  # keys come from the model, not the client
     vals = ", ".join(f":{k}" for k in fields)
@@ -595,11 +658,18 @@ def create_product(body: ProductFields, db: Session = Depends(get_db)):
 
 
 @router.patch("/products/{product_id}")
-def update_product(product_id: int, body: ProductFields, db: Session = Depends(get_db)):
-    _product_or_404(db, product_id)
+@needs("products.edit_details", "products.edit_price", "products.publish", "inventory.adjust", "fitment.add")
+def update_product(
+    product_id: int,
+    body: ProductFields,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(current_user),
+):
+    current = _product_or_404(db, product_id)
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(400, "Nothing to update")
+    _require_field_perms(user, fields, current._mapping)
     for required in ("sku", "title"):
         if required in fields and not fields[required]:
             raise HTTPException(400, f"{required} cannot be empty")
@@ -635,6 +705,7 @@ class FitmentRemove(BaseModel):
 
 
 @router.get("/products/{product_id}/fitment")
+@needs(*READ_LISTS)
 def product_fitment(product_id: int, db: Session = Depends(get_db)):
     prod = _product_or_404(db, product_id)
     rows = db.execute(
@@ -670,6 +741,7 @@ def product_fitment(product_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/products/{product_id}/fitment", status_code=201)
+@needs("fitment.add")
 def add_product_fitment(product_id: int, body: FitmentAdd, db: Session = Depends(get_db)):
     _product_or_404(db, product_id)
     available = db.execute(
@@ -709,6 +781,7 @@ def add_product_fitment(product_id: int, body: FitmentAdd, db: Session = Depends
 
 
 @router.post("/products/{product_id}/fitment/remove")
+@needs("fitment.remove")
 def remove_product_fitment(product_id: int, body: FitmentRemove, db: Session = Depends(get_db)):
     _product_or_404(db, product_id)
     if body.vehicle_ids:

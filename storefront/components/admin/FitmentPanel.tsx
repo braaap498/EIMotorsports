@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Field, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "./ui";
+import { useAccess } from "./AdminAccess";
 
 type FitYear = { vehicle_id: number; year: number; submodel: string | null };
 type FitModel = {
@@ -17,6 +18,9 @@ type ModelOpt = { id: number; name: string; make: string; year_min: number | nul
 type YearRow = { vehicle_id: number; year: number };
 
 export default function FitmentPanel({ productId, isUniversal }: { productId: number; isUniversal: boolean }) {
+  const { can } = useAccess();
+  const mayAdd = can("fitment.add");
+  const mayRemove = can("fitment.remove");
   const [fits, setFits] = useState<FitModel[]>([]);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -163,23 +167,27 @@ export default function FitmentPanel({ productId, isUniversal }: { productId: nu
                     {f.make} {f.model} {f.vehicle_type && <Badge>{f.vehicle_type}</Badge>}
                     <span className="ml-2 text-xs font-normal text-gray-500">{f.years.length} year(s)</span>
                   </div>
-                  <button
-                    className={dangerCls}
-                    disabled={busy}
-                    onClick={() => {
-                      if (confirm(`Remove ${f.make} ${f.model} (all years)?`)) remove({ model_id: f.model_id });
-                    }}
-                  >
-                    Remove model
-                  </button>
+                  {mayRemove && (
+                    <button
+                      className={dangerCls}
+                      disabled={busy}
+                      onClick={() => {
+                        if (confirm(`Remove ${f.make} ${f.model} (all years)?`)) remove({ model_id: f.model_id });
+                      }}
+                    >
+                      Remove model
+                    </button>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {f.years.map((y) => (
                     <span key={y.vehicle_id} className="inline-flex items-center gap-1 rounded border border-gray-300 bg-gray-50 px-2 py-1 text-sm">
                       {y.year}
-                      <button type="button" className="text-gray-400 hover:text-red-600" disabled={busy} onClick={() => remove({ vehicle_ids: [y.vehicle_id] })} aria-label={`Remove ${y.year}`}>
-                        ×
-                      </button>
+                      {mayRemove && (
+                        <button type="button" className="text-gray-400 hover:text-red-600" disabled={busy} onClick={() => remove({ vehicle_ids: [y.vehicle_id] })} aria-label={`Remove ${y.year}`}>
+                          ×
+                        </button>
+                      )}
                     </span>
                   ))}
                 </div>
@@ -189,6 +197,7 @@ export default function FitmentPanel({ productId, isUniversal }: { productId: nu
         )}
       </div>
 
+      {mayAdd && (
       <div className="space-y-3 border-t border-gray-200 pt-4">
         <h3 className="text-sm font-medium text-gray-700">Add fitment</h3>
         <div className="grid gap-3 sm:grid-cols-3">
@@ -263,6 +272,7 @@ export default function FitmentPanel({ productId, isUniversal }: { productId: nu
           </div>
         )}
       </div>
+      )}
     </section>
   );
 }

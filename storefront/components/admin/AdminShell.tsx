@@ -7,16 +7,19 @@ import { api, ApiError, errMsg } from "../../lib/adminApi";
 import { getSupabase } from "../../lib/supabase";
 import { Notice, btnCls, btn2Cls, inputCls, Field } from "./ui";
 import PasswordInput from "./PasswordInput";
+import { AdminAccessProvider } from "./AdminAccess";
 
 type Status = "loading" | "signedout" | "forbidden" | "error" | "ok";
 
-const NAV = [
-  { href: "/admin", label: "Dashboard", exact: true },
-  { href: "/admin/products", label: "Products" },
+// `any`: shown to employees who hold at least one of these permissions.
+// Items without `any` are for owners and admins only.
+const NAV: { href: string; label: string; exact?: boolean; any?: string[] }[] = [
+  { href: "/admin", label: "Dashboard", exact: true, any: ["products.view", "fitment.view"] },
+  { href: "/admin/products", label: "Products", any: ["products.view", "fitment.view"] },
   { href: "/admin/models", label: "Models & years" },
   { href: "/admin/fitment", label: "Types & makes" },
   { href: "/admin/cleanup", label: "Parts clean-up" },
-  { href: "/admin/users", label: "Admin users" },
+  { href: "/admin/users", label: "Team" },
 ];
 
 function LoginForm() {
@@ -74,6 +77,8 @@ export default function AdminShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [status, setStatus] = useState<Status>("loading");
   const [email, setEmail] = useState("");
+  const [role, setRole] = useState("");
+  const [permissions, setPermissions] = useState<string[]>([]);
   const [problem, setProblem] = useState("");
   const [attempt, setAttempt] = useState(0);
 
@@ -95,10 +100,12 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         return;
       }
       try {
-        const me = await api<{ email: string | null; role: string }>("/me");
+        const me = await api<{ email: string | null; role: string; permissions?: string[] }>("/me");
         if (!active) return;
         setEmail(me.email ?? "");
-        setStatus(me.role === "admin" || me.role === "owner" ? "ok" : "forbidden");
+        setRole(me.role);
+        setPermissions(me.permissions ?? []);
+        setStatus(["owner", "admin", "staff"].includes(me.role) ? "ok" : "forbidden");
       } catch (e) {
         if (!active) return;
         if (e instanceof ApiError && e.status === 403) setStatus("forbidden");
@@ -151,12 +158,23 @@ export default function AdminShell({ children }: { children: ReactNode }) {
     );
   }
 
+  const isAdmin = role === "admin" || role === "owner";
+  const navItems = NAV.filter((n) => isAdmin || (n.any ?? []).some((k) => permissions.includes(k)));
+  // An employee whose account has no permissions yet can sign in but sees nothing to do.
+  const nothingGranted = !isAdmin && navItems.length === 0;
+  // Typing an admin-only address into the browser: say so instead of showing a page full of errors.
+  const here = NAV.filter((n) => (n.exact ? pathname === n.href : pathname.startsWith(n.href))).sort(
+    (a, b) => b.href.length - a.href.length
+  )[0];
+  const blocked = !isAdmin && !nothingGranted && !!here && !navItems.includes(here);
+
   return (
+    <AdminAccessProvider role={role} permissions={permissions}>
     <div className="flex min-h-screen flex-col bg-gray-50 text-gray-900 md:flex-row">
       <aside className="border-b border-gray-200 bg-white md:w-56 md:border-b-0 md:border-r">
         <div className="px-4 py-4 text-sm font-bold uppercase tracking-wide">E&amp;I Admin</div>
         <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:flex-col md:pb-0">
-          {NAV.map((n) => {
+          {navItems.map((n) => {
             const active = n.exact ? pathname === n.href : pathname.startsWith(n.href);
             return (
               <Link
@@ -178,12 +196,23 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <main className="min-w-0 flex-1 p-4 md:p-6">
-        <div className="mx-auto max-w-6xl">{children}</div>
+        <div className="mx-auto max-w-6xl">
+          {nothingGranted || blocked ? (
+            <Notice kind="error">
+              {nothingGranted
+                ? "Your account is set up, but no permissions have been given to it yet. Ask an admin to turn some on."
+                : "Your account doesn't have access to this page."}
+            </Notice>
+          ) : (
+            children
+          )}
+        </div>
         <div className="mt-8 text-xs text-gray-500 md:hidden">
           {email} ·{" "}
           <button onClick={signOut} className="underline">Sign out</button>
         </div>
       </main>
     </div>
+    </AdminAccessProvider>
   );
 }

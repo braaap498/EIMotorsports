@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import FitmentPanel from "./FitmentPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
+import { useAccess } from "./AdminAccess";
 
 type Cat = { id: number; parent_id: number | null; name: string; sort_order: number };
 type Photo = {
@@ -85,10 +86,49 @@ function orderCategories(cats: Cat[]): { cat: Cat; depth: number }[] {
   return out;
 }
 
+type Flags = { is_published: boolean; is_active: boolean; is_universal: boolean };
+
+// Turns what is on screen into what the API expects. Used for saving, and once
+// at load time so that saving can send only what the person actually changed.
+function buildPayload(vals: Record<string, string>, flags: Flags): { payload: Record<string, unknown> } | { error: string } {
+  const payload: Record<string, unknown> = {};
+  for (const f of ALL) {
+    const raw = (vals[f.key] ?? "").trim();
+    if (raw === "") {
+      if (!f.notNull) payload[f.key] = null;
+      continue;
+    }
+    if (f.kind === "text") payload[f.key] = raw;
+    else {
+      const n = Number(raw);
+      if (Number.isNaN(n)) return { error: `${f.label} must be a number` };
+      payload[f.key] = n;
+    }
+  }
+  payload.description = (vals.description ?? "").trim() ? vals.description : null;
+  payload.category_id = vals.category_id ? Number(vals.category_id) : null;
+  if ((vals.slug ?? "").trim()) payload.slug = vals.slug.trim();
+  Object.assign(payload, flags);
+  return { payload };
+}
+
 export default function ProductForm({ productId }: { productId?: number }) {
+  const { can } = useAccess();
+  // What this person may change. New products: "create" covers the basic details.
+  const mayDetails = productId ? can("products.edit_details") : can("products.create");
+  const mayPrice = can("products.edit_price");
+  const mayStock = can("inventory.adjust");
+  const mayPublish = can("products.publish");
+  const mayUniversal = can("fitment.add");
+  const maySave = productId
+    ? can("products.edit_details", "products.edit_price", "inventory.adjust", "products.publish", "fitment.add")
+    : can("products.create");
+  const fieldAllowed = (key: string) =>
+    key === "list_price" || key === "cost" ? mayPrice : key === "quantity_on_hand" || key === "reorder_point" ? mayStock : mayDetails;
+  const [baseline, setBaseline] = useState<Record<string, unknown> | null>(null);
   const router = useRouter();
   const [vals, setVals] = useState<Record<string, string>>({});
-  const [flags, setFlags] = useState({ is_published: false, is_active: true, is_universal: false });
+  const [flags, setFlags] = useState<Flags>({ is_published: false, is_active: true, is_universal: false });
   const [cats, setCats] = useState<Cat[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [similar, setSimilar] = useState<SimilarMatch[]>([]);
@@ -142,12 +182,15 @@ export default function ProductForm({ productId }: { productId?: number }) {
           const v = p[k];
           next[k] = v == null ? "" : String(v);
         });
-        setVals(next);
-        setFlags({
+        const loadedFlags = {
           is_published: !!p.is_published,
           is_active: !!p.is_active,
           is_universal: !!p.is_universal,
-        });
+        };
+        setVals(next);
+        setFlags(loadedFlags);
+        const base = buildPayload(next, loadedFlags);
+        setBaseline("payload" in base ? base.payload : null);
         setPhotos(p.photos ?? []);
       })
       .catch((e) => setMsg({ kind: "error", text: errMsg(e) }))
@@ -160,29 +203,22 @@ export default function ProductForm({ productId }: { productId?: number }) {
     if (!(vals.title ?? "").trim() || !(vals.sku ?? "").trim()) {
       return setMsg({ kind: "error", text: "Title and SKU are required" });
     }
-    const payload: Record<string, unknown> = {};
-    for (const f of ALL) {
-      const raw = (vals[f.key] ?? "").trim();
-      if (raw === "") {
-        if (!f.notNull) payload[f.key] = null;
-        continue;
-      }
-      if (f.kind === "text") payload[f.key] = raw;
-      else {
-        const n = Number(raw);
-        if (Number.isNaN(n)) return setMsg({ kind: "error", text: `${f.label} must be a number` });
-        payload[f.key] = n;
-      }
+    const built = buildPayload(vals, flags);
+    if ("error" in built) return setMsg({ kind: "error", text: built.error });
+    let payload = built.payload;
+    if (productId && baseline) {
+      // Send only what changed, so a field the person can't see or edit (like cost) is never sent back.
+      payload = Object.fromEntries(
+        Object.entries(payload).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(baseline[k]))
+      );
+      if (Object.keys(payload).length === 0) return setMsg({ kind: "success", text: "Nothing has changed." });
     }
-    payload.description = (vals.description ?? "").trim() ? vals.description : null;
-    payload.category_id = vals.category_id ? Number(vals.category_id) : null;
-    if ((vals.slug ?? "").trim()) payload.slug = vals.slug.trim();
-    Object.assign(payload, flags);
 
     setBusy(true);
     try {
       if (productId) {
         await api(`/products/${productId}`, { method: "PATCH", body: payload });
+        if (baseline) setBaseline({ ...baseline, ...payload });
         setMsg({ kind: "success", text: "Saved" });
       } else {
         const r = await api<{ id: number }>("/products", { method: "POST", body: payload });
@@ -198,10 +234,13 @@ export default function ProductForm({ productId }: { productId?: number }) {
   if (loading) return <p className="text-sm text-gray-500">Loading…</p>;
 
   const renderFields = (defs: FieldDef[]) =>
-    defs.map((f) => (
+    defs
+      .filter((f) => f.key !== "cost" || mayPrice) // what the shop paid is only shown to people who can change prices
+      .map((f) => (
       <Field key={f.key} label={f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
         <input
           className={inputCls}
+          disabled={!fieldAllowed(f.key)}
           type={f.kind === "text" ? "text" : "number"}
           step={f.kind === "number" ? f.step : f.kind === "int" ? "1" : undefined}
           value={vals[f.key] ?? ""}
@@ -226,7 +265,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
           <div className={grid}>
             {renderFields(BASIC)}
             <Field label="Category">
-              <select className={inputCls} value={vals.category_id ?? ""} onChange={(e) => set("category_id", e.target.value)}>
+              <select className={inputCls} disabled={!mayDetails} value={vals.category_id ?? ""} onChange={(e) => set("category_id", e.target.value)}>
                 <option value="">(none)</option>
                 {orderedCats.map(({ cat, depth }) => (
                   <option key={cat.id} value={cat.id}>{`${"\u00A0\u00A0".repeat(depth)}${cat.name}`}</option>
@@ -235,7 +274,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
             </Field>
             {productId && (
               <Field label="URL slug">
-                <input className={inputCls} value={vals.slug ?? ""} onChange={(e) => set("slug", e.target.value)} />
+                <input className={inputCls} disabled={!mayDetails} value={vals.slug ?? ""} onChange={(e) => set("slug", e.target.value)} />
               </Field>
             )}
           </div>
@@ -263,7 +302,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
             </div>
           )}
           <Field label="Description">
-            <textarea className={`${inputCls} min-h-40`} value={vals.description ?? ""} onChange={(e) => set("description", e.target.value)} />
+            <textarea className={`${inputCls} min-h-40`} disabled={!mayDetails} value={vals.description ?? ""} onChange={(e) => set("description", e.target.value)} />
           </Field>
         </section>
 
@@ -276,15 +315,15 @@ export default function ProductForm({ productId }: { productId?: number }) {
           <h2 className="text-lg font-semibold">Visibility</h2>
           <div className="flex flex-wrap gap-6 text-sm">
             <label className="flex items-center gap-2">
-              <input type="checkbox" checked={flags.is_published} onChange={(e) => setFlags((f) => ({ ...f, is_published: e.target.checked }))} />
+              <input type="checkbox" disabled={!mayPublish} checked={flags.is_published} onChange={(e) => setFlags((f) => ({ ...f, is_published: e.target.checked }))} />
               Published (shown in the store)
             </label>
             <label className="flex items-center gap-2">
-              <input type="checkbox" checked={flags.is_active} onChange={(e) => setFlags((f) => ({ ...f, is_active: e.target.checked }))} />
+              <input type="checkbox" disabled={!mayPublish} checked={flags.is_active} onChange={(e) => setFlags((f) => ({ ...f, is_active: e.target.checked }))} />
               Active
             </label>
             <label className="flex items-center gap-2">
-              <input type="checkbox" checked={flags.is_universal} onChange={(e) => setFlags((f) => ({ ...f, is_universal: e.target.checked }))} />
+              <input type="checkbox" disabled={!mayUniversal} checked={flags.is_universal} onChange={(e) => setFlags((f) => ({ ...f, is_universal: e.target.checked }))} />
               Universal fit (shows for every machine)
             </label>
           </div>
@@ -299,9 +338,13 @@ export default function ProductForm({ productId }: { productId?: number }) {
         </details>
 
         {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
-        <button className={btnCls} disabled={busy}>
-          {busy ? "Saving…" : productId ? "Save changes" : "Create product"}
-        </button>
+        {maySave ? (
+          <button className={btnCls} disabled={busy}>
+            {busy ? "Saving…" : productId ? "Save changes" : "Create product"}
+          </button>
+        ) : (
+          <p className="text-sm text-gray-500">You can look at this product but not change it.</p>
+        )}
         {!productId && <p className="text-xs text-gray-500">Fitment and photos can be added after the product is created.</p>}
       </form>
 

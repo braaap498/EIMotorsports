@@ -22,6 +22,10 @@ Safeguards:
     any role. Only an owner can set an owner's password. The password itself
     is never written to any log.
   - Only accounts that already have a staff role can be edited here.
+  - Employees ("staff") can be given individual permissions (see
+    app/permissions.py). They are stored as app_metadata.permissions, are
+    only kept for the "staff" role (admins and owners can do everything), and
+    are cleared when someone is promoted to admin.
 """
 import json
 import logging
@@ -35,6 +39,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.auth import STAFF_ROLES, AuthUser, require_admin
 from app.config import get_settings
+from app.permissions import IMPLIES, catalog, normalize
 
 log = logging.getLogger("admin_users")
 
@@ -52,11 +57,21 @@ def _clean_name(v: str) -> str:
     return v
 
 
+def _clean_permissions(v: Optional[list[str]]) -> Optional[list[str]]:
+    return None if v is None else normalize(v)
+
+
 class NewUser(BaseModel):
     display_name: str = Field(max_length=40)
     email: str = Field(max_length=200)
     role: Literal["admin", "staff"]
     password: str = Field(min_length=12, max_length=72)
+    permissions: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("permissions")
+    @classmethod
+    def _perms(cls, v: list[str]) -> list[str]:
+        return normalize(v)
 
     @field_validator("display_name")
     @classmethod
@@ -79,11 +94,17 @@ class SetPassword(BaseModel):
 class EditUser(BaseModel):
     display_name: Optional[str] = Field(default=None, max_length=40)
     role: Optional[Literal["admin", "staff"]] = None
+    permissions: Optional[list[str]] = Field(default=None, max_length=100)
 
     @field_validator("display_name")
     @classmethod
     def _name(cls, v: Optional[str]) -> Optional[str]:
         return None if v is None else _clean_name(v)
+
+    @field_validator("permissions")
+    @classmethod
+    def _perms(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        return _clean_permissions(v)
 
 
 # ------------------------------------------------------------ Supabase calls
@@ -136,12 +157,19 @@ def _public(u: dict) -> dict:
         "email": u.get("email"),
         "display_name": um.get("display_name") or "",
         "role": am.get("role") or "",
+        "permissions": am.get("permissions") if isinstance(am.get("permissions"), list) else [],
         "last_sign_in_at": u.get("last_sign_in_at"),
         "created_at": u.get("created_at"),
     }
 
 
 # ------------------------------------------------------------------ routes
+@router.get("/permissions")
+def list_permissions():
+    """The checkbox list for employee permissions, plus which ones imply others."""
+    return {"groups": catalog(), "implies": IMPLIES}
+
+
 @router.get("")
 def list_staff():
     """Everyone with a staff role. Customers are never listed."""
@@ -165,7 +193,7 @@ def add_staff(body: NewUser):
             "email": body.email,
             "password": body.password,
             "email_confirm": True,
-            "app_metadata": {"role": body.role},
+            "app_metadata": {"role": body.role, "permissions": body.permissions if body.role == "staff" else []},
             "user_metadata": {"display_name": body.display_name},
         },
     )
@@ -174,7 +202,7 @@ def add_staff(body: NewUser):
 
 @router.patch("/{user_id}")
 def edit_staff(user_id: str, body: EditUser, me: AuthUser = Depends(require_admin)):
-    if body.display_name is None and body.role is None:
+    if body.display_name is None and body.role is None and body.permissions is None:
         raise HTTPException(400, "Nothing to change.")
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", user_id):
         raise HTTPException(400, "Invalid account id.")
@@ -190,11 +218,24 @@ def edit_staff(user_id: str, body: EditUser, me: AuthUser = Depends(require_admi
         if cur_role == "owner":
             raise HTTPException(400, "An owner's role can't be changed here.")
 
+    new_role = body.role or cur_role
+    if body.permissions is not None and new_role != "staff":
+        raise HTTPException(400, "Admins and owners can already do everything; permissions only apply to employees.")
+
     update: dict = {}
     if body.display_name is not None:
         update["user_metadata"] = {**(current.get("user_metadata") or {}), "display_name": body.display_name}
-    if body.role is not None:
-        update["app_metadata"] = {**(current.get("app_metadata") or {}), "role": body.role}
+    if body.role is not None or body.permissions is not None:
+        meta = {**(current.get("app_metadata") or {})}
+        if body.role is not None:
+            meta["role"] = body.role
+        if new_role != "staff":
+            meta["permissions"] = []  # promoted to admin: nothing left to limit
+        elif body.permissions is not None:
+            meta["permissions"] = body.permissions
+        elif body.role is not None and cur_role != "staff":
+            meta["permissions"] = []  # demoted to employee: start with nothing
+        update["app_metadata"] = meta
     return _public(_call("PUT", f"/users/{user_id}", update))
 
 

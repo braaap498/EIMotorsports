@@ -44,7 +44,12 @@ def health():
 
 @admin_router.get("/me")
 def me(user: AuthUser = Depends(require_staff)):
-    return {"user_id": user.user_id, "email": user.email, "role": user.role}
+    return {
+        "user_id": user.user_id,
+        "email": user.email,
+        "role": user.role,
+        "permissions": sorted(user.permissions),
+    }
 
 
 @admin_router.get("/ping-db")
