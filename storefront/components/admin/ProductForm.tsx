@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
+import DescriptionEditor from "./DescriptionEditor";
 import FitmentPanel from "./FitmentPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
 import { useAccess } from "./AdminAccess";
@@ -301,9 +302,12 @@ export default function ProductForm({ productId }: { productId?: number }) {
               </ul>
             </div>
           )}
-          <Field label="Description">
-            <textarea className={`${inputCls} min-h-40`} disabled={!mayDetails} value={vals.description ?? ""} onChange={(e) => set("description", e.target.value)} />
-          </Field>
+          <DescriptionEditor
+            label="Description"
+            disabled={!mayDetails}
+            value={vals.description ?? ""}
+            onChange={(html) => set("description", html)}
+          />
         </section>
 
         <section className={card}>
