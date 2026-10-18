@@ -88,6 +88,8 @@ export default function PhotosPanel({
   const [selected, setSelected] = useState<number[]>([]); // photos ticked for bulk delete
   const [pendingDelete, setPendingDelete] = useState<{ list: Photo[]; items: PreviewItem[] } | null>(null); // waiting for the confirmation dialog
   const [showPicker, setShowPicker] = useState(false);
+  // A change of main photo or order waits here until it is confirmed in the dialog below.
+  const [pendingChange, setPendingChange] = useState<{ kind: "main" | "move"; photo: Photo; direction?: -1 | 1 } | null>(null);
 
   useEffect(() => () => { if (tipTimer.current) clearTimeout(tipTimer.current); }, []);
 
@@ -161,10 +163,22 @@ export default function PhotosPanel({
     }
   }
 
+  // Nothing below changes the main photo or the order until the person confirms (see the dialog).
   function move(photo: Photo, direction: -1 | 1) {
-    const ids = others.map((p) => p.id);
-    const i = ids.indexOf(photo.id);
+    const i = others.findIndex((p) => p.id === photo.id);
     const j = i + direction;
+    if (i < 0 || j < 0 || j >= others.length) return;
+    setPendingChange({ kind: "move", photo, direction });
+  }
+
+  function applyChange(change: { kind: "main" | "move"; photo: Photo; direction?: -1 | 1 }) {
+    if (change.kind === "main") {
+      void call("Saving…", `${base}/${change.photo.id}/main`, { method: "POST", body: {} });
+      return;
+    }
+    const ids = others.map((p) => p.id);
+    const i = ids.indexOf(change.photo.id);
+    const j = i + (change.direction ?? 0);
     if (i < 0 || j < 0 || j >= ids.length) return;
     [ids[i], ids[j]] = [ids[j], ids[i]];
     void call("Saving order…", `${base}/order`, { method: "POST", body: { photo_ids: ids } });
@@ -258,7 +272,7 @@ export default function PhotosPanel({
         {mayEdit && (
           <div className="flex flex-wrap gap-1">
             {!isMain && (
-              <button type="button" className={small} disabled={!!busy} onClick={() => void call("Saving…", `${base}/${photo.id}/main`, { method: "POST", body: {} })}>
+              <button type="button" className={small} disabled={!!busy} onClick={() => setPendingChange({ kind: "main", photo })}>
                 Make main
               </button>
             )}
@@ -366,6 +380,57 @@ export default function PhotosPanel({
           {ordered.map((p, i) => renderTile(p, i))}
         </ul>
       )}
+      {pendingChange && (() => {
+        const { kind, photo, direction } = pendingChange;
+        const src = photo.thumb ?? photo.source_url;
+        const from = others.findIndex((p) => p.id === photo.id) + 2; // the main photo is position 1
+        const to = from + (direction ?? 0);
+        const title = kind === "main" ? "Make this the main photo?" : direction === -1 ? "Move this photo earlier?" : "Move this photo later?";
+        return (
+          <Modal title={title} onClose={() => setPendingChange(null)}>
+            <div className="space-y-4">
+              <div className="flex gap-3">
+                {src ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={src} alt="The photo being changed" className="h-24 w-24 shrink-0 rounded border border-gray-200 object-cover" />
+                ) : (
+                  <div className="flex h-24 w-24 shrink-0 items-center justify-center rounded border border-gray-200 bg-gray-100 text-xs text-gray-500">No picture</div>
+                )}
+                <div className="space-y-2 text-sm text-gray-800">
+                  {kind === "main" ? (
+                    <>
+                      <p>This photo becomes the one shoppers see first, on the product page and in search results.</p>
+                      <p className="text-gray-600">The current main photo moves down into the list.</p>
+                    </>
+                  ) : (
+                    <p>
+                      This photo moves from position {from} to position {to}.
+                    </p>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <button type="button" className={btn2Cls} autoFocus onClick={() => setPendingChange(null)}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="rounded bg-black px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-40"
+                  disabled={!!busy}
+                  onClick={() => {
+                    const change = pendingChange;
+                    setPendingChange(null);
+                    applyChange(change);
+                  }}
+                >
+                  {kind === "main" ? "Make main" : direction === -1 ? "Move earlier" : "Move later"}
+                </button>
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
+
       {showPicker && (
         <PhotoPicker
           productId={productId}
