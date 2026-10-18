@@ -10,12 +10,15 @@ type Staff = {
   email: string | null;
   display_name: string;
   role: string;
+  permissions: string[];
   last_sign_in_at: string | null;
   created_at: string | null;
 };
+type PermGroup = { key: string; label: string; perms: { key: string; label: string }[] };
+type PermCatalog = { groups: PermGroup[]; implies: Record<string, string[]> };
 type Created = { email: string; display_name: string; password: string };
 
-const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", staff: "Staff" };
+const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", staff: "Employee" };
 
 // No look-alike characters (0/O, 1/l/I) so a password read out loud is not misheard.
 const PW_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
@@ -25,7 +28,81 @@ function generatePassword(length = 16): string {
   return Array.from(bytes, (b) => PW_CHARS[b % PW_CHARS.length]).join("");
 }
 
-function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void }) {
+// Ticking a permission also ticks the ones it needs (you can't edit what you can't open);
+// unticking one also unticks anything that needs it.
+function toggled(current: string[], key: string, on: boolean, implies: Record<string, string[]>): string[] {
+  const set = new Set(current);
+  if (on) {
+    set.add(key);
+    (implies[key] ?? []).forEach((k) => set.add(k));
+  } else {
+    set.delete(key);
+    Object.entries(implies).forEach(([k, needs]) => {
+      if (needs.includes(key)) set.delete(k);
+    });
+  }
+  return Array.from(set);
+}
+
+function PermissionGrid({
+  catalog,
+  value,
+  onChange,
+}: {
+  catalog: PermCatalog | null;
+  value: string[];
+  onChange: (v: string[]) => void;
+}) {
+  if (!catalog) return <p className="text-xs text-gray-500">Loading permissions…</p>;
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      {catalog.groups.map((g) => {
+        const keys = g.perms.map((p) => p.key);
+        const allOn = keys.every((k) => value.includes(k));
+        return (
+          <fieldset key={g.key} className="space-y-1 rounded border border-gray-200 bg-white p-3">
+            <legend className="px-1 text-sm font-semibold">{g.label}</legend>
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input
+                type="checkbox"
+                checked={allOn}
+                onChange={(e) => {
+                  let next = value;
+                  keys.forEach((k) => (next = toggled(next, k, e.target.checked, catalog.implies)));
+                  onChange(next);
+                }}
+              />
+              Allow all
+            </label>
+            {g.perms.map((p) => (
+              <label key={p.key} className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={value.includes(p.key)}
+                  onChange={(e) => onChange(toggled(value, p.key, e.target.checked, catalog.implies))}
+                />
+                <span>{p.label}</span>
+              </label>
+            ))}
+          </fieldset>
+        );
+      })}
+    </div>
+  );
+}
+
+function Row({
+  s,
+  meId,
+  catalog,
+  onSaved,
+}: {
+  s: Staff;
+  meId: string;
+  catalog: PermCatalog | null;
+  onSaved: () => void;
+}) {
   const [name, setName] = useState(s.display_name);
   const [role, setRole] = useState(s.role);
   const [busy, setBusy] = useState(false);
@@ -37,6 +114,11 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
   const [pwBusy, setPwBusy] = useState(false);
   const [pwError, setPwError] = useState("");
   const [pwDone, setPwDone] = useState("");
+  const [permOpen, setPermOpen] = useState(false);
+  const [perms, setPerms] = useState<string[]>(s.permissions ?? []);
+  const [permBusy, setPermBusy] = useState(false);
+  const [permError, setPermError] = useState("");
+  const [permDone, setPermDone] = useState(false);
 
   const isMe = s.id === meId;
   const roleLocked = isMe || s.role === "owner";
@@ -55,6 +137,21 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
       setError(errMsg(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function savePerms() {
+    setPermBusy(true);
+    setPermError("");
+    setPermDone(false);
+    try {
+      await api(`/users/${s.id}`, { method: "PATCH", body: { permissions: perms } });
+      setPermDone(true);
+      onSaved();
+    } catch (e) {
+      setPermError(errMsg(e));
+    } finally {
+      setPermBusy(false);
     }
   }
 
@@ -99,7 +196,7 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
         <select className={inputCls} value={role} disabled={roleLocked} onChange={(e) => setRole(e.target.value)}>
           {s.role === "owner" && <option value="owner">Owner</option>}
           <option value="admin">Admin</option>
-          <option value="staff">Staff</option>
+          <option value="staff">Employee</option>
         </select>
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
@@ -109,6 +206,21 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
         <button className={btnCls} disabled={busy || !changed || !name.trim()} onClick={save}>
           {busy ? "Saving…" : "Save"}
         </button>{" "}
+        {s.role === "staff" && (
+          <>
+            <button
+              className={btn2Cls}
+              onClick={() => {
+                setPermOpen((o) => !o);
+                setPerms(s.permissions ?? []);
+                setPermDone(false);
+                setPermError("");
+              }}
+            >
+              {permOpen ? "Close" : `Permissions (${(s.permissions ?? []).length})`}
+            </button>{" "}
+          </>
+        )}
         <button
           className={btn2Cls}
           onClick={() => {
@@ -123,6 +235,23 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
         </button>
       </td>
     </tr>
+    {permOpen && (
+      <tr className="bg-gray-50">
+        <td colSpan={5} className="px-3 py-3">
+          <div className="space-y-3">
+            <p className="text-sm font-medium">What {s.display_name || s.email} is allowed to do</p>
+            <PermissionGrid catalog={catalog} value={perms} onChange={setPerms} />
+            {permError && <Notice kind="error">{permError}</Notice>}
+            {permDone && (
+              <Notice kind="success">Saved. It takes effect on their next sign-in (or within about an hour).</Notice>
+            )}
+            <button className={btnCls} disabled={permBusy || !catalog} onClick={savePerms}>
+              {permBusy ? "Saving…" : "Save permissions"}
+            </button>
+          </div>
+        </td>
+      </tr>
+    )}
     {pwOpen && (
       <tr className="bg-gray-50">
         <td colSpan={5} className="px-3 py-3">
@@ -185,6 +314,9 @@ export default function AdminUsersPage() {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("admin");
   const [password, setPassword] = useState("");
+  const [newPerms, setNewPerms] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<PermCatalog | null>(null);
+  const [tab, setTab] = useState<"admins" | "employees">("admins");
   const [showPw, setShowPw] = useState(false);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState("");
@@ -204,8 +336,15 @@ export default function AdminUsersPage() {
     api<{ user_id: string }>("/me")
       .then((m) => setMeId(m.user_id))
       .catch(() => {});
+    api<PermCatalog>("/users/permissions")
+      .then(setCatalog)
+      .catch(() => {});
     load();
   }, [load]);
+
+  const adminList = staff.filter((s) => s.role === "owner" || s.role === "admin");
+  const employeeList = staff.filter((s) => s.role === "staff");
+  const shown = tab === "admins" ? adminList : employeeList;
 
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
   const canAdd = displayName.trim().length > 0 && emailOk && password.length >= 12 && !adding;
@@ -219,7 +358,13 @@ export default function AdminUsersPage() {
     try {
       await api("/users", {
         method: "POST",
-        body: { display_name: displayName.trim(), email: email.trim(), role, password },
+        body: {
+          display_name: displayName.trim(),
+          email: email.trim(),
+          role,
+          password,
+          permissions: role === "staff" ? newPerms : [],
+        },
       });
       setCreated({ email: email.trim().toLowerCase(), display_name: displayName.trim(), password });
       setDisplayName("");
@@ -227,6 +372,7 @@ export default function AdminUsersPage() {
       setPassword("");
       setShowPw(false);
       setRole("admin");
+      setNewPerms([]);
       load();
     } catch (err) {
       setAddError(errMsg(err));
@@ -240,7 +386,7 @@ export default function AdminUsersPage() {
       <h1 className="text-2xl font-semibold">Admin users</h1>
 
       <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
-        <h2 className="text-lg font-semibold">Add an admin</h2>
+        <h2 className="text-lg font-semibold">Add a team member</h2>
         <form onSubmit={add} className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Display name (required) — shown as “Hi, …” on the site">
@@ -252,7 +398,7 @@ export default function AdminUsersPage() {
             <Field label="Role">
               <select className={inputCls} value={role} onChange={(e) => setRole(e.target.value)}>
                 <option value="admin">Admin — can use every admin screen</option>
-                <option value="staff">Staff — cannot open the admin screens yet</option>
+                <option value="staff">Employee — only what you tick below</option>
               </select>
             </Field>
             <Field label="Set Password (at least 12 characters)">
@@ -271,10 +417,19 @@ export default function AdminUsersPage() {
               </div>
             </Field>
           </div>
+          {role === "staff" && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">What this employee is allowed to do</p>
+              <PermissionGrid catalog={catalog} value={newPerms} onChange={setNewPerms} />
+              <p className="text-xs text-gray-500">
+                Models, years, types, makes, parts clean-up and this Team page are for admins only.
+              </p>
+            </div>
+          )}
           {addError && <Notice kind="error">{addError}</Notice>}
           <div className="flex flex-wrap items-center gap-3">
             <button className={btnCls} disabled={!canAdd}>
-              {adding ? "Adding…" : "Add admin"}
+              {adding ? "Adding…" : role === "staff" ? "Add employee" : "Add admin"}
             </button>
             {!displayName.trim() && <span className="text-xs text-gray-500">A display name is required.</span>}
           </div>
@@ -282,9 +437,19 @@ export default function AdminUsersPage() {
 
         {created && (
           <div className="space-y-2 rounded border border-green-300 bg-green-50 p-3 text-sm text-green-900">
-            <p className="font-semibold">
-              {created.display_name} was added. Give them these sign-in details privately:
-            </p>
+            <div className="flex items-start justify-between gap-3">
+              <p className="font-semibold">
+                {created.display_name} was added. Give them these sign-in details privately:
+              </p>
+              <button
+                type="button"
+                className="-mt-1 rounded px-2 text-xl leading-none text-green-900 hover:bg-green-100"
+                onClick={() => setCreated(null)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
             <p>
               Email: <code className="rounded bg-white px-1">{created.email}</code>
               <br />
@@ -294,8 +459,8 @@ export default function AdminUsersPage() {
               <button type="button" className={btn2Cls} onClick={() => navigator.clipboard?.writeText(`${created.email}\n${created.password}`)}>
                 Copy both
               </button>
-              <button type="button" className="text-xs underline" onClick={() => setCreated(null)}>
-                Hide
+              <button type="button" className={btn2Cls} onClick={() => setCreated(null)}>
+                Close
               </button>
             </div>
             <p className="text-xs">
@@ -307,7 +472,30 @@ export default function AdminUsersPage() {
       </section>
 
       <section className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
-        <h2 className="text-lg font-semibold">Current admins</h2>
+        <h2 className="text-lg font-semibold">Team</h2>
+        <div className="flex gap-1 border-b border-gray-200" role="tablist">
+          {(
+            [
+              ["admins", "Admins", adminList.length],
+              ["employees", "Employees", employeeList.length],
+            ] as const
+          ).map(([key, label, count]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={tab === key}
+              onClick={() => setTab(key)}
+              className={`-mb-px rounded-t border px-4 py-2 text-sm font-medium ${
+                tab === key
+                  ? "border-gray-200 border-b-white bg-white text-gray-900"
+                  : "border-transparent text-gray-500 hover:text-gray-800"
+              }`}
+            >
+              {label} ({count})
+            </button>
+          ))}
+        </div>
         {error && <Notice kind="error">{error}</Notice>}
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
@@ -321,13 +509,19 @@ export default function AdminUsersPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {staff.map((s) => (
-                <Row key={`${s.id}:${s.display_name}:${s.role}`} s={s} meId={meId} onSaved={load} />
+              {shown.map((s) => (
+                <Row
+                  key={`${s.id}:${s.display_name}:${s.role}:${(s.permissions ?? []).join(",")}`}
+                  s={s}
+                  meId={meId}
+                  catalog={catalog}
+                  onSaved={load}
+                />
               ))}
-              {loaded && staff.length === 0 && !error && (
+              {loaded && shown.length === 0 && !error && (
                 <tr>
                   <td colSpan={5} className="px-3 py-6 text-center text-gray-500">
-                    No staff accounts found.
+                    {tab === "admins" ? "No admin accounts found." : "No employees yet. Add one above."}
                   </td>
                 </tr>
               )}
@@ -335,7 +529,7 @@ export default function AdminUsersPage() {
           </table>
         </div>
         <p className="text-xs text-gray-500">
-          A changed display name or role appears on the person&apos;s next sign-in (or within about an hour). You can&apos;t
+          A changed display name, role or permission appears on the person&apos;s next sign-in (or within about an hour). You can&apos;t
           change your own role, and the Owner role can only be given directly in the database.
         </p>
       </section>
