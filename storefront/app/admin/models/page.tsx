@@ -124,6 +124,7 @@ function EditModal({
   const [makeId, setMakeId] = useState(String(model.make_id));
   const [typeId, setTypeId] = useState(model.vehicle_type_id ? String(model.vehicle_type_id) : "");
   const [years, setYears] = useState<YearRow[]>([]);
+  const [yearsLoaded, setYearsLoaded] = useState(false);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [mergeQ, setMergeQ] = useState("");
@@ -133,7 +134,10 @@ function EditModal({
 
   const loadYears = useCallback(() => {
     api<YearRow[]>(`/models/${model.id}/years`)
-      .then(setYears)
+      .then((y) => {
+        setYears(y);
+        setYearsLoaded(true);
+      })
       .catch((e) => setMsg({ kind: "error", text: errMsg(e) }));
   }, [model.id]);
   useEffect(loadYears, [loadYears]);
@@ -230,7 +234,9 @@ function EditModal({
 
         <section className="space-y-3">
           <h3 className="font-medium">Years</h3>
-          <div className="flex flex-wrap gap-2">
+          {/* Fixed height, so the window does not grow and shrink while stepping between models. */}
+          <div className="flex h-40 flex-wrap content-start gap-2 overflow-y-auto rounded border border-gray-100 bg-white p-2">
+            {!yearsLoaded && <span className="text-sm text-gray-400">Loading years…</span>}
             {uniqueYears.map((y) => (
               <span key={y.year} className="inline-flex items-center gap-1 rounded border border-gray-300 bg-gray-50 px-2 py-1 text-sm">
                 {y.year}
@@ -240,7 +246,7 @@ function EditModal({
                 </button>
               </span>
             ))}
-            {uniqueYears.length === 0 && <span className="text-sm text-gray-500">No years yet.</span>}
+            {yearsLoaded && uniqueYears.length === 0 && <span className="text-sm text-gray-500">No years yet.</span>}
           </div>
           <div className="flex flex-wrap items-end gap-2">
             <Field label="Add years from"><input className={`${inputCls} w-28`} type="number" value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
