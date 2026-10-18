@@ -188,16 +188,8 @@ export default function PhotosPanel({
       return;
     }
     setBusy(null);
-    const losesFile = items.some((i) => i.last_use);
-    if (!losesFile) {
-      // No stored file is about to lose its last use: a simple confirm is enough.
-      const mainGoes = list.some((p) => p.id === mainPhoto?.id) && list.length < photos.length;
-      const what = list.length === 1 ? "this photo" : `these ${list.length} photos`;
-      const note = mainGoes ? "\n\nThe next photo will become the main photo." : "";
-      if (!window.confirm(`Remove ${what} from the product?${note}`)) return;
-      void deleteMany(list);
-      return;
-    }
+    // Every delete goes through the in-page dialog below. It is the only way to reach
+    // deleteMany, and unlike the browser's confirm box it cannot be switched off.
     setPendingDelete({ list, items });
   }
 
