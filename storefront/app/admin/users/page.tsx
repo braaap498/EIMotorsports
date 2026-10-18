@@ -4,7 +4,6 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Field, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 import PasswordInput from "../../../components/admin/PasswordInput";
-import { getSupabase } from "../../../lib/supabase";
 
 type Staff = {
   id: string;
@@ -33,6 +32,7 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
   const [error, setError] = useState("");
   const [pwOpen, setPwOpen] = useState(false);
   const [pw, setPw] = useState("");
+  const [pwAgain, setPwAgain] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [pwBusy, setPwBusy] = useState(false);
   const [pwError, setPwError] = useState("");
@@ -59,13 +59,16 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
   }
 
   async function setPassword() {
-    setPwBusy(true);
     setPwError("");
     setPwDone("");
+    if (pw.length < 12) return setPwError("Use at least 12 characters.");
+    if (pw !== pwAgain) return setPwError("The two passwords don't match.");
+    setPwBusy(true);
     try {
       await api(`/users/${s.id}/password`, { method: "POST", body: { password: pw } });
       setPwDone(pw);
       setPw("");
+      setPwAgain("");
       setShowPw(false);
     } catch (e) {
       setPwError(errMsg(e));
@@ -110,6 +113,8 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
           className={btn2Cls}
           onClick={() => {
             setPwOpen((o) => !o);
+            setPw("");
+            setPwAgain("");
             setPwDone("");
             setPwError("");
           }}
@@ -126,21 +131,29 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
               Set a new password for {s.display_name || s.email}
               {isMe ? " (your own account)" : ""}
             </p>
-            <div className="flex gap-2">
-              <PasswordInput value={pw} onChange={setPw} autoComplete="new-password" show={showPw} onToggle={() => setShowPw((v) => !v)} placeholder="At least 12 characters" />
-              <button
-                type="button"
-                className={btn2Cls}
-                onClick={() => {
-                  setPw(generatePassword());
-                  setShowPw(true);
-                }}
-              >
-                Generate
-              </button>
-            </div>
+            <Field label="New password (at least 12 characters)">
+              <div className="flex gap-2">
+                <PasswordInput value={pw} onChange={setPw} autoComplete="new-password" show={showPw} onToggle={() => setShowPw((v) => !v)} />
+                <button
+                  type="button"
+                  className={btn2Cls}
+                  onClick={() => {
+                    const g = generatePassword();
+                    setPw(g);
+                    setPwAgain(g);
+                    setShowPw(true);
+                  }}
+                >
+                  Generate
+                </button>
+              </div>
+            </Field>
+            <Field label="Type it again">
+              <PasswordInput value={pwAgain} onChange={setPwAgain} autoComplete="new-password" show={showPw} onToggle={() => setShowPw((v) => !v)} />
+            </Field>
             {pwError && <Notice kind="error">{pwError}</Notice>}
-            {pwDone && (
+            {pwDone && isMe && <Notice kind="success">Your password was changed. Use it the next time you sign in.</Notice>}
+            {pwDone && !isMe && (
               <div className="space-y-1 rounded border border-green-300 bg-green-50 p-2 text-sm text-green-900">
                 <p>
                   Password changed. New password: <code className="rounded bg-white px-1">{pwDone}</code>
@@ -151,7 +164,7 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
                 <p className="text-xs">Give it to them privately. It is only shown now.</p>
               </div>
             )}
-            <button className={btnCls} disabled={pwBusy || pw.length < 12} onClick={setPassword}>
+            <button className={btnCls} disabled={pwBusy || !pw || !pwAgain} onClick={setPassword}>
               {pwBusy ? "Setting…" : "Set password"}
             </button>
           </div>
@@ -159,61 +172,6 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
       </tr>
     )}
     </>
-  );
-}
-
-function MyPassword() {
-  const [open, setOpen] = useState(false);
-  const [pw, setPw] = useState("");
-  const [again, setAgain] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [done, setDone] = useState(false);
-
-  async function save(e: React.FormEvent) {
-    e.preventDefault();
-    setError("");
-    setDone(false);
-    if (pw.length < 12) return setError("Use at least 12 characters.");
-    if (pw !== again) return setError("The two passwords don't match.");
-    setBusy(true);
-    try {
-      const { error: err } = await getSupabase().auth.updateUser({ password: pw });
-      if (err) throw new Error(err.message);
-      setDone(true);
-      setPw("");
-      setAgain("");
-    } catch (e2) {
-      setError(errMsg(e2));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <section className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Change my password</h2>
-        <button className={btn2Cls} onClick={() => setOpen((o) => !o)}>
-          {open ? "Close" : "Change"}
-        </button>
-      </div>
-      {open && (
-        <form onSubmit={save} className="max-w-md space-y-3">
-          <Field label="New password (at least 12 characters)">
-            <PasswordInput value={pw} onChange={setPw} autoComplete="new-password" />
-          </Field>
-          <Field label="Type it again">
-            <PasswordInput value={again} onChange={setAgain} autoComplete="new-password" />
-          </Field>
-          {error && <Notice kind="error">{error}</Notice>}
-          {done && <Notice kind="success">Your password was changed. Use it the next time you sign in.</Notice>}
-          <button className={btnCls} disabled={busy || !pw || !again}>
-            {busy ? "Saving…" : "Change my password"}
-          </button>
-        </form>
-      )}
-    </section>
   );
 }
 
@@ -280,8 +238,6 @@ export default function AdminUsersPage() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold">Admin users</h1>
-
-      <MyPassword />
 
       <section className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
         <h2 className="text-lg font-semibold">Add an admin</h2>
