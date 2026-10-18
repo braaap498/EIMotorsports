@@ -177,7 +177,7 @@ export default function PhotosPanel({
     setMsg(null);
     let items: PreviewItem[];
     try {
-      const r = await api<{ items: PreviewItem[] }>(`${base}/photos/delete-preview`, {
+      const r = await api<{ items: PreviewItem[] }>(`${base}/delete-preview`, {
         method: "POST",
         body: { photo_ids: list.map((p) => p.id) },
       });
