@@ -114,7 +114,7 @@ function Row({ s, meId, onSaved }: { s: Staff; meId: string; onSaved: () => void
             setPwError("");
           }}
         >
-          {pwOpen ? "Close" : "Set password"}
+          {pwOpen ? "Close" : "Change Password"}
         </button>
       </td>
     </tr>
@@ -299,7 +299,7 @@ export default function AdminUsersPage() {
                 <option value="staff">Staff — cannot open the admin screens yet</option>
               </select>
             </Field>
-            <Field label="Temporary password (at least 12 characters)">
+            <Field label="Set Password (at least 12 characters)">
               <div className="flex gap-2">
                 <PasswordInput value={password} onChange={setPassword} autoComplete="new-password" show={showPw} onToggle={() => setShowPw((v) => !v)} />
                 <button
@@ -332,7 +332,7 @@ export default function AdminUsersPage() {
             <p>
               Email: <code className="rounded bg-white px-1">{created.email}</code>
               <br />
-              Temporary password: <code className="rounded bg-white px-1">{created.password}</code>
+              Password: <code className="rounded bg-white px-1">{created.password}</code>
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <button type="button" className={btn2Cls} onClick={() => navigator.clipboard?.writeText(`${created.email}\n${created.password}`)}>
