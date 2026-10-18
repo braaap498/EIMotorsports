@@ -189,16 +189,12 @@ export default function PhotosPanel({
     }
     setBusy(null);
     const losesFile = items.some((i) => i.last_use);
-    if (list.length === 1 && !losesFile) {
-      // One photo whose file stays in storage (or was only an eBay link): the simple question is enough.
-      const photo = list[0];
-      const info = items[0];
-      const notes = [
-        info?.also_on.length ? `The picture is also used on ${info.also_on.join(", ")}, so it stays in storage.` : "",
-        photo.id === mainPhoto?.id && photos.length > 1 ? "The next photo will become the main photo." : "",
-        photos.length <= 1 ? "The product will have no photos left." : "",
-      ].filter(Boolean);
-      if (!window.confirm(`Remove this photo from the product?${notes.length ? `\n\n${notes.join(" ")}` : ""}`)) return;
+    if (!losesFile) {
+      // No stored file is about to lose its last use: a simple confirm is enough.
+      const mainGoes = list.some((p) => p.id === mainPhoto?.id) && list.length < photos.length;
+      const what = list.length === 1 ? "this photo" : `these ${list.length} photos`;
+      const note = mainGoes ? "\n\nThe next photo will become the main photo." : "";
+      if (!window.confirm(`Remove ${what} from the product?${note}`)) return;
       void deleteMany(list);
       return;
     }
@@ -398,9 +394,6 @@ export default function PhotosPanel({
         const { list, items } = pendingDelete;
         const all = list.length >= photos.length;
         const goneKeys: string[] = Array.from(new Set<string>(items.filter((i) => i.last_use && i.image_key).map((i) => i.image_key as string)));
-        const keptItems = items.filter((i) => i.image_key && !i.last_use);
-        const keptKeys: string[] = Array.from(new Set<string>(keptItems.map((i) => i.image_key as string)));
-        const linkOnly = items.filter((i) => !i.image_key).length;
         const mainGoes = list.some((p) => p.id === mainPhoto?.id);
         const danger = goneKeys.length > 0;
         const title = danger
@@ -410,7 +403,6 @@ export default function PhotosPanel({
           : list.length === 1
           ? "Remove this photo?"
           : `Remove ${list.length} photos?`;
-        const alsoOn = (key: string) => items.find((i) => i.image_key === key)?.also_on ?? [];
         return (
           <Modal title={title} onClose={() => setPendingDelete(null)}>
             <div className="space-y-4">
@@ -450,26 +442,6 @@ export default function PhotosPanel({
                   </div>
                 )}
 
-                {keptKeys.length > 0 && (
-                  <div className="space-y-1">
-                    <p className="text-gray-700">
-                      {keptKeys.length === 1 ? "1 picture stays" : `${keptKeys.length} pictures stay`} in storage because another listing still uses {keptKeys.length === 1 ? "it" : "them"}:
-                    </p>
-                    <ul className="max-h-24 overflow-y-auto rounded border border-gray-200 bg-gray-50 p-2 font-mono text-xs break-all text-gray-600">
-                      {keptKeys.map((k) => (
-                        <li key={k}>
-                          {k.split("/").pop()} <span className="font-sans">· also on {alsoOn(k).join(", ")}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {linkOnly > 0 && (
-                  <p className="text-gray-600">
-                    {linkOnly === 1 ? "1 photo is" : `${linkOnly} photos are`} only an eBay link, so nothing is deleted from storage for {linkOnly === 1 ? "it" : "them"}.
-                  </p>
-                )}
               </div>
 
               <div className="flex flex-wrap justify-end gap-2">
