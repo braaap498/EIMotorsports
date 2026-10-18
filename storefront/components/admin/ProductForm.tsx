@@ -16,6 +16,16 @@ type Photo = {
   is_primary: boolean;
 };
 
+type SimilarMatch = {
+  id: number;
+  sku: string;
+  title: string;
+  quantity_on_hand: number;
+  listing_count: number;
+  prior_merges: number | string;
+  reason: string;
+};
+
 type FieldDef = {
   key: string;
   label: string;
@@ -81,6 +91,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [flags, setFlags] = useState({ is_published: false, is_active: true, is_universal: false });
   const [cats, setCats] = useState<Cat[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
+  const [similar, setSimilar] = useState<SimilarMatch[]>([]);
   const [loading, setLoading] = useState(!!productId);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -91,6 +102,36 @@ export default function ProductForm({ productId }: { productId?: number }) {
   useEffect(() => {
     api<Cat[]>("/categories").then(setCats).catch(() => {});
   }, []);
+
+  // New products only: warn (never block) if a product like this already exists.
+  useEffect(() => {
+    if (productId) return;
+    const title = (vals.title ?? "").trim();
+    const sku = (vals.sku ?? "").trim();
+    const pn = (vals.manufacturer_part_number ?? "").trim();
+    if (title.length < 8 && !sku && !pn) {
+      setSimilar([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      const p = new URLSearchParams();
+      if (title) p.set("title", title);
+      if (sku) p.set("sku", sku);
+      if (pn) p.set("part_number", pn);
+      api<{ matches: SimilarMatch[] }>(`/cleanup/similar?${p}`)
+        .then((r) => {
+          if (!cancelled) setSimilar(r.matches);
+        })
+        .catch(() => {
+          if (!cancelled) setSimilar([]);
+        });
+    }, 700);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [productId, vals.title, vals.sku, vals.manufacturer_part_number]);
 
   useEffect(() => {
     if (!productId) return;
@@ -198,6 +239,29 @@ export default function ProductForm({ productId }: { productId?: number }) {
               </Field>
             )}
           </div>
+          {!productId && similar.length > 0 && (
+            <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+              <p className="font-semibold">A product like this may already exist</p>
+              <p className="mb-2 text-xs">
+                If it is the same part, open the existing one instead of creating a new one. You can also create this one
+                and merge them later in Parts clean-up.
+              </p>
+              <ul className="space-y-1">
+                {similar.map((m) => (
+                  <li key={m.id} className="flex flex-wrap items-center gap-x-2">
+                    <Link href={`/admin/products/${m.id}`} target="_blank" className="font-medium underline">
+                      {m.title}
+                    </Link>
+                    <span className="text-xs text-amber-800">
+                      SKU {m.sku} · {m.listing_count} eBay · qty {m.quantity_on_hand}
+                      {Number(m.prior_merges) > 0 ? " · MASTER" : ""}
+                    </span>
+                    <span className="text-xs italic">({m.reason})</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <Field label="Description">
             <textarea className={`${inputCls} min-h-40`} value={vals.description ?? ""} onChange={(e) => set("description", e.target.value)} />
           </Field>

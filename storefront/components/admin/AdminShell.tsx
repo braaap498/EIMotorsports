@@ -14,6 +14,7 @@ const NAV = [
   { href: "/admin/products", label: "Products" },
   { href: "/admin/models", label: "Models & years" },
   { href: "/admin/fitment", label: "Types & makes" },
+  { href: "/admin/cleanup", label: "Parts clean-up" },
 ];
 
 function LoginForm() {

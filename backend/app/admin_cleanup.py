@@ -22,6 +22,7 @@ What a merge does (and does not do):
 """
 import hashlib
 import json
+import math
 import re
 from typing import Optional
 
@@ -548,6 +549,101 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
     except Exception as exc:  # any surprise = full rollback
         db.rollback()
         raise HTTPException(500, f"Merge failed and was rolled back; nothing changed. ({type(exc).__name__})")
+
+
+# --------------------------------------------------------------------------
+# 5. "does a product like this already exist?"  (used by the Add product form)
+#    Read-only. It only WARNS; it never blocks creating a product.
+# --------------------------------------------------------------------------
+_STOPWORDS = {"the", "and", "for", "with", "fits", "fit", "new", "from", "your", "you"}
+
+
+def _title_tokens(title: str) -> list[str]:
+    """The distinctive words of a title: no filler words, no model years."""
+    out: list[str] = []
+    for tok in re.findall(r"[a-z0-9][a-z0-9.\-]*", title.lower()):
+        tok = tok.rstrip(".-")
+        if len(tok) < 3 or tok in _STOPWORDS or re.fullmatch(r"(19|20)\d\d(-(19|20)?\d\d)?", tok):
+            continue
+        if tok not in out:
+            out.append(tok)
+    return sorted(out, key=len, reverse=True)[:8]
+
+
+@router.get("/similar")
+def similar(
+    title: str = Query("", max_length=300),
+    sku: Optional[str] = Query(None, max_length=100),
+    part_number: Optional[str] = Query(None, max_length=100),
+    exclude_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    sku = (sku or "").strip() or None
+    pn = (part_number or "").strip() or None
+    tokens = _title_tokens(title)
+    use_title = len(tokens) >= 2
+    if not use_title and not sku and not pn:
+        return {"matches": []}
+
+    words = tokens if use_title else []
+    params: dict = {f"t{i}": f"%{t}%" for i, t in enumerate(words)}
+    params.update({"sku": sku, "pn": pn, "x": exclude_id})
+    score = " + ".join(
+        f"(case when p.title ilike cast(:t{i} as text) then 1 else 0 end)" for i in range(len(words))
+    ) or "0"
+    need = max(2, math.ceil(len(tokens) * 0.7)) if use_title else 1000
+    params["need"] = need
+
+    rows = db.execute(
+        text(
+            f"""
+            select * from (
+              select p.id, p.sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+                     (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
+                     (select coalesce(sum(l.merged_count), 0) from part_merge_log l
+                       where l.survivor_product_id = p.id) as prior_merges,
+                     ({score}) as score,
+                     (cast(:sku as text) is not null and lower(p.sku) = lower(cast(:sku as text))) as same_sku,
+                     (cast(:pn as text) is not null and (
+                        lower(p.manufacturer_part_number) = lower(cast(:pn as text))
+                        or exists (select 1 from product_item_specifics s
+                                    where s.product_id = p.id and s.name in ({_PN_NAMES})
+                                      and lower(s.value) = lower(cast(:pn as text)))
+                     )) as same_pn
+              from products p
+              where p.id <> coalesce(cast(:x as bigint), -1)
+            ) m
+            where m.same_sku or m.same_pn or m.score >= :need
+            order by m.same_pn desc, m.same_sku desc, m.score desc, m.listing_count desc, m.id
+            limit 8
+            """
+        ),
+        params,
+    ).all()
+
+    matches = []
+    for r in rows:
+        d = dict(r._mapping)
+        if d["same_pn"]:
+            reason = "same part number"
+        elif d["same_sku"]:
+            reason = "same SKU"
+        else:
+            reason = f"title shares {d['score']} of {len(tokens)} key words"
+        matches.append(
+            {
+                "id": d["id"],
+                "sku": d["sku"],
+                "title": d["title"],
+                "list_price": d["list_price"],
+                "quantity_on_hand": d["quantity_on_hand"],
+                "is_published": d["is_published"],
+                "listing_count": d["listing_count"],
+                "prior_merges": d["prior_merges"],
+                "reason": reason,
+            }
+        )
+    return {"matches": matches}
 
 
 # --------------------------------------------------------------------------
