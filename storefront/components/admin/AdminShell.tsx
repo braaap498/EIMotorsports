@@ -35,7 +35,7 @@ function LoginForm() {
     }
     const { error } = await getSupabase().auth.resetPasswordForEmail(email.trim(), { redirectTo: window.location.origin });
     if (error) setError(error.message);
-    else setInfo("If that email has an admin account, a reset link is on its way. Open it on this device and choose a new password in the window that appears.");
+    else setInfo("A reset link has been sent to the email associated with this admin account. Open it on this device and choose a new password in the window that appears.");
   }
 
   async function submit(e: React.FormEvent) {
