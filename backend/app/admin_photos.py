@@ -5,6 +5,7 @@ Admin: manage the photos of an existing product.
     POST   /admin/products/{id}/photos/{photo}/replace  swap a photo's picture
     POST   /admin/products/{id}/photos/{photo}/main     make it the main photo
     POST   /admin/products/{id}/photos/order            set the order of the others
+    POST   /admin/products/{id}/photos/arrange          set the main photo and the order together
     POST   /admin/products/{id}/photos/{photo}/delete   remove a photo
     POST   /admin/products/{id}/photos/delete-preview   which stored files a delete would remove
     GET    /admin/photo-library?q=...                   find pictures already in storage, by product
@@ -47,6 +48,10 @@ class NewPhoto(BaseModel):
 
 class PhotoOrder(BaseModel):
     photo_ids: list[int]
+
+
+class PhotoArrangement(BaseModel):
+    photo_ids: list[int] = Field(..., max_length=500, description="all the photos, main photo first")
 
 
 class DeletePreview(BaseModel):
@@ -187,6 +192,33 @@ def add_photo(product_id: int, body: NewPhoto, db: Session = Depends(get_db)):
 def reorder_photos(product_id: int, body: PhotoOrder, db: Session = Depends(get_db)):
     _require_product(db, product_id)
     _tidy(db, product_id, first_ids=body.photo_ids)
+    db.commit()
+    return _listing(db, product_id)
+
+
+@router.post("/products/{product_id}/photos/arrange")
+@needs("products.photos")
+def arrange_photos(product_id: int, body: PhotoArrangement, db: Session = Depends(get_db)):
+    """
+    Saves a whole arrangement in one step: the first id becomes the main photo and
+    the rest follow in the order given. Photos missing from the list keep their
+    relative order after it, so nothing is lost if the list is out of date.
+    """
+    _require_product(db, product_id)
+    existing = [
+        r.id
+        for r in db.execute(
+            text("select id from product_photos where product_id = :p order by is_primary desc, sort_order, id"),
+            {"p": product_id},
+        ).all()
+    ]
+    wanted = [i for i in dict.fromkeys(body.photo_ids) if i in existing]
+    final = wanted + [i for i in existing if i not in wanted]
+    for position, pid in enumerate(final):
+        db.execute(
+            text("update product_photos set is_primary = :m, sort_order = :o where id = :id and product_id = :p"),
+            {"m": position == 0, "o": position, "id": pid, "p": product_id},
+        )
     db.commit()
     return _listing(db, product_id)
 

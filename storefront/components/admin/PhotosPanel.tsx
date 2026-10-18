@@ -70,11 +70,13 @@ export default function PhotosPanel({
   photos,
   onChange,
   cardCls,
+  onDirtyChange,
 }: {
   productId: number;
   photos: Photo[];
   onChange: (photos: Photo[]) => void;
   cardCls: string;
+  onDirtyChange?: (dirty: boolean) => void; // true while main-photo / order changes are not saved yet
 }) {
   const { can } = useAccess();
   const mayEdit = can("products.photos");
@@ -88,8 +90,8 @@ export default function PhotosPanel({
   const [selected, setSelected] = useState<number[]>([]); // photos ticked for bulk delete
   const [pendingDelete, setPendingDelete] = useState<{ list: Photo[]; items: PreviewItem[] } | null>(null); // waiting for the confirmation dialog
   const [showPicker, setShowPicker] = useState(false);
-  // A change of main photo or order waits here until it is confirmed in the dialog below.
-  const [pendingChange, setPendingChange] = useState<{ kind: "main" | "move"; photo: Photo; direction?: -1 | 1 } | null>(null);
+  // Changes to the main photo and the order are only a draft until "Save changes" is pressed.
+  const [draftIds, setDraftIds] = useState<number[] | null>(null);
 
   useEffect(() => () => { if (tipTimer.current) clearTimeout(tipTimer.current); }, []);
 
@@ -103,8 +105,31 @@ export default function PhotosPanel({
   }
 
   const base = `/products/${productId}/photos`;
-  const mainPhoto = photos.find((p) => p.is_primary) ?? photos[0];
-  const others = photos.filter((p) => p.id !== mainPhoto?.id);
+  // The order as saved on the server (main photo first), then the draft laid over it.
+  const serverMain = photos.find((p) => p.is_primary) ?? photos[0];
+  const serverIds = serverMain ? [serverMain.id, ...photos.filter((p) => p.id !== serverMain.id).map((p) => p.id)] : [];
+  const orderedIds = draftIds
+    ? [...draftIds.filter((id) => serverIds.includes(id)), ...serverIds.filter((id) => !draftIds.includes(id))]
+    : serverIds;
+  const ordered = orderedIds.map((id) => photos.find((p) => p.id === id)).filter((p): p is Photo => !!p);
+  const mainPhoto = ordered[0];
+  const others = ordered.slice(1);
+  const dirty = orderedIds.join(",") !== serverIds.join(",");
+  const locked = !!busy || dirty; // uploads, replaces and deletes wait until the draft is saved or discarded
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
+  // Closing or reloading the tab with unsaved changes gets the browser's own warning.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   async function call(label: string, path: string, init: { method: "POST"; body?: unknown }) {
     setBusy(label);
@@ -163,25 +188,26 @@ export default function PhotosPanel({
     }
   }
 
-  // Nothing below changes the main photo or the order until the person confirms (see the dialog).
-  function move(photo: Photo, direction: -1 | 1) {
-    const i = others.findIndex((p) => p.id === photo.id);
-    const j = i + direction;
-    if (i < 0 || j < 0 || j >= others.length) return;
-    setPendingChange({ kind: "move", photo, direction });
+  // These only change the draft on screen. Nothing is saved until "Save changes".
+  function makeMain(photo: Photo) {
+    setDraftIds([photo.id, ...orderedIds.filter((id) => id !== photo.id)]);
   }
 
-  function applyChange(change: { kind: "main" | "move"; photo: Photo; direction?: -1 | 1 }) {
-    if (change.kind === "main") {
-      void call("Saving…", `${base}/${change.photo.id}/main`, { method: "POST", body: {} });
-      return;
-    }
-    const ids = others.map((p) => p.id);
-    const i = ids.indexOf(change.photo.id);
-    const j = i + (change.direction ?? 0);
-    if (i < 0 || j < 0 || j >= ids.length) return;
+  function move(photo: Photo, direction: -1 | 1) {
+    const ids = [...orderedIds];
+    const i = ids.indexOf(photo.id);
+    const j = i + direction;
+    if (i < 1 || j < 1 || j >= ids.length) return; // position 0 is the main photo
     [ids[i], ids[j]] = [ids[j], ids[i]];
-    void call("Saving order…", `${base}/order`, { method: "POST", body: { photo_ids: ids } });
+    setDraftIds(ids);
+  }
+
+  async function saveArrangement() {
+    const ok = await call("Saving photo order…", `${base}/arrange`, { method: "POST", body: { photo_ids: orderedIds } });
+    if (ok) {
+      setDraftIds(null);
+      setMsg({ kind: "success", text: "Photo order saved." });
+    }
   }
 
   // Asks the server which stored files these deletes would remove, then either
@@ -272,7 +298,7 @@ export default function PhotosPanel({
         {mayEdit && (
           <div className="flex flex-wrap gap-1">
             {!isMain && (
-              <button type="button" className={small} disabled={!!busy} onClick={() => setPendingChange({ kind: "main", photo })}>
+              <button type="button" className={small} disabled={!!busy} onClick={() => makeMain(photo)}>
                 Make main
               </button>
             )}
@@ -289,7 +315,7 @@ export default function PhotosPanel({
             <button
               type="button"
               className={small}
-              disabled={!!busy}
+              disabled={locked}
               onClick={() => {
                 replaceId.current = photo.id;
                 replaceInput.current?.click();
@@ -297,7 +323,7 @@ export default function PhotosPanel({
             >
               Replace
             </button>
-            <button type="button" className={`${small} text-red-700`} disabled={!!busy} onClick={() => remove(photo)}>
+            <button type="button" className={`${small} text-red-700`} disabled={locked} onClick={() => remove(photo)}>
               Delete
             </button>
           </div>
@@ -306,7 +332,6 @@ export default function PhotosPanel({
     );
   }
 
-  const ordered = mainPhoto ? [mainPhoto, ...others] : [];
   const selectedPhotos = ordered.filter((p) => selected.includes(p.id));
 
   return (
@@ -315,10 +340,10 @@ export default function PhotosPanel({
         <h2 className="text-lg font-semibold">Photos</h2>
         {mayEdit && (
           <div className="flex gap-2">
-            <button type="button" className={small} disabled={!!busy} onClick={() => addInput.current?.click()}>
+            <button type="button" className={small} disabled={locked} onClick={() => addInput.current?.click()}>
               + Add photos
             </button>
-            <button type="button" className={small} disabled={!!busy} onClick={() => setShowPicker(true)}>
+            <button type="button" className={small} disabled={locked} onClick={() => setShowPicker(true)}>
               + Add from existing photos
             </button>
           </div>
@@ -347,6 +372,26 @@ export default function PhotosPanel({
         );
       })()}
 
+      {mayEdit && dirty && (
+        <div className="flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <span className="font-medium">You have unsaved changes to the main photo or photo order.</span>
+          <span className="flex gap-2">
+            <button
+              type="button"
+              className="rounded bg-black px-3 py-1.5 text-xs font-semibold text-white hover:bg-gray-800 disabled:opacity-40"
+              disabled={!!busy}
+              onClick={() => void saveArrangement()}
+            >
+              Save changes
+            </button>
+            <button type="button" className={small} disabled={!!busy} onClick={() => setDraftIds(null)}>
+              Discard
+            </button>
+          </span>
+          <span className="text-xs text-amber-800">Adding, replacing and deleting photos is paused until you save or discard.</span>
+        </div>
+      )}
+
       {mayEdit && ordered.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 text-sm">
           {selectedPhotos.length > 0 && <span className="font-medium text-gray-800">{selectedPhotos.length} selected</span>}
@@ -363,7 +408,7 @@ export default function PhotosPanel({
               <button
                 type="button"
                 className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40"
-                disabled={!!busy}
+                disabled={locked}
                 onClick={() => void requestDelete(selectedPhotos)}
               >
                 Delete selected ({selectedPhotos.length})
@@ -380,57 +425,6 @@ export default function PhotosPanel({
           {ordered.map((p, i) => renderTile(p, i))}
         </ul>
       )}
-      {pendingChange && (() => {
-        const { kind, photo, direction } = pendingChange;
-        const src = photo.thumb ?? photo.source_url;
-        const from = others.findIndex((p) => p.id === photo.id) + 2; // the main photo is position 1
-        const to = from + (direction ?? 0);
-        const title = kind === "main" ? "Make this the main photo?" : direction === -1 ? "Move this photo earlier?" : "Move this photo later?";
-        return (
-          <Modal title={title} onClose={() => setPendingChange(null)}>
-            <div className="space-y-4">
-              <div className="flex gap-3">
-                {src ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={src} alt="The photo being changed" className="h-24 w-24 shrink-0 rounded border border-gray-200 object-cover" />
-                ) : (
-                  <div className="flex h-24 w-24 shrink-0 items-center justify-center rounded border border-gray-200 bg-gray-100 text-xs text-gray-500">No picture</div>
-                )}
-                <div className="space-y-2 text-sm text-gray-800">
-                  {kind === "main" ? (
-                    <>
-                      <p>This photo becomes the one shoppers see first, on the product page and in search results.</p>
-                      <p className="text-gray-600">The current main photo moves down into the list.</p>
-                    </>
-                  ) : (
-                    <p>
-                      This photo moves from position {from} to position {to}.
-                    </p>
-                  )}
-                </div>
-              </div>
-              <div className="flex flex-wrap justify-end gap-2">
-                <button type="button" className={btn2Cls} autoFocus onClick={() => setPendingChange(null)}>
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="rounded bg-black px-3 py-2 text-sm font-semibold text-white hover:bg-gray-800 disabled:opacity-40"
-                  disabled={!!busy}
-                  onClick={() => {
-                    const change = pendingChange;
-                    setPendingChange(null);
-                    applyChange(change);
-                  }}
-                >
-                  {kind === "main" ? "Make main" : direction === -1 ? "Move earlier" : "Move later"}
-                </button>
-              </div>
-            </div>
-          </Modal>
-        );
-      })()}
-
       {showPicker && (
         <PhotoPicker
           productId={productId}

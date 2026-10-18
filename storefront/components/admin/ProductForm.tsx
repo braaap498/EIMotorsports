@@ -127,6 +127,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [flags, setFlags] = useState<Flags>({ is_published: false, is_active: true, is_universal: false });
   const [cats, setCats] = useState<Cat[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
+  const [photosDirty, setPhotosDirty] = useState(false); // unsaved main-photo / order changes in the photos panel
   const [similar, setSimilar] = useState<SimilarMatch[]>([]);
   const [loading, setLoading] = useState(!!productId);
   const [busy, setBusy] = useState(false);
@@ -239,6 +240,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const canDown = !!nav && navPos >= 0 && navPos < nav.total - 1;
 
   function hasUnsavedChanges(): boolean {
+    if (photosDirty) return true;
     if (!baseline) return false;
     const built = buildPayload(vals, flags);
     if (!("payload" in built)) return true;
@@ -410,7 +412,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
 
       {productId && <FitmentPanel productId={productId} isUniversal={flags.is_universal} />}
 
-      {productId && <PhotosPanel productId={productId} photos={photos} onChange={setPhotos} cardCls={card} />}
+      {productId && <PhotosPanel productId={productId} photos={photos} onChange={setPhotos} cardCls={card} onDirtyChange={setPhotosDirty} />}
     </div>
   );
 }
