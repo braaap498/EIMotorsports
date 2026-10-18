@@ -1,9 +1,9 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { useAccess } from "./AdminAccess";
-import { Notice } from "./ui";
+import { Modal, Notice, btn2Cls } from "./ui";
 
 export type Photo = {
   id: number;
@@ -48,6 +48,17 @@ async function shrink(file: File, maxSide = 2000): Promise<string> {
   return dataUrl.split(",")[1] ?? "";
 }
 
+// What to show for "which file is this?": the name in the storage bucket, or why there is none.
+function storageInfo(p: Photo): { file: string; path: string | null; inStorage: boolean } {
+  if (p.image_key) {
+    return { file: p.image_key.split("/").pop() ?? p.image_key, path: `full/${p.image_key}`, inStorage: true };
+  }
+  if (p.storage_path) return { file: "Not in storage yet", path: `local: ${p.storage_path}`, inStorage: false };
+  return { file: "Not in storage (eBay link only)", path: null, inStorage: false };
+}
+
+const HOVER_MS = 700; // how long the pointer must rest on a photo before the file name appears
+
 const small =
   "rounded border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-800 hover:bg-gray-50 disabled:opacity-40";
 
@@ -69,6 +80,20 @@ export default function PhotosPanel({
   const replaceId = useRef<number | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const [tipId, setTipId] = useState<number | null>(null); // photo whose file name is showing
+  const tipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [lastPhoto, setLastPhoto] = useState<Photo | null>(null); // waiting for "delete the last photo" confirmation
+
+  useEffect(() => () => { if (tipTimer.current) clearTimeout(tipTimer.current); }, []);
+
+  function tipStart(id: number) {
+    if (tipTimer.current) clearTimeout(tipTimer.current);
+    tipTimer.current = setTimeout(() => setTipId(id), HOVER_MS);
+  }
+  function tipStop() {
+    if (tipTimer.current) clearTimeout(tipTimer.current);
+    setTipId(null);
+  }
 
   const base = `/products/${productId}/photos`;
   const mainPhoto = photos.find((p) => p.is_primary) ?? photos[0];
@@ -141,6 +166,11 @@ export default function PhotosPanel({
   }
 
   function remove(photo: Photo) {
+    // The last photo gets its own, stronger warning (see the dialog below).
+    if (photos.length <= 1) {
+      setLastPhoto(photo);
+      return;
+    }
     const extra = photo.is_primary && photos.length > 1 ? " The next photo will become the main photo." : "";
     if (!window.confirm(`Remove this photo from the product?${extra}`)) return;
     void call("Removing photo…", `${base}/${photo.id}/delete`, { method: "POST", body: {} });
@@ -152,10 +182,14 @@ export default function PhotosPanel({
     const posInOthers = others.findIndex((p) => p.id === photo.id);
     return (
       <li key={photo.id} className="w-36 space-y-1.5">
-        <div className={`relative overflow-hidden rounded border-2 ${isMain ? "border-blue-600" : "border-gray-200"}`}>
+        <div
+          className={`relative overflow-hidden rounded border-2 ${isMain ? "border-blue-600" : "border-gray-200"}`}
+          onMouseEnter={() => tipStart(photo.id)}
+          onMouseLeave={tipStop}
+        >
           {src ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <a href={photo.url ?? src} target="_blank" rel="noopener noreferrer" title="Open full size">
+            <a href={photo.url ?? src} target="_blank" rel="noopener noreferrer" aria-label="Open full size">
               <img src={src} alt={`Product photo ${index + 1}`} className="h-36 w-36 object-cover" />
             </a>
           ) : (
@@ -166,6 +200,16 @@ export default function PhotosPanel({
               Main photo
             </span>
           )}
+          {tipId === photo.id && (() => {
+            const info = storageInfo(photo);
+            return (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-black/85 p-1.5 text-[11px] leading-tight text-white">
+                <p className="break-all font-mono font-semibold">{info.file}</p>
+                {info.path && <p className="mt-0.5 break-all font-mono text-gray-300">{info.path}</p>}
+                <p className="mt-0.5 text-gray-400">Click the picture to open full size</p>
+              </div>
+            );
+          })()}
         </div>
         {mayEdit && (
           <div className="flex flex-wrap gap-1">
@@ -229,6 +273,51 @@ export default function PhotosPanel({
           {ordered.map((p, i) => renderTile(p, i))}
         </ul>
       )}
+      {lastPhoto && (() => {
+        const info = storageInfo(lastPhoto);
+        const src = lastPhoto.thumb ?? lastPhoto.source_url;
+        return (
+          <Modal title="Delete the last photo?" onClose={() => setLastPhoto(null)}>
+            <div className="space-y-4">
+              <div className="flex gap-3">
+                {src && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={src} alt="The photo about to be deleted" className="h-24 w-24 shrink-0 rounded border border-gray-200 object-cover" />
+                )}
+                <div className="space-y-2 text-sm text-gray-800">
+                  <p className="font-semibold text-red-700">This is the only photo left on this product.</p>
+                  <p>After this, the product will have no pictures at all.</p>
+                  {info.inStorage ? (
+                    <p>
+                      The stored picture <span className="break-all font-mono text-xs">{info.path}</span> and its thumbnail will be
+                      permanently deleted from storage, unless another product uses the same picture. This cannot be undone.
+                    </p>
+                  ) : (
+                    <p>This photo is not in your storage (it is only a link), so nothing will be deleted from storage.</p>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <button type="button" className={btn2Cls} autoFocus onClick={() => setLastPhoto(null)}>
+                  Cancel, keep it
+                </button>
+                <button
+                  type="button"
+                  className="rounded bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-40"
+                  disabled={!!busy}
+                  onClick={() => {
+                    const id = lastPhoto.id;
+                    setLastPhoto(null);
+                    void call("Removing photo…", `${base}/${id}/delete`, { method: "POST", body: {} });
+                  }}
+                >
+                  Delete permanently
+                </button>
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
       <p className="text-xs text-gray-500">
         The main photo is the one shoppers see first, on the product page and in search results.
         {mayEdit ? " JPG, PNG or WEBP. Large pictures are shrunk automatically." : " You do not have permission to change photos."}

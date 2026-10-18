@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Field, Notice, Pager, btn2Cls, inputCls } from "../../../components/admin/ui";
 import { useAccess } from "../../../components/admin/AdminAccess";
+import { saveNav } from "../../../lib/listNav";
 
 type Row = {
   id: number;
@@ -52,6 +53,13 @@ export default function ProductsPage() {
       .then((d) => {
         setData(d);
         setError("");
+        // Remember this page so the edit screen can step to the product above/below.
+        const filters = new URLSearchParams();
+        if (q) filters.set("q", q);
+        if (published) filters.set("published", published);
+        if (universal) filters.set("universal", universal);
+        if (noFitment) filters.set("no_fitment", "true");
+        saveNav({ kind: "products", query: filters.toString(), limit: LIMIT, offset, total: d.total, ids: d.items.map((i) => i.id) });
       })
       .catch((e) => setError(errMsg(e)));
   }, [ready, q, published, universal, noFitment, offset]);

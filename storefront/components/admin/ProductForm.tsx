@@ -9,6 +9,8 @@ import FitmentPanel from "./FitmentPanel";
 import PhotosPanel, { type Photo } from "./PhotosPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
 import { useAccess } from "./AdminAccess";
+import ArrowBar from "./ArrowBar";
+import { loadNav, saveNav, type NavState } from "../../lib/listNav";
 
 type Cat = { id: number; parent_id: number | null; name: string; sort_order: number };
 type SimilarMatch = {
@@ -225,6 +227,50 @@ export default function ProductForm({ productId }: { productId?: number }) {
     }
   }
 
+  // ---- up / down arrows: step to the product above or below in the list you came from
+  const [nav, setNav] = useState<NavState | null>(null);
+  const [navBusy, setNavBusy] = useState(false);
+  useEffect(() => {
+    if (productId) setNav(loadNav("products"));
+  }, [productId]);
+  const navIdx = nav && productId ? nav.ids.indexOf(productId) : -1;
+  const navPos = nav && navIdx >= 0 ? nav.offset + navIdx : -1; // 0-based place in the whole list
+  const canUp = navPos > 0;
+  const canDown = !!nav && navPos >= 0 && navPos < nav.total - 1;
+
+  function hasUnsavedChanges(): boolean {
+    if (!baseline) return false;
+    const built = buildPayload(vals, flags);
+    if (!("payload" in built)) return true;
+    return Object.entries(built.payload).some(([k, v]) => JSON.stringify(v) !== JSON.stringify(baseline[k]));
+  }
+
+  async function step(dir: -1 | 1) {
+    if (!nav || navIdx < 0) return;
+    if (hasUnsavedChanges() && !window.confirm("You have unsaved changes on this product. Leave without saving?")) return;
+    const j = navIdx + dir;
+    if (j >= 0 && j < nav.ids.length) {
+      router.push(`/admin/products/${nav.ids[j]}`);
+      return;
+    }
+    // At the edge of this page of the list: load the neighbouring page.
+    const offset = dir > 0 ? nav.offset + nav.limit : Math.max(0, nav.offset - nav.limit);
+    setNavBusy(true);
+    try {
+      const r = await api<{ total: number; items: { id: number }[] }>(
+        `/products?${nav.query ? `${nav.query}&` : ""}limit=${nav.limit}&offset=${offset}`
+      );
+      const ids = r.items.map((i) => i.id);
+      if (ids.length === 0) return;
+      saveNav({ ...nav, offset, total: r.total, ids });
+      router.push(`/admin/products/${dir > 0 ? ids[0] : ids[ids.length - 1]}`);
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setNavBusy(false);
+    }
+  }
+
   if (loading) return <p className="text-sm text-gray-500">Loading…</p>;
 
   const renderFields = (defs: FieldDef[]) =>
@@ -250,7 +296,21 @@ export default function ProductForm({ productId }: { productId?: number }) {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">{productId ? "Edit product" : "New product"}</h1>
-        <Link href="/admin/products" className="text-sm underline">Back to products</Link>
+        <div className="flex items-center gap-4">
+          {productId && navIdx >= 0 && (
+            <ArrowBar
+              upLabel="Previous product in the list"
+              downLabel="Next product in the list"
+              position={`${navPos + 1} of ${nav!.total}`}
+              canUp={canUp}
+              canDown={canDown}
+              busy={navBusy}
+              onUp={() => void step(-1)}
+              onDown={() => void step(1)}
+            />
+          )}
+          <Link href="/admin/products" className="text-sm underline">Back to products</Link>
+        </div>
       </div>
 
       <form onSubmit={save} className="space-y-6">

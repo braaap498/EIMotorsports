@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, errMsg } from "../../../lib/adminApi";
+import ArrowBar from "../../../components/admin/ArrowBar";
 import { Badge, Field, Modal, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
 
 type Opt = { id: number; name: string };
@@ -104,12 +105,20 @@ function EditModal({
   types,
   onClose,
   onChanged,
+  position,
+  canUp,
+  canDown,
+  onStep,
 }: {
   model: ModelRow;
   makes: Opt[];
   types: Opt[];
   onClose: () => void;
   onChanged: () => void;
+  position?: string;
+  canUp: boolean;
+  canDown: boolean;
+  onStep: (dir: -1 | 1) => void;
 }) {
   const [name, setName] = useState(model.name);
   const [makeId, setMakeId] = useState(String(model.make_id));
@@ -157,11 +166,33 @@ function EditModal({
     });
   }
 
+  const hasUnsaved =
+    name !== model.name ||
+    makeId !== String(model.make_id) ||
+    typeId !== (model.vehicle_type_id ? String(model.vehicle_type_id) : "") ||
+    from !== "" ||
+    to !== "";
+
+  function step(dir: -1 | 1) {
+    if (hasUnsaved && !confirm("You have unsaved changes on this model. Leave without saving?")) return;
+    onStep(dir);
+  }
+
   const uniqueYears = Array.from(new Map(years.map((y) => [y.year, y])).values());
 
   return (
     <Modal title={`${model.make} ${model.name}`} onClose={onClose}>
       <div className="space-y-6">
+        <ArrowBar
+          upLabel="Previous model in the list"
+          downLabel="Next model in the list"
+          position={position}
+          canUp={canUp}
+          canDown={canDown}
+          busy={busy}
+          onUp={() => step(-1)}
+          onDown={() => step(1)}
+        />
         {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
 
         <section className="space-y-3">
@@ -339,6 +370,35 @@ export default function ModelsPage() {
     setOffset(0);
   }
 
+  // ---- up / down arrows inside the edit window
+  const pendingPick = useRef<"first" | "last" | null>(null);
+  const editIdx = editing ? data.items.findIndex((i) => i.id === editing.id) : -1;
+  const editPos = editIdx >= 0 ? offset + editIdx : -1; // 0-based place in the whole list
+  const canUp = editPos > 0;
+  const canDown = editPos >= 0 && editPos < data.total - 1;
+
+  function stepModel(dir: -1 | 1) {
+    if (editIdx < 0) return;
+    const j = editIdx + dir;
+    if (j >= 0 && j < data.items.length) {
+      setEditing(data.items[j]);
+    } else if (dir > 0 && offset + LIMIT < data.total) {
+      pendingPick.current = "first";
+      setOffset(offset + LIMIT);
+    } else if (dir < 0 && offset > 0) {
+      pendingPick.current = "last";
+      setOffset(Math.max(0, offset - LIMIT));
+    }
+  }
+
+  // After the neighbouring page has loaded, open its first (or last) model.
+  useEffect(() => {
+    if (!pendingPick.current || data.items.length === 0) return;
+    const pick = pendingPick.current === "first" ? data.items[0] : data.items[data.items.length - 1];
+    pendingPick.current = null;
+    setEditing(pick);
+  }, [data]);
+
   async function setType(m: ModelRow, value: string) {
     try {
       await api(`/models/${m.id}`, { method: "PATCH", body: { vehicle_type_id: Number(value) } });
@@ -435,6 +495,10 @@ export default function ModelsPage() {
           types={types}
           onClose={() => setEditing(null)}
           onChanged={load}
+          position={editPos >= 0 ? `${editPos + 1} of ${data.total}` : undefined}
+          canUp={canUp}
+          canDown={canDown}
+          onStep={stepModel}
         />
       )}
     </div>
