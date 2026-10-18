@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import ProductImage from "../../../components/site/ProductImage";
+import ProductGallery from "../../../components/site/ProductGallery";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -47,32 +47,7 @@ async function Product({ params }: { params: Promise<{ slug: string }> }) {
 
   return (
     <div className="mt-4 grid gap-8 md:grid-cols-2">
-      <div>
-        {p.photos[0] ? (
-          <ProductImage
-            src={p.photos[0].url}
-            fallback={p.photos[0].fallback}
-            alt={p.title}
-            className="w-full rounded border border-gray-200"
-          />
-        ) : (
-          <div className="flex aspect-square items-center justify-center rounded bg-gray-100 text-gray-400">
-            No photo
-          </div>
-        )}
-        {p.photos.length > 1 && (
-          <div className="mt-3 grid grid-cols-4 gap-2">
-            {p.photos.slice(1, 9).map((ph) => (
-              <ProductImage
-                key={ph.url}
-                src={ph.thumb}
-                fallback={ph.fallback}
-                className="aspect-square w-full rounded border border-gray-200 object-cover"
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      <ProductGallery key={p.sku} photos={p.photos} title={p.title} />
 
       <div>
         <h1 className="text-2xl font-bold">{p.title}</h1>
