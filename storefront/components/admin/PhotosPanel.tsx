@@ -200,16 +200,6 @@ export default function PhotosPanel({
               Main photo
             </span>
           )}
-          {tipId === photo.id && (() => {
-            const info = storageInfo(photo);
-            return (
-              <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-black/85 p-1.5 text-[11px] leading-tight text-white">
-                <p className="break-all font-mono font-semibold">{info.file}</p>
-                {info.path && <p className="mt-0.5 break-all font-mono text-gray-300">{info.path}</p>}
-                <p className="mt-0.5 text-gray-400">Click the picture to open full size</p>
-              </div>
-            );
-          })()}
         </div>
         {mayEdit && (
           <div className="flex flex-wrap gap-1">
@@ -265,6 +255,23 @@ export default function PhotosPanel({
 
       {busy && <p className="text-sm text-gray-600">{busy}</p>}
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+
+      {ordered.length > 0 && (() => {
+        const tipPhoto = tipId != null ? photos.find((p) => p.id === tipId) : null;
+        const info = tipPhoto ? storageInfo(tipPhoto) : null;
+        return (
+          <div className="min-h-[3.25rem] rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm" aria-live="polite">
+            {info ? (
+              <>
+                <p className="break-all font-mono font-semibold text-gray-900">{info.file}</p>
+                {info.path && <p className="break-all font-mono text-xs text-gray-500">{info.path}</p>}
+              </>
+            ) : (
+              <p className="text-gray-500">Rest the pointer on a photo to see its file name in storage.</p>
+            )}
+          </div>
+        );
+      })()}
 
       {ordered.length === 0 ? (
         <p className="text-sm text-gray-500">No photos yet.{mayEdit ? " Use “Add photos” to upload some." : ""}</p>
