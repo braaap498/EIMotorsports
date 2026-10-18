@@ -18,19 +18,25 @@ Safeguards:
     role can only be given directly in the database, and an owner account can
     only be edited by another owner.
   - You cannot change your own role (so nobody locks themselves out).
+  - An admin or owner can set a new password for any staff-side account, of
+    any role. Only an owner can set an owner's password. The password itself
+    is never written to any log.
   - Only accounts that already have a staff role can be edited here.
 """
 import json
+import logging
 import re
 import urllib.error
 import urllib.request
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth import STAFF_ROLES, AuthUser, require_admin
 from app.config import get_settings
+
+log = logging.getLogger("admin_users")
 
 router = APIRouter(prefix="/users", tags=["admin-users"], dependencies=[Depends(require_admin)])
 
@@ -64,6 +70,10 @@ class NewUser(BaseModel):
         if not EMAIL_RE.match(v):
             raise ValueError("Enter a valid email address")
         return v
+
+
+class SetPassword(BaseModel):
+    password: str = Field(min_length=12, max_length=72)
 
 
 class EditUser(BaseModel):
@@ -186,3 +196,19 @@ def edit_staff(user_id: str, body: EditUser, me: AuthUser = Depends(require_admi
     if body.role is not None:
         update["app_metadata"] = {**(current.get("app_metadata") or {}), "role": body.role}
     return _public(_call("PUT", f"/users/{user_id}", update))
+
+
+@router.post("/{user_id}/password", status_code=204)
+def set_staff_password(user_id: str, body: SetPassword, me: AuthUser = Depends(require_admin)):
+    """Set a new password for a staff-side account (any role)."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", user_id):
+        raise HTTPException(400, "Invalid account id.")
+    current = _call("GET", f"/users/{user_id}")
+    cur_role = (current.get("app_metadata") or {}).get("role")
+    if cur_role not in STAFF_ROLES:
+        raise HTTPException(404, "That is not a staff account.")
+    if cur_role == "owner" and me.role != "owner":
+        raise HTTPException(403, "Only an owner can change an owner's password.")
+    _call("PUT", f"/users/{user_id}", {"password": body.password})
+    log.info("password set for account %s (%s) by %s", user_id, cur_role, me.email or me.user_id)
+    return Response(status_code=204)

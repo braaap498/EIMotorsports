@@ -24,6 +24,19 @@ function LoginForm() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+
+  async function forgot() {
+    setError("");
+    setInfo("");
+    if (!email.trim()) {
+      setError("Type your email above first, then click “Forgot password?”.");
+      return;
+    }
+    const { error } = await getSupabase().auth.resetPasswordForEmail(email.trim(), { redirectTo: window.location.origin });
+    if (error) setError(error.message);
+    else setInfo("If that email has an admin account, a reset link is on its way. Open it on this device and choose a new password in the window that appears.");
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -45,8 +58,12 @@ function LoginForm() {
           <PasswordInput autoComplete="current-password" value={password} onChange={setPassword} required />
         </Field>
         {error && <Notice kind="error">{error}</Notice>}
+        {info && <Notice kind="success">{info}</Notice>}
         <button className={`${btnCls} w-full`} disabled={busy}>
           {busy ? "Signing in…" : "Sign in"}
+        </button>
+        <button type="button" onClick={forgot} className="w-full text-center text-sm text-gray-600 underline">
+          Forgot password?
         </button>
       </form>
     </div>
