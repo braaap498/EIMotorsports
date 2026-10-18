@@ -274,8 +274,11 @@ export default function ProductForm({ productId }: { productId?: number }) {
               </select>
             </Field>
             {productId && (
-              <Field label="URL slug">
-                <input className={inputCls} disabled={!mayDetails} value={vals.slug ?? ""} onChange={(e) => set("slug", e.target.value)} />
+              <Field label="URL slug (set automatically)">
+                <input className={`${inputCls} cursor-not-allowed bg-gray-100 text-gray-500`} readOnly value={vals.slug ?? ""} />
+                <span className="mt-1 block text-xs font-normal text-gray-500">
+                  This is the product&apos;s web address. It is locked because changing it would break existing links.
+                </span>
               </Field>
             )}
           </div>
