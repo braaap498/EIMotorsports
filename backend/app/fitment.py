@@ -155,7 +155,7 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
     p = db.execute(
         text(
             "select id, sku, title, slug, list_price, condition, description, "
-            "manufacturer_part_number from products p "
+            "manufacturer_part_number, quantity_on_hand from products p "
             f"where p.slug = :slug and {PUBLISHED_FILTER}"
         ),
         {"slug": slug},
@@ -184,6 +184,7 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         "price": f"{p.list_price:.2f}" if p.list_price is not None else None,
         "condition": p.condition,
         "part_number": p.manufacturer_part_number,
+        "available": max(0, p.quantity_on_hand or 0),
         "description": clean_description(p.description),
         "photos": gallery(photos),
         "specifics": [{"name": s.name, "value": s.value} for s in specifics],

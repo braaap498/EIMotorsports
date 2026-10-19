@@ -4,6 +4,7 @@ Mounted at /store/*.
 
   GET    /store/categories      public
   GET    /store/search          public (text, category, and/or a chosen machine)
+  POST   /store/cart/price      public (current price and stock for the items in a cart)
   GET    /store/garage          signed-in customer
   POST   /store/garage          signed-in customer
   DELETE /store/garage/{id}     signed-in customer
@@ -21,7 +22,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, current_user
@@ -136,6 +137,75 @@ def search(
             for r in rows
         ],
     }
+
+
+# --------------------------------------------------------------------------
+# cart
+# The cart itself lives in the customer's browser. This only answers "what do
+# these items cost right now, and how many can be bought?" so the screen never
+# relies on a price the browser remembered.
+# --------------------------------------------------------------------------
+class CartItemIn(BaseModel):
+    product_id: int
+    qty: int = Field(..., ge=1, le=999)
+
+
+class CartPriceIn(BaseModel):
+    items: list[CartItemIn] = Field(..., max_length=50)
+
+
+@router.post("/cart/price")
+def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
+    ids = list({i.product_id for i in body.items})
+    if not ids:
+        return {"items": []}
+    rows = db.execute(
+        text(
+            f"""
+            select p.id, p.slug, p.sku, p.title, p.list_price, p.quantity_on_hand,
+              (select ph.source_url from product_photos ph
+                where ph.product_id = p.id
+                order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_source_url,
+              (select ph.image_key from product_photos ph
+                where ph.product_id = p.id
+                order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_image_key
+            from products p
+            where p.id in :ids and {PUBLISHED_FILTER}
+            """
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).all()
+    by_id = {r.id: r for r in rows}
+    out = []
+    for it in body.items:
+        r = by_id.get(it.product_id)
+        if not r:
+            out.append({"product_id": it.product_id, "problem": "unavailable"})
+            continue
+        available = max(0, r.quantity_on_hand or 0)
+        qty = it.qty
+        problem = None
+        if r.list_price is None:
+            problem = "no_price"
+        elif available <= 0:
+            problem = "sold_out"
+        elif qty > available:
+            qty = available
+            problem = "reduced"
+        out.append(
+            {
+                "product_id": r.id,
+                "slug": r.slug,
+                "sku": r.sku,
+                "title": r.title,
+                "price": f"{r.list_price:.2f}" if r.list_price is not None else None,
+                "available": available,
+                "qty": qty,
+                "problem": problem,
+                **card_image(r.photo_image_key, r.photo_source_url),
+            }
+        )
+    return {"items": out}
 
 
 # --------------------------------------------------------------------------

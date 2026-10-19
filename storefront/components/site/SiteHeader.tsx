@@ -6,12 +6,12 @@ import { useEffect, useMemo, useState } from "react";
 import VehicleSelector from "../VehicleSelector";
 import { useAuth } from "./AuthProvider";
 import GarageMenu from "./GarageMenu";
+import { useCart } from "./CartProvider";
 import { CartIcon, ChevronIcon, SearchIcon, UserIcon } from "./icons";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
-// Flip to true once the store has a cart page at /cart.
-const SHOW_CART = false;
+const SHOW_CART = true;
 
 // product_count is optional: once /store/categories returns it (products in
 // that category itself), empty branches are hidden automatically.
@@ -49,6 +49,7 @@ export default function SiteHeader() {
   const pathname = usePathname();
   const sp = useSearchParams();
   const { user, ready, isStaff, openAuth, signOut } = useAuth();
+  const { count: cartCount } = useCart();
   const [cats, setCats] = useState<Cat[]>([]);
   const [menu, setMenu] = useState(false);
   const [rideOpen, setRideOpen] = useState(false);
@@ -149,8 +150,13 @@ export default function SiteHeader() {
             )}
 
             {SHOW_CART && (
-              <Link href="/cart" aria-label="Cart" className="hover:text-[#06bde7]">
+              <Link href="/cart" aria-label={`Cart, ${cartCount} item${cartCount === 1 ? "" : "s"}`} className="relative hover:text-[#06bde7]">
                 <CartIcon className="h-7 w-7" />
+                {cartCount > 0 && (
+                  <span className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#06bde7] px-1 text-[11px] font-extrabold text-[#04202b]">
+                    {cartCount > 99 ? "99+" : cartCount}
+                  </span>
+                )}
               </Link>
             )}
           </nav>
