@@ -24,6 +24,22 @@ const VALID_TYPES = new Set(MACHINE_TYPES.map((t) => t.slug));
 // page puts the dropdowns back the way they were.
 const STORAGE_KEY = "ei-vehicle-selector";
 
+// A remembered selection is only brought back when the page is reloaded or reached
+// with the browser's back/forward buttons, or when this component is shown again
+// within the same page visit. A fresh visit (typing the address, opening a link,
+// a new tab) always starts with nothing selected.
+let documentChecked = false;
+function shouldRestoreSelection(): boolean {
+  if (documentChecked) return true;
+  documentChecked = true;
+  try {
+    const nav = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+    return nav?.type === "reload" || nav?.type === "back_forward";
+  } catch {
+    return false;
+  }
+}
+
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${API}/store/fitment${path}`);
   if (!res.ok) throw new Error(`Request failed: ${res.status}`);
@@ -71,6 +87,11 @@ function VehicleSelectorInner() {
   // Restore the last selection once, on first load in this tab.
   useEffect(() => {
     try {
+      if (!shouldRestoreSelection()) {
+        sessionStorage.removeItem(STORAGE_KEY); // fresh visit: forget any old selection
+        setRestored(true);
+        return;
+      }
       const raw = sessionStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved = JSON.parse(raw);
