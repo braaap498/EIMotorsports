@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import "./globals.css";
 import { AuthProvider } from "../components/site/AuthProvider";
 import AuthModal from "../components/site/AuthModal";
+import CheckoutGateModal from "../components/site/CheckoutGateModal";
 import SiteHeader from "../components/site/SiteHeader";
 
 const geistSans = Geist({
@@ -35,6 +36,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           </Suspense>
           <div className="flex-1">{children}</div>
           <AuthModal />
+          <CheckoutGateModal />
         </AuthProvider>
       </body>
     </html>

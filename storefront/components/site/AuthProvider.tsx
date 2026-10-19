@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -24,6 +25,8 @@ export type GarageItem = {
 };
 export type Machine = { year: number; make_id: number; model_id: number };
 export type AuthMode = "signin" | "signup" | "reset" | "newpassword";
+// How a purchase continues once the customer has chosen at the checkout prompt.
+export type CheckoutChoice = "account" | "guest";
 
 type Ctx = {
   user: User | null;
@@ -40,6 +43,15 @@ type Ctx = {
   pending: Machine | null;
   selectMachine: (m: Machine) => void;
   clearPending: () => void;
+  // Checkout prompt: call requireCheckoutChoice(...) when a customer starts to pay.
+  // Signed-in customers continue straight away; everyone else is asked to sign in,
+  // create an account, or continue as a guest.
+  gateOpen: boolean;
+  requireCheckoutChoice: (onContinue: (choice: CheckoutChoice) => void) => void;
+  chooseGuest: () => void;
+  startGateAuth: (mode: "signin" | "signup") => void;
+  completeGate: () => void; // the sign-in dialog calls this after a successful sign-in
+  cancelGate: () => void;
 };
 
 const AuthCtx = createContext<Ctx | null>(null);
@@ -56,6 +68,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [garage, setGarage] = useState<GarageItem[]>([]);
   const [modal, setModal] = useState<AuthMode | null>(null);
   const [pending, setPending] = useState<Machine | null>(null);
+  const [gateOpen, setGateOpen] = useState(false);
+  const gateCb = useRef<((c: CheckoutChoice) => void) | null>(null);
 
   useEffect(() => {
     let sb: ReturnType<typeof getSupabase>;
@@ -101,6 +115,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setGarage((g) => g.filter((x) => x.id !== id));
   }, []);
 
+  const requireCheckoutChoice = useCallback(
+    (onContinue: (choice: CheckoutChoice) => void) => {
+      if (user) {
+        onContinue("account");
+        return;
+      }
+      gateCb.current = onContinue;
+      setGateOpen(true);
+    },
+    [user]
+  );
+  const chooseGuest = useCallback(() => {
+    const cb = gateCb.current;
+    gateCb.current = null;
+    setGateOpen(false);
+    cb?.("guest");
+  }, []);
+  const startGateAuth = useCallback((mode: "signin" | "signup") => {
+    setGateOpen(false); // the callback stays waiting until sign-in succeeds
+    setModal(mode);
+  }, []);
+  const completeGate = useCallback(() => {
+    const cb = gateCb.current;
+    gateCb.current = null;
+    setGateOpen(false);
+    cb?.("account");
+  }, []);
+  const cancelGate = useCallback(() => {
+    gateCb.current = null;
+    setGateOpen(false);
+  }, []);
+
   const signOut = useCallback(async () => {
     await getSupabase().auth.signOut();
   }, []);
@@ -122,8 +168,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       pending,
       selectMachine: (m: Machine) => setPending(m),
       clearPending: () => setPending(null),
+      gateOpen,
+      requireCheckoutChoice,
+      chooseGuest,
+      startGateAuth,
+      completeGate,
+      cancelGate,
     }),
-    [user, ready, role, garage, modal, signOut, addToGarage, removeFromGarage, pending]
+    [user, ready, role, garage, modal, signOut, addToGarage, removeFromGarage, pending, gateOpen, requireCheckoutChoice, chooseGuest, startGateAuth, completeGate, cancelGate]
   );
 
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;

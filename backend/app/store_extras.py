@@ -7,15 +7,20 @@ Mounted at /store/*.
   GET    /store/garage          signed-in customer
   POST   /store/garage          signed-in customer
   DELETE /store/garage/{id}     signed-in customer
+  GET    /store/addresses       signed-in customer (shipping and billing addresses)
+  POST   /store/addresses       signed-in customer
+  POST   /store/addresses/{id}  signed-in customer (edit)
+  POST   /store/addresses/{id}/default   signed-in customer
+  DELETE /store/addresses/{id}  signed-in customer
 
 Garage routes use the Supabase login (any signed-in user, not just staff) and
 only ever touch rows belonging to the caller's own user id.
 """
 import re
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -27,6 +32,7 @@ router = APIRouter(prefix="/store", tags=["store"])
 
 PUBLISHED_FILTER = "p.is_published = true"
 MAX_GARAGE = 12
+MAX_ADDRESSES = 10
 
 
 # --------------------------------------------------------------------------
@@ -203,5 +209,162 @@ def garage_remove(garage_id: int, user: AuthUser = Depends(current_user), db: Se
     db.execute(
         text("delete from customer_garage where id = :id and user_id = cast(:uid as uuid)"),
         {"id": garage_id, "uid": user.user_id},
+    )
+    db.commit()
+
+
+# --------------------------------------------------------------------------
+# addresses (needs table public.customer_addresses - see customer_addresses.sql)
+# Card numbers are never stored here: payment details belong to the payment provider.
+# --------------------------------------------------------------------------
+ADDRESS_COLS = (
+    "id, kind, full_name, line1, line2, city, region, postal_code, country, phone, is_default"
+)
+
+
+class AddressIn(BaseModel):
+    kind: Literal["shipping", "billing"]
+    full_name: str = Field(..., max_length=100)
+    line1: str = Field(..., max_length=120)
+    line2: Optional[str] = Field(None, max_length=120)
+    city: str = Field(..., max_length=80)
+    region: str = Field(..., max_length=50)
+    postal_code: str = Field(..., max_length=12)
+    country: str = Field("US", min_length=2, max_length=2)
+    phone: Optional[str] = Field(None, max_length=25)
+    is_default: bool = False
+
+
+def _clean_address(body: AddressIn) -> dict:
+    data = {
+        "full_name": body.full_name.strip(),
+        "line1": body.line1.strip(),
+        "line2": (body.line2 or "").strip() or None,
+        "city": body.city.strip(),
+        "region": body.region.strip(),
+        "postal_code": body.postal_code.strip(),
+        "country": body.country.strip().upper(),
+        "phone": (body.phone or "").strip() or None,
+    }
+    labels = {
+        "full_name": "Full name",
+        "line1": "Address",
+        "city": "City",
+        "region": "State / Province",
+        "postal_code": "ZIP / Postal code",
+    }
+    for key, label in labels.items():
+        if not data[key]:
+            raise HTTPException(400, f"{label} is required")
+    if len(data["postal_code"]) < 3:
+        raise HTTPException(400, "Enter a valid ZIP / Postal code")
+    return data
+
+
+def _address_row(db: Session, address_id: int, uid: str) -> dict:
+    row = db.execute(
+        text(f"select {ADDRESS_COLS} from customer_addresses where id = :id and user_id = cast(:uid as uuid)"),
+        {"id": address_id, "uid": uid},
+    ).first()
+    if not row:
+        raise HTTPException(404, "Address not found")
+    return dict(row._mapping)
+
+
+@router.get("/addresses")
+def addresses_list(user: AuthUser = Depends(current_user), db: Session = Depends(get_db)):
+    rows = db.execute(
+        text(
+            f"select {ADDRESS_COLS} from customer_addresses where user_id = cast(:uid as uuid) "
+            "order by kind, is_default desc, id"
+        ),
+        {"uid": user.user_id},
+    ).all()
+    return [dict(r._mapping) for r in rows]
+
+
+@router.post("/addresses", status_code=201)
+def address_add(body: AddressIn, user: AuthUser = Depends(current_user), db: Session = Depends(get_db)):
+    data = _clean_address(body)
+    count = db.execute(
+        text("select count(*) from customer_addresses where user_id = cast(:uid as uuid)"),
+        {"uid": user.user_id},
+    ).scalar()
+    if count >= MAX_ADDRESSES:
+        raise HTTPException(400, f"You can save up to {MAX_ADDRESSES} addresses. Remove one first.")
+    has_default = db.execute(
+        text(
+            "select 1 from customer_addresses where user_id = cast(:uid as uuid) and kind = :k and is_default limit 1"
+        ),
+        {"uid": user.user_id, "k": body.kind},
+    ).first()
+    make_default = body.is_default or not has_default  # the first address of a kind is the default
+    if make_default:
+        db.execute(
+            text("update customer_addresses set is_default = false where user_id = cast(:uid as uuid) and kind = :k"),
+            {"uid": user.user_id, "k": body.kind},
+        )
+    new_id = db.execute(
+        text(
+            "insert into customer_addresses (user_id, kind, full_name, line1, line2, city, region, postal_code, country, phone, is_default) "
+            "values (cast(:uid as uuid), :k, :full_name, :line1, :line2, :city, :region, :postal_code, :country, :phone, :d) "
+            "returning id"
+        ),
+        {"uid": user.user_id, "k": body.kind, "d": make_default, **data},
+    ).scalar()
+    db.commit()
+    return _address_row(db, new_id, user.user_id)
+
+
+@router.post("/addresses/{address_id}")
+def address_edit(address_id: int, body: AddressIn, user: AuthUser = Depends(current_user), db: Session = Depends(get_db)):
+    current = _address_row(db, address_id, user.user_id)
+    data = _clean_address(body)
+    if body.is_default:
+        db.execute(
+            text(
+                "update customer_addresses set is_default = false "
+                "where user_id = cast(:uid as uuid) and kind = :k and id <> :id"
+            ),
+            {"uid": user.user_id, "k": current["kind"], "id": address_id},
+        )
+    db.execute(
+        text(
+            "update customer_addresses set full_name = :full_name, line1 = :line1, line2 = :line2, city = :city, "
+            "region = :region, postal_code = :postal_code, country = :country, phone = :phone, "
+            "is_default = (is_default or :d) where id = :id and user_id = cast(:uid as uuid)"
+        ),
+        {"id": address_id, "uid": user.user_id, "d": body.is_default, **data},
+    )
+    db.commit()
+    return _address_row(db, address_id, user.user_id)
+
+
+@router.post("/addresses/{address_id}/default")
+def address_make_default(address_id: int, user: AuthUser = Depends(current_user), db: Session = Depends(get_db)):
+    current = _address_row(db, address_id, user.user_id)
+    db.execute(
+        text("update customer_addresses set is_default = (id = :id) where user_id = cast(:uid as uuid) and kind = :k"),
+        {"id": address_id, "uid": user.user_id, "k": current["kind"]},
+    )
+    db.commit()
+    return _address_row(db, address_id, user.user_id)
+
+
+@router.delete("/addresses/{address_id}", status_code=204)
+def address_remove(address_id: int, user: AuthUser = Depends(current_user), db: Session = Depends(get_db)):
+    current = _address_row(db, address_id, user.user_id)
+    db.execute(
+        text("delete from customer_addresses where id = :id and user_id = cast(:uid as uuid)"),
+        {"id": address_id, "uid": user.user_id},
+    )
+    # If the default was removed, the newest remaining address of that kind takes over.
+    db.execute(
+        text(
+            "update customer_addresses set is_default = true where id = ("
+            " select id from customer_addresses where user_id = cast(:uid as uuid) and kind = :k order by id desc limit 1"
+            ") and not exists (select 1 from customer_addresses where user_id = cast(:uid as uuid) and kind = :k and is_default)"
+        ),
+        {"uid": user.user_id, "k": current["kind"]},
     )
     db.commit()
