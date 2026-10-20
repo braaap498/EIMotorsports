@@ -7,7 +7,7 @@ import VehicleSelector from "../VehicleSelector";
 import { useAuth } from "./AuthProvider";
 import GarageMenu from "./GarageMenu";
 import { useCart } from "./CartProvider";
-import { CartIcon, ChevronIcon, SearchIcon, UserIcon } from "./icons";
+import { AtvIcon, ChevronIcon, SearchIcon, UserIcon } from "./icons";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -151,7 +151,7 @@ export default function SiteHeader() {
 
             {SHOW_CART && (
               <Link href="/cart" aria-label={`Cart, ${cartCount} item${cartCount === 1 ? "" : "s"}`} className="relative hover:text-[#06bde7]">
-                <CartIcon className="h-7 w-7" />
+                <AtvIcon className="h-8 w-12" />
                 {cartCount > 0 && (
                   <span className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#06bde7] px-1 text-[11px] font-extrabold text-[#04202b]">
                     {cartCount > 99 ? "99+" : cartCount}
