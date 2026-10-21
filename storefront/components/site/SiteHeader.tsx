@@ -285,6 +285,13 @@ export default function SiteHeader() {
                     </span>
                   )}
                 </Link>
+                {cartMenu && cartCount === 0 && (
+                  <div className="absolute right-0 z-50 pt-2">
+                    <div className="w-56 rounded-lg bg-white px-4 py-3 text-sm font-medium text-gray-900 shadow-xl">
+                      Your cart is empty.
+                    </div>
+                  </div>
+                )}
                 {cartMenu && cartCount > 0 && (
                   // pt-2 (not a margin) keeps the pointer inside while moving down to the card
                   <div className="absolute right-0 z-50 pt-2">
