@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Field, Notice, btnCls, inputCls } from "../../../components/admin/ui";
 import AboutBody from "../../../components/site/AboutBody";
+import { shrink } from "../../../components/admin/PhotosPanel";
 
 type About = {
   title: string;
   body: string;
   ebay_feedback_url: string | null;
   ebay_store_url: string | null;
+  image_url: string | null;
   updated_at: string | null;
 };
 
@@ -19,6 +21,9 @@ export default function AdminAboutPage() {
   const [body, setBody] = useState("");
   const [feedbackUrl, setFeedbackUrl] = useState("");
   const [storeUrl, setStoreUrl] = useState("");
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -29,6 +34,35 @@ export default function AdminAboutPage() {
     setBody(a.body);
     setFeedbackUrl(a.ebay_feedback_url ?? "");
     setStoreUrl(a.ebay_store_url ?? "");
+    setImageUrl(a.image_url);
+  }
+
+  // The photo saves on its own (it does not wait for the Save button) and leaves any
+  // text you are in the middle of typing alone.
+  async function photoCall(path: string, body: unknown, done: string) {
+    setPhotoBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const a = await api<About>(path, { method: "POST", body });
+      setImageUrl(a.image_url);
+      setNotice(done);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setPhotoBusy(false);
+    }
+  }
+  async function pickPhoto(files: FileList | null) {
+    const f = files?.[0];
+    if (fileInput.current) fileInput.current.value = "";
+    if (!f) return;
+    try {
+      const data = await shrink(f);
+      await photoCall("/about/photo", { data }, "Photo saved. It is now on the About page.");
+    } catch (e) {
+      setError(errMsg(e));
+    }
   }
 
   useEffect(() => {
@@ -76,6 +110,30 @@ export default function AdminAboutPage() {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="space-y-4">
+          <Field label="Photo (optional)">
+            <div className="flex flex-wrap items-center gap-3">
+              {imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={imageUrl} alt="" className="h-24 w-24 rounded border border-gray-200 object-cover" />
+              ) : (
+                <span className="text-sm text-gray-500">No photo. The page shows just the text.</span>
+              )}
+              <button type="button" className={btnCls} disabled={photoBusy} onClick={() => fileInput.current?.click()}>
+                {photoBusy ? "Working…" : imageUrl ? "Replace photo" : "Add photo"}
+              </button>
+              {imageUrl && (
+                <button
+                  type="button"
+                  className="rounded border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-50 disabled:opacity-40"
+                  disabled={photoBusy}
+                  onClick={() => void photoCall("/about/photo/remove", undefined, "Photo removed from the About page.")}
+                >
+                  Remove photo
+                </button>
+              )}
+            </div>
+            <input ref={fileInput} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => void pickPhoto(e.target.files)} />
+          </Field>
           <Field label="Page title">
             <input className={inputCls} value={title} maxLength={120} onChange={(e) => setTitle(e.target.value)} />
           </Field>
@@ -107,6 +165,10 @@ export default function AdminAboutPage() {
           <p className="mb-2 text-sm font-medium text-gray-700">Preview</p>
           <div className="rounded-lg border border-gray-200 bg-white p-5">
             <h2 className="mb-4 text-2xl font-extrabold text-gray-900">{title || "About us"}</h2>
+            {imageUrl && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={imageUrl} alt="" className="mb-4 w-full max-w-xs rounded-lg border border-gray-200 object-cover" />
+            )}
             {body.trim() ? <AboutBody text={body} /> : <p className="text-sm text-gray-500">Nothing written yet.</p>}
           </div>
         </div>

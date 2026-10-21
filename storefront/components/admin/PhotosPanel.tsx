@@ -23,7 +23,7 @@ type PreviewItem = { id: number; image_key: string | null; last_use: boolean; al
 // Phone photos are often 5-10 MB. The browser shrinks each one to at most 2000 px
 // on its longest side before sending, which keeps uploads quick. The server checks
 // and re-encodes it again, so this is only a convenience.
-async function shrink(file: File, maxSide = 2000): Promise<string> {
+export async function shrink(file: File, maxSide = 2000): Promise<string> {
   let bmp: ImageBitmap;
   try {
     bmp = await createImageBitmap(file, { imageOrientation: "from-image" });

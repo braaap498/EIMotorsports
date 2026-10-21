@@ -9,6 +9,7 @@ type About = {
   body: string;
   ebay_feedback_url: string | null;
   ebay_store_url: string | null;
+  image_url: string | null;
 };
 
 const wrap = "mx-auto max-w-3xl px-4 py-10";
@@ -41,8 +42,14 @@ export default function AboutPage() {
   return (
     <main className={wrap}>
       <h1 className="text-3xl font-extrabold text-gray-900">{about.title}</h1>
-      <div className="mt-5">
-        {about.body.trim() ? <AboutBody text={about.body} /> : <p className="text-gray-600">Check back soon.</p>}
+      <div className={about.image_url ? "mt-5 grid gap-6 md:grid-cols-[18rem_1fr] md:items-start" : "mt-5"}>
+        {about.image_url && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={about.image_url} alt={about.title} className="w-full rounded-lg border border-gray-200 object-cover" />
+        )}
+        <div>
+          {about.body.trim() ? <AboutBody text={about.body} /> : <p className="text-gray-600">Check back soon.</p>}
+        </div>
       </div>
 
       {(about.ebay_feedback_url || about.ebay_store_url) && (
