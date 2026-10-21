@@ -12,6 +12,15 @@ export default function AdminDashboard() {
   const { can, isAdmin } = useAccess();
   const [stats, setStats] = useState<Stats | null>(null);
   const [error, setError] = useState("");
+  const [pendingReviews, setPendingReviews] = useState<number | undefined>(undefined);
+
+  // Admin-only: how many website reviews are waiting for approval.
+  useEffect(() => {
+    if (!isAdmin) return;
+    api<{ counts: { pending: number } }>("/reviews?status=pending&limit=1")
+      .then((r) => setPendingReviews(r.counts.pending))
+      .catch(() => setPendingReviews(undefined));
+  }, [isAdmin]);
 
   useEffect(() => {
     Promise.all([
@@ -38,6 +47,12 @@ export default function AdminDashboard() {
       value: stats?.untyped,
       href: "/admin/models?untyped=1",
       hint: "Assign a machine type",
+    },
+    {
+      label: "Reviews waiting",
+      value: pendingReviews,
+      href: "/admin/reviews",
+      hint: "Approve new website reviews",
     },
   ];
 
