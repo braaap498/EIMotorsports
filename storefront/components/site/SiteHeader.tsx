@@ -1,17 +1,31 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import VehicleSelector from "../VehicleSelector";
 import { useAuth } from "./AuthProvider";
 import GarageMenu from "./GarageMenu";
 import { useCart } from "./CartProvider";
+import ProductImage from "./ProductImage";
+import { CHECKOUT_ENABLED } from "../../lib/features";
 import { AtvIcon, ChevronIcon, SearchIcon, UserIcon } from "./icons";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 const SHOW_CART = true;
+
+// What the store says about a cart line right now (same answer the cart page gets).
+type Priced = {
+  product_id: number;
+  slug?: string;
+  title?: string;
+  price?: string | null;
+  image_url?: string | null;
+  image_fallback?: string | null;
+  problem: null | "unavailable" | "sold_out" | "no_price" | "reduced";
+};
+const money = (c: number) => `$${(c / 100).toFixed(2)}`;
 
 // True on a computer with a mouse; false on phones and tablets, where there is no hover.
 const canHover = () => typeof window !== "undefined" && window.matchMedia("(hover: hover)").matches;
@@ -51,14 +65,17 @@ function buildTree(all: Cat[]): Node[] {
 export default function SiteHeader() {
   const pathname = usePathname();
   const sp = useSearchParams();
-  const { user, ready, isStaff, garage, openAuth, signOut } = useAuth();
-  const { count: cartCount } = useCart();
+  const { user, ready, isStaff, garage, openAuth, signOut, requireCheckoutChoice } = useAuth();
+  const router = useRouter();
+  const { count: cartCount, lines } = useCart();
   const [cats, setCats] = useState<Cat[]>([]);
   const [menu, setMenu] = useState(false);
   const [rideOpen, setRideOpen] = useState(false);
   const [openId, setOpenId] = useState<number | null>(null); // desktop mega-menu
   const [catsOpen, setCatsOpen] = useState(false); // mobile category list
   const menuRef = useRef<HTMLDivElement>(null); // the account menu, for outside-click detection
+  const [cartMenu, setCartMenu] = useState(false); // cart preview on hover
+  const [preview, setPreview] = useState<Priced[] | null>(null);
 
   useEffect(() => {
     fetch(`${API}/store/categories`)
@@ -75,6 +92,7 @@ export default function SiteHeader() {
     setOpenId(null);
     setCatsOpen(false);
     setMenu(false);
+    setCartMenu(false);
   }, [pathname, search]);
 
   // Close the account menu on a click or tap outside it, or on Escape.
@@ -97,6 +115,25 @@ export default function SiteHeader() {
     };
   }, [menu]);
 
+  // Cart preview: look up today's prices when the preview opens.
+  const cartKey = lines.map((l) => `${l.product_id}x${l.qty}`).join(",");
+  useEffect(() => {
+    if (!cartMenu || lines.length === 0) return;
+    let cancelled = false;
+    fetch(`${API}/store/cart/price`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items: lines.map((l) => ({ product_id: l.product_id, qty: l.qty })) }),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((d: { items: Priced[] }) => !cancelled && setPreview(d.items))
+      .catch(() => !cancelled && setPreview([]));
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cartMenu, cartKey]);
+
   // The back office has its own layout.
   if (pathname.startsWith("/admin")) return null;
 
@@ -109,6 +146,18 @@ export default function SiteHeader() {
   const name = displayName || user?.email?.split("@")[0] || "";
   const href = (slug: string) => `/search?category=${encodeURIComponent(slug)}${ride}`;
   const active = tree.find((c) => c.id === openId && c.children.length > 0) ?? null;
+
+  const previewRows = lines.map((line) => {
+    const p = preview?.find((x) => x.product_id === line.product_id);
+    const ok = !!p && (p.problem === null || p.problem === "reduced") && p.price != null;
+    return { line, p, ok, unit: ok ? Math.round(parseFloat(p?.price ?? "0") * 100) : 0 };
+  });
+  const previewSubtotal = previewRows.reduce((sum, r) => sum + r.unit * r.line.qty, 0);
+  const previewBlocked = preview !== null && preview.length > 0 && previewRows.some((r) => !r.ok);
+  function goCheckout() {
+    setCartMenu(false);
+    requireCheckoutChoice((choice) => router.push(`/checkout?as=${choice}`));
+  }
 
   return (
     <header className="sticky top-0 z-30 shadow-md">
@@ -204,14 +253,91 @@ export default function SiteHeader() {
             )}
 
             {SHOW_CART && (
-              <Link href="/cart" aria-label={`Cart, ${cartCount} item${cartCount === 1 ? "" : "s"}`} className="relative hover:text-[#06bde7]">
-                <AtvIcon className="h-8 w-12" />
-                {cartCount > 0 && (
-                  <span className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#06bde7] px-1 text-[11px] font-extrabold text-[#04202b]">
-                    {cartCount > 99 ? "99+" : cartCount}
-                  </span>
+              <div
+                className="relative"
+                // Hover (mouse) or keyboard focus shows the cart contents. Touch screens go straight to the cart page.
+                onMouseEnter={() => canHover() && setCartMenu(true)}
+                onMouseLeave={() => setCartMenu(false)}
+                onFocus={() => canHover() && setCartMenu(true)}
+                onBlur={(e) => {
+                  const next = e.relatedTarget;
+                  if (!(next instanceof Element) || !e.currentTarget.contains(next)) setCartMenu(false);
+                }}
+                onKeyDown={(e) => e.key === "Escape" && setCartMenu(false)}
+              >
+                <Link href="/cart" aria-label={`Cart, ${cartCount} item${cartCount === 1 ? "" : "s"}`} className="relative block hover:text-[#06bde7]">
+                  <AtvIcon className="h-8 w-12" />
+                  {cartCount > 0 && (
+                    <span className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#06bde7] px-1 text-[11px] font-extrabold text-[#04202b]">
+                      {cartCount > 99 ? "99+" : cartCount}
+                    </span>
+                  )}
+                </Link>
+                {cartMenu && cartCount > 0 && (
+                  // pt-2 (not a margin) keeps the pointer inside while moving down to the card
+                  <div className="absolute right-0 z-50 pt-2">
+                    <div className="w-80 overflow-hidden rounded-lg bg-white text-sm font-medium text-gray-900 shadow-xl">
+                      <ul className="max-h-80 divide-y divide-gray-100 overflow-y-auto">
+                        {previewRows.slice(0, 5).map(({ line, p, ok, unit }) => (
+                          <li key={line.product_id} className="flex gap-3 px-4 py-3">
+                            <Link
+                              href={`/shop/${p?.slug ?? line.slug}`}
+                              onClick={() => setCartMenu(false)}
+                              className="h-12 w-12 shrink-0 overflow-hidden rounded border border-gray-200 bg-gray-50"
+                            >
+                              {p?.image_url ? (
+                                <ProductImage src={p.image_url} fallback={p.image_fallback} alt="" className="h-full w-full object-cover" />
+                              ) : null}
+                            </Link>
+                            <div className="min-w-0 flex-1">
+                              <p className="line-clamp-2 text-xs font-semibold leading-snug">
+                                {p?.title ?? (preview === null ? "Loading…" : "This part")}
+                              </p>
+                              {p && !ok ? (
+                                <p className="text-xs font-normal text-red-700">Unavailable</p>
+                              ) : (
+                                <p className="text-xs font-normal text-gray-600">{line.qty} × {ok ? money(unit) : "…"}</p>
+                              )}
+                            </div>
+                            {ok && <span className="shrink-0 text-xs font-semibold">{money(unit * line.qty)}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                      {previewRows.length > 5 && (
+                        <p className="border-t border-gray-100 px-4 py-2 text-xs font-normal text-gray-600">
+                          + {previewRows.length - 5} more in your cart
+                        </p>
+                      )}
+                      <div className="border-t border-gray-200 bg-gray-50 px-4 py-3">
+                        <div className="mb-3 flex justify-between">
+                          <span>Subtotal ({cartCount} {cartCount === 1 ? "item" : "items"})</span>
+                          <span className="font-bold">{preview === null || preview.length === 0 ? "…" : money(previewSubtotal)}</span>
+                        </div>
+                        <div className="flex gap-2">
+                          <Link
+                            href="/cart"
+                            onClick={() => setCartMenu(false)}
+                            className="flex-1 rounded border border-gray-300 bg-white px-3 py-2 text-center text-sm font-bold hover:bg-gray-100"
+                          >
+                            View cart
+                          </Link>
+                          {CHECKOUT_ENABLED && (
+                            <button
+                              type="button"
+                              onClick={goCheckout}
+                              disabled={preview === null || previewBlocked}
+                              className="flex-1 rounded bg-[#06bde7] px-3 py-2 text-sm font-extrabold text-[#04202b] hover:brightness-110 disabled:opacity-40"
+                            >
+                              Checkout
+                            </button>
+                          )}
+                        </div>
+                        {previewBlocked && <p className="mt-2 text-xs font-normal text-red-700">Review your cart first: something is unavailable.</p>}
+                      </div>
+                    </div>
+                  </div>
                 )}
-              </Link>
+              </div>
             )}
           </nav>
         </div>
