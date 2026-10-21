@@ -21,6 +21,7 @@ from app.auth import AuthUser, require_staff
 from app.config import get_settings
 from app.database import get_db
 from app.fitment import router as fitment_router
+from app.store_checkout import router as store_checkout_router
 from app.store_extras import router as store_extras_router
 
 settings = get_settings()
@@ -70,3 +71,4 @@ admin_router.include_router(admin_users_router)
 app.include_router(admin_router)
 app.include_router(fitment_router)
 app.include_router(store_extras_router)
+app.include_router(store_checkout_router)
