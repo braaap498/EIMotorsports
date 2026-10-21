@@ -77,6 +77,16 @@ _PERIOD_SQL = (
 )
 
 
+# "Most relevant" first: a longer, more detailed comment scores higher (up to 200 characters),
+# and newer ones score higher (fading to nothing over 2 years). The rating itself is not a factor.
+# Comments typed in by hand have no date, so they get a middle recency score.
+_RELEVANCE_SQL = (
+    "(0.6 * least(char_length(comment), 200) / 200.0 "
+    "+ 0.4 * case when entered_at is null then 0.5 "
+    "else greatest(0.0, 1.0 - extract(epoch from (now() - entered_at)) / 63072000.0) end)"
+)
+
+
 @store_router.get("/ebay-feedback")
 def public_ebay_feedback(
     background: BackgroundTasks,
@@ -88,7 +98,7 @@ def public_ebay_feedback(
     rows = db.execute(
         text(
             f"select id, rating, comment, {_PERIOD_SQL} as period from ebay_feedback_items "
-            "order by entered_at desc nulls first, sort_order, id desc limit :l offset :o"
+            f"order by {_RELEVANCE_SQL} desc, id desc limit :l offset :o"
         ),
         {"l": limit, "o": offset},
     ).all()
