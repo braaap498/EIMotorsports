@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
-import { Badge, Field, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
+import { Badge, Field, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
 import PasswordInput from "../../../components/admin/PasswordInput";
 
 type Staff = {
@@ -17,6 +17,18 @@ type Staff = {
 type PermGroup = { key: string; label: string; perms: { key: string; label: string }[] };
 type PermCatalog = { groups: PermGroup[]; implies: Record<string, string[]> };
 type Created = { email: string; display_name: string; password: string };
+type Customer = {
+  id: string;
+  email: string | null;
+  name: string;
+  phone: string;
+  confirmed: boolean;
+  blocked: boolean;
+  created_at: string | null;
+  last_sign_in_at: string | null;
+  address: string | null;
+};
+type CustomerList = { customers: Customer[]; matched: number; total: number };
 
 const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", staff: "Employee" };
 
@@ -304,6 +316,248 @@ function Row({
   );
 }
 
+function CustomerRow({
+  c,
+  showAddress,
+  onChanged,
+}: {
+  c: Customer;
+  showAddress: boolean;
+  onChanged: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [delOpen, setDelOpen] = useState(false);
+  const [typed, setTyped] = useState("");
+
+  const label = c.name || c.email || "this customer";
+  const emailMatches = !!c.email && typed.trim().toLowerCase() === c.email.toLowerCase();
+
+  async function run(key: string, path: string, body: Record<string, unknown>, done: string) {
+    setBusy(key);
+    setError("");
+    try {
+      await api(`/users/customers/${c.id}/${path}`, { method: "POST", body });
+      onChanged(done);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <>
+      <tr className="align-top">
+        <td className="px-3 py-2">
+          <div className="font-medium text-gray-900">{c.name || <span className="text-gray-400">No name</span>}</div>
+          <div className="text-xs text-gray-600">{c.email}</div>
+          {c.phone && <div className="text-xs text-gray-500">{c.phone}</div>}
+        </td>
+        <td className="px-3 py-2">
+          {c.blocked ? (
+            <span className="inline-block rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">Blocked</span>
+          ) : c.confirmed ? (
+            <Badge tone="green">Active</Badge>
+          ) : (
+            <Badge tone="amber">Waiting for verification</Badge>
+          )}
+        </td>
+        <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
+          {c.created_at ? new Date(c.created_at).toLocaleDateString() : "—"}
+        </td>
+        <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
+          {c.last_sign_in_at ? new Date(c.last_sign_in_at).toLocaleDateString() : "Never"}
+        </td>
+        {showAddress && <td className="px-3 py-2 text-xs text-gray-700">{c.address || "—"}</td>}
+        <td className="px-3 py-2">
+          <div className="flex flex-wrap justify-end gap-2">
+            {c.blocked ? (
+              <button className={btn2Cls} disabled={!!busy} onClick={() => run("unblock", "unblock", {}, `${label} was unblocked.`)}>
+                {busy === "unblock" ? "Working…" : "Unblock"}
+              </button>
+            ) : (
+              <button className={btn2Cls} disabled={!!busy} onClick={() => run("block", "block", {}, `${label} was blocked. They can't sign in.`)}>
+                {busy === "block" ? "Working…" : "Block"}
+              </button>
+            )}
+            {!c.confirmed && (
+              <button
+                className={btn2Cls}
+                disabled={!!busy}
+                onClick={() => run("resend", "resend-confirmation", {}, `A new confirmation email was sent to ${c.email}.`)}
+              >
+                {busy === "resend" ? "Sending…" : "Resend confirmation"}
+              </button>
+            )}
+            <button
+              className={btn2Cls}
+              disabled={!!busy}
+              onClick={() => run("reset", "reset-password", {}, `A password reset email was sent to ${c.email}.`)}
+            >
+              {busy === "reset" ? "Sending…" : "Send password reset"}
+            </button>
+            <button
+              className={dangerCls}
+              disabled={!!busy}
+              onClick={() => {
+                setDelOpen((o) => !o);
+                setTyped("");
+                setError("");
+              }}
+            >
+              {delOpen ? "Cancel" : "Delete"}
+            </button>
+          </div>
+          {error && <p className="mt-1 text-right text-xs text-red-700">{error}</p>}
+        </td>
+      </tr>
+      {delOpen && (
+        <tr className="bg-red-50">
+          <td colSpan={showAddress ? 6 : 5} className="px-3 py-3">
+            <div className="max-w-xl space-y-2 text-sm">
+              <p className="font-medium text-red-900">Permanently delete {label}?</p>
+              <p className="text-red-900">
+                This removes the account and can&apos;t be undone. If you only want to stop them signing in, use Block
+                instead; that keeps their records. To confirm, type their email:
+                <span className="ml-1 font-mono">{c.email}</span>
+              </p>
+              <input
+                className={inputCls}
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                placeholder="Type the email to confirm"
+                autoComplete="off"
+              />
+              <div className="flex gap-2">
+                <button
+                  className={dangerCls}
+                  disabled={!emailMatches || !!busy}
+                  onClick={() => run("delete", "delete", { confirm_email: typed.trim() }, `${label} was deleted.`)}
+                >
+                  {busy === "delete" ? "Deleting…" : "Delete permanently"}
+                </button>
+                <button className={btn2Cls} onClick={() => setDelOpen(false)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function CustomersPanel() {
+  const [q, setQ] = useState("");
+  const [data, setData] = useState<CustomerList | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [notice, setNotice] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    // Wait a moment after the last keystroke so we don't ask the server on every letter.
+    const t = setTimeout(
+      () => {
+        api<CustomerList>(`/users/customers?q=${encodeURIComponent(q.trim())}`)
+          .then((r) => {
+            if (cancelled) return;
+            setData(r);
+            setError("");
+          })
+          .catch((e) => {
+            if (!cancelled) setError(errMsg(e));
+          })
+          .finally(() => {
+            if (!cancelled) setLoading(false);
+          });
+      },
+      q ? 300 : 0
+    );
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [q, reloadKey]);
+
+  const rows = data?.customers ?? [];
+  const showAddress = rows.some((r) => !!r.address);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <input
+          className={`${inputCls} max-w-md`}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search customers by name, email or phone"
+        />
+        {data && (
+          <span className="text-xs text-gray-500">
+            {data.total} customer{data.total === 1 ? "" : "s"} in total
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-gray-500">
+        <strong>Block</strong> stops someone signing in but keeps their records (it can be undone). <strong>Delete</strong>{" "}
+        removes the account for good. A block or delete can take up to an hour to affect someone who is already signed in.
+      </p>
+      {notice && <Notice kind="success">{notice}</Notice>}
+      {error && <Notice kind="error">{error}</Notice>}
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+            <tr>
+              <th className="px-3 py-2">Customer</th>
+              <th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2">Signed up</th>
+              <th className="px-3 py-2">Last sign-in</th>
+              {showAddress && <th className="px-3 py-2">Address</th>}
+              <th className="px-3 py-2" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {rows.map((c) => (
+              <CustomerRow
+                key={`${c.id}:${c.blocked}:${c.confirmed}`}
+                c={c}
+                showAddress={showAddress}
+                onChanged={(m) => {
+                  setNotice(m);
+                  setReloadKey((k) => k + 1);
+                }}
+              />
+            ))}
+            {!loading && !error && rows.length === 0 && (
+              <tr>
+                <td colSpan={showAddress ? 6 : 5} className="px-3 py-6 text-center text-gray-500">
+                  {q.trim() ? "No customers match that search." : "No customer accounts yet."}
+                </td>
+              </tr>
+            )}
+            {loading && rows.length === 0 && (
+              <tr>
+                <td colSpan={showAddress ? 6 : 5} className="px-3 py-6 text-center text-gray-500">
+                  Loading…
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {data && data.matched > rows.length && (
+        <p className="text-xs text-gray-500">
+          Showing the newest {rows.length} of {data.matched} matches. Type more of the name or email to narrow it down.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function AdminUsersPage() {
   const [staff, setStaff] = useState<Staff[]>([]);
   const [meId, setMeId] = useState("");
@@ -316,7 +570,7 @@ export default function AdminUsersPage() {
   const [password, setPassword] = useState("");
   const [newPerms, setNewPerms] = useState<string[]>([]);
   const [catalog, setCatalog] = useState<PermCatalog | null>(null);
-  const [tab, setTab] = useState<"admins" | "employees">("admins");
+  const [tab, setTab] = useState<"admins" | "employees" | "customers">("admins");
   const [showPw, setShowPw] = useState(false);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState("");
@@ -344,7 +598,7 @@ export default function AdminUsersPage() {
 
   const adminList = staff.filter((s) => s.role === "owner" || s.role === "admin");
   const employeeList = staff.filter((s) => s.role === "staff");
-  const shown = tab === "admins" ? adminList : employeeList;
+  const shown = tab === "employees" ? employeeList : adminList;
 
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
   const canAdd = displayName.trim().length > 0 && emailOk && password.length >= 12 && !adding;
@@ -478,6 +732,7 @@ export default function AdminUsersPage() {
             [
               ["admins", "Admins", adminList.length],
               ["employees", "Employees", employeeList.length],
+              ["customers", "Customers", null],
             ] as const
           ).map(([key, label, count]) => (
             <button
@@ -492,11 +747,13 @@ export default function AdminUsersPage() {
                   : "border-transparent text-gray-500 hover:text-gray-800"
               }`}
             >
-              {label} ({count})
+              {label}{count === null ? "" : ` (${count})`}
             </button>
           ))}
         </div>
-        {error && <Notice kind="error">{error}</Notice>}
+        {tab === "customers" && <CustomersPanel />}
+        {tab !== "customers" && error && <Notice kind="error">{error}</Notice>}
+        {tab !== "customers" && (
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
@@ -528,10 +785,13 @@ export default function AdminUsersPage() {
             </tbody>
           </table>
         </div>
+        )}
+        {tab !== "customers" && (
         <p className="text-xs text-gray-500">
           A changed display name, role or permission appears on the person&apos;s next sign-in (or within about an hour). You can&apos;t
           change your own role, and the Owner role can only be given directly in the database.
         </p>
+        )}
       </section>
     </div>
   );

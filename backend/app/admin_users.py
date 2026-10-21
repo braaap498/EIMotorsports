@@ -26,12 +26,25 @@ Safeguards:
     app/permissions.py). They are stored as app_metadata.permissions, are
     only kept for the "staff" role (admins and owners can do everything), and
     are cleared when someone is promoted to admin.
+
+Customer support (the Customers tab on the Team page): search customer
+accounts, block / unblock them, resend the confirmation email, send a
+password-reset email, or delete the account. Only accounts WITHOUT a staff
+role are reachable through the /users/customers routes, so an owner or admin
+can never be blocked or deleted from there. Deleting also requires the
+customer's email to be typed back (checked here, not just in the browser).
+Optional setting: STOREFRONT_URL (e.g. https://eandimotorsports.com) so the
+emails sent from here bring the customer back to the store; without it
+Supabase uses the Site URL from its URL Configuration.
 """
 import json
 import logging
+import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -252,4 +265,193 @@ def set_staff_password(user_id: str, body: SetPassword, me: AuthUser = Depends(r
         raise HTTPException(403, "Only an owner can change an owner's password.")
     _call("PUT", f"/users/{user_id}", {"password": body.password})
     log.info("password set for account %s (%s) by %s", user_id, cur_role, me.email or me.user_id)
+    return Response(status_code=204)
+
+
+# =================================================================== CUSTOMERS
+# Customer accounts are the Supabase users that do NOT have a staff role.
+CUSTOMER_LIST_CAP = 50
+BLOCK_FOR = "876000h"  # about 100 years; Supabase has no "forever"
+UUID_RE = re.compile(r"[0-9a-fA-F-]{36}")
+
+
+class ConfirmDelete(BaseModel):
+    confirm_email: str = Field(max_length=200)
+
+
+def _storefront_url() -> str:
+    return (os.getenv("STOREFRONT_URL") or "").strip().rstrip("/")
+
+
+def _auth_public_call(path: str, body: dict, redirect_to: Optional[str] = None) -> None:
+    """
+    Supabase's public Auth endpoints (/resend, /recover). These are the ones
+    that actually SEND the email; the admin API can't. Called with the
+    project's key, from the server only.
+    """
+    s = get_settings()
+    key = getattr(s, "supabase_service_key", None)
+    if not key:
+        raise HTTPException(
+            503,
+            "Account management is not set up yet: add SUPABASE_SERVICE_KEY to the API's environment settings.",
+        )
+    url = f"{s.supabase_url.rstrip('/')}/auth/v1{path}"
+    if redirect_to:
+        url += "?" + urllib.parse.urlencode({"redirect_to": redirect_to})
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        method="POST",
+        headers={"apikey": key, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            return
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read().decode("utf-8", "replace"))
+        except Exception:
+            err = {}
+        msg = err.get("msg") or err.get("message") or ""
+        if e.code == 429 or "rate" in (err.get("error_code") or ""):
+            raise HTTPException(429, "Too many emails were sent recently. Wait a few minutes and try again.")
+        raise HTTPException(502, f"Supabase could not send that email ({e.code}). {msg}".strip())
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(502, "Could not reach Supabase. Try again in a moment.")
+
+
+def _is_customer(u: dict) -> bool:
+    return (u.get("app_metadata") or {}).get("role") not in STAFF_ROLES
+
+
+def _is_confirmed(u: dict) -> bool:
+    return bool(u.get("email_confirmed_at") or u.get("confirmed_at"))
+
+
+def _is_blocked(u: dict) -> bool:
+    until = u.get("banned_until")
+    if not until:
+        return False
+    try:
+        return datetime.fromisoformat(str(until).replace("Z", "+00:00")) > datetime.now(timezone.utc)
+    except ValueError:
+        return True  # a ban date we can't read is treated as still blocked
+
+
+def _public_customer(u: dict) -> dict:
+    um = u.get("user_metadata") or {}
+    return {
+        "id": u.get("id"),
+        "email": u.get("email"),
+        "name": um.get("full_name") or um.get("display_name") or "",
+        "phone": u.get("phone") or "",
+        "confirmed": _is_confirmed(u),
+        "blocked": _is_blocked(u),
+        "created_at": u.get("created_at"),
+        "last_sign_in_at": u.get("last_sign_in_at"),
+        "address": None,  # filled in by _attach_addresses
+    }
+
+
+def _attach_addresses(rows: list[dict]) -> None:
+    """Hook: look up each customer's default address and set row["address"]."""
+    return None
+
+
+def _load_customer(user_id: str) -> dict:
+    if not UUID_RE.fullmatch(user_id):
+        raise HTTPException(400, "Invalid account id.")
+    u = _call("GET", f"/users/{user_id}")
+    if not _is_customer(u):
+        raise HTTPException(404, "That is not a customer account.")
+    return u
+
+
+@router.get("/customers")
+def list_customers(q: str = ""):
+    """Newest customers first; `q` filters by name, email or phone."""
+    needle = q.strip().lower()
+    matches: list[dict] = []
+    total = 0
+    for page in range(1, 21):  # the list is paged; stop after 20 pages
+        data = _call("GET", f"/users?page={page}&per_page=200")
+        users = data.get("users") or []
+        for u in users:
+            if not _is_customer(u):
+                continue
+            total += 1
+            if needle:
+                um = u.get("user_metadata") or {}
+                hay = " ".join(
+                    str(x or "") for x in (u.get("email"), um.get("full_name"), um.get("display_name"), u.get("phone"))
+                ).lower()
+                if needle not in hay:
+                    continue
+            matches.append(u)
+        if len(users) < 200:
+            break
+    matches.sort(key=lambda u: u.get("created_at") or "", reverse=True)
+    rows = [_public_customer(u) for u in matches[:CUSTOMER_LIST_CAP]]
+    _attach_addresses(rows)
+    return {"customers": rows, "matched": len(matches), "total": total}
+
+
+@router.post("/customers/{user_id}/block")
+def block_customer(user_id: str, me: AuthUser = Depends(require_admin)):
+    """Stop them signing in. Their records are kept; undo with /unblock."""
+    _load_customer(user_id)
+    out = _call("PUT", f"/users/{user_id}", {"ban_duration": BLOCK_FOR})
+    log.info("customer %s blocked by %s", user_id, me.email or me.user_id)
+    return _public_customer(out)
+
+
+@router.post("/customers/{user_id}/unblock")
+def unblock_customer(user_id: str, me: AuthUser = Depends(require_admin)):
+    _load_customer(user_id)
+    out = _call("PUT", f"/users/{user_id}", {"ban_duration": "none"})
+    log.info("customer %s unblocked by %s", user_id, me.email or me.user_id)
+    return _public_customer(out)
+
+
+@router.post("/customers/{user_id}/resend-confirmation", status_code=204)
+def resend_confirmation(user_id: str, me: AuthUser = Depends(require_admin)):
+    u = _load_customer(user_id)
+    if _is_confirmed(u):
+        raise HTTPException(400, "That customer has already confirmed their email.")
+    base = _storefront_url()
+    _auth_public_call("/resend", {"type": "signup", "email": u.get("email")}, f"{base}/auth/confirmed" if base else None)
+    log.info("confirmation email re-sent for customer %s by %s", user_id, me.email or me.user_id)
+    return Response(status_code=204)
+
+
+@router.post("/customers/{user_id}/reset-password", status_code=204)
+def send_customer_reset(user_id: str, me: AuthUser = Depends(require_admin)):
+    """Email the customer a password-reset link. Nobody here ever sees a password."""
+    u = _load_customer(user_id)
+    base = _storefront_url()
+    _auth_public_call("/recover", {"email": u.get("email")}, base or None)
+    log.info("password reset email sent for customer %s by %s", user_id, me.email or me.user_id)
+    return Response(status_code=204)
+
+
+@router.post("/customers/{user_id}/delete", status_code=204)
+def delete_customer(user_id: str, body: ConfirmDelete, me: AuthUser = Depends(require_admin)):
+    """Permanently delete a customer account. The email must be typed back to confirm."""
+    u = _load_customer(user_id)
+    if (body.confirm_email or "").strip().lower() != (u.get("email") or "").strip().lower():
+        raise HTTPException(400, "The email you typed doesn't match this account.")
+    try:
+        _call("DELETE", f"/users/{user_id}")
+    except HTTPException as e:
+        if e.status_code == 502:
+            raise HTTPException(
+                409,
+                "Supabase refused to delete this account. This usually means the customer still has saved data "
+                "(such as addresses or orders) linked to it. Block the account instead, or clear that data first.",
+            )
+        raise
+    log.info("customer %s deleted by %s", user_id, me.email or me.user_id)
     return Response(status_code=204)
