@@ -28,7 +28,7 @@ type Customer = {
   last_sign_in_at: string | null;
   address: string | null;
 };
-type CustomerList = { customers: Customer[]; matched: number; total: number };
+type CustomerList = { customers: Customer[]; matched: number; total: number; addresses_error?: string | null };
 
 const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", staff: "Employee" };
 
@@ -316,15 +316,7 @@ function Row({
   );
 }
 
-function CustomerRow({
-  c,
-  showAddress,
-  onChanged,
-}: {
-  c: Customer;
-  showAddress: boolean;
-  onChanged: (message: string) => void;
-}) {
+function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: string) => void }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [delOpen, setDelOpen] = useState(false);
@@ -369,7 +361,7 @@ function CustomerRow({
         <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
           {c.last_sign_in_at ? new Date(c.last_sign_in_at).toLocaleDateString() : "Never"}
         </td>
-        {showAddress && <td className="px-3 py-2 text-xs text-gray-700">{c.address || "—"}</td>}
+        <td className="px-3 py-2 text-xs text-gray-700">{c.address || <span className="text-gray-400">None saved</span>}</td>
         <td className="px-3 py-2">
           <div className="flex flex-wrap justify-end gap-2">
             {c.blocked ? (
@@ -414,7 +406,7 @@ function CustomerRow({
       </tr>
       {delOpen && (
         <tr className="bg-red-50">
-          <td colSpan={showAddress ? 6 : 5} className="px-3 py-3">
+          <td colSpan={6} className="px-3 py-3">
             <div className="max-w-xl space-y-2 text-sm">
               <p className="font-medium text-red-900">Permanently delete {label}?</p>
               <p className="text-red-900">
@@ -485,7 +477,6 @@ function CustomersPanel() {
   }, [q, reloadKey]);
 
   const rows = data?.customers ?? [];
-  const showAddress = rows.some((r) => !!r.address);
 
   return (
     <div className="space-y-3">
@@ -502,12 +493,40 @@ function CustomersPanel() {
           </span>
         )}
       </div>
-      <p className="text-xs text-gray-500">
-        <strong>Block</strong> stops someone signing in but keeps their records (it can be undone). <strong>Delete</strong>{" "}
-        removes the account for good. A block or delete can take up to an hour to affect someone who is already signed in.
-      </p>
+      <details open className="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+        <summary className="cursor-pointer font-medium">What do these buttons do?</summary>
+        <ul className="mt-2 list-disc space-y-1.5 pl-5">
+          <li>
+            <strong>Block</strong> stops the customer signing in. Their account, saved addresses, garage and order history
+            are all kept, and <strong>Unblock</strong> puts everything back. Use it for a hacked, spammed or misused
+            account. It does not cancel or refund anything.
+          </li>
+          <li>
+            <strong>Delete</strong> permanently removes the account together with their saved addresses and garage. It can&apos;t be
+            undone. Use it for test accounts, duplicates, or someone who asks to be removed. A customer who has placed an
+            order can&apos;t be deleted (their order history is kept); block them instead.
+          </li>
+          <li>
+            <strong>Resend confirmation</strong> emails a new confirmation link to someone who never received or lost the
+            first one. It only appears for customers who haven&apos;t confirmed yet.
+          </li>
+          <li>
+            <strong>Send password reset</strong> emails the customer a link to choose a new password. You never see or set
+            their password.
+          </li>
+          <li>
+            A block or delete can take up to an hour to take effect for someone who is already signed in.
+          </li>
+        </ul>
+      </details>
       {notice && <Notice kind="success">{notice}</Notice>}
       {error && <Notice kind="error">{error}</Notice>}
+      {data?.addresses_error && (
+        <Notice kind="error">
+          Saved addresses couldn&apos;t be loaded, so the Address column is empty and address search is off. Reason:{" "}
+          {data.addresses_error}
+        </Notice>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full text-left text-sm">
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
@@ -516,7 +535,7 @@ function CustomersPanel() {
               <th className="px-3 py-2">Status</th>
               <th className="px-3 py-2">Signed up</th>
               <th className="px-3 py-2">Last sign-in</th>
-              {showAddress && <th className="px-3 py-2">Address</th>}
+              <th className="px-3 py-2">Address</th>
               <th className="px-3 py-2" />
             </tr>
           </thead>
@@ -525,7 +544,6 @@ function CustomersPanel() {
               <CustomerRow
                 key={`${c.id}:${c.blocked}:${c.confirmed}`}
                 c={c}
-                showAddress={showAddress}
                 onChanged={(m) => {
                   setNotice(m);
                   setReloadKey((k) => k + 1);
@@ -534,14 +552,14 @@ function CustomersPanel() {
             ))}
             {!loading && !error && rows.length === 0 && (
               <tr>
-                <td colSpan={showAddress ? 6 : 5} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={6} className="px-3 py-6 text-center text-gray-500">
                   {q.trim() ? "No customers match that search." : "No customer accounts yet."}
                 </td>
               </tr>
             )}
             {loading && rows.length === 0 && (
               <tr>
-                <td colSpan={showAddress ? 6 : 5} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={6} className="px-3 py-6 text-center text-gray-500">
                   Loading…
                 </td>
               </tr>

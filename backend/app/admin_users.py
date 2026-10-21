@@ -372,6 +372,18 @@ def _rest_get(table: str, params: dict) -> list[dict]:
         return json.loads(resp.read() or b"[]")
 
 
+def _describe_error(e: Exception) -> str:
+    """A short, safe description of why a lookup failed, shown to the admin so a problem isn't silent."""
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            err = json.loads(e.read().decode("utf-8", "replace"))
+            detail = err.get("message") or err.get("msg") or err.get("hint") or ""
+        except Exception:
+            detail = ""
+        return f"Supabase returned {e.code}. {detail}".strip()[:200]
+    return f"{type(e).__name__}: {e}"[:200]
+
+
 def _format_address(a: dict) -> str:
     parts = [a.get("line1"), a.get("line2"), a.get("city")]
     region_zip = " ".join(x for x in (a.get("region"), a.get("postal_code")) if x)
@@ -382,26 +394,29 @@ def _format_address(a: dict) -> str:
     return ", ".join(p.strip() for p in parts if p and p.strip())
 
 
-def _address_search_ids(needle: str) -> set[str]:
-    """Ids of customers with a saved address matching the search text. Never breaks the list if the lookup fails."""
+def _address_search_ids(needle: str) -> tuple[set[str], Optional[str]]:
+    """Ids of customers with a saved address matching the search text, plus an error note if the lookup failed."""
     n = re.sub(r"[^\w \-#./']", " ", needle).strip()
     if len(n) < 2:
-        return set()
+        return set(), None
     cols = ("full_name", "line1", "line2", "city", "region", "postal_code", "phone")
     flt = "(" + ",".join(f"{c}.ilike.*{n}*" for c in cols) + ")"
     try:
         rows = _rest_get("customer_addresses", {"select": "user_id", "or": flt, "limit": "500"})
-    except Exception:
+    except Exception as e:
         log.warning("address search failed; falling back to name/email/phone only", exc_info=True)
-        return set()
-    return {r["user_id"] for r in rows if r.get("user_id")}
+        return set(), _describe_error(e)
+    return {r["user_id"] for r in rows if r.get("user_id")}, None
 
 
-def _attach_addresses(rows: list[dict]) -> None:
-    """Set row["address"] to each customer's default shipping address (or the best one they have)."""
+def _attach_addresses(rows: list[dict]) -> Optional[str]:
+    """
+    Set row["address"] to each customer's default shipping address (or the best one they have).
+    Returns None on success, or a short error note if the lookup failed (the list still works).
+    """
     ids = [r["id"] for r in rows if r.get("id") and UUID_RE.fullmatch(r["id"])]
     if not ids:
-        return
+        return None
     try:
         found = _rest_get(
             "customer_addresses",
@@ -411,9 +426,9 @@ def _attach_addresses(rows: list[dict]) -> None:
                 "limit": "1000",
             },
         )
-    except Exception:
+    except Exception as e:
         log.warning("address lookup failed; showing customers without addresses", exc_info=True)
-        return
+        return _describe_error(e)
     best: dict[str, dict] = {}
     for a in found:
         # Prefer a default shipping address, then any default, then any shipping, then anything.
@@ -425,6 +440,7 @@ def _attach_addresses(rows: list[dict]) -> None:
         hit = best.get(r["id"])
         if hit:
             r["address"] = _format_address(hit["addr"]) or None
+    return None
 
 
 def _load_customer(user_id: str) -> dict:
@@ -440,7 +456,7 @@ def _load_customer(user_id: str) -> dict:
 def list_customers(q: str = ""):
     """Newest customers first; `q` filters by name, email, phone or a saved address."""
     needle = q.strip().lower()
-    address_ids = _address_search_ids(needle) if needle else set()
+    address_ids, search_err = _address_search_ids(needle) if needle else (set(), None)
     matches: list[dict] = []
     total = 0
     for page in range(1, 21):  # the list is paged; stop after 20 pages
@@ -462,8 +478,14 @@ def list_customers(q: str = ""):
             break
     matches.sort(key=lambda u: u.get("created_at") or "", reverse=True)
     rows = [_public_customer(u) for u in matches[:CUSTOMER_LIST_CAP]]
-    _attach_addresses(rows)
-    return {"customers": rows, "matched": len(matches), "total": total}
+    lookup_err = _attach_addresses(rows)
+    return {
+        "customers": rows,
+        "matched": len(matches),
+        "total": total,
+        # None when addresses loaded fine; otherwise why they didn't (shown on the page).
+        "addresses_error": lookup_err or search_err,
+    }
 
 
 @router.post("/customers/{user_id}/block")
