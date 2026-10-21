@@ -28,7 +28,7 @@ Safeguards:
     are cleared when someone is promoted to admin.
 
 Customer support (the Customers tab on the Team page): search customer
-accounts, block / unblock them, resend the confirmation email, send a
+accounts (by name, email, phone or saved address), block / unblock them, resend the confirmation email, send a
 password-reset email, or delete the account. Only accounts WITHOUT a staff
 role are reachable through the /users/customers routes, so an owner or admin
 can never be blocked or deleted from there. Deleting also requires the
@@ -356,9 +356,75 @@ def _public_customer(u: dict) -> dict:
     }
 
 
+def _rest_get(table: str, params: dict) -> list[dict]:
+    """Read rows from the project's database through Supabase's REST API (server key, so it can see every customer's rows)."""
+    s = get_settings()
+    key = getattr(s, "supabase_service_key", None)
+    if not key:
+        raise RuntimeError("SUPABASE_SERVICE_KEY is not set")
+    url = f"{s.supabase_url.rstrip('/')}/rest/v1/{table}?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"apikey": key, "Authorization": f"Bearer {key}", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read() or b"[]")
+
+
+def _format_address(a: dict) -> str:
+    parts = [a.get("line1"), a.get("line2"), a.get("city")]
+    region_zip = " ".join(x for x in (a.get("region"), a.get("postal_code")) if x)
+    parts.append(region_zip)
+    country = (a.get("country") or "").strip()
+    if country and country.upper() not in ("US", "USA"):
+        parts.append(country)
+    return ", ".join(p.strip() for p in parts if p and p.strip())
+
+
+def _address_search_ids(needle: str) -> set[str]:
+    """Ids of customers with a saved address matching the search text. Never breaks the list if the lookup fails."""
+    n = re.sub(r"[^\w \-#./']", " ", needle).strip()
+    if len(n) < 2:
+        return set()
+    cols = ("full_name", "line1", "line2", "city", "region", "postal_code", "phone")
+    flt = "(" + ",".join(f"{c}.ilike.*{n}*" for c in cols) + ")"
+    try:
+        rows = _rest_get("customer_addresses", {"select": "user_id", "or": flt, "limit": "500"})
+    except Exception:
+        log.warning("address search failed; falling back to name/email/phone only", exc_info=True)
+        return set()
+    return {r["user_id"] for r in rows if r.get("user_id")}
+
+
 def _attach_addresses(rows: list[dict]) -> None:
-    """Hook: look up each customer's default address and set row["address"]."""
-    return None
+    """Set row["address"] to each customer's default shipping address (or the best one they have)."""
+    ids = [r["id"] for r in rows if r.get("id") and UUID_RE.fullmatch(r["id"])]
+    if not ids:
+        return
+    try:
+        found = _rest_get(
+            "customer_addresses",
+            {
+                "select": "user_id,kind,line1,line2,city,region,postal_code,country,is_default",
+                "user_id": "in.(" + ",".join(ids) + ")",
+                "limit": "1000",
+            },
+        )
+    except Exception:
+        log.warning("address lookup failed; showing customers without addresses", exc_info=True)
+        return
+    best: dict[str, dict] = {}
+    for a in found:
+        # Prefer a default shipping address, then any default, then any shipping, then anything.
+        rank = (a.get("kind") == "shipping" and bool(a.get("is_default")), bool(a.get("is_default")), a.get("kind") == "shipping")
+        uid = a.get("user_id")
+        if uid and (uid not in best or rank > best[uid]["rank"]):
+            best[uid] = {"rank": rank, "addr": a}
+    for r in rows:
+        hit = best.get(r["id"])
+        if hit:
+            r["address"] = _format_address(hit["addr"]) or None
 
 
 def _load_customer(user_id: str) -> dict:
@@ -372,8 +438,9 @@ def _load_customer(user_id: str) -> dict:
 
 @router.get("/customers")
 def list_customers(q: str = ""):
-    """Newest customers first; `q` filters by name, email or phone."""
+    """Newest customers first; `q` filters by name, email, phone or a saved address."""
     needle = q.strip().lower()
+    address_ids = _address_search_ids(needle) if needle else set()
     matches: list[dict] = []
     total = 0
     for page in range(1, 21):  # the list is paged; stop after 20 pages
@@ -388,7 +455,7 @@ def list_customers(q: str = ""):
                 hay = " ".join(
                     str(x or "") for x in (u.get("email"), um.get("full_name"), um.get("display_name"), u.get("phone"))
                 ).lower()
-                if needle not in hay:
+                if needle not in hay and u.get("id") not in address_ids:
                     continue
             matches.append(u)
         if len(users) < 200:
@@ -449,8 +516,8 @@ def delete_customer(user_id: str, body: ConfirmDelete, me: AuthUser = Depends(re
         if e.status_code == 502:
             raise HTTPException(
                 409,
-                "Supabase refused to delete this account. This usually means the customer still has saved data "
-                "(such as addresses or orders) linked to it. Block the account instead, or clear that data first.",
+                "Supabase refused to delete this account. Something else is probably still linked to it (such as "
+                "an order). Block the account instead, or tell your developer what's linked to it.",
             )
         raise
     log.info("customer %s deleted by %s", user_id, me.email or me.user_id)

@@ -494,7 +494,7 @@ function CustomersPanel() {
           className={`${inputCls} max-w-md`}
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search customers by name, email or phone"
+          placeholder="Search customers by name, email, phone or address"
         />
         {data && (
           <span className="text-xs text-gray-500">
