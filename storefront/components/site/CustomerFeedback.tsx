@@ -144,12 +144,61 @@ function LoadError({ message, onRetry }: { message: string; onRetry: () => void 
   );
 }
 
-function EbayPanel({ list, feedbackUrl }: { list: List<EbayItem>; feedbackUrl: string | null }) {
-  if (list.error && list.items.length === 0) return <LoadError message={list.error} onRetry={list.reload} />;
-  if (list.total === null) return <p className="py-6 text-sm text-gray-600">Loading feedback…</p>;
-  if (list.total === 0) return <p className="py-6 text-sm text-gray-600">Our eBay feedback will show up here soon.</p>;
+type EbayStats = { percent: number; score: number | null; as_of: string | null };
+
+function EbayPanel({
+  list,
+  stats,
+  feedbackUrl,
+  storeUrl,
+}: {
+  list: List<EbayItem>;
+  stats: EbayStats | null;
+  feedbackUrl: string | null;
+  storeUrl: string | null;
+}) {
+  const summary = stats && (
+    <div>
+      <p className="text-gray-900">
+        <span className="text-3xl font-extrabold">{stats.percent}%</span>{" "}
+        <span className="font-semibold">positive feedback on eBay</span>
+        {stats.score != null && <span className="text-gray-600"> · {stats.score.toLocaleString("en-US")} ratings</span>}
+      </p>
+      {stats.as_of && (
+        <p className="mt-0.5 text-xs text-gray-500">
+          As of {new Date(stats.as_of).toLocaleDateString("en-US", { month: "short", year: "numeric" })}
+        </p>
+      )}
+    </div>
+  );
+
+  if (list.error && list.items.length === 0) {
+    return (
+      <div className="space-y-3">
+        {summary}
+        <LoadError message={list.error} onRetry={list.reload} />
+      </div>
+    );
+  }
+  if (list.total === null) {
+    return (
+      <div className="space-y-3">
+        {summary}
+        <p className="py-3 text-sm text-gray-600">Loading feedback…</p>
+      </div>
+    );
+  }
+  if (list.total === 0) {
+    return (
+      <div className="space-y-3">
+        {summary}
+        <p className="py-3 text-sm text-gray-600">Our eBay feedback will show up here soon.</p>
+      </div>
+    );
+  }
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
+      {summary}
       <ScrollList label="eBay feedback" hasMore={list.hasMore} loading={list.loading} onMore={list.more}>
         {list.items.map((it) => (
           <li key={it.id} className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 px-4 py-3 sm:grid-cols-[auto_1fr_7rem]">
@@ -161,14 +210,21 @@ function EbayPanel({ list, feedbackUrl }: { list: List<EbayItem>; feedbackUrl: s
       </ScrollList>
       {list.error && <LoadError message={list.error} onRetry={list.more} />}
       <p className="text-xs text-gray-500">
-        Showing {list.items.length} of {list.total} comments from buyers in our eBay store.
+        Showing {list.items.length.toLocaleString("en-US")} of {list.total.toLocaleString("en-US")} comments from buyers in our eBay store.
         {feedbackUrl && (
           <>
             {" "}
             <a href={feedbackUrl} target="_blank" rel="noopener noreferrer" className="underline">
               See our full feedback page on eBay
             </a>
-            .
+          </>
+        )}
+        {storeUrl && (
+          <>
+            {" "}
+            <a href={storeUrl} target="_blank" rel="noopener noreferrer" className="underline">
+              Visit our eBay store
+            </a>
           </>
         )}
       </p>
@@ -395,17 +451,18 @@ function SitePanel({ list }: { list: List<Review> }) {
 }
 
 export default function CustomerFeedback({
-  id,
-  open,
+  ebayStats,
   feedbackUrl,
+  storeUrl,
 }: {
-  id: string;
-  open: boolean;
+  ebayStats: EbayStats | null;
   feedbackUrl: string | null;
+  storeUrl: string | null;
 }) {
+  const id = "customer-feedback";
   const [tab, setTab] = useState<"ebay" | "site">("ebay");
-  const ebay = usePaged<EbayItem>("/ebay-feedback", open);
-  const site = usePaged<Review>("/reviews", open);
+  const ebay = usePaged<EbayItem>("/ebay-feedback", true);
+  const site = usePaged<Review>("/reviews", true);
 
   const tabs = [
     { key: "ebay", label: "From eBay", count: ebay.total },
@@ -413,45 +470,33 @@ export default function CustomerFeedback({
   ] as const;
 
   return (
-    // Slides open and closed. `inert` keeps hidden content out of the tab order.
-    <div
-      id={id}
-      className={`grid transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none ${
-        open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
-      }`}
-    >
-      <div className="min-h-0 overflow-hidden" inert={!open}>
-        <div className="px-0.5 pb-0.5 pt-5">
-          <div className="flex gap-1 border-b border-gray-200" role="tablist" aria-label="Customer feedback">
-            {tabs.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                role="tab"
-                id={`${id}-tab-${t.key}`}
-                aria-selected={tab === t.key}
-                aria-controls={`${id}-panel-${t.key}`}
-                onClick={() => setTab(t.key)}
-                className={`-mb-px border-b-2 px-4 py-2 text-sm font-semibold ${
-                  tab === t.key
-                    ? "border-[#06bde7] text-gray-900"
-                    : "border-transparent text-gray-500 hover:text-gray-800"
-                }`}
-              >
-                {t.label}
-                {t.count !== null && <span className="ml-1 font-normal text-gray-500">({t.count})</span>}
-              </button>
-            ))}
-          </div>
+    <div id={id}>
+      <div className="flex gap-1 border-b border-gray-200" role="tablist" aria-label="Customer feedback">
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            id={`${id}-tab-${t.key}`}
+            aria-selected={tab === t.key}
+            aria-controls={`${id}-panel-${t.key}`}
+            onClick={() => setTab(t.key)}
+            className={`-mb-px border-b-2 px-4 py-2 text-sm font-semibold ${
+              tab === t.key ? "border-[#06bde7] text-gray-900" : "border-transparent text-gray-500 hover:text-gray-800"
+            }`}
+          >
+            {t.label}
+            {t.count !== null && <span className="ml-1 font-normal text-gray-500">({t.count.toLocaleString("en-US")})</span>}
+          </button>
+        ))}
+      </div>
 
-          <div className="pt-4">
-            <div role="tabpanel" id={`${id}-panel-ebay`} aria-labelledby={`${id}-tab-ebay`} hidden={tab !== "ebay"}>
-              <EbayPanel list={ebay} feedbackUrl={feedbackUrl} />
-            </div>
-            <div role="tabpanel" id={`${id}-panel-site`} aria-labelledby={`${id}-tab-site`} hidden={tab !== "site"}>
-              <SitePanel list={site} />
-            </div>
-          </div>
+      <div className="pt-4">
+        <div role="tabpanel" id={`${id}-panel-ebay`} aria-labelledby={`${id}-tab-ebay`} hidden={tab !== "ebay"}>
+          <EbayPanel list={ebay} stats={ebayStats} feedbackUrl={feedbackUrl} storeUrl={storeUrl} />
+        </div>
+        <div role="tabpanel" id={`${id}-panel-site`} aria-labelledby={`${id}-tab-site`} hidden={tab !== "site"}>
+          <SitePanel list={site} />
         </div>
       </div>
     </div>

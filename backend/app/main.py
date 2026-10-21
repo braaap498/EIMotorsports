@@ -23,6 +23,8 @@ from app.auth import AuthUser, require_staff
 from app.config import get_settings
 from app.database import get_db
 from app.fitment import router as fitment_router
+from app.reviews import admin_router as admin_reviews_router
+from app.reviews import store_router as store_reviews_router
 from app.store_checkout import router as store_checkout_router
 from app.store_extras import router as store_extras_router
 
@@ -70,9 +72,11 @@ admin_router.include_router(admin_cleanup_router)
 admin_router.include_router(admin_photos_router)
 admin_router.include_router(admin_users_router)
 admin_router.include_router(admin_about_router)
+admin_router.include_router(admin_reviews_router)
 
 app.include_router(admin_router)
 app.include_router(fitment_router)
 app.include_router(store_extras_router)
 app.include_router(store_checkout_router)
 app.include_router(store_about_router)
+app.include_router(store_reviews_router)
