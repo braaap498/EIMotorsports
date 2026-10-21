@@ -13,6 +13,8 @@ type About = {
   ebay_store_url: string | null;
   image_url: string | null;
   updated_at: string | null;
+  ebay_feedback: { percent: number; score: number | null; as_of: string | null } | null;
+  ebay_status: { configured: boolean; seller: string; last_attempt_at: string | null; last_error: string | null };
 };
 
 export default function AdminAboutPage() {
@@ -24,6 +26,8 @@ export default function AdminAboutPage() {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [ebay, setEbay] = useState<Pick<About, "ebay_feedback" | "ebay_status"> | null>(null);
+  const [ebayBusy, setEbayBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -35,6 +39,22 @@ export default function AdminAboutPage() {
     setFeedbackUrl(a.ebay_feedback_url ?? "");
     setStoreUrl(a.ebay_store_url ?? "");
     setImageUrl(a.image_url);
+    setEbay({ ebay_feedback: a.ebay_feedback, ebay_status: a.ebay_status });
+  }
+
+  // Asks eBay now. The saved numbers only change if eBay answers; a failure is shown below.
+  async function refreshEbay() {
+    setEbayBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const a = await api<About>("/about/ebay-refresh", { method: "POST" });
+      setEbay({ ebay_feedback: a.ebay_feedback, ebay_status: a.ebay_status });
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setEbayBusy(false);
+    }
   }
 
   // The photo saves on its own (it does not wait for the Save button) and leaves any
@@ -155,6 +175,37 @@ export default function AdminAboutPage() {
           <Field label="Link to your eBay store (optional)">
             <input className={inputCls} value={storeUrl} maxLength={500} onChange={(e) => setStoreUrl(e.target.value)} placeholder="https://www.ebay.com/str/your-store" />
           </Field>
+          <div className="rounded-lg border border-gray-200 bg-white p-4 text-sm">
+            <p className="font-medium text-gray-800">eBay feedback on the page</p>
+            {ebay?.ebay_feedback ? (
+              <p className="mt-1 text-gray-700">
+                {ebay.ebay_feedback.percent}% positive
+                {ebay.ebay_feedback.score != null ? `, ${ebay.ebay_feedback.score.toLocaleString("en-US")} ratings` : ""}
+                {ebay.ebay_feedback.as_of ? ` (saved ${new Date(ebay.ebay_feedback.as_of).toLocaleDateString("en-US")})` : ""}
+              </p>
+            ) : (
+              <p className="mt-1 text-gray-500">No numbers saved yet, so nothing shows on the page.</p>
+            )}
+            {ebay && !ebay.ebay_status.configured && (
+              <p className="mt-1 text-amber-700">
+                eBay keys are not set on the API yet (EBAY_CLIENT_ID and EBAY_CLIENT_SECRET), so it cannot read feedback.
+              </p>
+            )}
+            {ebay?.ebay_status.last_error && (
+              <p className="mt-1 text-amber-700">
+                Last try{ebay.ebay_status.last_attempt_at ? ` (${new Date(ebay.ebay_status.last_attempt_at).toLocaleString("en-US")})` : ""} did not work: {ebay.ebay_status.last_error} The saved numbers above are unchanged.
+              </p>
+            )}
+            <button
+              type="button"
+              className="mt-2 rounded border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-800 hover:bg-gray-50 disabled:opacity-40"
+              disabled={ebayBusy || !ebay?.ebay_status.configured}
+              onClick={() => void refreshEbay()}
+            >
+              {ebayBusy ? "Checking eBay…" : `Refresh from eBay (${ebay?.ebay_status.seller ?? "seller"})`}
+            </button>
+            <p className="mt-1 text-xs text-gray-500">It also refreshes by itself about once a day when someone views the About page.</p>
+          </div>
           <button type="button" className={btnCls} disabled={busy || !changed || !saved} onClick={save}>
             {busy ? "Saving…" : "Save"}
           </button>

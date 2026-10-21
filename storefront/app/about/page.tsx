@@ -10,6 +10,8 @@ type About = {
   ebay_feedback_url: string | null;
   ebay_store_url: string | null;
   image_url: string | null;
+  // Last saved eBay numbers (a snapshot, not a live reading). null until the first one is saved.
+  ebay_feedback: { percent: number; score: number | null; as_of: string | null } | null;
 };
 
 const wrap = "mx-auto max-w-3xl px-4 py-10";
@@ -52,10 +54,27 @@ export default function AboutPage() {
         </div>
       </div>
 
-      {(about.ebay_feedback_url || about.ebay_store_url) && (
+      {(about.ebay_feedback_url || about.ebay_store_url || about.ebay_feedback) && (
         <section className="mt-8 rounded-lg border border-gray-200 bg-white p-5">
           <h2 className="text-lg font-bold text-gray-900">See what customers say</h2>
-          <p className="mt-1 text-sm text-gray-600">We also sell on eBay. Read our feedback and ratings there.</p>
+          {about.ebay_feedback ? (
+            <div className="mt-2">
+              <p className="text-gray-900">
+                <span className="text-3xl font-extrabold">{about.ebay_feedback.percent}%</span>{" "}
+                <span className="font-semibold">positive feedback on eBay</span>
+                {about.ebay_feedback.score != null && (
+                  <span className="text-gray-600"> · {about.ebay_feedback.score.toLocaleString("en-US")} ratings</span>
+                )}
+              </p>
+              {about.ebay_feedback.as_of && (
+                <p className="mt-0.5 text-xs text-gray-500">
+                  As of {new Date(about.ebay_feedback.as_of).toLocaleDateString("en-US", { month: "short", year: "numeric" })}
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="mt-1 text-sm text-gray-600">We also sell on eBay. Read our feedback and ratings there.</p>
+          )}
           <div className="mt-4 flex flex-wrap gap-3">
             {about.ebay_feedback_url && (
               <a href={about.ebay_feedback_url} target="_blank" rel="noopener noreferrer" className={`${btn} bg-[#06bde7] text-[#04202b]`}>
