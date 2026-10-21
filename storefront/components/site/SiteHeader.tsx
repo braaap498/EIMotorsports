@@ -81,7 +81,8 @@ export default function SiteHeader() {
   useEffect(() => {
     if (!menu) return;
     const onDown = (e: MouseEvent | TouchEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(false);
+      const t = e.target;
+      if (menuRef.current && t instanceof Element && !menuRef.current.contains(t)) setMenu(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setMenu(false);
