@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import VehicleSelector from "../VehicleSelector";
 import { useAuth } from "./AuthProvider";
 import GarageMenu from "./GarageMenu";
@@ -12,6 +12,9 @@ import { AtvIcon, ChevronIcon, SearchIcon, UserIcon } from "./icons";
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 const SHOW_CART = true;
+
+// True on a computer with a mouse; false on phones and tablets, where there is no hover.
+const canHover = () => typeof window !== "undefined" && window.matchMedia("(hover: hover)").matches;
 
 // product_count is optional: once /store/categories returns it (products in
 // that category itself), empty branches are hidden automatically.
@@ -48,13 +51,14 @@ function buildTree(all: Cat[]): Node[] {
 export default function SiteHeader() {
   const pathname = usePathname();
   const sp = useSearchParams();
-  const { user, ready, isStaff, openAuth, signOut } = useAuth();
+  const { user, ready, isStaff, garage, openAuth, signOut } = useAuth();
   const { count: cartCount } = useCart();
   const [cats, setCats] = useState<Cat[]>([]);
   const [menu, setMenu] = useState(false);
   const [rideOpen, setRideOpen] = useState(false);
   const [openId, setOpenId] = useState<number | null>(null); // desktop mega-menu
   const [catsOpen, setCatsOpen] = useState(false); // mobile category list
+  const menuRef = useRef<HTMLDivElement>(null); // the account menu, for outside-click detection
 
   useEffect(() => {
     fetch(`${API}/store/categories`)
@@ -70,7 +74,27 @@ export default function SiteHeader() {
   useEffect(() => {
     setOpenId(null);
     setCatsOpen(false);
+    setMenu(false);
   }, [pathname, search]);
+
+  // Close the account menu on a click or tap outside it, or on Escape.
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent | TouchEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("touchstart", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("touchstart", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
 
   // The back office has its own layout.
   if (pathname.startsWith("/admin")) return null;
@@ -118,33 +142,62 @@ export default function SiteHeader() {
                 Sign in <UserIcon className="h-7 w-7" />
               </button>
             ) : (
-              <div className="relative">
-                <button type="button" onClick={() => setMenu((m) => !m)} className="flex items-center gap-2 hover:text-[#06bde7]" aria-expanded={menu}>
+              <div
+                ref={menuRef}
+                className="relative"
+                // Mouse: open on hover. Touch screens have no hover, so a tap opens and closes it.
+                onMouseEnter={() => canHover() && setMenu(true)}
+                onMouseLeave={() => canHover() && setMenu(false)}
+              >
+                <button
+                  type="button"
+                  onClick={() => setMenu((m) => (canHover() ? true : !m))}
+                  className="flex items-center gap-2 hover:text-[#06bde7]"
+                  aria-expanded={menu}
+                  aria-haspopup="menu"
+                >
                   <span className="hidden max-w-32 truncate sm:block">Hi, {name}</span>
                   <UserIcon className="h-7 w-7" />
-                  <ChevronIcon className="h-3.5 w-3.5" />
+                  <ChevronIcon className={`h-3.5 w-3.5 transition ${menu ? "rotate-180" : ""}`} />
                 </button>
                 {menu && (
-                  <>
-                    <button type="button" aria-label="Close menu" className="fixed inset-0 z-40 cursor-default" onClick={() => setMenu(false)} />
-                    <div className="absolute right-0 z-50 mt-2 w-48 overflow-hidden rounded-lg bg-white py-1 text-sm font-medium text-gray-900 shadow-xl">
-                      <Link href="/account" onClick={() => setMenu(false)} className="block px-4 py-2 hover:bg-gray-100">My account</Link>
-                      <Link href="/track-order" onClick={() => setMenu(false)} className="block px-4 py-2 hover:bg-gray-100">Track Order</Link>
-                      {isStaff && (
-                        <Link href="/admin" onClick={() => setMenu(false)} className="block px-4 py-2 hover:bg-gray-100">Admin</Link>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setMenu(false);
-                          signOut();
-                        }}
-                        className="block w-full px-4 py-2 text-left hover:bg-gray-100"
-                      >
-                        Sign out
-                      </button>
+                  // pt-2 (not a margin) keeps the pointer inside the menu while moving down to it
+                  <div className="absolute right-0 z-50 pt-2">
+                    <div className="w-64 overflow-hidden rounded-lg bg-white text-sm font-medium text-gray-900 shadow-xl">
+                      <div className="border-b border-gray-200 bg-gray-50 px-4 py-3">
+                        <p className="truncate font-bold">{name}</p>
+                        {user.email && <p className="truncate text-xs font-normal text-gray-600">{user.email}</p>}
+                        <p className="mt-1 text-xs font-normal text-gray-600">
+                          {garage.length === 0
+                            ? "No machines in your garage yet"
+                            : `${garage.length} ${garage.length === 1 ? "machine" : "machines"} in your garage`}
+                        </p>
+                      </div>
+                      <div className="py-1">
+                        <Link href="/account" onClick={() => setMenu(false)} className="block px-4 py-2 hover:bg-gray-100">My account</Link>
+                        <Link href="/cart" onClick={() => setMenu(false)} className="flex items-center justify-between px-4 py-2 hover:bg-gray-100">
+                          Cart
+                          {cartCount > 0 && <span className="text-xs font-normal text-gray-600">{cartCount} {cartCount === 1 ? "item" : "items"}</span>}
+                        </Link>
+                        <Link href="/track-order" onClick={() => setMenu(false)} className="block px-4 py-2 hover:bg-gray-100">Track Order</Link>
+                        {isStaff && (
+                          <Link href="/admin" onClick={() => setMenu(false)} className="block px-4 py-2 hover:bg-gray-100">Admin</Link>
+                        )}
+                      </div>
+                      <div className="border-t border-gray-200 py-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMenu(false);
+                            signOut();
+                          }}
+                          className="block w-full px-4 py-2 text-left hover:bg-gray-100"
+                        >
+                          Sign out
+                        </button>
+                      </div>
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             )}
