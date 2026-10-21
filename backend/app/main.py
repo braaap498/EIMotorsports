@@ -13,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.about import admin_router as admin_about_router
+from app.about import store_router as store_about_router
 from app.admin_catalog import router as admin_catalog_router
 from app.admin_cleanup import router as admin_cleanup_router
 from app.admin_photos import router as admin_photos_router
@@ -67,8 +69,10 @@ admin_router.include_router(admin_catalog_router)
 admin_router.include_router(admin_cleanup_router)
 admin_router.include_router(admin_photos_router)
 admin_router.include_router(admin_users_router)
+admin_router.include_router(admin_about_router)
 
 app.include_router(admin_router)
 app.include_router(fitment_router)
 app.include_router(store_extras_router)
 app.include_router(store_checkout_router)
+app.include_router(store_about_router)

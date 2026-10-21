@@ -49,9 +49,12 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from app.auth import STAFF_ROLES, AuthUser, require_admin
 from app.config import get_settings
+from app.database import get_db
 from app.permissions import IMPLIES, catalog, normalize
 
 log = logging.getLogger("admin_users")
@@ -394,22 +397,33 @@ def _format_address(a: dict) -> str:
     return ", ".join(p.strip() for p in parts if p and p.strip())
 
 
-def _address_search_ids(needle: str) -> tuple[set[str], Optional[str]]:
-    """Ids of customers with a saved address matching the search text, plus an error note if the lookup failed."""
+def _address_search_ids(needle: str, db: Session) -> tuple[set[str], Optional[str]]:
+    """Ids of customers with a saved address matching the search text, plus an error note if the lookup failed.
+
+    Reads the database directly (the same connection checkout uses) rather than through Supabase's REST
+    service, so a hiccup in that service cannot blank out this column.
+    """
     n = re.sub(r"[^\w \-#./']", " ", needle).strip()
     if len(n) < 2:
         return set(), None
-    cols = ("full_name", "line1", "line2", "city", "region", "postal_code", "phone")
-    flt = "(" + ",".join(f"{c}.ilike.*{n}*" for c in cols) + ")"
+    pat = "%" + n.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
     try:
-        rows = _rest_get("customer_addresses", {"select": "user_id", "or": flt, "limit": "500"})
+        rows = db.execute(
+            text(
+                "select distinct user_id from customer_addresses where "
+                "full_name ilike :p or line1 ilike :p or line2 ilike :p or city ilike :p "
+                "or region ilike :p or postal_code ilike :p or phone ilike :p limit 500"
+            ),
+            {"p": pat},
+        ).all()
     except Exception as e:
+        db.rollback()
         log.warning("address search failed; falling back to name/email/phone only", exc_info=True)
         return set(), _describe_error(e)
-    return {r["user_id"] for r in rows if r.get("user_id")}, None
+    return {str(r.user_id) for r in rows if r.user_id}, None
 
 
-def _attach_addresses(rows: list[dict]) -> Optional[str]:
+def _attach_addresses(rows: list[dict], db: Session) -> Optional[str]:
     """
     Set row["address"] to each customer's default shipping address (or the best one they have).
     Returns None on success, or a short error note if the lookup failed (the list still works).
@@ -418,22 +432,25 @@ def _attach_addresses(rows: list[dict]) -> Optional[str]:
     if not ids:
         return None
     try:
-        found = _rest_get(
-            "customer_addresses",
-            {
-                "select": "user_id,kind,line1,line2,city,region,postal_code,country,is_default",
-                "user_id": "in.(" + ",".join(ids) + ")",
-                "limit": "1000",
-            },
-        )
+        found = [
+            dict(r._mapping)
+            for r in db.execute(
+                text(
+                    "select user_id, kind, line1, line2, city, region, postal_code, country, is_default "
+                    "from customer_addresses where user_id = any(cast(:ids as uuid[])) limit 1000"
+                ),
+                {"ids": ids},
+            ).all()
+        ]
     except Exception as e:
+        db.rollback()
         log.warning("address lookup failed; showing customers without addresses", exc_info=True)
         return _describe_error(e)
     best: dict[str, dict] = {}
     for a in found:
         # Prefer a default shipping address, then any default, then any shipping, then anything.
         rank = (a.get("kind") == "shipping" and bool(a.get("is_default")), bool(a.get("is_default")), a.get("kind") == "shipping")
-        uid = a.get("user_id")
+        uid = str(a["user_id"]) if a.get("user_id") else None
         if uid and (uid not in best or rank > best[uid]["rank"]):
             best[uid] = {"rank": rank, "addr": a}
     for r in rows:
@@ -453,10 +470,10 @@ def _load_customer(user_id: str) -> dict:
 
 
 @router.get("/customers")
-def list_customers(q: str = ""):
+def list_customers(q: str = "", db: Session = Depends(get_db)):
     """Newest customers first; `q` filters by name, email, phone or a saved address."""
     needle = q.strip().lower()
-    address_ids, search_err = _address_search_ids(needle) if needle else (set(), None)
+    address_ids, search_err = _address_search_ids(needle, db) if needle else (set(), None)
     matches: list[dict] = []
     total = 0
     for page in range(1, 21):  # the list is paged; stop after 20 pages
@@ -478,7 +495,7 @@ def list_customers(q: str = ""):
             break
     matches.sort(key=lambda u: u.get("created_at") or "", reverse=True)
     rows = [_public_customer(u) for u in matches[:CUSTOMER_LIST_CAP]]
-    lookup_err = _attach_addresses(rows)
+    lookup_err = _attach_addresses(rows, db)
     return {
         "customers": rows,
         "matched": len(matches),

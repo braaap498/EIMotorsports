@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import VehicleSelector from "../VehicleSelector";
 import { useAuth } from "./AuthProvider";
 import GarageMenu from "./GarageMenu";
@@ -26,9 +26,6 @@ type Priced = {
   problem: null | "unavailable" | "sold_out" | "no_price" | "reduced";
 };
 const money = (c: number) => `$${(c / 100).toFixed(2)}`;
-
-// True on a computer with a mouse; false on phones and tablets, where there is no hover.
-const canHover = () => typeof window !== "undefined" && window.matchMedia("(hover: hover)").matches;
 
 // product_count is optional: once /store/categories returns it (products in
 // that category itself), empty branches are hidden automatically.
@@ -74,6 +71,12 @@ export default function SiteHeader() {
   const [openId, setOpenId] = useState<number | null>(null); // desktop mega-menu
   const [catsOpen, setCatsOpen] = useState(false); // mobile category list
   const menuRef = useRef<HTMLDivElement>(null); // the account menu, for outside-click detection
+  // What the last pointer was ("mouse", "touch", "pen"). Hover menus only react to a real mouse;
+  // checking the pointer itself works on laptops with touch screens, where the screen-wide test fails.
+  const lastPointer = useRef<string>("mouse");
+  const track = (e: ReactPointerEvent) => {
+    lastPointer.current = e.pointerType;
+  };
   const [cartMenu, setCartMenu] = useState(false); // cart preview on hover
   const [preview, setPreview] = useState<Priced[] | null>(null);
 
@@ -183,6 +186,7 @@ export default function SiteHeader() {
           </form>
 
           <nav className="ml-auto flex items-center gap-5 text-sm font-semibold text-white md:ml-0">
+            <Link href="/about" className="hidden hover:text-[#06bde7] md:block">About</Link>
             <Link href="/track-order" className="hidden hover:text-[#06bde7] md:block">Track Order</Link>
 
             {!ready ? (
@@ -196,12 +200,16 @@ export default function SiteHeader() {
                 ref={menuRef}
                 className="relative"
                 // Mouse: open on hover. Touch screens have no hover, so a tap opens and closes it.
-                onMouseEnter={() => canHover() && setMenu(true)}
-                onMouseLeave={() => canHover() && setMenu(false)}
+                onPointerEnter={(e) => {
+                  track(e);
+                  if (e.pointerType === "mouse") setMenu(true);
+                }}
+                onPointerLeave={(e) => e.pointerType === "mouse" && setMenu(false)}
+                onPointerDown={track}
               >
                 <button
                   type="button"
-                  onClick={() => setMenu((m) => (canHover() ? true : !m))}
+                  onClick={() => setMenu((m) => (lastPointer.current === "mouse" ? true : !m))}
                   className="flex items-center gap-2 hover:text-[#06bde7]"
                   aria-expanded={menu}
                   aria-haspopup="menu"
@@ -256,9 +264,13 @@ export default function SiteHeader() {
               <div
                 className="relative"
                 // Hover (mouse) or keyboard focus shows the cart contents. Touch screens go straight to the cart page.
-                onMouseEnter={() => canHover() && setCartMenu(true)}
-                onMouseLeave={() => setCartMenu(false)}
-                onFocus={() => canHover() && setCartMenu(true)}
+                onPointerEnter={(e) => {
+                  track(e);
+                  if (e.pointerType === "mouse") setCartMenu(true);
+                }}
+                onPointerLeave={(e) => e.pointerType === "mouse" && setCartMenu(false)}
+                onPointerDown={track}
+                onFocus={() => lastPointer.current === "mouse" && setCartMenu(true)}
                 onBlur={(e) => {
                   const next = e.relatedTarget;
                   if (!(next instanceof Element) || !e.currentTarget.contains(next)) setCartMenu(false);
