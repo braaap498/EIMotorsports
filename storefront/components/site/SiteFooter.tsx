@@ -28,7 +28,7 @@ export default function SiteFooter() {
           ))}
         </nav>
         <p className="mt-4 text-gray-400">All prices are in US dollars (USD).</p>
-        <p className="mt-1 text-gray-500">&copy; {new Date().getFullYear()} E&amp;I Motorsports</p>
+        <p className="mt-1 text-gray-500">&copy; E&amp;I Motorsports</p>
       </div>
     </footer>
   );
