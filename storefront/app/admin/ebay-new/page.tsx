@@ -192,8 +192,8 @@ export default function NewEbayListingsPage() {
       <div>
         <h1 className="text-2xl font-bold">New eBay listings</h1>
         <p className="mt-1 max-w-3xl text-sm text-gray-600">
-          Finds eBay listings that are not on any product yet. Nothing is imported: pick the product each one belongs
-          to and its eBay item number is added to that product&rsquo;s other eBay item numbers.
+          Finds eBay listings that are not linked to any product yet. Nothing is imported: pick the product each one belongs
+          to and its eBay item number is added to that product&rsquo;s existing eBay item numbers.
         </p>
       </div>
 
