@@ -7,6 +7,7 @@ import AuthModal from "../components/site/AuthModal";
 import CheckoutGateModal from "../components/site/CheckoutGateModal";
 import { CartProvider } from "../components/site/CartProvider";
 import SiteHeader from "../components/site/SiteHeader";
+import SiteFooter from "../components/site/SiteFooter";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -37,6 +38,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               <SiteHeader />
             </Suspense>
             <div className="flex-1">{children}</div>
+            <SiteFooter />
             <AuthModal />
             <CheckoutGateModal />
           </CartProvider>

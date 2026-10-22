@@ -51,6 +51,14 @@ def _reach_us() -> str:
     return f"email us at {email}" if email else "contact us"
 
 
+def _handling_time() -> str:
+    """How long before an order ships, as a phrase ("within 2 business days").
+    Set HANDLING_DAYS (Render environment variable) to change it; the default is 2."""
+    raw = os.getenv("HANDLING_DAYS", "").strip()
+    days = int(raw) if raw.isdigit() and int(raw) > 0 else 2
+    return f"within {days} business day{'' if days == 1 else 's'}"
+
+
 def _default_shipping() -> str:
     """Starter shipping text. The methods and prices come from the list checkout uses."""
     methods = "\n".join(
@@ -66,10 +74,15 @@ def _default_shipping() -> str:
             "Shipping is priced per item.",
             methods,
             "",
+            "All prices on this site, including shipping, are in US dollars (USD).",
+            "",
+            "## Handling time",
+            f"Orders ship {_handling_time()} after your payment is confirmed. Business days are Monday "
+            "through Friday, not counting holidays.",
+            "",
             "## Delivery times",
-            "We ship orders as quickly as we can once your payment is confirmed. Delivery times are "
-            "estimates from USPS and are not guaranteed. Delays can happen, especially around holidays "
-            "or in bad weather.",
+            "Once your order has shipped, delivery times are estimates from USPS and are not "
+            "guaranteed. Delays can happen, especially around holidays or in bad weather.",
             "",
             "## Your shipping address",
             "We ship to the address you enter at checkout, so please double-check it. If you notice a "
