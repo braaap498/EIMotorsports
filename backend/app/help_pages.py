@@ -1,18 +1,18 @@
 """
-The Help pages (Shipping, Returns, Refunds and Privacy): their text is stored in the database and edited
+The Help pages (Shipping, Returns, Refunds, Privacy and Contact): their text is stored in the database and edited
 from the admin area, the same way the About page is.
 
   GET /store/help         public        both pages, for the tabs on the storefront's /help page
   GET /admin/help         admin/owner   the same, for the editor
   PUT /admin/help/{key}   admin/owner   save one page (it shows on the site straight away)
 
-`key` is "shipping", "returns", "refunds" or "privacy". Each page is one row in the
-site_pages table (slugs "help-shipping", "help-returns", "help-refunds", "help-privacy"),
+`key` is "shipping", "returns", "refunds", "privacy" or "contact". Each page is one row in the
+site_pages table (slugs "help-shipping", "help-returns", "help-refunds", "help-privacy", "help-contact"),
 so no new table or migration is needed. To add another tab later, add it to PAGES below.
 
 Until a page is saved for the first time it shows a modest starter policy written in this file:
   * Shipping: the methods and prices are built from app/shipping.py, so they always match checkout.
-  * Returns, Refunds, Privacy: general starter terms. They are the shop's own terms, so read
+  * Returns, Refunds, Privacy: general starter terms. Contact: a short how-to-reach-us page. They are the shop's own terms, so read
     them, change anything that is not how the shop works, and save your version in the admin editor.
   * Set SUPPORT_EMAIL (Render environment variable) and the starter text tells customers to email
     that address; without it the text just says "contact us".
@@ -24,6 +24,7 @@ again when it is served. The starter policies below are written as simple plain 
 ("## " for a heading, "- " for a bullet) and are converted to HTML when read.
 """
 import os
+from html import escape
 from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -82,6 +83,26 @@ def _default_shipping() -> str:
             f"If your order arrives damaged or does not arrive, {_reach_us()} and we will help sort it "
             "out. See the Refunds tab for what to expect.",
         ]
+    )
+
+
+def _default_contact() -> str:
+    """Starter contact page. Add your phone, hours and address in the admin editor."""
+    email = os.getenv("SUPPORT_EMAIL", "").strip()
+    if email:
+        e = escape(email, quote=True)
+        reach = f'<p>Email us at <a href="mailto:{e}">{escape(email, quote=False)}</a>.</p>'
+    else:
+        reach = "<p>Contact details are coming soon.</p>"
+    return (
+        "<h3>Contact us</h3>"
+        "<p>Questions about an order, a part, or a return? We are happy to help.</p>"
+        f"{reach}"
+        "<h3>Before you write</h3>"
+        "<p>Please include your order number. For a question about whether a part fits, include "
+        "your vehicle's year, make and model.</p>"
+        "<h3>More help</h3>"
+        "<p>Shipping, returns, refunds and privacy information is on the other tabs of this page.</p>"
     )
 
 
@@ -212,6 +233,12 @@ PAGES: dict[str, dict] = {
         "label": "Privacy",
         "title": "Privacy policy",
         "default_body": _default_privacy,
+    },
+    "contact": {
+        "slug": "help-contact",
+        "label": "Contact",
+        "title": "Contact us",
+        "default_body": _default_contact,
     },
 }
 
