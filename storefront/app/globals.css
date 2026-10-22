@@ -17,6 +17,13 @@
   color-scheme: light;
 }
 
+/* Always reserve room for the vertical scrollbar. Without this, a short page (a type with
+   few products) has no scrollbar and a long one does, so centered content jumps sideways by
+   the scrollbar's width when you switch between them. */
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
