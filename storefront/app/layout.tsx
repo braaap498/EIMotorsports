@@ -38,7 +38,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               <SiteHeader />
             </Suspense>
             <div className="flex-1">{children}</div>
-            <SiteFooter />
+            {/* Like the header, the footer reads the current URL, so it needs a Suspense boundary. */}
+            <Suspense fallback={null}>
+              <SiteFooter />
+            </Suspense>
             <AuthModal />
             <CheckoutGateModal />
           </CartProvider>
