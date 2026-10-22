@@ -350,7 +350,8 @@ export default function CheckoutPage() {
             {busy ? "Taking you to payment…" : "Continue to payment"}
           </button>
           <p className="mt-3 text-center text-xs text-gray-500">You will enter your card on Stripe's secure page.</p>
-          <Link href="/cart" className="mt-3 block text-center text-sm text-gray-600 underline">Back to cart</Link>
+          <Link href="/help" target="_blank" className="mt-3 block text-center text-sm text-gray-600 underline">Shipping &amp; returns info</Link>
+          <Link href="/cart" className="mt-2 block text-center text-sm text-gray-600 underline">Back to cart</Link>
         </aside>
       </form>
     </main>

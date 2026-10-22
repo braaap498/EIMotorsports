@@ -187,6 +187,7 @@ export default function SiteHeader() {
 
           <nav className="ml-auto flex items-center gap-5 text-sm font-semibold text-white md:ml-0">
             <Link href="/about" className="hidden hover:text-[#06bde7] md:block">About</Link>
+            <Link href="/help" className="hidden hover:text-[#06bde7] md:block">Help</Link>
             <Link href="/track-order" className="hidden hover:text-[#06bde7] md:block">Track Order</Link>
 
             {!ready ? (

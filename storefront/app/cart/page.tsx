@@ -195,7 +195,8 @@ export default function CartPage() {
               Online checkout is not open yet. Your cart is saved on this device.
             </p>
           )}
-          <Link href="/" className="mt-4 block text-center text-sm text-gray-600 underline">Continue shopping</Link>
+          <Link href="/help" className="mt-4 block text-center text-sm text-gray-600 underline">Shipping &amp; returns info</Link>
+          <Link href="/" className="mt-2 block text-center text-sm text-gray-600 underline">Continue shopping</Link>
         </aside>
       </div>
     </main>
