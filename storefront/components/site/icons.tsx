@@ -23,7 +23,7 @@ export const GarageIcon = (p: SVGProps<SVGSVGElement>) => (
 export const CartIcon = (p: SVGProps<SVGSVGElement>) => (
   <svg {...base} {...p}><circle cx="9" cy="20" r="1.5" /><circle cx="18" cy="20" r="1.5" /><path d="M2 3h3l2.4 11.2a1 1 0 0 0 1 .8h9.2a1 1 0 0 0 1-.8L20 7H6" /></svg>
 );
-// ATV side view, used as the cart icon. Drawn with currentColor, so it is white in the black header.
+// ATV side view, used on the ATV button on the home page. Drawn with currentColor, so it takes the text color.
 export const AtvIcon = (p: SVGProps<SVGSVGElement>) => (
   <svg
     viewBox="8 50 448 292"

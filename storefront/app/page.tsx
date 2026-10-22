@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import ProductImage from "../components/site/ProductImage";
+import { AtvIcon } from "../components/site/icons";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 const PAGE_SIZE = 24;
@@ -33,8 +34,9 @@ function pageHref(type: string | undefined, page: number) {
   return s ? `/?${s}` : "/";
 }
 
-// Every published product, whatever machine it fits. Choosing a machine in the
-// bar above ("Find parts") is what narrows the list to parts that fit.
+// Every published product, or only the parts for one machine type when a type
+// button is chosen (?type=atv). Choosing a machine in the bar above ("Find parts")
+// narrows the list further, to parts that fit that machine.
 async function AllProducts({ searchParams }: { searchParams: Params }) {
   const p = await searchParams;
   const page = Math.max(1, Number(p.page) || 1);
@@ -44,6 +46,7 @@ async function AllProducts({ searchParams }: { searchParams: Params }) {
   let error = "";
   try {
     const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String((page - 1) * PAGE_SIZE) });
+    if (TYPES.some((t) => t.slug === p.type)) qs.set("type", p.type as string); // unknown ?type= means all types
     const res = await fetch(`${API}/store/search?${qs}`, { cache: "no-store" });
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
@@ -87,27 +90,33 @@ async function AllProducts({ searchParams }: { searchParams: Params }) {
   );
 }
 
-export default function Home({ searchParams }: { searchParams: Params }) {
+export default async function Home({ searchParams }: { searchParams: Params }) {
+  const { type } = await searchParams;
   return (
-    <main className="mx-auto max-w-6xl px-4 py-10">
-      <h1 className="text-3xl font-extrabold tracking-tight text-gray-900 sm:text-4xl">All aftermarket products</h1>
-      <p className="mt-2 max-w-2xl text-gray-600">
-        Browse everything below, or choose your machine in the bar above and we&apos;ll show only the parts that fit.
-      </p>
+    <main className="mx-auto max-w-6xl px-4 py-5">
+      <h1 className="text-3xl font-extrabold tracking-tight text-gray-900 sm:text-4xl">Filter by type</h1>
 
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        {TYPES.map((t) => (
-          <Link
-            key={t.slug}
-            href={`/?type=${t.slug}`}
-            className="rounded-lg border-2 border-gray-200 px-4 py-3 text-center font-bold text-gray-900 transition hover:border-[#06bde7] hover:shadow-md"
-          >
-            {t.name}
-          </Link>
-        ))}
+      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        {TYPES.map((t) => {
+          const active = type === t.slug;
+          return (
+            <Link
+              key={t.slug}
+              // Choosing the active type again clears the filter.
+              href={active ? "/" : `/?type=${t.slug}`}
+              aria-current={active ? "true" : undefined}
+              className={`flex items-center justify-center gap-2 rounded-lg border-2 px-4 py-3 text-center font-bold text-gray-900 transition hover:border-[#06bde7] hover:shadow-md ${
+                active ? "border-[#06bde7] bg-[#e8f8fd]" : "border-gray-200"
+              }`}
+            >
+              {t.slug === "atv" && <AtvIcon className="h-6 w-9 shrink-0" />}
+              {t.name}
+            </Link>
+          );
+        })}
       </div>
 
-      <div className="mt-8">
+      <div className="mt-4">
         <Suspense fallback={<p className="text-gray-600">Loading products…</p>}>
           <AllProducts searchParams={searchParams} />
         </Suspense>

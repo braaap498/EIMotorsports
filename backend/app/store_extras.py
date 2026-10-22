@@ -3,7 +3,7 @@ Public storefront extras: categories, product search, and the customer garage.
 Mounted at /store/*.
 
   GET    /store/categories      public
-  GET    /store/search          public (text, category, and/or a chosen machine)
+  GET    /store/search          public (text, category, machine type, and/or a chosen machine)
   POST   /store/cart/price      public (current price and stock for the items in a cart)
   GET    /store/garage          signed-in customer
   POST   /store/garage          signed-in customer
@@ -67,13 +67,16 @@ def search(
     category: Optional[str] = None,
     year: Optional[int] = None,
     model_id: Optional[int] = None,
+    type: Optional[str] = None,  # machine type slug: atv, utv, snowmobile, dirt-bike, motorcycle, pwc
     limit: int = Query(24, le=100),
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
     # Every word must match the title, SKU or a part number (any order).
     words = re.sub(r"[%_\\]", " ", (q or "")[:100]).split()[:5]
-    params: dict = {"cat": category or None, "year": year, "model_id": model_id}
+    # An unknown type is ignored (all types), so a bad link never gives an empty store.
+    vtype = type if type in {"atv", "utv", "snowmobile", "dirt-bike", "motorcycle", "pwc"} else None
+    params: dict = {"cat": category or None, "year": year, "model_id": model_id, "vtype": vtype}
     word_sql = ""
     for i, w in enumerate(words):
         params[f"w{i}"] = f"%{w}%"
@@ -93,6 +96,17 @@ def search(
         where {PUBLISHED_FILTER}
         {word_sql}
         and (cast(:cat as text) is null or p.category_id in (select id from tree))
+        and (
+          cast(:vtype as text) is null
+          or p.is_universal
+          or exists (
+            select 1 from product_fitment pf
+            join vehicles v on v.id = pf.vehicle_id
+            join vehicle_models vm on vm.id = v.model_id
+            join vehicle_types vt on vt.id = vm.vehicle_type_id
+            where pf.product_id = p.id and vt.slug = cast(:vtype as text)
+          )
+        )
         and (
           cast(:model_id as bigint) is null or cast(:year as int) is null
           or p.is_universal

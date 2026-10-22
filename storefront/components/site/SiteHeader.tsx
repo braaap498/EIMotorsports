@@ -9,7 +9,7 @@ import GarageMenu from "./GarageMenu";
 import { useCart } from "./CartProvider";
 import ProductImage from "./ProductImage";
 import { CHECKOUT_ENABLED } from "../../lib/features";
-import { AtvIcon, ChevronIcon, SearchIcon, UserIcon } from "./icons";
+import { CartIcon, ChevronIcon, SearchIcon, UserIcon } from "./icons";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -279,7 +279,7 @@ export default function SiteHeader() {
                 onKeyDown={(e) => e.key === "Escape" && setCartMenu(false)}
               >
                 <Link href="/cart" aria-label={`Cart, ${cartCount} item${cartCount === 1 ? "" : "s"}`} className="relative block hover:text-[#06bde7]">
-                  <AtvIcon className="h-8 w-12" />
+                  <CartIcon className="h-8 w-8" />
                   {cartCount > 0 && (
                     <span className="absolute -right-2 -top-2 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#06bde7] px-1 text-[11px] font-extrabold text-[#04202b]">
                       {cartCount > 99 ? "99+" : cartCount}
