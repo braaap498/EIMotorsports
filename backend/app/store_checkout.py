@@ -241,6 +241,7 @@ def checkout_start(
                 "price_data": {
                     "currency": "usd",
                     "unit_amount": l["unit_price_cents"],
+                    "tax_behavior": "exclusive",  # prices are before tax; Stripe adds tax on top
                     "product_data": {"name": (l["title"] or "Item")[:250]},
                 },
                 "quantity": l["qty"],
