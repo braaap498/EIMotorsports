@@ -1,18 +1,19 @@
 """
-The Help pages (Shipping and Returns): their text is stored in the database and edited
+The Help pages (Shipping, Returns, Refunds and Privacy): their text is stored in the database and edited
 from the admin area, the same way the About page is.
 
   GET /store/help         public        both pages, for the tabs on the storefront's /help page
   GET /admin/help         admin/owner   the same, for the editor
   PUT /admin/help/{key}   admin/owner   save one page (it shows on the site straight away)
 
-`key` is "shipping" or "returns". Each page is one row in the site_pages table (slugs
-"help-shipping" and "help-returns"), so no new table or migration is needed.
+`key` is "shipping", "returns", "refunds" or "privacy". Each page is one row in the
+site_pages table (slugs "help-shipping", "help-returns", "help-refunds", "help-privacy"),
+so no new table or migration is needed. To add another tab later, add it to PAGES below.
 
 Until a page is saved for the first time it shows a starter text:
   * Shipping: built from app/shipping.py, so the methods and prices always match checkout.
-  * Returns: empty (the storefront shows "check back soon"), because the return terms are
-    the shop's own decision. Write them in the admin editor.
+  * Returns, Refunds, Privacy: empty (the storefront shows "check back soon"), because these
+    are the shop's own terms. Write them in the admin editor.
 Once a page has been saved, what was saved is what shows, even if it was cleared on purpose.
 
 The page text is plain text. The storefront turns it into headings, paragraphs and
@@ -66,6 +67,18 @@ PAGES: dict[str, dict] = {
         "slug": "help-returns",
         "label": "Returns",
         "title": "Returns",
+        "default_body": lambda: "",
+    },
+    "refunds": {
+        "slug": "help-refunds",
+        "label": "Refunds",
+        "title": "Refunds",
+        "default_body": lambda: "",
+    },
+    "privacy": {
+        "slug": "help-privacy",
+        "label": "Privacy",
+        "title": "Privacy policy",
         "default_body": lambda: "",
     },
 }

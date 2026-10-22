@@ -11,7 +11,9 @@ type Draft = { title: string; body: string };
 // Shown only while a page is empty, as a hint for how to lay it out. Nothing here is saved.
 const PLACEHOLDERS: Record<string, string> = {
   shipping: "## Where we ship\nWe ship within the United States.\n\n## Shipping methods\n- USPS Ground Advantage: Free",
-  returns: "## How to start a return\nWrite how a customer asks for a return...\n\n## Refunds\n- What gets refunded, and how long it takes",
+  returns: "## How to start a return\nWrite how a customer asks for a return...\n\n## Return window\n- How many days, and the condition items must be in",
+  refunds: "## When we refund\nWrite when a customer gets money back...\n\n## How long it takes\n- How the refund is paid, and how long it takes to show up",
+  privacy: "## What we collect\nWrite what information the store collects...\n\n## How we use it\n- Orders, shipping, receipts\n\n## Contact\nHow to reach you about privacy questions",
 };
 
 export default function AdminHelpPage() {
@@ -78,7 +80,7 @@ export default function AdminHelpPage() {
       {error && <Notice kind="error">{error}</Notice>}
 
       {saved && (
-        <div role="tablist" aria-label="Help pages" className="flex gap-1 border-b border-gray-200">
+        <div role="tablist" aria-label="Help pages" className="flex gap-1 overflow-x-auto border-b border-gray-200">
           {saved.map((p) => (
             <button
               key={p.key}
@@ -89,7 +91,7 @@ export default function AdminHelpPage() {
                 setTab(p.key);
                 setNotice("");
               }}
-              className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium ${
+              className={`-mb-px shrink-0 whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium ${
                 p.key === tab ? "border-gray-900 text-gray-900" : "border-transparent text-gray-600 hover:text-gray-900"
               }`}
             >

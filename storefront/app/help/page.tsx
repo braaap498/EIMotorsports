@@ -67,7 +67,7 @@ export default function HelpPage() {
     <main className={wrap}>
       <h1 className="text-3xl font-extrabold text-gray-900">Help</h1>
 
-      <div role="tablist" aria-label="Help topics" className="mt-5 flex gap-1 border-b border-gray-200">
+      <div role="tablist" aria-label="Help topics" className="mt-5 flex gap-1 overflow-x-auto border-b border-gray-200">
         {pages.map((p, i) => {
           const on = p.key === current.key;
           return (
@@ -81,7 +81,7 @@ export default function HelpPage() {
               tabIndex={on ? 0 : -1}
               onClick={() => open(p.key)}
               onKeyDown={(e) => onKeyDown(e, i)}
-              className={`-mb-px border-b-2 px-4 py-2.5 text-sm font-semibold ${
+              className={`-mb-px shrink-0 whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-semibold ${
                 on ? "border-[#06bde7] text-gray-900" : "border-transparent text-gray-600 hover:text-gray-900"
               }`}
             >
