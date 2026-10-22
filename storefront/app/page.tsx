@@ -90,31 +90,45 @@ async function AllProducts({ searchParams }: { searchParams: Params }) {
   );
 }
 
-export default async function Home({ searchParams }: { searchParams: Params }) {
+// The type buttons. `active` is the chosen type slug, if any.
+function TypeButtons({ active }: { active?: string }) {
+  return (
+    <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      {TYPES.map((t) => {
+        const isActive = active === t.slug;
+        return (
+          <Link
+            key={t.slug}
+            // Choosing the active type again clears the filter.
+            href={isActive ? "/" : `/?type=${t.slug}`}
+            aria-current={isActive ? "true" : undefined}
+            className={`flex items-center justify-center gap-2 rounded-lg border-2 px-4 py-3 text-center font-bold text-gray-900 transition hover:border-[#06bde7] hover:shadow-md ${
+              isActive ? "border-[#06bde7] bg-[#e8f8fd]" : "border-gray-200"
+            }`}
+          >
+            {t.slug === "atv" && <AtvIcon className="h-6 w-9 shrink-0" />}
+            {t.name}
+          </Link>
+        );
+      })}
+    </div>
+  );
+}
+
+// Reads the URL inside a Suspense boundary (like AllProducts), so the page can still prerender.
+async function TypeButtonsFromUrl({ searchParams }: { searchParams: Params }) {
   const { type } = await searchParams;
+  return <TypeButtons active={type} />;
+}
+
+export default function Home({ searchParams }: { searchParams: Params }) {
   return (
     <main className="mx-auto max-w-6xl px-4 py-5">
       <h1 className="text-3xl font-extrabold tracking-tight text-gray-900 sm:text-4xl">Filter by type</h1>
 
-      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        {TYPES.map((t) => {
-          const active = type === t.slug;
-          return (
-            <Link
-              key={t.slug}
-              // Choosing the active type again clears the filter.
-              href={active ? "/" : `/?type=${t.slug}`}
-              aria-current={active ? "true" : undefined}
-              className={`flex items-center justify-center gap-2 rounded-lg border-2 px-4 py-3 text-center font-bold text-gray-900 transition hover:border-[#06bde7] hover:shadow-md ${
-                active ? "border-[#06bde7] bg-[#e8f8fd]" : "border-gray-200"
-              }`}
-            >
-              {t.slug === "atv" && <AtvIcon className="h-6 w-9 shrink-0" />}
-              {t.name}
-            </Link>
-          );
-        })}
-      </div>
+      <Suspense fallback={<TypeButtons />}>
+        <TypeButtonsFromUrl searchParams={searchParams} />
+      </Suspense>
 
       <div className="mt-4">
         <Suspense fallback={<p className="text-gray-600">Loading products…</p>}>
