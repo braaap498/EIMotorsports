@@ -20,6 +20,11 @@ for the seller's listings NEWEST FIRST. Reading stops at the first page that hol
 a normal check is one or two calls. "deep" keeps going through everything eBay will return
 (eBay stops at 10,000 results), which is slower.
 
+SKU form: products carry SKUs like EBAY-800705556598, so the screen shows new listings the same way
+(EBAY- plus the item number). What gets stored in channel_listings copies the form the existing
+links already use (with or without a prefix), and "already linked" ignores any prefix when comparing,
+so the two can never disagree about whether a listing is linked.
+
 Settings (environment variables on the API; the first three are shared with the About page):
     EBAY_CLIENT_ID, EBAY_CLIENT_SECRET   production keys from developer.ebay.com
     EBAY_SELLER_USERNAME                 the store's eBay user name
@@ -86,11 +91,28 @@ def _fetch_page(token: str, offset: int) -> dict:
     return _open(req)
 
 
+_DIGITS = "regexp_replace(cast(external_id as text), '[^0-9]', '', 'g')"  # item number without any prefix
+SKU_PREFIX = "EBAY-"  # how product SKUs are written
+
+
+def _stored_prefix(db: Session) -> str:
+    """What comes before the item number in the existing channel_listings.external_id values
+    (for example 'EBAY-', or '' when only the bare number is stored): whatever most rows use."""
+    row = db.execute(
+        text(
+            "select regexp_replace(cast(external_id as text), '[0-9]+$', '') as pfx, count(*) "
+            "from channel_listings where external_id is not null "
+            "group by 1 order by 2 desc limit 1"
+        )
+    ).first()
+    return row[0] if row and row[0] is not None else ""
+
+
 def _already_linked(db: Session, item_numbers: list[str]) -> set[str]:
     if not item_numbers:
         return set()
     rows = db.execute(
-        text("select cast(external_id as text) from channel_listings where cast(external_id as text) = any(cast(:ids as text[]))"),
+        text(f"select {_DIGITS} from channel_listings where {_DIGITS} = any(cast(:ids as text[]))"),
         {"ids": item_numbers},
     ).all()
     return {r[0] for r in rows}
@@ -137,6 +159,7 @@ def check(deep: bool = Query(False), db: Session = Depends(get_db)):
                 image = s.get("image") or {}
                 new[n] = {
                     "item_id": n,
+                    "sku": f"{SKU_PREFIX}{n}",
                     "title": s.get("title") or "(no title)",
                     "price": price.get("value"),
                     "currency": price.get("currency"),
@@ -193,7 +216,7 @@ def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
         raise HTTPException(404, "That product no longer exists.")
 
     existing = db.execute(
-        text("select product_id from channel_listings where cast(external_id as text) = :e limit 1"),
+        text(f"select product_id from channel_listings where {_DIGITS} = :e limit 1"),
         {"e": item_id},
     ).first()
     if existing:
@@ -242,13 +265,15 @@ def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
 
     numeric = by_name["external_id"].data_type in {"bigint", "integer", "smallint", "numeric"}
     value_sql = "cast(:e as bigint)" if numeric else "cast(:e as text)"
+    # Store it the way the existing links are stored (same prefix, if they have one).
+    stored = item_id if numeric else _stored_prefix(db) + item_id
     try:
         db.execute(
             text(
                 f"insert into channel_listings (product_id, channel_id, external_id) "
                 f"values (:p, :c, {value_sql})"
             ),
-            {"p": product.id, "c": channel[0], "e": item_id},
+            {"p": product.id, "c": channel[0], "e": stored},
         )
         count = db.execute(
             text("select count(*) from channel_listings where product_id = :p"), {"p": product.id}
@@ -259,4 +284,4 @@ def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
         raise HTTPException(409, f"eBay item {item_id} was just linked by someone else.")
 
     log.info("eBay item %s linked to product %s by %s", item_id, product.id, user.email or user.user_id)
-    return {"ok": True, "item_id": item_id, "product_id": product.id, "product_title": product.title, "listing_count": count}
+    return {"ok": True, "item_id": item_id, "sku": f"{SKU_PREFIX}{item_id}", "stored_as": stored, "product_id": product.id, "product_title": product.title, "listing_count": count}
