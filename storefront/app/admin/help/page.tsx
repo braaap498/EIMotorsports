@@ -3,18 +3,11 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Field, Notice, btnCls, inputCls } from "../../../components/admin/ui";
-import AboutBody from "../../../components/site/AboutBody";
+import DescriptionEditor from "../../../components/admin/DescriptionEditor";
+import { sanitizeHtml } from "../../../components/admin/sanitizeHtml";
 
 type Page = { key: string; label: string; title: string; body: string; updated_at: string | null };
 type Draft = { title: string; body: string };
-
-// Shown only while a page is empty, as a hint for how to lay it out. Nothing here is saved.
-const PLACEHOLDERS: Record<string, string> = {
-  shipping: "## Where we ship\nWe ship within the United States.\n\n## Shipping methods\n- USPS Ground Advantage: Free",
-  returns: "## How to start a return\nWrite how a customer asks for a return...\n\n## Return window\n- How many days, and the condition items must be in",
-  refunds: "## When we refund\nWrite when a customer gets money back...\n\n## How long it takes\n- How the refund is paid, and how long it takes to show up",
-  privacy: "## What we collect\nWrite what information the store collects...\n\n## How we use it\n- Orders, shipping, receipts\n\n## Contact\nHow to reach you about privacy questions",
-};
 
 export default function AdminHelpPage() {
   const [saved, setSaved] = useState<Page[] | null>(null);
@@ -108,18 +101,16 @@ export default function AdminHelpPage() {
             <Field label="Heading">
               <input className={inputCls} value={draft.title} maxLength={120} onChange={(e) => edit({ title: e.target.value })} />
             </Field>
-            <Field label="Page text">
-              <textarea
-                className={`${inputCls} h-96 font-mono text-sm`}
+            <div>
+              <DescriptionEditor
+                key={page.key}
+                label="Page text"
                 value={draft.body}
-                maxLength={20000}
-                onChange={(e) => edit({ body: e.target.value })}
-                placeholder={PLACEHOLDERS[page.key] ?? ""}
+                onChange={(html) => edit({ body: html })}
+                contentClass="page-content min-h-64 text-base text-gray-700"
               />
-              <p className="mt-1 text-xs text-gray-500">
-                Start a line with <code className="rounded bg-gray-100 px-1">## </code> for a heading and <code className="rounded bg-gray-100 px-1">- </code> for a bullet. A blank line starts a new paragraph.
-              </p>
-            </Field>
+              <p className="mt-1 text-xs text-gray-500">Use the style menu for headings, and the buttons for bold, lists and links.</p>
+            </div>
             <button type="button" className={btnCls} disabled={busy || !isChanged(tab)} onClick={save}>
               {busy ? "Saving…" : "Save"}
             </button>
@@ -138,7 +129,11 @@ export default function AdminHelpPage() {
             <p className="mb-2 text-sm font-medium text-gray-700">Preview</p>
             <div className="rounded-lg border border-gray-200 bg-white p-5">
               <h2 className="mb-4 text-2xl font-extrabold text-gray-900">{draft.title || page.label}</h2>
-              {draft.body.trim() ? <AboutBody text={draft.body} /> : <p className="text-sm text-gray-500">Nothing written yet. The site shows &ldquo;Check back soon.&rdquo;</p>}
+              {draft.body.trim() ? (
+                <div className="page-content text-gray-700" dangerouslySetInnerHTML={{ __html: sanitizeHtml(draft.body) }} />
+              ) : (
+                <p className="text-sm text-gray-500">Nothing written yet. The site shows &ldquo;Check back soon.&rdquo;</p>
+              )}
             </div>
           </div>
         </div>

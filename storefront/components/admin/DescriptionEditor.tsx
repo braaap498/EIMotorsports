@@ -16,6 +16,9 @@ type Props = {
   value: string;
   onChange: (html: string) => void;
   disabled?: boolean;
+  // Look of the editing area. The default matches product descriptions; the About and
+  // Help pages pass the .page-content look so the editor matches those pages.
+  contentClass?: string;
 };
 
 type Active = { bold: boolean; italic: boolean; underline: boolean; ul: boolean; ol: boolean; heading: boolean };
@@ -119,7 +122,13 @@ function Tool(props: { title: string; on?: boolean; disabled: boolean; onClick: 
   );
 }
 
-export default function DescriptionEditor({ label, value, onChange, disabled = false }: Props) {
+export default function DescriptionEditor({
+  label,
+  value,
+  onChange,
+  disabled = false,
+  contentClass = "product-description min-h-40 text-sm text-gray-900",
+}: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
   // The last HTML this editor handed to the form. A different value means the
   // product was (re)loaded, and the editor must show it.
@@ -257,7 +266,7 @@ export default function DescriptionEditor({ label, value, onChange, disabled = f
         onInput={emit}
         onPaste={onPaste}
         onDrop={(e) => e.preventDefault()}
-        className={`product-description min-h-40 w-full min-w-0 rounded-b border border-gray-300 px-3 py-2 text-sm font-normal text-gray-900 ${
+        className={`${contentClass} w-full min-w-0 rounded-b border border-gray-300 px-3 py-2 font-normal ${
           disabled ? "bg-gray-100 text-gray-500" : "bg-white"
         }`}
       />

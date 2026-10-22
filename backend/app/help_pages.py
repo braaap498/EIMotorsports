@@ -18,9 +18,10 @@ Until a page is saved for the first time it shows a modest starter policy writte
     that address; without it the text just says "contact us".
 Once a page has been saved, what was saved is what shows, even if it was cleared on purpose.
 
-The page text is plain text. The storefront turns it into headings, paragraphs and
-bullets itself (a line starting with "## " is a heading, "- " is a bullet), so no
-HTML from the editor is ever put on the page.
+The page text is rich text, edited with the same visual toolbar as product descriptions.
+It is stored as cleaned HTML (app/pagetext.py): the server cleans it when it is saved and
+again when it is served. The starter policies below are written as simple plain text
+("## " for a heading, "- " for a bullet) and are converted to HTML when read.
 """
 import os
 from typing import Callable
@@ -32,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.database import get_db
+from app.pagetext import clean_page_input, page_html
 from app.shipping import RATES
 
 admin_router = APIRouter(prefix="/help", tags=["admin-help"], dependencies=[Depends(require_admin)])
@@ -216,12 +218,17 @@ PAGES: dict[str, dict] = {
 
 class HelpPageIn(BaseModel):
     title: str = Field(default="", max_length=120)
-    body: str = Field(default="", max_length=20000)
+    body: str = Field(default="", max_length=60000)
 
     @field_validator("title")
     @classmethod
     def _title(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("body")
+    @classmethod
+    def _body(cls, v: str) -> str:
+        return clean_page_input(v)
 
 
 def _load_all(db: Session) -> dict:
@@ -244,7 +251,7 @@ def _load_all(db: Session) -> dict:
                 "label": p["label"],
                 "title": (row.title if row and row.title else None) or p["title"],
                 # A saved page wins, even if its text was cleared on purpose.
-                "body": (row.body or "") if row else default_body(),
+                "body": page_html(row.body) if row else page_html(default_body()),
                 "updated_at": row.updated_at.isoformat() if row and row.updated_at else None,
             }
         )

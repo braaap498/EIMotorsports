@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState, type KeyboardEvent } from "react";
-import AboutBody from "../../components/site/AboutBody";
 import { storeApi } from "../../lib/storeApi";
 
 type HelpPage = { key: string; label: string; title: string; body: string; updated_at: string | null };
@@ -94,7 +93,12 @@ export default function HelpPage() {
       <section role="tabpanel" id="help-panel" aria-labelledby={`help-tab-${current.key}`} className="mt-6">
         <h2 className="text-2xl font-extrabold text-gray-900">{current.title}</h2>
         <div className="mt-4">
-          {current.body.trim() ? <AboutBody text={current.body} /> : <p className="text-gray-600">Check back soon.</p>}
+          {current.body.trim() ? (
+            // The server sends cleaned HTML (the same kind product descriptions use).
+            <div className="page-content text-gray-700" dangerouslySetInnerHTML={{ __html: current.body }} />
+          ) : (
+            <p className="text-gray-600">Check back soon.</p>
+          )}
         </div>
       </section>
     </main>

@@ -16,9 +16,10 @@ The photo is optional: with no photo the page is just the text. Removing a photo
 only un-links it from the page; the stored file is left alone, because the same
 picture may also be in use on a product (identical pictures share one stored file).
 
-The page text is plain text. The storefront turns it into headings, paragraphs and
-bullets itself (a line starting with "## " is a heading, "- " is a bullet), so no
-HTML from the editor is ever put on the page.
+The page text is rich text, edited with the same visual toolbar as product descriptions.
+It is stored as cleaned HTML (app/pagetext.py): the server cleans it when it is saved and
+again when it is served, so nothing unsafe can reach the page. Older plain-text bodies
+(a line starting with "## " is a heading, "- " is a bullet) are converted when read.
 """
 import json
 import logging
@@ -35,6 +36,7 @@ from app import ebay_feedback
 from app.auth import require_admin
 from app.database import _session_factory, get_db
 from app.images import full_url
+from app.pagetext import clean_page_input, page_html
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +61,7 @@ def clean_ebay_url(v: Optional[str]) -> Optional[str]:
 
 class AboutIn(BaseModel):
     title: str = Field(default=DEFAULT_TITLE, max_length=120)
-    body: str = Field(default="", max_length=20000)
+    body: str = Field(default="", max_length=60000)
     ebay_feedback_url: Optional[str] = Field(default=None, max_length=500)
     ebay_store_url: Optional[str] = Field(default=None, max_length=500)
 
@@ -67,6 +69,11 @@ class AboutIn(BaseModel):
     @classmethod
     def _title(cls, v: str) -> str:
         return v.strip() or DEFAULT_TITLE
+
+    @field_validator("body")
+    @classmethod
+    def _body(cls, v: str) -> str:
+        return clean_page_input(v)
 
     @field_validator("ebay_feedback_url", "ebay_store_url")
     @classmethod
@@ -115,7 +122,7 @@ def _load(db: Session, admin: bool = False) -> dict:
 
     out = {
         "title": (row.title if row else None) or DEFAULT_TITLE,
-        "body": (row.body if row else None) or "",
+        "body": page_html(row.body if row else None),
         "ebay_feedback_url": row.ebay_feedback_url if row else None,
         "ebay_store_url": row.ebay_store_url if row else None,
         "image_url": full_url(row.image_key) if row else None,

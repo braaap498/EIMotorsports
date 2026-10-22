@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import AboutBody from "../../components/site/AboutBody";
 import CustomerFeedback from "../../components/site/CustomerFeedback";
 import { storeApi } from "../../lib/storeApi";
 
@@ -50,7 +49,12 @@ export default function AboutPage() {
           <img src={about.image_url} alt={about.title} className="w-full rounded-lg border border-gray-200 object-cover" />
         )}
         <div>
-          {about.body.trim() ? <AboutBody text={about.body} /> : <p className="text-gray-600">Check back soon.</p>}
+          {about.body.trim() ? (
+            // The server sends cleaned HTML (the same kind product descriptions use).
+            <div className="page-content text-gray-700" dangerouslySetInnerHTML={{ __html: about.body }} />
+          ) : (
+            <p className="text-gray-600">Check back soon.</p>
+          )}
         </div>
       </div>
 

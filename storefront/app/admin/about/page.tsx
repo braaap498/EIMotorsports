@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Field, Notice, btnCls, inputCls } from "../../../components/admin/ui";
-import AboutBody from "../../../components/site/AboutBody";
+import DescriptionEditor from "../../../components/admin/DescriptionEditor";
+import { sanitizeHtml } from "../../../components/admin/sanitizeHtml";
 import { shrink } from "../../../components/admin/PhotosPanel";
 
 type About = {
@@ -157,18 +158,15 @@ export default function AdminAboutPage() {
           <Field label="Page title">
             <input className={inputCls} value={title} maxLength={120} onChange={(e) => setTitle(e.target.value)} />
           </Field>
-          <Field label="Page text">
-            <textarea
-              className={`${inputCls} h-80 font-mono text-sm`}
+          <div>
+            <DescriptionEditor
+              label="Page text"
               value={body}
-              maxLength={20000}
-              onChange={(e) => setBody(e.target.value)}
-              placeholder={"## Who we are\nWe are a powersports parts shop...\n\n## Why shop with us\n- Fast shipping\n- Parts that fit"}
+              onChange={setBody}
+              contentClass="page-content min-h-64 text-base text-gray-700"
             />
-            <p className="mt-1 text-xs text-gray-500">
-              Start a line with <code className="rounded bg-gray-100 px-1">## </code> for a heading and <code className="rounded bg-gray-100 px-1">- </code> for a bullet. A blank line starts a new paragraph.
-            </p>
-          </Field>
+            <p className="mt-1 text-xs text-gray-500">Use the style menu for headings, and the buttons for bold, lists and links.</p>
+          </div>
           <Field label="Link to your eBay feedback page (optional)">
             <input className={inputCls} value={feedbackUrl} maxLength={500} onChange={(e) => setFeedbackUrl(e.target.value)} placeholder="https://www.ebay.com/fdbk/feedback_profile/your-ebay-name" />
           </Field>
@@ -220,7 +218,11 @@ export default function AdminAboutPage() {
               // eslint-disable-next-line @next/next/no-img-element
               <img src={imageUrl} alt="" className="mb-4 w-full max-w-xs rounded-lg border border-gray-200 object-cover" />
             )}
-            {body.trim() ? <AboutBody text={body} /> : <p className="text-sm text-gray-500">Nothing written yet.</p>}
+            {body.trim() ? (
+              <div className="page-content text-gray-700" dangerouslySetInnerHTML={{ __html: sanitizeHtml(body) }} />
+            ) : (
+              <p className="text-sm text-gray-500">Nothing written yet.</p>
+            )}
           </div>
         </div>
       </div>
