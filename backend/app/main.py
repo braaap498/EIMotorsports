@@ -17,6 +17,7 @@ from app.about import admin_router as admin_about_router
 from app.about import store_router as store_about_router
 from app.admin_catalog import router as admin_catalog_router
 from app.admin_cleanup import router as admin_cleanup_router
+from app.admin_ebay_new import router as admin_ebay_new_router
 from app.admin_photos import router as admin_photos_router
 from app.admin_users import router as admin_users_router
 from app.auth import AuthUser, require_staff
@@ -71,6 +72,7 @@ def ping_db(db: Session = Depends(get_db)):
 # so they pick up the /admin prefix and the staff check.
 admin_router.include_router(admin_catalog_router)
 admin_router.include_router(admin_cleanup_router)
+admin_router.include_router(admin_ebay_new_router)
 admin_router.include_router(admin_photos_router)
 admin_router.include_router(admin_users_router)
 admin_router.include_router(admin_about_router)

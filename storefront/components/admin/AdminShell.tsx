@@ -19,6 +19,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[] }[] = 
   { href: "/admin/models", label: "Models & years" },
   { href: "/admin/fitment", label: "Types & makes" },
   { href: "/admin/cleanup", label: "Parts clean-up" },
+  { href: "/admin/ebay-new", label: "New eBay listings" },
   { href: "/admin/users", label: "Team" },
   { href: "/admin/about", label: "About page" },
   { href: "/admin/help", label: "Help pages" },
