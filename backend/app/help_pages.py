@@ -10,16 +10,19 @@ from the admin area, the same way the About page is.
 site_pages table (slugs "help-shipping", "help-returns", "help-refunds", "help-privacy"),
 so no new table or migration is needed. To add another tab later, add it to PAGES below.
 
-Until a page is saved for the first time it shows a starter text:
-  * Shipping: built from app/shipping.py, so the methods and prices always match checkout.
-  * Returns, Refunds, Privacy: empty (the storefront shows "check back soon"), because these
-    are the shop's own terms. Write them in the admin editor.
+Until a page is saved for the first time it shows a modest starter policy written in this file:
+  * Shipping: the methods and prices are built from app/shipping.py, so they always match checkout.
+  * Returns, Refunds, Privacy: general starter terms. They are the shop's own terms, so read
+    them, change anything that is not how the shop works, and save your version in the admin editor.
+  * Set SUPPORT_EMAIL (Render environment variable) and the starter text tells customers to email
+    that address; without it the text just says "contact us".
 Once a page has been saved, what was saved is what shows, even if it was cleared on purpose.
 
 The page text is plain text. The storefront turns it into headings, paragraphs and
 bullets itself (a line starting with "## " is a heading, "- " is a bullet), so no
 HTML from the editor is ever put on the page.
 """
+import os
 from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -39,18 +42,145 @@ def _money(cents: int) -> str:
     return f"${cents / 100:,.2f}"
 
 
+def _reach_us() -> str:
+    """How the starter text tells customers to get in touch (lower case, used mid-sentence)."""
+    email = os.getenv("SUPPORT_EMAIL", "").strip()
+    return f"email us at {email}" if email else "contact us"
+
+
 def _default_shipping() -> str:
-    """Starter shipping text, built from the same price list checkout uses."""
+    """Starter shipping text. The methods and prices come from the list checkout uses."""
     methods = "\n".join(
         f"- {label}: {'Free' if cents == 0 else _money(cents) + ' per item'}" for _code, label, cents in RATES
     )
-    return (
-        "## Where we ship\n"
-        "We currently ship within the United States only.\n\n"
-        "## Shipping methods and prices\n"
-        "You choose a shipping method at checkout, and the price is shown before you pay. "
-        "Shipping is priced per item.\n"
-        f"{methods}"
+    return "\n".join(
+        [
+            "## Where we ship",
+            "We currently ship within the United States only.",
+            "",
+            "## Shipping methods and prices",
+            "You choose a shipping method at checkout, and the price is shown before you pay. "
+            "Shipping is priced per item.",
+            methods,
+            "",
+            "## Delivery times",
+            "We ship orders as quickly as we can once your payment is confirmed. Delivery times are "
+            "estimates from USPS and are not guaranteed. Delays can happen, especially around holidays "
+            "or in bad weather.",
+            "",
+            "## Your shipping address",
+            "We ship to the address you enter at checkout, so please double-check it. If you notice a "
+            f"mistake, {_reach_us()} right away and we will try to help. We cannot promise to change "
+            "the address once an order has shipped.",
+            "",
+            "## Taxes",
+            "Sales tax, where it applies, is calculated at checkout.",
+            "",
+            "## Lost or damaged packages",
+            f"If your order arrives damaged or does not arrive, {_reach_us()} and we will help sort it "
+            "out. See the Refunds tab for what to expect.",
+        ]
+    )
+
+
+def _default_returns() -> str:
+    return "\n".join(
+        [
+            "## Return window",
+            "You can return most items within 30 days of the day your order was delivered.",
+            "",
+            "## What can be returned",
+            "- Items that are unused and uninstalled",
+            "- In their original packaging, with all parts included",
+            "- Items that were damaged, defective, or not what you ordered (see below)",
+            "",
+            "## How to start a return",
+            f"Please do not send anything back before you hear from us. First, {_reach_us()} with your "
+            "order number and the reason for the return. We will reply with the next steps and the "
+            "address to send the item to.",
+            "",
+            "## Return shipping",
+            "If you are returning an item because you changed your mind or ordered the wrong part, you "
+            "pay for return shipping. If we sent the wrong item, or it arrived damaged or defective, we "
+            "will cover it.",
+            "",
+            "## Checking fit",
+            "Use the Year, Make and Model selector and compare part numbers before you order. A part "
+            "ordered by mistake can still be returned under the terms above.",
+            "",
+            "## Damaged or incorrect items",
+            f"{_reach_us()[0].upper()}{_reach_us()[1:]} within 7 days of delivery and include your order number and a "
+            "few photos of the item and the packaging.",
+        ]
+    )
+
+
+def _default_refunds() -> str:
+    return "\n".join(
+        [
+            "## When we refund",
+            "Once we receive and check a returned item, we refund the item price to the card you paid "
+            "with. You will get a message from us when the refund has been issued.",
+            "",
+            "## How long it takes",
+            "Refunds are sent to your original payment method. Depending on your bank or card issuer, "
+            "it can take about 5 to 10 business days for the money to show up on your statement.",
+            "",
+            "## Shipping costs",
+            "The original shipping charge is not refunded unless the return is because of our mistake "
+            "(the wrong item, or an item that arrived damaged or defective).",
+            "",
+            "## Cancelling an order",
+            f"To cancel an order, {_reach_us()} as soon as you can. If it has not shipped yet, we will "
+            "cancel it and refund the full amount. If it has already shipped, you can return it under "
+            "our returns policy.",
+            "",
+            "## Lost packages",
+            f"If a package never arrives, {_reach_us()}. We will look into it with the carrier and "
+            "either send a replacement or refund your order.",
+        ]
+    )
+
+
+def _default_privacy() -> str:
+    return "\n".join(
+        [
+            "## What we collect",
+            "When you place an order or create an account, we collect:",
+            "- Your name and email address",
+            "- Your shipping address and, if you give it, a phone number",
+            "- The billing address you enter when paying",
+            "- Your order history",
+            "",
+            "## Payments",
+            "Payments are handled by Stripe. You enter your card details on Stripe's secure payment "
+            "page, and your card number never reaches our website or our servers.",
+            "",
+            "## How we use your information",
+            "We use it to process and ship your order, send receipts and order updates, answer your "
+            "questions, and keep our records. We do not sell your personal information.",
+            "",
+            "## Who we share it with",
+            "We share information only with the services that help us run the store, such as payment "
+            "processing, account sign-in and data storage, and shipping carriers, and only what they "
+            "need to do their job. We may also share it if the law requires.",
+            "",
+            "## Cookies and your device",
+            "The site stores some information in your browser to work properly, such as keeping you "
+            "signed in and saving the items in your cart on your device.",
+            "",
+            "## Keeping your information",
+            "We keep order records for as long as we need them for accounting, tax, and customer "
+            f"service. To ask for a copy of your information or to have your account information "
+            f"deleted, {_reach_us()}. We may need to keep some order records after that.",
+            "",
+            "## Children",
+            "This store is not meant for children under 13, and we do not knowingly collect their "
+            "information.",
+            "",
+            "## Changes",
+            "We may update this page from time to time. The version on this page is the current one.",
+        ]
     )
 
 
@@ -67,19 +197,19 @@ PAGES: dict[str, dict] = {
         "slug": "help-returns",
         "label": "Returns",
         "title": "Returns",
-        "default_body": lambda: "",
+        "default_body": _default_returns,
     },
     "refunds": {
         "slug": "help-refunds",
         "label": "Refunds",
         "title": "Refunds",
-        "default_body": lambda: "",
+        "default_body": _default_refunds,
     },
     "privacy": {
         "slug": "help-privacy",
         "label": "Privacy",
         "title": "Privacy policy",
-        "default_body": lambda: "",
+        "default_body": _default_privacy,
     },
 }
 

@@ -124,6 +124,11 @@ export default function AdminHelpPage() {
               {busy ? "Saving…" : "Save"}
             </button>
             {isChanged(tab) && <span className="ml-3 text-xs text-amber-700">You have unsaved changes.</span>}
+            {!page.updated_at && !isChanged(tab) && (
+              <p className="mt-2 text-xs text-amber-700">
+                This is starter text. It is already showing on the site. Read it, change anything that is not how your shop works, and click Save to keep your own version.
+              </p>
+            )}
             {page.updated_at && !isChanged(tab) && (
               <span className="ml-3 text-xs text-gray-500">Last saved {new Date(page.updated_at).toLocaleString("en-US")}</span>
             )}
