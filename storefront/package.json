@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",
+    "bwip-js": "^4.11.4",
     "next": "16.4.1",
     "react": "19.3.0",
     "react-dom": "19.3.0"
