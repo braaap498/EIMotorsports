@@ -40,7 +40,14 @@ router = APIRouter(prefix="/cleanup", tags=["admin-cleanup"], dependencies=[Depe
 MAX_MERGE = 1500  # products merged in one go (the biggest duplicate family is ~900)
 
 # Tables that point at products and whose rows must FOLLOW the part to the survivor.
-MOVE_TABLES = {"channel_listings", "inventory_transactions", "sales_transactions", "purchase_order_lines"}
+MOVE_TABLES = {
+    "channel_listings",
+    "inventory_transactions",
+    "sales_transactions",
+    "purchase_order_lines",
+    "product_barcodes",       # scanning an old label still finds the kept part
+    "inventory_batch_lines",  # receiving / shipping history follows the part
+}
 # Tables whose rows are only descriptions of the deleted duplicates; they go with the product.
 DROP_TABLES = {
     "product_fitment",

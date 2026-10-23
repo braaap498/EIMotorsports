@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, ApiError, errMsg } from "../../lib/adminApi";
 import { getSupabase } from "../../lib/supabase";
@@ -16,6 +16,11 @@ type Status = "loading" | "signedout" | "forbidden" | "error" | "ok";
 const NAV: { href: string; label: string; exact?: boolean; any?: string[] }[] = [
   { href: "/admin", label: "Dashboard", exact: true, any: ["products.view", "fitment.view"] },
   { href: "/admin/products", label: "Products", any: ["products.view", "fitment.view"] },
+  {
+    href: "/admin/inventory",
+    label: "Inventory",
+    any: ["inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust"],
+  },
   { href: "/admin/models", label: "Models & years" },
   { href: "/admin/fitment", label: "Types & makes" },
   { href: "/admin/cleanup", label: "Parts clean-up" },
@@ -24,6 +29,15 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[] }[] = 
   { href: "/admin/about", label: "About page" },
   { href: "/admin/help", label: "Help pages" },
 ];
+
+// An employee who can only use some pages lands on /admin; send them to the first one they may open.
+function Redirect({ to }: { to: string }) {
+  const router = useRouter();
+  useEffect(() => {
+    router.replace(to);
+  }, [router, to]);
+  return <p className="p-8 text-sm text-gray-500">Loading…</p>;
+}
 
 function LoginForm() {
   const [email, setEmail] = useState("");
@@ -200,7 +214,9 @@ export default function AdminShell({ children }: { children: ReactNode }) {
       </aside>
       <main className="min-w-0 flex-1 p-4 md:p-6">
         <div className="mx-auto max-w-6xl">
-          {nothingGranted || blocked ? (
+          {blocked && pathname === "/admin" && navItems[0] ? (
+            <Redirect to={navItems[0].href} />
+          ) : nothingGranted || blocked ? (
             <Notice kind="error">
               {nothingGranted
                 ? "Your account is set up, but no permissions have been given to it yet. Ask an admin to turn some on."
