@@ -27,6 +27,8 @@ from app.database import get_db
 from app.fitment import router as fitment_router
 from app.help_pages import admin_router as admin_help_router
 from app.help_pages import store_router as store_help_router
+from app.quickbooks import admin_router as admin_quickbooks_router
+from app.quickbooks import soap_router as qbwc_router
 from app.reviews import admin_router as admin_reviews_router
 from app.reviews import store_router as store_reviews_router
 from app.store_checkout import router as store_checkout_router
@@ -74,6 +76,7 @@ def ping_db(db: Session = Depends(get_db)):
 admin_router.include_router(admin_catalog_router)
 admin_router.include_router(admin_cleanup_router)
 admin_router.include_router(admin_ebay_new_router)
+admin_router.include_router(admin_quickbooks_router)
 admin_router.include_router(admin_inventory_router)
 admin_router.include_router(admin_photos_router)
 admin_router.include_router(admin_users_router)
@@ -88,3 +91,4 @@ app.include_router(store_checkout_router)
 app.include_router(store_about_router)
 app.include_router(store_reviews_router)
 app.include_router(store_help_router)
+app.include_router(qbwc_router)  # QuickBooks Web Connector (public URL, checks its own login)
