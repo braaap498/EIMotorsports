@@ -236,6 +236,9 @@ export default function AdminShell({ children }: { children: ReactNode }) {
           ) : (
             <>
               {FITMENT_TABS.some((t) => pathname.startsWith(t.href)) && (
+                <h1 className="mb-3 text-2xl font-semibold">Fitment</h1>
+              )}
+              {FITMENT_TABS.some((t) => pathname.startsWith(t.href)) && (
                 <div className="mb-4 flex gap-1 border-b border-gray-200">
                   {FITMENT_TABS.map((t) => {
                     const on = pathname.startsWith(t.href);
