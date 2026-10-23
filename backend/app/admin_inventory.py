@@ -7,7 +7,7 @@ HOW STOCK IS COUNTED - read this before changing anything
     moment Stripe confirms payment (store_checkout._mark_paid), and eBay sales take theirs
     elsewhere. So SCANNING A PART OUT NEVER SUBTRACTS STOCK A SECOND TIME. The ship scan
     checks the pick (right part, right quantity, nothing missing), records who shipped what,
-    and marks the website order shipped.
+    and sets the website order to 'shipped'.
   * Receiving scans ADD stock, and write an inventory_transactions ledger row.
   * Every commit is ONE database transaction, tagged with a batch id made by the browser, so a
     double click or a retry after a dropped connection can never be applied twice.
@@ -390,7 +390,7 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
                 text(
                     "insert into inventory_transactions "
                     "(product_id, transaction_type, quantity_change, reference, legacy_created_by) "
-                    "values (:p, 'Receiving', :q, :ref, :by)"
+                    "values (:p, 'Receive', :q, :ref, :by)"
                 ),
                 {"p": pid, "q": m["qty"], "ref": ref[:200], "by": user.email},
             )
@@ -564,7 +564,7 @@ def ship(body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(c
             _insert_line(db, body.batch_id, pid, m["barcode_id"], m["qty"])
         if order and complete:
             db.execute(
-                text("update orders set shipped_at = now(), shipped_by = :by where id = :id"),
+                text("update orders set status = 'shipped', shipped_at = now(), shipped_by = :by where id = :id"),
                 {"by": user.email, "id": order.id},
             )
         db.commit()
