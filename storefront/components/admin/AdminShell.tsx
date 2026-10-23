@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { api, ApiError, errMsg } from "../../lib/adminApi";
 import { getSupabase } from "../../lib/supabase";
@@ -13,11 +13,15 @@ type Status = "loading" | "signedout" | "forbidden" | "error" | "ok";
 
 // `any`: shown to employees who hold at least one of these permissions.
 // Items without `any` are for owners and admins only.
-const NAV: { href: string; label: string; exact?: boolean; any?: string[] }[] = [
+const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match?: string[] }[] = [
   { href: "/admin", label: "Dashboard", exact: true, any: ["products.view", "fitment.view"] },
   { href: "/admin/products", label: "Products", any: ["products.view", "fitment.view"] },
-  { href: "/admin/models", label: "Models & years" },
-  { href: "/admin/fitment", label: "Types & makes" },
+  {
+    href: "/admin/inventory",
+    label: "Inventory",
+    any: ["inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust"],
+  },
+  { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
   { href: "/admin/cleanup", label: "Parts clean-up" },
   { href: "/admin/ebay-new", label: "New eBay listings" },
   { href: "/admin/quickbooks", label: "QuickBooks" },
@@ -25,6 +29,26 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[] }[] = 
   { href: "/admin/about", label: "About page" },
   { href: "/admin/help", label: "Help pages" },
 ];
+
+// Sub-pages shown as tabs under the Fitment button.
+const FITMENT_TABS = [
+  { href: "/admin/models", label: "Models & years" },
+  { href: "/admin/fitment", label: "Types & makes" },
+];
+
+function isActive(n: (typeof NAV)[number], pathname: string) {
+  if (n.match) return n.match.some((m) => pathname.startsWith(m));
+  return n.exact ? pathname === n.href : pathname.startsWith(n.href);
+}
+
+// An employee who can only use some pages lands on /admin; send them to the first one they may open.
+function Redirect({ to }: { to: string }) {
+  const router = useRouter();
+  useEffect(() => {
+    router.replace(to);
+  }, [router, to]);
+  return <p className="p-8 text-sm text-gray-500">Loading…</p>;
+}
 
 function LoginForm() {
   const [email, setEmail] = useState("");
@@ -167,7 +191,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
   // An employee whose account has no permissions yet can sign in but sees nothing to do.
   const nothingGranted = !isAdmin && navItems.length === 0;
   // Typing an admin-only address into the browser: say so instead of showing a page full of errors.
-  const here = NAV.filter((n) => (n.exact ? pathname === n.href : pathname.startsWith(n.href))).sort(
+  const here = NAV.filter((n) => isActive(n, pathname)).sort(
     (a, b) => b.href.length - a.href.length
   )[0];
   const blocked = !isAdmin && !nothingGranted && !!here && !navItems.includes(here);
@@ -179,7 +203,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         <div className="px-4 py-4 text-sm font-bold uppercase tracking-wide">E&amp;I Admin</div>
         <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:flex-col md:pb-0">
           {navItems.map((n) => {
-            const active = n.exact ? pathname === n.href : pathname.startsWith(n.href);
+            const active = isActive(n, pathname);
             return (
               <Link
                 key={n.href}
@@ -201,14 +225,36 @@ export default function AdminShell({ children }: { children: ReactNode }) {
       </aside>
       <main className="min-w-0 flex-1 p-4 md:p-6">
         <div className="mx-auto max-w-6xl">
-          {nothingGranted || blocked ? (
+          {blocked && pathname === "/admin" && navItems[0] ? (
+            <Redirect to={navItems[0].href} />
+          ) : nothingGranted || blocked ? (
             <Notice kind="error">
               {nothingGranted
                 ? "Your account is set up, but no permissions have been given to it yet. Ask an admin to turn some on."
                 : "Your account doesn't have access to this page."}
             </Notice>
           ) : (
-            children
+            <>
+              {FITMENT_TABS.some((t) => pathname.startsWith(t.href)) && (
+                <div className="mb-4 flex gap-1 border-b border-gray-200">
+                  {FITMENT_TABS.map((t) => {
+                    const on = pathname.startsWith(t.href);
+                    return (
+                      <Link
+                        key={t.href}
+                        href={t.href}
+                        className={`-mb-px whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium ${
+                          on ? "border-black text-black" : "border-transparent text-gray-500 hover:text-gray-800"
+                        }`}
+                      >
+                        {t.label}
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+              {children}
+            </>
           )}
         </div>
         <div className="mt-8 text-xs text-gray-500 md:hidden">
