@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
 import { useAccess } from "../AdminAccess";
@@ -17,11 +17,13 @@ type Row = {
 };
 type Resp = { total: number; low_count: number; out_count: number; items: Row[] };
 type View = "all" | "low" | "out";
+type Note = "" | "saving" | "saved";
 
 const LIMIT = 50;
+const SAVE_DELAY_MS = 700;
 const isLow = (r: Row) => (r.reorder_point ?? 0) > 0 && r.quantity_on_hand <= (r.reorder_point ?? 0);
 
-/** Every product with its stock, manual +/-, restock levels, and the list of what needs reordering. */
+/** Every product with its stock, manual count changes, restock levels, and the list of what needs reordering. */
 export default function StockPanel({ active }: { active: boolean }) {
   const { can } = useAccess();
   const canEdit = can("inventory.adjust");
@@ -69,8 +71,9 @@ export default function StockPanel({ active }: { active: boolean }) {
       .catch(() => {});
   }, [inactive]);
 
-  function onUpdate(row: Row) {
-    setData((prev) => ({ ...prev, items: prev.items.map((r) => (r.id === row.id ? row : r)) }));
+  // Merge only the field that changed, so a slow save can never overwrite a newer edit to another field.
+  function onUpdate(id: number, patch: Partial<Row>) {
+    setData((prev) => ({ ...prev, items: prev.items.map((r) => (r.id === id ? { ...r, ...patch } : r)) }));
     refreshCounts();
   }
 
@@ -90,8 +93,8 @@ export default function StockPanel({ active }: { active: boolean }) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-gray-600">
-        Every part and how many you have. Use − and + to change a count by one, or type the real number and press Enter.
-        Set a restock level on a part and it shows up under Low stock when you reach or drop below it.
+        Every part and how many you have. Use the arrows or type the real number; changes save by themselves a moment
+        after you stop. Set a restock level on a part and it shows up under Low stock when you reach or drop below it.
       </p>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -170,73 +173,166 @@ function StockRow({
   row: Row;
   canEdit: boolean;
   showShort: boolean;
-  onUpdate: (r: Row) => void;
+  onUpdate: (id: number, patch: Partial<Row>) => void;
   onError: (msg: string) => void;
 }) {
   const [count, setCount] = useState(String(row.quantity_on_hand));
   const [level, setLevel] = useState(row.reorder_point ? String(row.reorder_point) : "");
-  const [busy, setBusy] = useState(false);
+  const [countNote, setCountNote] = useState<Note>("");
+  const [levelNote, setLevelNote] = useState<Note>("");
 
+  // Always the latest row, so async handlers never act on a stale copy.
+  const rowRef = useRef(row);
+  rowRef.current = row;
+
+  // Per-field save bookkeeping.
+  //  timer: pending debounced save; seq: newest request (older replies are ignored);
+  //  dirty: the box holds something the server hasn't confirmed, so don't overwrite it;
+  //  sent: the last value we asked the server to store.
+  const countTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const levelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countSeq = useRef(0);
+  const levelSeq = useRef(0);
+  const countDirty = useRef(false);
+  const levelDirty = useRef(false);
+  const sentCount = useRef(row.quantity_on_hand);
+  const sentLevel = useRef(row.reorder_point ?? 0);
+
+  // Follow the server's value, but never while you're mid-edit.
   useEffect(() => {
-    setCount(String(row.quantity_on_hand));
+    sentCount.current = row.quantity_on_hand;
+    if (!countDirty.current) setCount(String(row.quantity_on_hand));
   }, [row.quantity_on_hand]);
   useEffect(() => {
-    setLevel(row.reorder_point ? String(row.reorder_point) : "");
+    sentLevel.current = row.reorder_point ?? 0;
+    if (!levelDirty.current) setLevel(row.reorder_point ? String(row.reorder_point) : "");
   }, [row.reorder_point]);
 
-  async function adjust(body: { delta?: number; set_to?: number }) {
-    setBusy(true);
+  function flash(set: (fn: (n: Note) => Note) => void) {
+    set(() => "saved");
+    setTimeout(() => set((n) => (n === "saved" ? "" : n)), 1500);
+  }
+
+  // ----- on hand -----
+  async function saveCount(text: string, final: boolean) {
+    const n = Number(text);
+    if (text.trim() === "" || !Number.isInteger(n) || n < 0) {
+      if (final) {
+        countDirty.current = false;
+        setCount(String(sentCount.current));
+      }
+      return; // while typing, wait for a real number
+    }
+    if (n === sentCount.current) {
+      if (final) countDirty.current = false;
+      return;
+    }
+    const seq = ++countSeq.current;
+    sentCount.current = n;
+    setCountNote("saving");
     onError("");
     try {
       const r = await api<{ quantity_on_hand: number }>(`/inventory/products/${row.id}/adjust`, {
         method: "POST",
-        body,
+        body: { set_to: n },
       });
-      onUpdate({ ...row, quantity_on_hand: r.quantity_on_hand });
+      if (seq !== countSeq.current) return;
+      if (!countTimer.current) countDirty.current = false;
+      sentCount.current = r.quantity_on_hand;
+      onUpdate(row.id, { quantity_on_hand: r.quantity_on_hand });
+      flash(setCountNote);
     } catch (e) {
+      if (seq !== countSeq.current) return;
       onError(errMsg(e));
-      setCount(String(row.quantity_on_hand));
-    } finally {
-      setBusy(false);
+      countDirty.current = false;
+      sentCount.current = rowRef.current.quantity_on_hand;
+      setCount(String(rowRef.current.quantity_on_hand));
+      setCountNote("");
     }
   }
 
-  function commitCount() {
-    const n = Number(count);
-    if (count.trim() === "" || !Number.isInteger(n) || n < 0) {
-      setCount(String(row.quantity_on_hand));
-      return;
-    }
-    if (n !== row.quantity_on_hand) adjust({ set_to: n });
+  function editCount(v: string) {
+    setCount(v);
+    countDirty.current = true;
+    if (countTimer.current) clearTimeout(countTimer.current);
+    countTimer.current = setTimeout(() => {
+      countTimer.current = null;
+      saveCount(v, false);
+    }, SAVE_DELAY_MS);
   }
 
-  async function commitLevel() {
-    const t = level.trim();
-    const n = t === "" ? null : Number(t);
-    if (n !== null && (!Number.isInteger(n) || n < 0)) {
-      setLevel(row.reorder_point ? String(row.reorder_point) : "");
+  function finishCount() {
+    if (countTimer.current) {
+      clearTimeout(countTimer.current);
+      countTimer.current = null;
+    }
+    saveCount(count, true);
+  }
+
+  // ----- restock level -----
+  async function saveLevel(text: string, final: boolean) {
+    const t = text.trim();
+    const n = t === "" ? 0 : Number(t); // empty = no restock level
+    if (!Number.isInteger(n) || n < 0) {
+      if (final) {
+        levelDirty.current = false;
+        setLevel(sentLevel.current ? String(sentLevel.current) : "");
+      }
       return;
     }
-    if ((n ?? 0) === (row.reorder_point ?? 0)) return;
-    setBusy(true);
+    if (n === sentLevel.current) {
+      if (final) levelDirty.current = false;
+      return;
+    }
+    const seq = ++levelSeq.current;
+    sentLevel.current = n;
+    setLevelNote("saving");
     onError("");
     try {
       const r = await api<{ reorder_point: number | null }>(`/inventory/products/${row.id}/reorder-point`, {
         method: "PUT",
-        body: { reorder_point: n },
+        body: { reorder_point: n === 0 ? null : n },
       });
-      onUpdate({ ...row, reorder_point: r.reorder_point });
+      if (seq !== levelSeq.current) return;
+      if (!levelTimer.current) levelDirty.current = false;
+      sentLevel.current = r.reorder_point ?? 0;
+      onUpdate(row.id, { reorder_point: r.reorder_point });
+      flash(setLevelNote);
     } catch (e) {
+      if (seq !== levelSeq.current) return;
       onError(errMsg(e));
-      setLevel(row.reorder_point ? String(row.reorder_point) : "");
-    } finally {
-      setBusy(false);
+      levelDirty.current = false;
+      sentLevel.current = rowRef.current.reorder_point ?? 0;
+      setLevel(rowRef.current.reorder_point ? String(rowRef.current.reorder_point) : "");
+      setLevelNote("");
     }
+  }
+
+  function editLevel(v: string) {
+    setLevel(v);
+    levelDirty.current = true;
+    if (levelTimer.current) clearTimeout(levelTimer.current);
+    levelTimer.current = setTimeout(() => {
+      levelTimer.current = null;
+      saveLevel(v, false);
+    }, SAVE_DELAY_MS);
+  }
+
+  function finishLevel() {
+    if (levelTimer.current) {
+      clearTimeout(levelTimer.current);
+      levelTimer.current = null;
+    }
+    saveLevel(level, true);
   }
 
   const enterBlurs = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") (e.target as HTMLInputElement).blur();
   };
+  // Scrolling the page over a focused number box would otherwise change the number.
+  const noWheel = (e: React.WheelEvent<HTMLInputElement>) => (e.target as HTMLInputElement).blur();
+
+  const noteText = (n: Note) => (n === "saving" ? "Saving…" : n === "saved" ? "Saved" : "");
   const low = isLow(row);
   const out = row.quantity_on_hand <= 0;
 
@@ -252,56 +348,50 @@ function StockRow({
         </div>
       </td>
       <td className="px-3 py-2 font-semibold">{row.bin_location ?? "—"}</td>
-      <td className="px-3 py-2">
+      <td className="whitespace-nowrap px-3 py-2">
         {canEdit ? (
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              className={btn2Cls}
-              disabled={busy || row.quantity_on_hand <= 0}
-              onClick={() => adjust({ delta: -1 })}
-              aria-label="Take one off"
-            >
-              −
-            </button>
+          <div className="flex items-center gap-2">
             <input
               type="number"
               min={0}
-              className={`${inputCls} w-20 text-center`}
+              className={`${inputCls} w-24 text-center`}
               value={count}
-              disabled={busy}
-              onChange={(e) => setCount(e.target.value)}
-              onBlur={commitCount}
+              onChange={(e) => editCount(e.target.value)}
+              onBlur={finishCount}
               onKeyDown={enterBlurs}
+              onWheel={noWheel}
             />
-            <button type="button" className={btn2Cls} disabled={busy} onClick={() => adjust({ delta: 1 })} aria-label="Add one">
-              +
-            </button>
+            <span className="w-14 text-xs text-gray-500">{noteText(countNote)}</span>
           </div>
         ) : (
           row.quantity_on_hand
         )}
       </td>
-      <td className="px-3 py-2">
+      <td className="whitespace-nowrap px-3 py-2">
         {canEdit ? (
-          <input
-            type="number"
-            min={0}
-            className={`${inputCls} w-24`}
-            value={level}
-            placeholder="none"
-            disabled={busy}
-            onChange={(e) => setLevel(e.target.value)}
-            onBlur={commitLevel}
-            onKeyDown={enterBlurs}
-          />
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              className={`${inputCls} w-24`}
+              value={level}
+              placeholder="none"
+              onChange={(e) => editLevel(e.target.value)}
+              onBlur={finishLevel}
+              onKeyDown={enterBlurs}
+              onWheel={noWheel}
+            />
+            <span className="w-14 text-xs text-gray-500">{noteText(levelNote)}</span>
+          </div>
         ) : (
           row.reorder_point ?? "—"
         )}
       </td>
       {showShort && <td className="px-3 py-2 font-semibold">{Math.max(0, (row.reorder_point ?? 0) - row.quantity_on_hand)}</td>}
-      <td className="px-3 py-2">
-        {out ? <Badge tone="amber">Out of stock</Badge> : low ? <Badge tone="amber">Low</Badge> : <Badge tone="green">OK</Badge>}
+      <td className="whitespace-nowrap px-3 py-2">
+        <span className="whitespace-nowrap">
+          {out ? <Badge tone="amber">Out of stock</Badge> : low ? <Badge tone="amber">Low</Badge> : <Badge tone="green">Ok</Badge>}
+        </span>
       </td>
     </tr>
   );
