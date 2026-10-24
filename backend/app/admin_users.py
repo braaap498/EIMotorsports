@@ -29,7 +29,8 @@ Safeguards:
 
 Customer support (the Customers tab on the Team page): search customer
 accounts (by name, email, phone or saved address), block / unblock them, resend the confirmation email, send a
-password-reset email, or delete the account. Only accounts WITHOUT a staff
+password-reset email, delete the account, or export the whole list (accounts and guest
+checkouts) as Excel or PDF. Only accounts WITHOUT a staff
 role are reachable through the /users/customers routes, so an owner or admin
 can never be blocked or deleted from there. Deleting also requires the
 customer's email to be typed back (checked here, not just in the browser).
@@ -47,7 +48,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -423,9 +424,10 @@ def _address_search_ids(needle: str, db: Session) -> tuple[set[str], Optional[st
     return {str(r.user_id) for r in rows if r.user_id}, None
 
 
-def _attach_addresses(rows: list[dict], db: Session) -> Optional[str]:
+def _attach_addresses(rows: list[dict], db: Session, limit: int = 1000) -> Optional[str]:
     """
-    Set row["address"] to each customer's default shipping address (or the best one they have).
+    Set row["address"] to each customer's default shipping address (or the best one they have),
+    and fill row["phone"] from that address when the login itself has no phone.
     Returns None on success, or a short error note if the lookup failed (the list still works).
     """
     ids = [r["id"] for r in rows if r.get("id") and UUID_RE.fullmatch(r["id"])]
@@ -436,10 +438,10 @@ def _attach_addresses(rows: list[dict], db: Session) -> Optional[str]:
             dict(r._mapping)
             for r in db.execute(
                 text(
-                    "select user_id, kind, line1, line2, city, region, postal_code, country, is_default "
-                    "from customer_addresses where user_id = any(cast(:ids as uuid[])) limit 1000"
+                    "select user_id, kind, line1, line2, city, region, postal_code, country, phone, is_default "
+                    "from customer_addresses where user_id = any(cast(:ids as uuid[])) limit :lim"
                 ),
-                {"ids": ids},
+                {"ids": ids, "lim": limit},
             ).all()
         ]
     except Exception as e:
@@ -457,6 +459,9 @@ def _attach_addresses(rows: list[dict], db: Session) -> Optional[str]:
         hit = best.get(r["id"])
         if hit:
             r["address"] = _format_address(hit["addr"]) or None
+            # Most customers have no phone on their login, so use the one saved with their address.
+            if not r.get("phone") and hit["addr"].get("phone"):
+                r["phone"] = hit["addr"]["phone"]
     return None
 
 
@@ -503,6 +508,198 @@ def list_customers(q: str = "", db: Session = Depends(get_db)):
         # None when addresses loaded fine; otherwise why they didn't (shown on the page).
         "addresses_error": lookup_err or search_err,
     }
+
+
+# ----------------------------------------------------------------- export
+EXPORT_COLUMNS = ["Type", "Name", "Email", "Phone", "Status", "Signed up", "Last sign-in", "Address"]
+
+
+def _fmt_date(v) -> str:
+    if not v:
+        return ""
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d")
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).strftime("%Y-%m-%d")
+    except ValueError:
+        return str(v)[:10]
+
+
+def _export_rows(db: Session) -> tuple[list[list[str]], int, int, list[str]]:
+    """Every customer, uncapped: accounts (newest first) then guest checkouts (newest first).
+
+    Returns (rows, account_count, guest_count, notes). `notes` says what could not be loaded, if anything,
+    so a partial export is never mistaken for a complete one.
+    """
+    notes: list[str] = []
+    users: list[dict] = []
+    for page in range(1, 51):  # 200 per page; up to 10,000 accounts
+        data = _call("GET", f"/users?page={page}&per_page=200")
+        batch = data.get("users") or []
+        users.extend(u for u in batch if _is_customer(u))
+        if len(batch) < 200:
+            break
+    users.sort(key=lambda u: u.get("created_at") or "", reverse=True)
+    accounts = [_public_customer(u) for u in users]
+    if _attach_addresses(accounts, db, limit=200000):
+        notes.append("Saved addresses could not be loaded, so the Address column is incomplete.")
+
+    rows: list[list[str]] = []
+    for c in accounts:
+        status = "Blocked" if c["blocked"] else ("Active" if c["confirmed"] else "Waiting for verification")
+        rows.append([
+            "Account", c["name"] or "", c["email"] or "", c["phone"] or "", status,
+            _fmt_date(c["created_at"]), _fmt_date(c["last_sign_in_at"]) if c["last_sign_in_at"] else "Never",
+            c["address"] or "",
+        ])
+
+    guests = []
+    try:
+        guests = db.execute(
+            text(
+                "select email, full_name, phone, last_shipping_address, created_at from customers "
+                "where user_id is null order by created_at desc"
+            )
+        ).all()
+    except Exception:
+        db.rollback()
+        log.warning("guest customers could not be loaded for the export", exc_info=True)
+        notes.append("Guest customers could not be loaded, so they are not in this file.")
+    for g in guests:
+        addr = g.last_shipping_address
+        if isinstance(addr, str):
+            try:
+                addr = json.loads(addr)
+            except ValueError:
+                addr = {}
+        rows.append([
+            "Guest", g.full_name or "", g.email or "", g.phone or "", "", _fmt_date(g.created_at), "",
+            _format_address(addr or {}),
+        ])
+    return rows, len(accounts), len(guests), notes
+
+
+def _build_xlsx(rows: list[list[str]], notes: list[str]) -> bytes:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise HTTPException(503, "Excel export isn't installed on the server yet: add openpyxl to requirements.txt.")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Customers"
+    ws.append(EXPORT_COLUMNS)
+    for r in rows:
+        ws.append(r)
+    head_fill = PatternFill("solid", fgColor="111111")
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = head_fill
+        cell.alignment = Alignment(vertical="center")
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.data_type = "s"  # always text, so a name or address starting with "=" can never run as a formula
+            cell.alignment = Alignment(vertical="top", wrap_text=(cell.column == 8))
+    widths = [10, 24, 32, 16, 22, 12, 13, 50]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    if notes:
+        n = wb.create_sheet("Notes")
+        for line in notes:
+            n.append([line])
+        n.column_dimensions["A"].width = 100
+    from io import BytesIO
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_pdf(rows: list[list[str]], accounts: int, guests: int, notes: list[str]) -> bytes:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import landscape, letter
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError:
+        raise HTTPException(503, "PDF export isn't installed on the server yet: add reportlab to requirements.txt.")
+    from io import BytesIO
+    from xml.sax.saxutils import escape
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(letter), leftMargin=0.5 * inch, rightMargin=0.5 * inch,
+        topMargin=0.5 * inch, bottomMargin=0.6 * inch, title="Customers",
+    )
+    base = getSampleStyleSheet()
+    cell = ParagraphStyle("cell", parent=base["BodyText"], fontSize=7.5, leading=9.5)
+    head = ParagraphStyle("head", parent=cell, textColor=colors.white, fontName="Helvetica-Bold")
+    story = [
+        Paragraph("Customers", base["Title"]),
+        Paragraph(
+            escape(
+                f"Exported {datetime.now(timezone.utc).strftime('%Y-%m-%d')} · {len(rows)} customers "
+                f"({accounts} accounts, {guests} guests)"
+            ),
+            base["Normal"],
+        ),
+    ]
+    for n in notes:
+        story.append(Paragraph(escape("Note: " + n), ParagraphStyle("note", parent=base["Normal"], textColor=colors.HexColor("#b45309"))))
+    story.append(Spacer(1, 10))
+    data = [[Paragraph(escape(h), head) for h in EXPORT_COLUMNS]]
+    for r in rows:
+        data.append([Paragraph(escape(str(v or "")), cell) for v in r])
+    widths = [44, 98, 148, 78, 74, 56, 58, 164]  # adds up to the 720pt between the margins
+    table = Table(data, colWidths=widths, repeatRows=1)
+    table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111111")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f4f6")]),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ])
+    )
+    story.append(table)
+
+    def footer(canvas, d):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.drawRightString(landscape(letter)[0] - 0.5 * inch, 0.35 * inch, f"Page {d.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return buf.getvalue()
+
+
+@router.get("/customers/export")
+def export_customers(
+    fmt: Literal["xlsx", "pdf"] = Query("xlsx", alias="format"),
+    db: Session = Depends(get_db),
+    me: AuthUser = Depends(require_admin),
+):
+    """The whole customer list (accounts and guest checkouts, no cap, ignores any search) as Excel or PDF."""
+    rows, accounts, guests, notes = _export_rows(db)
+    if fmt == "xlsx":
+        body = _build_xlsx(rows, notes)
+        media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        body = _build_pdf(rows, accounts, guests, notes)
+        media = "application/pdf"
+    log.info("customer list exported as %s (%d accounts, %d guests) by %s", fmt, accounts, guests, me.email or me.user_id)
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return Response(
+        content=body,
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="customers-{stamp}.{fmt}"', "Cache-Control": "no-store"},
+    )
 
 
 @router.post("/customers/{user_id}/block")
