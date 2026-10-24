@@ -18,6 +18,7 @@ export default function ProductPicker({ onPick }: { onPick: (p: PickRow) => void
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<PickRow[] | null>(null);
   const [error, setError] = useState("");
+  const MAX_RESULTS = 50; // the most the server will return for one search
   const [busy, setBusy] = useState(false);
 
   async function search(e: React.FormEvent) {
@@ -26,7 +27,7 @@ export default function ProductPicker({ onPick }: { onPick: (p: PickRow) => void
     setBusy(true);
     setError("");
     try {
-      const r = await api<{ items: PickRow[] }>(`/inventory/products/search?q=${encodeURIComponent(q.trim())}`);
+      const r = await api<{ items: PickRow[] }>(`/inventory/products/search?q=${encodeURIComponent(q.trim())}&limit=${MAX_RESULTS}`);
       setRows(r.items);
     } catch (err) {
       setError(errMsg(err));
@@ -51,7 +52,10 @@ export default function ProductPicker({ onPick }: { onPick: (p: PickRow) => void
       {error && <Notice kind="error">{error}</Notice>}
       {rows && rows.length === 0 && <p className="text-sm text-gray-500">Nothing found. Try fewer words.</p>}
       {rows && rows.length > 0 && (
-        <ul className="max-h-72 divide-y divide-gray-100 overflow-y-auto rounded border border-gray-200 bg-white">
+        <ul
+          className="divide-y divide-gray-100 overflow-y-auto rounded border border-gray-200 bg-white"
+          style={{ maxHeight: "60vh" }}
+        >
           {rows.map((r) => (
             <li key={r.id}>
               <button type="button" onClick={() => onPick(r)} className="block w-full px-3 py-2 text-left text-sm hover:bg-gray-50">
@@ -65,6 +69,9 @@ export default function ProductPicker({ onPick }: { onPick: (p: PickRow) => void
             </li>
           ))}
         </ul>
+      )}
+      {rows && rows.length >= MAX_RESULTS && (
+        <p className="text-xs text-gray-500">Showing the first {MAX_RESULTS} matches. Add more words to narrow it down.</p>
       )}
     </div>
   );
