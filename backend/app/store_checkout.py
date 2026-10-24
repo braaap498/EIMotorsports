@@ -17,6 +17,8 @@ Rules this file follows:
     checkout cannot disagree about price or availability.
   * An order is 'paid' only when Stripe's signed webhook says so AND the amount matches.
   * Card details never touch this server; they are entered on Stripe's page.
+  * When an order is paid, the buyer gets a row in `customers` (guest = no user_id). That step is
+    best-effort: if it fails, the payment is still recorded (see _record_customer).
 
 Settings (environment variables, set in Render, never in code or chat):
   STRIPE_SECRET_KEY       checkout stays closed (503) until this is set
@@ -345,10 +347,65 @@ def _order_id_of(session: dict) -> int:
         return 0
 
 
+def _record_customer(db: Session, order) -> None:
+    """Create or update the buyer's `customers` row and link the order to it.
+
+    Guests (no user_id) get a guest row, one per email. A signed-in buyer's row is found by
+    user_id first; a guest row with the same email is claimed for them (and stops being a guest).
+    Only called for paid orders, so abandoned checkouts never become customers.
+    """
+    email = (order.customer_email or "").strip().lower()
+    if not email:
+        return
+    uid = str(order.user_id) if order.user_id else None
+    addr = order.shipping_address or {}
+    name = (order.customer_name or addr.get("full_name") or "").strip() or None
+    phone = (addr.get("phone") or "").strip() or None
+
+    row = None
+    if uid:
+        row = db.execute(text("select id, user_id from customers where user_id = cast(:u as uuid)"), {"u": uid}).first()
+    if row is None:
+        row = db.execute(text("select id, user_id from customers where lower(email) = :e"), {"e": email}).first()
+        if row is not None and uid and row.user_id is None:
+            # A guest who now has an account: same person, same row.
+            db.execute(
+                text("update customers set user_id = cast(:u as uuid) where id = :id and user_id is null"),
+                {"u": uid, "id": row.id},
+            )
+    if row is None:
+        row = db.execute(
+            text(
+                "insert into customers (user_id, email, full_name, phone, last_shipping_address) "
+                "values (cast(:u as uuid), :e, :n, :p, cast(:a as jsonb)) "
+                "on conflict ((lower(email))) do nothing returning id"
+            ),
+            {"u": uid, "e": email, "n": name, "p": phone, "a": json.dumps(addr)},
+        ).first()
+        if row is None:  # another payment for the same email landed at the same moment
+            row = db.execute(text("select id from customers where lower(email) = :e"), {"e": email}).first()
+    else:
+        # Guests keep their latest details. Accounts only get blanks filled, never overwritten.
+        db.execute(
+            text(
+                "update customers set "
+                "full_name = case when user_id is null then coalesce(:n, full_name) else coalesce(full_name, :n) end, "
+                "phone = case when user_id is null then coalesce(:p, phone) else coalesce(phone, :p) end, "
+                "last_shipping_address = case when user_id is null then cast(:a as jsonb) "
+                "  else coalesce(last_shipping_address, cast(:a as jsonb)) end, "
+                "updated_at = now() where id = :id"
+            ),
+            {"n": name, "p": phone, "a": json.dumps(addr), "id": row.id},
+        )
+    if row is not None:
+        db.execute(text("update orders set customer_id = :c where id = :o"), {"c": row.id, "o": order.id})
+
+
 def _mark_paid(db: Session, session: dict) -> None:
     order = db.execute(
         text(
-            "select id, status, subtotal_cents, shipping_cents from orders "
+            "select id, status, subtotal_cents, shipping_cents, user_id, customer_email, customer_name, "
+            "shipping_address from orders "
             "where id = :id and payment_provider = 'stripe' for update"
         ),
         {"id": _order_id_of(session)},
@@ -395,6 +452,12 @@ def _mark_paid(db: Session, session: dict) -> None:
         ),
         {"id": order.id},
     )
+    # Record the buyer as a customer. Inside a savepoint so a problem here can never undo the payment.
+    try:
+        with db.begin_nested():
+            _record_customer(db, order)
+    except Exception:
+        log.exception("Could not record customer for order %s (payment is still recorded)", order.id)
     db.commit()
 
 
