@@ -52,22 +52,26 @@ export const AtvIcon = (p: SVGProps<SVGSVGElement>) => (
 // Side views for the UTV, Snowmobile, Dirt Bike, Motorcycle and PWC buttons on the home page. Same drawing style as AtvIcon: currentColor, so they take the text color.
 export const UtvIcon = (p: SVGProps<SVGSVGElement>) => (
   <svg
-    viewBox="0 0 48 32"
+    viewBox="0 0 52 32"
     fill="none"
     stroke="currentColor"
-    strokeWidth={2}
+    strokeWidth={2.2}
     strokeLinecap="round"
     strokeLinejoin="round"
     aria-hidden="true"
     {...p}
   >
-    <g transform="translate(48 0) scale(-1 1)">
-      <circle cx="10" cy="23.5" r="5.8" />
-      <circle cx="10" cy="23.5" r="2.3" />
-      <circle cx="37.5" cy="23.5" r="5.8" />
-      <circle cx="37.5" cy="23.5" r="2.3" />
-      <path d="M3.5 16V12H15L18 19.5H31.5L34 15H44L46 17.5V19.5" />
-      <path d="M12.5 12L15 4.5H28.5L34 15" />
+    <g transform="translate(51 0) scale(-1 1)">
+      <circle cx="7.3" cy="24.2" r="5.4" />
+      <circle cx="42.2" cy="24.2" r="5.4" />
+      <path d="M0.7 13.6V11.3L10.8 10.2L36.2 10.8L47.6 12.6L48.7 15.3L48.1 18.3" />
+      <path d="M0.7 13.6H8.2" />
+      <path d="M10.4 10.2L12.7 3.9L32.7 4.3L36.2 9.8" />
+      <path d="M18 11L22 18H29.8L32.5 11" />
+      <path d="M18 21.8H33.4" />
+      <path d="M18 21.8L14.2 22.8" />
+      <path d="M33.4 21.8L37.2 22.8" />
+      <path d="M8.2 14.2L9.7 19" />
     </g>
   </svg>
 );
