@@ -6,3 +6,5 @@ pydantic-settings>=2.4
 pyjwt[crypto]>=2.9
 pillow>=10.4
 stripe>=10.0
+openpyxl
+reportlab
