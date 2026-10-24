@@ -5,6 +5,7 @@ import { useAccess } from "../../../components/admin/AdminAccess";
 import { Notice } from "../../../components/admin/ui";
 import BarcodePanel from "../../../components/admin/inventory/BarcodePanel";
 import HistoryPanel from "../../../components/admin/inventory/HistoryPanel";
+import StockPanel from "../../../components/admin/inventory/StockPanel";
 import ScanSession from "../../../components/admin/inventory/ScanSession";
 import WebOrderShip from "../../../components/admin/inventory/WebOrderShip";
 
@@ -12,6 +13,7 @@ const ANY = ["inventory.receive", "inventory.ship", "inventory.barcodes", "inven
 const TABS = [
   { key: "receive", label: "Receive (scan in)", perms: ["inventory.receive"] },
   { key: "ship", label: "Ship (scan out)", perms: ["inventory.ship"] },
+  { key: "stock", label: "Stock", perms: ANY },
   { key: "barcodes", label: "Barcodes & labels", perms: ["inventory.barcodes"] },
   { key: "history", label: "History", perms: ANY },
 ];
@@ -84,6 +86,10 @@ export default function InventoryPage() {
           </div>
         </div>
       )}
+
+      <div className={tab === "stock" ? "" : "hidden"}>
+        <StockPanel active={tab === "stock"} />
+      </div>
 
       {can("inventory.barcodes") && (
         <div className={tab === "barcodes" ? "" : "hidden"}>

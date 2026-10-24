@@ -25,6 +25,9 @@ Routes
   GET    /inventory/orders/{order_number}   one order with what is still to scan
   POST   /inventory/ship                    commit a shipping batch
   GET    /inventory/history                 recent batches (audit trail)
+  GET    /inventory/stock                   every product with on-hand + restock level (search, low, out)
+  POST   /inventory/products/{id}/adjust    manual +/- or set-the-count (writes an 'Adjustment' ledger row)
+  PUT    /inventory/products/{id}/reorder-point   set or clear the restock level
 """
 import re
 import uuid
@@ -403,6 +406,153 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
     except Exception as exc:  # any surprise = nothing changed
         db.rollback()
         raise HTTPException(500, f"Receiving failed and was rolled back; no stock changed. ({type(exc).__name__})")
+
+
+# --------------------------------------------------------------------------
+# stock list, manual adjustments, restock levels
+# --------------------------------------------------------------------------
+# "Low" = a restock level is set (above 0) and on-hand is AT or BELOW it.
+_LOW_SQL = "(coalesce(p.reorder_point, 0) > 0 and coalesce(p.quantity_on_hand, 0) <= p.reorder_point)"
+_OUT_SQL = "(coalesce(p.quantity_on_hand, 0) <= 0)"
+
+
+@router.get("/stock")
+@needs(*ANY_INVENTORY)
+def stock_list(
+    q: Optional[str] = Query(None, max_length=100),
+    view: str = Query("all", pattern="^(all|low|out)$"),
+    include_inactive: bool = False,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    params: dict = {"limit": limit, "offset": offset}
+    scope = [] if include_inactive else ["coalesce(p.is_active, true)"]
+
+    conds = list(scope)
+    words = [w for w in re.split(r"\s+", (q or "").strip()) if w][:6]
+    for i, w in enumerate(words):
+        params[f"w{i}"] = f"%{w}%"
+        conds.append(
+            f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text) "
+            f"or p.manufacturer_part_number ilike cast(:w{i} as text) "
+            f"or p.internal_part_number ilike cast(:w{i} as text) "
+            f"or p.bin_location ilike cast(:w{i} as text) "
+            f"or exists (select 1 from product_barcodes b where b.product_id = p.id "
+            f"           and b.code ilike cast(:w{i} as text)))"
+        )
+    if view == "low":
+        conds.append(_LOW_SQL)
+    elif view == "out":
+        conds.append(_OUT_SQL)
+    where = ("where " + " and ".join(conds)) if conds else ""
+    order = (
+        "(p.reorder_point - coalesce(p.quantity_on_hand, 0)) desc, p.title, p.id"
+        if view == "low"
+        else "p.title, p.id"
+    )
+
+    total = db.execute(text(f"select count(*) from products p {where}"), params).scalar()
+    rows = db.execute(
+        text(
+            "select p.id, p.sku, p.title, coalesce(p.quantity_on_hand, 0) as quantity_on_hand, "
+            "       p.reorder_point, p.bin_location, coalesce(p.is_active, true) as is_active "
+            f"from products p {where} order by {order} limit :limit offset :offset"
+        ),
+        params,
+    ).all()
+    scope_where = ("where " + " and ".join(scope)) if scope else ""
+    counts = db.execute(
+        text(
+            f"select count(*) filter (where {_LOW_SQL}) as low_count, "
+            f"       count(*) filter (where {_OUT_SQL}) as out_count "
+            f"from products p {scope_where}"
+        )
+    ).first()
+    return {
+        "total": total,
+        "low_count": counts.low_count if counts else 0,
+        "out_count": counts.out_count if counts else 0,
+        "items": [dict(r._mapping) for r in rows],
+    }
+
+
+class AdjustIn(BaseModel):
+    delta: Optional[int] = Field(None, ge=-MAX_QTY, le=MAX_QTY)  # +/- this many
+    set_to: Optional[int] = Field(None, ge=0, le=MAX_QTY)  # or: the real count is this
+    note: Optional[str] = Field(None, max_length=200)
+
+
+@router.post("/products/{product_id}/adjust")
+@needs("inventory.adjust")
+def adjust_stock(
+    product_id: int,
+    body: AdjustIn,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(current_user),
+):
+    """Manual stock change. Locks the product row, never goes below zero, and logs who did it."""
+    if (body.delta is None) == (body.set_to is None):
+        raise HTTPException(400, "Send either a change (+/-) or a new count, not both")
+    try:
+        row = db.execute(
+            text("select id, quantity_on_hand from products where id = :id for update"),
+            {"id": product_id},
+        ).first()
+        if not row:
+            db.rollback()
+            raise HTTPException(404, "That product no longer exists")
+        before = row.quantity_on_hand or 0
+        new = body.set_to if body.set_to is not None else before + body.delta
+        if new < 0:
+            db.rollback()
+            raise HTTPException(400, f"That would take stock below zero (on hand is {before}).")
+        if new > MAX_QTY:
+            db.rollback()
+            raise HTTPException(400, f"Stock can't be more than {MAX_QTY}.")
+        change = new - before
+        if change == 0:
+            db.rollback()
+            return {"product_id": product_id, "quantity_on_hand": before, "change": 0}
+        db.execute(
+            text("update products set quantity_on_hand = :q, updated_at = now() where id = :id"),
+            {"q": new, "id": product_id},
+        )
+        ref = "Manual adjustment" + (f" - {body.note.strip()}" if (body.note or "").strip() else "")
+        db.execute(
+            text(
+                "insert into inventory_transactions "
+                "(product_id, transaction_type, quantity_change, reference, legacy_created_by) "
+                "values (:p, 'Adjustment', :d, :ref, :by)"
+            ),
+            {"p": product_id, "d": change, "ref": ref[:200], "by": user.email},
+        )
+        db.commit()
+        return {"product_id": product_id, "quantity_on_hand": new, "change": change}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, f"Adjustment failed and was rolled back; no stock changed. ({type(exc).__name__})")
+
+
+class ReorderIn(BaseModel):
+    reorder_point: Optional[int] = Field(None, ge=0, le=MAX_QTY)  # empty / 0 = no restock level
+
+
+@router.put("/products/{product_id}/reorder-point")
+@needs("inventory.adjust")
+def set_reorder_point(product_id: int, body: ReorderIn, db: Session = Depends(get_db)):
+    value = body.reorder_point or None
+    got = db.execute(
+        text("update products set reorder_point = :v, updated_at = now() where id = :id returning reorder_point"),
+        {"v": value, "id": product_id},
+    ).first()
+    if not got:
+        db.rollback()
+        raise HTTPException(404, "That product no longer exists")
+    db.commit()
+    return {"product_id": product_id, "reorder_point": got.reorder_point}
 
 
 # --------------------------------------------------------------------------
