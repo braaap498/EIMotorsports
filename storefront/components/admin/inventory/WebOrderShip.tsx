@@ -298,7 +298,11 @@ export default function WebOrderShip({ active }: { active: boolean }) {
           <div className="flex flex-wrap items-center gap-3">
             {!confirming ? (
               <button className={btnCls} disabled={busy || (scannedUnits === 0 && !complete)} onClick={() => setConfirming(true)}>
-                {complete ? "Mark shipped" : `Ship partial (${scannedUnits} scanned, ${totalLeft} not yet)`}
+                {complete
+                  ? "Mark shipped"
+                  : scannedUnits === 0
+                  ? "Scan items to ship"
+                  : `Ship partial (${scannedUnits} scanned, ${totalLeft} not yet)`}
               </button>
             ) : (
               <>
