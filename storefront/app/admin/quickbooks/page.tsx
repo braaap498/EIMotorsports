@@ -227,7 +227,7 @@ export default function QuickBooksPage() {
               </Notice>
             )}
 
-            <dl className="grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+            <dl className="grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2 lg:grid-cols-[auto_auto_minmax(0,1fr)_auto]">
               <div>
                 <dt className="text-xs uppercase text-gray-500">Last sync</dt>
                 <dd>
@@ -251,7 +251,7 @@ export default function QuickBooksPage() {
               </div>
               <div>
                 <dt className="text-xs uppercase text-gray-500">Connection address</dt>
-                <dd className="break-all">{status.endpoint}</dd>
+                <dd className="break-all lg:whitespace-nowrap lg:break-normal">{status.endpoint}</dd>
               </div>
             </dl>
 
