@@ -1,7 +1,7 @@
-import { Suspense } from "react";
+import { Suspense, type ComponentType, type SVGProps } from "react";
 import Link from "next/link";
 import ProductImage from "../components/site/ProductImage";
-import { AtvIcon } from "../components/site/icons";
+import { AtvIcon, UtvIcon, SnowmobileIcon, DirtBikeIcon, MotorcycleIcon, PwcIcon } from "../components/site/icons";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 const PAGE_SIZE = 24;
@@ -14,6 +14,16 @@ const TYPES = [
   { slug: "motorcycle", name: "Motorcycle" },
   { slug: "pwc", name: "PWC" },
 ];
+
+// Icon shown in each type button.
+const TYPE_ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
+  atv: AtvIcon,
+  utv: UtvIcon,
+  snowmobile: SnowmobileIcon,
+  "dirt-bike": DirtBikeIcon,
+  motorcycle: MotorcycleIcon,
+  pwc: PwcIcon,
+};
 
 type Item = {
   id: number;
@@ -96,18 +106,28 @@ function TypeButtons({ active }: { active?: string }) {
     <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
       {TYPES.map((t) => {
         const isActive = active === t.slug;
+        const Icon = TYPE_ICONS[t.slug];
         return (
           <Link
             key={t.slug}
             // Choosing the active type again clears the filter.
             href={isActive ? "/" : `/?type=${t.slug}`}
             aria-current={isActive ? "true" : undefined}
-            className={`flex items-center justify-center gap-2 rounded-lg border-2 px-4 py-3 text-center font-bold text-gray-900 transition hover:border-[#06bde7] hover:shadow-md ${
+            // Fixed 52px tall (the same height the buttons had before): name in a header strip on top, icon below.
+            className={`flex h-[52px] flex-col overflow-hidden rounded-lg border-2 text-center font-bold text-gray-900 transition hover:border-[#06bde7] hover:shadow-md ${
               isActive ? "border-[#06bde7] bg-[#e8f8fd]" : "border-gray-200"
             }`}
           >
-            {t.slug === "atv" && <AtvIcon className="h-6 w-9 shrink-0" />}
-            {t.name}
+            <span
+              className={`block h-5 shrink-0 border-b text-[13px] leading-5 ${
+                isActive ? "border-[#bfe9f6] bg-[#d3f1fa]" : "border-gray-200 bg-gray-50"
+              }`}
+            >
+              {t.name}
+            </span>
+            <span className="flex flex-1 items-center justify-center">
+              {Icon && <Icon className={`h-6 shrink-0 ${t.slug === "snowmobile" ? "w-[42px]" : "w-9"}`} />}
+            </span>
           </Link>
         );
       })}
