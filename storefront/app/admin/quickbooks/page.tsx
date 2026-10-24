@@ -36,6 +36,7 @@ type Status = {
   endpoint: string;
   entities_filter: string;
   full_refresh_hours: number;
+  run_every_minutes: number;
   control?: { sync_requested: boolean; full_resync: boolean };
   entities?: EntityRow[];
   errors_by_entity?: { entity: string; last_error: string }[];
@@ -58,6 +59,7 @@ type RecFull = Rec & { deleted_at: string | null; data: Record<string, unknown> 
 const PAGE = 50;
 const when = (s: string | null) => (s ? new Date(s).toLocaleString() : "—");
 const money = (v: number | null) => (v == null ? "" : v.toLocaleString(undefined, { style: "currency", currency: "USD" }));
+const every = (n: number) => (n % 60 === 0 ? (n === 60 ? "hour" : `${n / 60} hours`) : `${n} minutes`);
 const statusTone = (s: string) => (s === "ok" ? "green" : s === "running" ? "blue" : s === "partial" ? "amber" : "gray");
 
 /* ----------------------------------------------------------- record viewer */
@@ -151,8 +153,8 @@ export default function QuickBooksPage() {
       await api("/quickbooks/sync-now", { method: "POST", body: { full } });
       setInfo(
         full
-          ? "Full re-read requested. It starts the next time the Web Connector checks in (within about 15 minutes), or right away if you click Update Selected in the Web Connector on the QuickBooks PC."
-          : "Sync requested. It starts the next time the Web Connector checks in (within about 15 minutes), or right away if you click Update Selected in the Web Connector on the QuickBooks PC.",
+          ? `Full re-read requested. It starts the next time the Web Connector checks in (every ${every(status?.run_every_minutes ?? 60)} by default), or right away if you click Update Selected in the Web Connector on the QuickBooks PC.`
+          : `Sync requested. It starts the next time the Web Connector checks in (every ${every(status?.run_every_minutes ?? 60)} by default), or right away if you click Update Selected in the Web Connector on the QuickBooks PC.`,
       );
       await loadStatus();
     } catch (e) {
@@ -272,7 +274,7 @@ export default function QuickBooksPage() {
                   QuickBooks is not running&rdquo; and pick an admin user. The file only asks for read access.
                 </li>
                 <li>Back in the Web Connector, type the password you set in step 1 into the Password box, then click Update Selected to run the first sync now.</li>
-                <li>The first sync reads all of your history and can take a while. After that it checks in about every 15 minutes, and the QuickBooks PC needs to be on.</li>
+                <li>The first sync reads all of your history and can take a while. After that it checks in about every {every(status.run_every_minutes)} (you can change this in the Web Connector window), and the QuickBooks PC needs to be on.</li>
               </ol>
             )}
           </section>

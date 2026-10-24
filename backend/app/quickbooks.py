@@ -35,6 +35,7 @@ Settings (environment variables on the API):
     QB_PAGE_SIZE                   records per request, default 100
     QB_FULL_REFRESH_HOURS          how often lists are fully re-read, default 6
     QB_MIN_MINUTES                 least time between scheduled syncs, default 10
+    QBWC_RUN_EVERY_MINUTES         how often the connection file tells the Web Connector to check in, default 60
     QB_ENTITIES                    optional comma list to sync only some kinds, e.g. "Customer,Item"
 """
 import hmac
@@ -84,6 +85,12 @@ def full_refresh_hours() -> int:
 
 def min_minutes() -> int:
     return _env_int("QB_MIN_MINUTES", 10)
+
+
+def run_every_minutes() -> int:
+    """Written into the connection file (.qwc). The Web Connector can also be changed by hand,
+    in its own window, without a new file."""
+    return _env_int("QBWC_RUN_EVERY_MINUTES", 60)
 
 
 # --------------------------------------------------------------------------
@@ -743,6 +750,7 @@ def status(request: Request, db: Session = Depends(get_db)):
         "endpoint": f"{_public_url(request)}/qbwc",
         "entities_filter": os.environ.get("QB_ENTITIES", ""),
         "full_refresh_hours": full_refresh_hours(),
+        "run_every_minutes": run_every_minutes(),
     }
     if not out["tables_ready"]:
         return out
@@ -828,7 +836,7 @@ def qwc(request: Request):
   <FileID>{{{file_id}}}</FileID>
   <QBType>QBFS</QBType>
   <Scheduler>
-    <RunEveryNMinutes>15</RunEveryNMinutes>
+    <RunEveryNMinutes>{run_every_minutes()}</RunEveryNMinutes>
   </Scheduler>
   <IsReadOnly>true</IsReadOnly>
 </QBWCXML>
