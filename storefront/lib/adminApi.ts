@@ -51,3 +51,17 @@ export async function api<T = unknown>(
   if (!res.ok) throw new ApiError(res.status, detailText(json?.detail, res.status));
   return json as T;
 }
+
+/** Download a file (Excel, PDF...) from an /admin/... endpoint as the signed-in user. */
+export async function apiDownload(path: string): Promise<Blob> {
+  const { data } = await getSupabase().auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) throw new ApiError(401, "Not signed in");
+
+  const res = await fetch(`${API}/admin${path}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    const json = await res.json().catch(() => null);
+    throw new ApiError(res.status, detailText(json?.detail, res.status));
+  }
+  return res.blob();
+}

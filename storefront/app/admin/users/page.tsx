@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { api, errMsg } from "../../../lib/adminApi";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, apiDownload, errMsg } from "../../../lib/adminApi";
 import { Badge, Field, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
 import PasswordInput from "../../../components/admin/PasswordInput";
 
@@ -316,6 +316,83 @@ function Row({
   );
 }
 
+type MenuItem = { key: string; label: string; onClick: () => void; danger?: boolean; hidden?: boolean };
+
+/** A "⋯" button that opens a small list of actions. The list is drawn on top of the page (position: fixed)
+ *  so the scrolling table can't clip it, and it flips upward near the bottom of the screen. */
+function RowMenu({ items, disabled, label }: { items: MenuItem[]; disabled: boolean; label: string }) {
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const shown = items.filter((i) => !i.hidden);
+
+  useEffect(() => {
+    if (!pos) return;
+    const close = () => setPos(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [pos]);
+
+  function toggle() {
+    if (pos) return setPos(null);
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const menuHeight = shown.length * 38 + 12;
+    const top = r.bottom + menuHeight > window.innerHeight ? Math.max(8, r.top - menuHeight) : r.bottom + 4;
+    setPos({ top, right: Math.max(8, window.innerWidth - r.right) });
+  }
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className={`${btn2Cls} px-3 text-lg leading-none`}
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={!!pos}
+        aria-label={`Actions for ${label}`}
+        onClick={toggle}
+      >
+        ⋯
+      </button>
+      {pos && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setPos(null)} />
+          <div
+            role="menu"
+            className="fixed z-50 min-w-[11rem] rounded border border-gray-200 bg-white py-1 shadow-lg"
+            style={{ top: pos.top, right: pos.right }}
+          >
+            {shown.map((i) => (
+              <button
+                key={i.key}
+                type="button"
+                role="menuitem"
+                className={`block w-full px-3 py-2 text-left text-sm hover:bg-gray-50 ${i.danger ? "text-red-700" : "text-gray-800"}`}
+                onClick={() => {
+                  setPos(null);
+                  i.onClick();
+                }}
+              >
+                {i.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: string) => void }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -338,14 +415,41 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
     }
   }
 
+  const items: MenuItem[] = [
+    c.blocked
+      ? { key: "unblock", label: "Unblock", onClick: () => run("unblock", "unblock", {}, `${label} was unblocked.`) }
+      : { key: "block", label: "Block", onClick: () => run("block", "block", {}, `${label} was blocked. They can't sign in.`) },
+    {
+      key: "resend",
+      label: "Resend confirmation",
+      hidden: c.confirmed,
+      onClick: () => run("resend", "resend-confirmation", {}, `A new confirmation email was sent to ${c.email}.`),
+    },
+    {
+      key: "reset",
+      label: "Send password reset",
+      onClick: () => run("reset", "reset-password", {}, `A password reset email was sent to ${c.email}.`),
+    },
+    {
+      key: "delete",
+      label: "Delete…",
+      danger: true,
+      onClick: () => {
+        setDelOpen(true);
+        setTyped("");
+        setError("");
+      },
+    },
+  ];
+
   return (
     <>
       <tr className="align-top">
         <td className="px-3 py-2">
           <div className="font-medium text-gray-900">{c.name || <span className="text-gray-400">No name</span>}</div>
           <div className="text-xs text-gray-600">{c.email}</div>
-          {c.phone && <div className="text-xs text-gray-500">{c.phone}</div>}
         </td>
+        <td className="whitespace-nowrap px-3 py-2 text-sm text-gray-700">{c.phone || <span className="text-gray-400">—</span>}</td>
         <td className="px-3 py-2">
           {c.blocked ? (
             <span className="inline-block rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">Blocked</span>
@@ -362,51 +466,15 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
           {c.last_sign_in_at ? new Date(c.last_sign_in_at).toLocaleDateString() : "Never"}
         </td>
         <td className="px-3 py-2 text-xs text-gray-700">{c.address || <span className="text-gray-400">None saved</span>}</td>
-        <td className="px-3 py-2">
-          <div className="flex flex-wrap justify-end gap-2">
-            {c.blocked ? (
-              <button className={btn2Cls} disabled={!!busy} onClick={() => run("unblock", "unblock", {}, `${label} was unblocked.`)}>
-                {busy === "unblock" ? "Working…" : "Unblock"}
-              </button>
-            ) : (
-              <button className={btn2Cls} disabled={!!busy} onClick={() => run("block", "block", {}, `${label} was blocked. They can't sign in.`)}>
-                {busy === "block" ? "Working…" : "Block"}
-              </button>
-            )}
-            {!c.confirmed && (
-              <button
-                className={btn2Cls}
-                disabled={!!busy}
-                onClick={() => run("resend", "resend-confirmation", {}, `A new confirmation email was sent to ${c.email}.`)}
-              >
-                {busy === "resend" ? "Sending…" : "Resend confirmation"}
-              </button>
-            )}
-            <button
-              className={btn2Cls}
-              disabled={!!busy}
-              onClick={() => run("reset", "reset-password", {}, `A password reset email was sent to ${c.email}.`)}
-            >
-              {busy === "reset" ? "Sending…" : "Send password reset"}
-            </button>
-            <button
-              className={dangerCls}
-              disabled={!!busy}
-              onClick={() => {
-                setDelOpen((o) => !o);
-                setTyped("");
-                setError("");
-              }}
-            >
-              {delOpen ? "Cancel" : "Delete"}
-            </button>
-          </div>
+        <td className="whitespace-nowrap px-3 py-2 text-right">
+          {busy && <span className="mr-2 text-xs text-gray-500">Working…</span>}
+          <RowMenu items={items} disabled={!!busy} label={label} />
           {error && <p className="mt-1 text-right text-xs text-red-700">{error}</p>}
         </td>
       </tr>
       {delOpen && (
         <tr className="bg-red-50">
-          <td colSpan={6} className="px-3 py-3">
+          <td colSpan={7} className="px-3 py-3">
             <div className="max-w-xl space-y-2 text-sm">
               <p className="font-medium text-red-900">Permanently delete {label}?</p>
               <p className="text-red-900">
@@ -438,6 +506,71 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
         </tr>
       )}
     </>
+  );
+}
+
+/** Downloads the whole customer list (not just what's on screen) as Excel or PDF. */
+function ExportMenu({ onError }: { onError: (message: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState("");
+
+  async function run(format: "xlsx" | "pdf") {
+    setOpen(false);
+    setBusy(format);
+    onError("");
+    try {
+      const blob = await apiDownload(`/users/customers/export?format=${format}`);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `customers-${new Date().toISOString().slice(0, 10)}.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      onError(errMsg(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        className={btn2Cls}
+        disabled={!!busy}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        {busy ? "Exporting…" : "Export ▾"}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div role="menu" className="absolute right-0 z-50 mt-1 w-48 rounded border border-gray-200 bg-white py-1 shadow-lg">
+            <button
+              type="button"
+              role="menuitem"
+              className="block w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gray-50"
+              onClick={() => run("xlsx")}
+            >
+              Excel (.xlsx)
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="block w-full px-3 py-2 text-left text-sm text-gray-800 hover:bg-gray-50"
+              onClick={() => run("pdf")}
+            >
+              PDF
+            </button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -492,10 +625,16 @@ function CustomersPanel() {
             {data.total} customer{data.total === 1 ? "" : "s"} in total
           </span>
         )}
+        <div className="ml-auto">
+          <ExportMenu onError={setError} />
+        </div>
       </div>
-      <details open className="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-        <summary className="cursor-pointer font-medium">What do these buttons do?</summary>
+      <details className="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+        <summary className="cursor-pointer font-medium">? What do the actions in the ⋯ menu do</summary>
         <ul className="mt-2 list-disc space-y-1.5 pl-5">
+          <li>
+            Click the <strong>⋯</strong> button at the end of a customer&apos;s row to see their actions.
+          </li>
           <li>
             <strong>Block</strong> stops the customer signing in. Their account, saved addresses, garage and order history
             are all kept, and <strong>Unblock</strong> puts everything back. Use it for a hacked, spammed or misused
@@ -514,8 +653,10 @@ function CustomersPanel() {
             <strong>Send password reset</strong> emails the customer a link to choose a new password. You never see or set
             their password.
           </li>
+          <li>A block or delete can take up to an hour to take effect for someone who is already signed in.</li>
           <li>
-            A block or delete can take up to an hour to take effect for someone who is already signed in.
+            <strong>Export</strong> downloads the whole customer list, not just the rows on screen or the current search, as
+            an Excel or PDF file.
           </li>
         </ul>
       </details>
@@ -532,6 +673,7 @@ function CustomersPanel() {
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
               <th className="px-3 py-2">Customer</th>
+              <th className="px-3 py-2">Phone</th>
               <th className="px-3 py-2">Status</th>
               <th className="px-3 py-2">Signed up</th>
               <th className="px-3 py-2">Last sign-in</th>
@@ -552,14 +694,14 @@ function CustomersPanel() {
             ))}
             {!loading && !error && rows.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
                   {q.trim() ? "No customers match that search." : "No customer accounts yet."}
                 </td>
               </tr>
             )}
             {loading && rows.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
                   Loading…
                 </td>
               </tr>
