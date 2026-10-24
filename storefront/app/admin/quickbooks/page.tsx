@@ -251,7 +251,7 @@ export default function QuickBooksPage() {
               </div>
               <div>
                 <dt className="text-xs uppercase text-gray-500">Connection address</dt>
-                <dd className="truncate" title={status.endpoint}>{status.endpoint}</dd>
+                <dd className="break-all">{status.endpoint}</dd>
               </div>
             </dl>
 
