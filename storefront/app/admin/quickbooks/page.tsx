@@ -290,6 +290,24 @@ export default function QuickBooksPage() {
     }
   }
 
+  async function refreshPurchases() {
+    setBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      const r = await api<{ updated: number }>("/quickbooks/refresh-last-purchases", { method: "POST" });
+      setInfo(
+        r.updated > 0
+          ? `Last purchase dates updated for ${r.updated.toLocaleString()} customers. They show in the Customers tab on the Team page.`
+          : "Last purchase dates are already up to date.",
+      );
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function downloadQwc() {
     setError("");
     try {
@@ -376,6 +394,9 @@ export default function QuickBooksPage() {
               </button>
               <button type="button" className={btn2Cls} onClick={() => void downloadQwc()} disabled={!status.credentials_set}>
                 Download connection file
+              </button>
+              <button type="button" className={btn2Cls} disabled={busy} onClick={() => void refreshPurchases()}>
+                Update last purchase dates
               </button>
               <button type="button" className="text-sm text-gray-600 underline" onClick={() => setShowSetup((v) => !v)}>
                 {showSetup ? "Hide setup steps" : "Setup steps"}

@@ -26,20 +26,22 @@ type Customer = {
   confirmed: boolean;
   blocked: boolean;
   created_at: string | null;
+  last_purchase_at: string | null;
   last_sign_in_at: string | null;
   address: string | null;
+  is_staff?: boolean; // an owner / admin / employee login: shown here for reference, nothing to manage
   has_account: boolean; // false = guest checkout or imported customer: no login, so no block / reset / delete
   email_masked: boolean; // a marketplace relay address (eBay, Amazon ...), not the person's own email
   status: string;
   source: string; // Website, eBay, Amazon, QuickBooks
-  group: "website" | "ebay" | "other";
+  group: "website" | "ebay" | "amazon" | "quickbooks";
 };
-type SourceFilter = "website" | "ebay" | "all";
-type SortKey = "customer" | "source" | "phone" | "status" | "signed_up" | "last_sign_in" | "address";
+type SourceFilter = "website" | "ebay" | "amazon" | "quickbooks" | "all";
+type SortKey = "customer" | "source" | "phone" | "status" | "signed_up" | "last_purchase" | "last_sign_in" | "address";
 type CustomerList = {
   customers: Customer[];
   matched: number;
-  counts: { all: number; website: number; ebay: number };
+  counts: { all: number; website: number; ebay: number; amazon: number; quickbooks: number };
   page: number;
   pages: number;
   page_size: number;
@@ -486,11 +488,15 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
           </div>
         </td>
         <td className="whitespace-nowrap px-3 py-2">
-          <Badge tone={c.group === "website" ? "blue" : c.group === "ebay" ? "amber" : "gray"}>{c.source}</Badge>
+          <Badge tone={c.group === "website" ? "blue" : c.group === "ebay" ? "amber" : c.group === "amazon" ? "green" : "gray"}>{c.source}</Badge>
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-sm text-gray-700">{c.phone || <span className="text-gray-400">—</span>}</td>
         <td className="px-3 py-2">
-          {!c.has_account ? (
+          {c.is_staff ? (
+            <span title="A staff login (owner, admin or employee). Manage it from the Admins or Employees tab.">
+              <Badge tone="blue">Staff</Badge>
+            </span>
+          ) : !c.has_account ? (
             <span title="Bought as a guest or imported from QuickBooks. There is no login to manage.">
               <Badge tone="gray">No login</Badge>
             </span>
@@ -503,7 +509,10 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
           )}
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
-          {c.created_at ? new Date(c.created_at).toLocaleDateString() : "—"}
+          {c.created_at ? new Date(c.created_at).toLocaleDateString() : ""}
+        </td>
+        <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
+          {c.last_purchase_at ? new Date(c.last_purchase_at.slice(0, 10) + "T12:00:00").toLocaleDateString() : ""}
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
           {c.last_sign_in_at ? new Date(c.last_sign_in_at).toLocaleDateString() : c.has_account ? "Never" : "—"}
@@ -511,13 +520,13 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
         <td className="px-3 py-2 text-xs text-gray-700">{c.address || <span className="text-gray-400">None saved</span>}</td>
         <td className="whitespace-nowrap px-3 py-2 text-right">
           {busy && <span className="mr-2 text-xs text-gray-500">Working…</span>}
-          {c.has_account && <RowMenu items={items} disabled={!!busy} label={label} />}
+          {c.has_account && !c.is_staff && <RowMenu items={items} disabled={!!busy} label={label} />}
           {error && <p className="mt-1 text-right text-xs text-red-700">{error}</p>}
         </td>
       </tr>
       {delOpen && (
         <tr className="bg-red-50">
-          <td colSpan={8} className="px-3 py-3">
+          <td colSpan={9} className="px-3 py-3">
             <div className="max-w-xl space-y-2 text-sm">
               <p className="font-medium text-red-900">Permanently delete {label}?</p>
               <p className="text-red-900">
@@ -620,6 +629,8 @@ function ExportMenu({ onError }: { onError: (message: string) => void }) {
 const SOURCE_BUTTONS: { key: SourceFilter; label: string }[] = [
   { key: "website", label: "Website" },
   { key: "ebay", label: "eBay" },
+  { key: "amazon", label: "Amazon" },
+  { key: "quickbooks", label: "QuickBooks" },
   { key: "all", label: "All" },
 ];
 
@@ -630,6 +641,7 @@ const FIRST_DIRECTION: Record<SortKey, "asc" | "desc"> = {
   phone: "asc",
   status: "asc",
   signed_up: "desc",
+  last_purchase: "desc",
   last_sign_in: "desc",
   address: "asc",
 };
@@ -770,13 +782,21 @@ function CustomersPanel() {
         <ul className="mt-2 list-disc space-y-1.5 pl-5">
           <li>
             This list has <strong>everyone</strong>: people with a login on the site, guests who checked out without
-            an account, and customers imported from QuickBooks. <strong>Website</strong> shows the first two,{" "}
-            <strong>eBay</strong> shows customers whose address is an eBay relay address, and <strong>All</strong>{" "}
-            shows everyone (including Amazon and other QuickBooks customers). Click a column heading to sort the whole
-            list by it; click again to reverse.
+            an account, and customers imported from QuickBooks. <strong>Website</strong> shows logins and guests
+            (including your own staff logins, marked <strong>Staff</strong>), <strong>eBay</strong> and{" "}
+            <strong>Amazon</strong> show customers whose address is that marketplace&apos;s relay address,{" "}
+            <strong>QuickBooks</strong> shows the remaining customers who only exist in QuickBooks, and{" "}
+            <strong>All</strong> shows everyone. Click a column heading to sort the whole list by it; click again to
+            reverse.
           </li>
           <li>
-            Only customers with a login have the <strong>⋯</strong> button at the end of their row. Guests and imported
+            <strong>Signed up</strong> is only filled in for website logins and guests. It is blank for customers who only
+            exist in QuickBooks, eBay or Amazon. <strong>Last purchase</strong> is the date of their newest QuickBooks
+            invoice or sales receipt, or paid website order. It is updated after a QuickBooks sync that brings in
+            invoices or sales receipts, and from the QuickBooks page (Update last purchase dates).
+          </li>
+          <li>
+            Only customers with a login (not staff logins) have the <strong>⋯</strong> button at the end of their row. Guests and imported
             customers show <strong>No login</strong> and can&apos;t be blocked, reset or deleted from here.
           </li>
           <li>
@@ -827,6 +847,7 @@ function CustomersPanel() {
               <SortHeader label="Phone" k="phone" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Status" k="status" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Signed up" k="signed_up" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Last purchase" k="last_purchase" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Last sign-in" k="last_sign_in" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Address" k="address" sort={sort} dir={dir} onSort={onSort} />
               <th className="px-3 py-2" />
@@ -846,14 +867,14 @@ function CustomersPanel() {
             ))}
             {!loading && !error && rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={9} className="px-3 py-6 text-center text-gray-500">
                   {q.trim() ? "No customers match that search." : source === "all" ? "No customers yet." : "No customers in this group."}
                 </td>
               </tr>
             )}
             {loading && rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={9} className="px-3 py-6 text-center text-gray-500">
                   Loading…
                 </td>
               </tr>

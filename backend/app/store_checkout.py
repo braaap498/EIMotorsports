@@ -438,6 +438,11 @@ def _record_customer(db: Session, order) -> None:
         )
     if row is not None:
         db.execute(text("update orders set customer_id = :c where id = :o"), {"c": row.id, "o": order.id})
+        try:  # today is their newest purchase; skipped quietly until customers_last_purchase.sql has been run
+            with db.begin_nested():
+                db.execute(text("update customers set last_purchase_at = current_date where id = :c"), {"c": row.id})
+        except Exception:
+            pass
 
 
 def _mark_paid(db: Session, session: dict) -> None:

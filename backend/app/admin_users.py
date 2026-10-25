@@ -612,7 +612,9 @@ def _customer_directory(db: Session, fresh: bool = False) -> tuple[list[dict], d
             return "ebay", "eBay"
         if has_account or src != "quickbooks":
             return "website", "Website"
-        return "other", _SOURCE_LABELS.get(mkt, "QuickBooks")
+        if mkt == "amazon":
+            return "amazon", "Amazon"
+        return "quickbooks", "QuickBooks"
 
     rows: list[dict] = []
     for a in accounts:
@@ -627,6 +629,7 @@ def _customer_directory(db: Session, fresh: bool = False) -> tuple[list[dict], d
             "status": status, "confirmed": a["confirmed"], "blocked": a["blocked"],
             "created_at": a["created_at"], "last_sign_in_at": a["last_sign_in_at"],
             "address": a["address"] or addr_text(rec) or None,
+            "last_purchase_at": None, "is_staff": False,
             "group": group, "source": label,
         })
     for rec in loose:
@@ -636,8 +639,9 @@ def _customer_directory(db: Session, fresh: bool = False) -> tuple[list[dict], d
             "email": rec.email, "email_masked": (rec.email_kind or "") == "masked",
             "name": rec.full_name or "", "phone": rec.phone or "",
             "status": "No login", "confirmed": False, "blocked": False,
-            "created_at": _iso(rec.created_at), "last_sign_in_at": None,
+            "created_at": _iso(rec.created_at) if group == "website" else None, "last_sign_in_at": None,
             "address": addr_text(rec) or None,
+            "last_purchase_at": None, "is_staff": False,
             "group": group, "source": label,
         })
     return rows, problems
@@ -651,6 +655,7 @@ _SORT_KEYS = {
     "signed_up": lambda r: _ts(r["created_at"]),
     "last_sign_in": lambda r: _ts(r["last_sign_in_at"]),
     "address": lambda r: (r["address"] or "").lower(),
+    "last_purchase": lambda r: _ts(r.get("last_purchase_at")),
 }
 
 
@@ -676,6 +681,28 @@ def _sync_columns_ready(db: Session) -> bool:
     return _SYNC_READY
 
 
+_PURCHASE_READY = False
+
+
+def _purchase_column_ready(db: Session) -> bool:
+    """True once customers_last_purchase.sql has added customers.last_purchase_at."""
+    global _PURCHASE_READY
+    if _PURCHASE_READY:
+        return True
+    try:
+        n = db.execute(
+            text(
+                "select count(*) from information_schema.columns where table_schema = 'public' "
+                "and table_name = 'customers' and column_name = 'last_purchase_at'"
+            )
+        ).scalar()
+    except Exception:
+        db.rollback()
+        return False
+    _PURCHASE_READY = bool(n)
+    return _PURCHASE_READY
+
+
 # Everything the list shows, worked out inside the database so only one page of rows ever travels.
 _LIST_CTE = """
 with base as (
@@ -684,7 +711,8 @@ with base as (
          coalesce(nullif(btrim(coalesce(c.phone, '')), ''), nullif(btrim(coalesce(a.phone, '')), '')) as phone,
          coalesce(a.addr, cast(c.last_shipping_address as jsonb)) as addr,
          c.source, c.email_kind, c.marketplace, c.account_status, c.last_sign_in_at,
-         coalesce(c.account_created_at, c.created_at) as signed_up
+         coalesce(c.account_created_at, c.created_at) as signed_up_raw,
+         __LP__ as last_purchase_at
   from customers c
   left join lateral (
     select jsonb_build_object('line1', x.line1, 'line2', x.line2, 'city', x.city, 'region', x.region,
@@ -694,20 +722,25 @@ with base as (
     order by (x.kind = 'shipping' and x.is_default) desc, x.is_default desc, (x.kind = 'shipping') desc, x.id
     limit 1
   ) a on c.user_id is not null
-  where coalesce(c.account_status, '') <> 'staff'
 ), d as (
   select base.*,
          case when lower(coalesce(marketplace, '')) = 'ebay' then 'ebay'
               when user_id is not null or lower(coalesce(source, '')) <> 'quickbooks' then 'website'
-              else 'other' end as grp,
+              when lower(coalesce(marketplace, '')) = 'amazon' then 'amazon'
+              else 'quickbooks' end as grp,
          concat_ws(', ', nullif(addr->>'line1', ''), nullif(addr->>'line2', ''), nullif(addr->>'city', ''),
                    nullif(btrim(concat_ws(' ', addr->>'region', addr->>'postal_code')), '')) as address_text
   from base
 ), e as (
   select d.*,
-         case grp when 'ebay' then 'eBay' when 'website' then 'Website'
-              else case when lower(coalesce(marketplace, '')) = 'amazon' then 'Amazon' else 'QuickBooks' end end as source_label,
-         case when user_id is null then 'No login'
+         case grp when 'ebay' then 'eBay' when 'website' then 'Website' when 'amazon' then 'Amazon'
+              else 'QuickBooks' end as source_label,
+         -- Only people who signed up on the site (or checked out as a guest) have a "signed up" date.
+         -- For customers who only exist in QuickBooks / eBay / Amazon it would just be the date they were added there.
+         case when grp = 'website' then signed_up_raw else null end as signed_up,
+         (account_status = 'staff') as is_staff,
+         case when account_status = 'staff' then 'Staff'
+              when user_id is null then 'No login'
               when account_status = 'blocked' then 'Blocked'
               when account_status = 'unconfirmed' then 'Waiting for verification'
               else 'Active' end as status_label
@@ -723,15 +756,17 @@ _LIST_ORDER = {
     "signed_up": "signed_up",
     "last_sign_in": "last_sign_in_at",
     "address": "nullif(lower(address_text), '')",
+    "last_purchase": "last_purchase_at",
 }
 
 
 def _list_customers_fast(q, source, sort, direction, page, db: Session):
     needle = q.strip().lower()[:100]
     pat = "%" + re.sub(r"([%_!])", r"!\1", needle) + "%" if needle else ""
-    counts = {"all": 0, "website": 0, "ebay": 0}
+    cte = _LIST_CTE.replace("__LP__", "c.last_purchase_at" if _purchase_column_ready(db) else "cast(null as date)")
+    counts = {"all": 0, "website": 0, "ebay": 0, "amazon": 0, "quickbooks": 0}
     for grp, n in db.execute(
-        text(_LIST_CTE + f"select grp, count(*) from e where {_LIST_SEARCH} group by grp"), {"pat": pat}
+        text(cte + f"select grp, count(*) from e where {_LIST_SEARCH} group by grp"), {"pat": pat}
     ).all():
         counts["all"] += n
         if grp in counts:
@@ -741,9 +776,9 @@ def _list_customers_fast(q, source, sort, direction, page, db: Session):
     page = min(page, pages)
     recs = db.execute(
         text(
-            _LIST_CTE
+            cte
             + "select rec_id, user_id, email, name, phone, addr, email_kind, status_label, grp, source_label, "
-            "signed_up, last_sign_in_at from e "
+            "signed_up, last_sign_in_at, last_purchase_at, is_staff from e "
             f"where {_LIST_SEARCH} and (:grp = 'all' or grp = :grp) "
             f"order by {_LIST_ORDER[sort]} {direction} nulls last, rec_id "
             "limit :lim offset :off"
@@ -771,6 +806,8 @@ def _list_customers_fast(q, source, sort, direction, page, db: Session):
             "blocked": r.status_label == "Blocked",
             "created_at": _iso(r.signed_up),
             "last_sign_in_at": _iso(r.last_sign_in_at),
+            "last_purchase_at": _iso(r.last_purchase_at),
+            "is_staff": bool(r.is_staff),
             "address": (_format_address(addr) if isinstance(addr, dict) else "") or None,
             "group": r.grp,
             "source": r.source_label,
@@ -790,8 +827,8 @@ def _list_customers_fast(q, source, sort, direction, page, db: Session):
 @router.get("/customers")
 def list_customers(
     q: str = "",
-    source: Literal["all", "website", "ebay"] = "all",
-    sort: Literal["customer", "source", "phone", "status", "signed_up", "last_sign_in", "address"] = "signed_up",
+    source: Literal["all", "website", "ebay", "amazon", "quickbooks"] = "all",
+    sort: Literal["customer", "source", "phone", "status", "signed_up", "last_purchase", "last_sign_in", "address"] = "signed_up",
     direction: Literal["asc", "desc"] = Query("desc", alias="dir"),
     page: int = Query(1, ge=1),
     refresh: bool = False,
@@ -799,7 +836,7 @@ def list_customers(
 ):
     """
     Everyone: login accounts, guest checkouts and the QuickBooks import, one page at a time.
-    `q` searches name, email, phone and address; `source` narrows to Website or eBay; `sort` and `dir`
+    `q` searches name, email, phone and address; `source` narrows to Website, eBay, Amazon or QuickBooks; `sort` and `dir`
     order the whole list (not just the page on screen).
     Fast path: the `customers` table is kept in step with the logins by customers_sync.sql, so the
     database does the searching, sorting and paging. Without that script, the slower merge is used.
@@ -829,6 +866,8 @@ def _list_customers_slow(q, source, sort, direction, page, refresh, db: Session)
         "all": len(rows),
         "website": sum(1 for r in rows if r["group"] == "website"),
         "ebay": sum(1 for r in rows if r["group"] == "ebay"),
+        "amazon": sum(1 for r in rows if r["group"] == "amazon"),
+        "quickbooks": sum(1 for r in rows if r["group"] == "quickbooks"),
     }
     if source != "all":
         rows = [r for r in rows if r["group"] == source]

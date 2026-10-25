@@ -720,6 +720,13 @@ def m_closeConnection(db: Session, a: dict) -> str:
         )
         db.commit()
         log.info("QuickBooks sync %s finished: %s (%s)", run.id, status, _j(run.counts))
+        counts = _j(run.counts) or {}
+        if status in ("ok", "partial") and (counts.get("Invoice") or counts.get("SalesReceipt")):
+            try:  # keep the Customers tab's "Last purchase" column current; never let this break the sync
+                _refresh_last_purchases(db)
+            except Exception:
+                db.rollback()
+                log.warning("could not refresh customers' last purchase dates", exc_info=True)
     return _res("closeConnection", "OK")
 
 
@@ -907,6 +914,59 @@ def sync_now(body: SyncIn, db: Session = Depends(get_db), user: AuthUser = Depen
     )
     db.commit()
     return {"ok": True, "full": body.full}
+
+
+_LAST_PURCHASE_SQL = """
+with qb as (
+  select lower(split_part(r.party, ':', 1)) as k, max(r.txn_date) as d
+  from qb_records r
+  where r.entity in ('Invoice', 'SalesReceipt') and r.deleted_at is null
+    and r.txn_date is not null and r.party is not null
+  group by 1
+), from_qb as (
+  select c.id, qb.d
+  from customers c
+  join qb_records cr on cr.entity = 'Customer' and cr.qb_id = c.qb_list_id and cr.deleted_at is null
+  join qb on qb.k = lower(split_part(coalesce(cr.name, ''), ':', 1))
+  where c.qb_list_id is not null
+), from_site as (
+  select o.customer_id as id, max(o.paid_at)::date as d
+  from orders o
+  where o.customer_id is not null and o.paid_at is not null and o.status not in ('cancelled', 'refunded')
+  group by 1
+), allp as (
+  select id, d from from_qb union all select id, d from from_site
+), best as (
+  select id, max(d) as d from allp group by id
+)
+update customers c set last_purchase_at = b.d
+from customers c2 left join best b on b.id = c2.id
+where c.id = c2.id and c.last_purchase_at is distinct from b.d
+"""
+
+
+def _refresh_last_purchases(db: Session) -> int:
+    """
+    Work out each customer's last purchase date and save it on the customer (customers.last_purchase_at).
+    A purchase is a QuickBooks invoice or sales receipt (eBay and Amazon sales are in QuickBooks too) or a paid
+    website order. A QuickBooks "Customer:Job" counts for the customer. Returns how many customers changed.
+    """
+    res = db.execute(text(_LAST_PURCHASE_SQL))
+    db.commit()
+    return res.rowcount or 0
+
+
+@admin_router.post("/refresh-last-purchases")
+def refresh_last_purchases(db: Session = Depends(get_db)):
+    _need_tables(db)
+    try:
+        n = _refresh_last_purchases(db)
+    except ProgrammingError as e:
+        db.rollback()
+        if getattr(getattr(e, "orig", None), "sqlstate", None) == "42703":
+            raise HTTPException(409, "Run customers_last_purchase.sql once in the Supabase SQL editor first, then try again.")
+        raise
+    return {"ok": True, "updated": n}
 
 
 class EnabledIn(BaseModel):
