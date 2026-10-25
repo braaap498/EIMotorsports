@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { MAX_LINE_QTY, useCart } from "./CartProvider";
+import { backorderText } from "../../lib/backorder";
 
 // Quantity picker and "Add to cart" button for a product page.
 export default function AddToCart({
@@ -11,12 +12,16 @@ export default function AddToCart({
   price,
   available,
   backordered = false,
+  expectedDate = null,
+  daysUntil = null,
 }: {
   productId: number;
   slug: string;
   price: string | null;
   available: number;
   backordered?: boolean;
+  expectedDate?: string | null;
+  daysUntil?: number | null;
 }) {
   const { lines, add } = useCart();
   const inCart = lines.find((l) => l.product_id === productId)?.qty ?? 0;
@@ -33,7 +38,7 @@ export default function AddToCart({
     return backordered ? (
       <div className="mt-6">
         <p className="inline-block rounded bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">Backordered</p>
-        <p className="mt-2 text-sm text-gray-600">More are on order but haven’t arrived yet. Check back soon.</p>
+        <p className="mt-2 text-sm text-gray-600">More are on order but haven’t arrived yet. {backorderText(expectedDate, daysUntil)}</p>
       </div>
     ) : (
       <p className="mt-6 inline-block rounded bg-gray-100 px-3 py-2 text-sm font-semibold text-gray-700">Out of stock</p>

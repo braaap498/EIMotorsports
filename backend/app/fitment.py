@@ -156,7 +156,8 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
     p = db.execute(
         text(
             "select id, sku, title, slug, list_price, condition, description, "
-            "manufacturer_part_number, on_order, "
+            "manufacturer_part_number, show_part_number, on_order, expected_date, "
+            f"(expected_date - current_date) as days_until, "
             f"{available_sql('p')} as available_qty from products p "
             f"where p.slug = :slug and {PUBLISHED_FILTER}"
         ),
@@ -178,6 +179,7 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         ),
         {"id": p.id},
     ).all()
+    backordered = bool(p.on_order) and int(p.available_qty or 0) <= 0
     return {
         "id": p.id,
         "sku": p.sku,
@@ -185,9 +187,12 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         "slug": p.slug,
         "price": f"{p.list_price:.2f}" if p.list_price is not None else None,
         "condition": p.condition,
-        "part_number": p.manufacturer_part_number,
+        # The manufacturer part number is only shown when the admin ticked "show to customers".
+        "part_number": p.manufacturer_part_number if p.show_part_number else None,
         "available": max(0, int(p.available_qty or 0)),
-        "backordered": bool(p.on_order) and int(p.available_qty or 0) <= 0,
+        "backordered": backordered,
+        "expected_date": p.expected_date.isoformat() if backordered and p.expected_date else None,
+        "days_until": int(p.days_until) if backordered and p.days_until is not None else None,
         "description": clean_description(p.description),
         "photos": gallery(photos),
         "specifics": [{"name": s.name, "value": s.value} for s in specifics],

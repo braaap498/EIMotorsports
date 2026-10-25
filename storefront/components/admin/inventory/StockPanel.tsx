@@ -16,7 +16,9 @@ type Row = {
   is_active: boolean;
   reserved: number; // promised to paid orders and open checkouts
   available: number; // what customers can still buy
-  on_order: boolean; // a purchase order is placed; the site says Backordered instead of Sold out
+  on_order: boolean; // Backordered: the site says Backordered (with the date) instead of Sold out
+  has_open_po: boolean; // the part is on a purchase order that has not been received; only then can Backordered be ticked
+  expected_date: string | null; // "YYYY-MM-DD", typed by hand, shown to customers
   oversold: boolean; // more promised to paid orders than the shelf count says is there
 };
 type Resp = { total: number; low_count: number; out_count: number; oversold_count?: number; items: Row[] };
@@ -25,7 +27,8 @@ type Note = "" | "saving" | "saved";
 
 const LIMIT = 50;
 const SAVE_DELAY_MS = 700;
-const isLow = (r: Row) => (r.reorder_point ?? 0) > 0 && r.available <= (r.reorder_point ?? 0);
+// Low = something left to sell but at or under the restock level. Nothing left is "Out", never both.
+const isLow = (r: Row) => (r.reorder_point ?? 0) > 0 && r.available > 0 && r.available <= (r.reorder_point ?? 0);
 
 /** Every product with its stock, manual count changes, restock levels, and the list of what needs reordering. */
 export default function StockPanel({ active }: { active: boolean }) {
@@ -100,7 +103,8 @@ export default function StockPanel({ active }: { active: boolean }) {
         Every part and how many you have. “On hand” is what is physically on the shelf: use the arrows or type the real
         number and it saves by itself. “Reserved” is promised to paid orders that haven’t been picked yet, and
         “Available” is what customers can still buy. Set a restock level on a part and it shows up under Low stock when
-        available reaches or drops below it.
+        available reaches or drops below it (and under Out of stock once none are left). “Backordered” can be ticked once
+        the part is on a purchase order, and the date you expect it is shown to customers.
       </p>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -348,19 +352,42 @@ function StockRow({
   const out = row.available <= 0;
   const [onOrder, setOnOrder] = useState(row.on_order);
   useEffect(() => setOnOrder(row.on_order), [row.on_order]);
+  const [date, setDate] = useState(row.expected_date ?? "");
+  useEffect(() => setDate(row.expected_date ?? ""), [row.expected_date]);
+  const [dateNote, setDateNote] = useState<Note>("");
 
   async function toggleOnOrder(next: boolean) {
     setOnOrder(next);
     onError("");
     try {
-      const r = await api<{ on_order: boolean }>(`/inventory/products/${row.id}/on-order`, {
+      const r = await api<{ on_order: boolean; expected_date: string | null }>(`/inventory/products/${row.id}/on-order`, {
         method: "PUT",
         body: { on_order: next },
       });
       setOnOrder(r.on_order);
-      onUpdate(row.id, { on_order: r.on_order });
+      setDate(r.expected_date ?? "");
+      onUpdate(row.id, { on_order: r.on_order, expected_date: r.expected_date });
     } catch (e) {
       setOnOrder(!next);
+      onError(errMsg(e));
+    }
+  }
+
+  async function saveDate(next: string) {
+    setDate(next);
+    setDateNote("saving");
+    onError("");
+    try {
+      const r = await api<{ expected_date: string | null }>(`/inventory/products/${row.id}/expected-date`, {
+        method: "PUT",
+        body: { expected_date: next || null },
+      });
+      setDate(r.expected_date ?? "");
+      onUpdate(row.id, { expected_date: r.expected_date });
+      flash(setDateNote);
+    } catch (e) {
+      setDate(rowRef.current.expected_date ?? "");
+      setDateNote("");
       onError(errMsg(e));
     }
   }
@@ -418,7 +445,7 @@ function StockRow({
           row.reorder_point ?? "—"
         )}
       </td>
-      {showShort && <td className="px-3 py-2 font-semibold">{Math.max(0, (row.reorder_point ?? 0) - row.quantity_on_hand)}</td>}
+      {showShort && <td className="px-3 py-2 font-semibold">{Math.max(0, (row.reorder_point ?? 0) - row.available)}</td>}
       <td className="whitespace-nowrap px-3 py-2">
         <span className="flex flex-wrap items-center gap-1 whitespace-nowrap">
           {row.oversold && <span className="rounded bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-800">OVERSOLD</span>}
@@ -430,11 +457,29 @@ function StockRow({
             <Badge tone="green">Ok</Badge>
           )}
         </span>
-        {canEdit && (
-          <label className="mt-1 flex items-center gap-1 text-xs text-gray-600">
-            <input type="checkbox" checked={onOrder} onChange={(e) => toggleOnOrder(e.target.checked)} />
-            On order (PO placed)
-          </label>
+        {/* Only a part that is on a purchase order can be Backordered. Creating the PO ticks it by default. */}
+        {canEdit && row.has_open_po && (
+          <div className="mt-1 space-y-1 text-xs text-gray-600">
+            <label className="flex items-center gap-1">
+              <input type="checkbox" checked={onOrder} onChange={(e) => toggleOnOrder(e.target.checked)} />
+              Backordered (on a PO)
+            </label>
+            {onOrder && (
+              <label className="flex items-center gap-1">
+                Expected
+                <input
+                  type="date"
+                  className={`${inputCls} w-36 py-0.5 text-xs`}
+                  value={date}
+                  onChange={(e) => saveDate(e.target.value)}
+                />
+                <span className="w-12 text-gray-500">{noteText(dateNote)}</span>
+              </label>
+            )}
+          </div>
+        )}
+        {!canEdit && onOrder && row.expected_date && (
+          <div className="mt-1 text-xs text-gray-600">Expected {row.expected_date}</div>
         )}
       </td>
     </tr>

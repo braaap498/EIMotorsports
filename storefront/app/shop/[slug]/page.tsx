@@ -11,6 +11,8 @@ type Detail = {
   slug: string;
   available: number;
   backordered?: boolean;
+  expected_date?: string | null;
+  days_until?: number | null;
   title: string;
   price: string | null;
   condition: string | null;
@@ -57,7 +59,7 @@ async function Product({ params }: { params: Promise<{ slug: string }> }) {
       <div>
         <h1 className="text-2xl font-bold">{p.title}</h1>
         {p.price && <p className="mt-2 text-2xl">${p.price}</p>}
-        <AddToCart productId={p.id} slug={p.slug} price={p.price} available={p.available} backordered={p.backordered} />
+        <AddToCart productId={p.id} slug={p.slug} price={p.price} available={p.available} backordered={p.backordered} expectedDate={p.expected_date} daysUntil={p.days_until} />
         <p className="mt-2 text-sm text-gray-500">
           {p.condition ? `${p.condition} · ` : ""}
           {p.part_number ? `Part # ${p.part_number} · ` : ""}SKU {p.sku}

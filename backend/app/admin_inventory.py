@@ -16,7 +16,8 @@ HOW STOCK IS COUNTED - read this before changing anything (rules live in app/sto
     taken at payment, so picking them takes nothing a second time.
   * eBay / other sales are decreased by whatever records them (outside this file); scanning those
     out only records who shipped what.
-  * Receiving scans ADD stock, write an inventory_transactions ledger row, and clear "on order".
+  * Receiving scans ADD stock, write an inventory_transactions ledger row, clear "on order" and the expected
+    date, and close the part's open purchase order lines (oldest first).
   * Every commit is ONE database transaction, tagged with a batch id made by the browser, so a
     double click or a retry after a dropped connection can never be applied twice.
 
@@ -36,7 +37,8 @@ Routes
   POST   /inventory/orders/{n}/shipped      picked order -> shipped, with its tracking number
   POST   /inventory/orders/{n}/cancel       cancel an unshipped paid order (releases / restores stock)
   POST   /inventory/orders/{n}/refund       refund through Stripe (owner / admin only)
-  PUT    /inventory/products/{id}/on-order  mark a part as on order (shows Backordered on the site)
+  PUT    /inventory/products/{id}/on-order  tick / untick Backordered (only while the part is on an open purchase order)
+  PUT    /inventory/products/{id}/expected-date   the date the backordered part is expected (shown to customers)
   GET    /inventory/history                 recent batches (audit trail)
   GET    /inventory/stock                   every product with on-hand + restock level (search, low, out)
   POST   /inventory/products/{id}/adjust    manual +/- or set-the-count (writes an 'Adjustment' ledger row)
@@ -45,6 +47,7 @@ Routes
 import logging
 import re
 import uuid
+from datetime import date
 from typing import Optional
 
 import stripe
@@ -122,6 +125,21 @@ def _barcode_owner(db: Session, code: str):
         ),
         {"c": code},
     ).first()
+
+
+def _close_po_lines(db: Session, product_id: int, qty: int) -> None:
+    """Parts arrived: mark this part's open purchase order lines received, oldest PO first, until the
+    received quantity is used up. That is what takes the Backordered tick away on the Stock tab."""
+    left = qty
+    lines = db.execute(
+        text("select id, quantity from po_lines where product_id = :p and received_at is null order by id"),
+        {"p": product_id},
+    ).all()
+    for l in lines:
+        if left <= 0:
+            break
+        db.execute(text("update po_lines set received_at = now() where id = :id"), {"id": l.id})
+        left -= l.quantity
 
 
 def _merge_lines(lines: list) -> dict[int, dict]:
@@ -402,7 +420,7 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
             new_qty = db.execute(
                 text(
                     "update products set quantity_on_hand = coalesce(quantity_on_hand, 0) + :q, on_order = false, "
-                    "updated_at = now() where id = :id returning quantity_on_hand"
+                    "expected_date = null, updated_at = now() where id = :id returning quantity_on_hand"
                 ),
                 {"q": m["qty"], "id": pid},
             ).scalar()
@@ -415,6 +433,7 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
                 {"p": pid, "q": m["qty"], "ref": ref[:200], "by": user.email},
             )
             _insert_line(db, body.batch_id, pid, m["barcode_id"], m["qty"])
+            _close_po_lines(db, pid, m["qty"])
             result.append({"product_id": pid, "received": m["qty"], "quantity_on_hand": new_qty})
         db.commit()
         return {"batch_id": str(body.batch_id), "lines": result}
@@ -428,10 +447,11 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
 # --------------------------------------------------------------------------
 # stock list, manual adjustments, restock levels
 # --------------------------------------------------------------------------
-# "Low" = a restock level is set (above 0) and what can still be SOLD (available) is AT or BELOW it.
+# "Low" = a restock level is set (above 0) and what can still be SOLD (available) is AT or BELOW it, but
+# not zero (zero is "Out", so a part never shows in both lists).
 # "Out" = nothing left to sell. Parts promised to paid orders are not counted as sellable.
 _AVAIL_SQL = available_sql("p")
-_LOW_SQL = f"(coalesce(p.reorder_point, 0) > 0 and {_AVAIL_SQL} <= p.reorder_point)"
+_LOW_SQL = f"(coalesce(p.reorder_point, 0) > 0 and {_AVAIL_SQL} > 0 and {_AVAIL_SQL} <= p.reorder_point)"
 _OUT_SQL = f"({_AVAIL_SQL} <= 0)"
 # Oversold = more promised to paid orders than the shelf count says is there. Staff-only warning.
 _OVERSOLD_SQL = f"({reserved_paid_sql('p')} > coalesce(p.quantity_on_hand, 0))"
@@ -479,7 +499,9 @@ def stock_list(
             "select p.id, p.sku, p.title, coalesce(p.quantity_on_hand, 0) as quantity_on_hand, "
             "       p.reorder_point, p.bin_location, coalesce(p.is_active, true) as is_active, "
             f"       {set_aside_sql('p')} as reserved, {_AVAIL_SQL} as available, "
-            f"       coalesce(p.on_order, false) as on_order, {_OVERSOLD_SQL} as oversold "
+            f"       coalesce(p.on_order, false) as on_order, p.expected_date, "
+            f"       exists (select 1 from po_lines l where l.product_id = p.id and l.received_at is null) as has_open_po, "
+            f"       {_OVERSOLD_SQL} as oversold "
             f"from products p {where} order by {order} limit :limit offset :offset"
         ),
         params,
@@ -584,20 +606,61 @@ class OnOrderIn(BaseModel):
     on_order: bool
 
 
+def _has_open_po(db: Session, product_id: int) -> bool:
+    return bool(
+        db.execute(
+            text("select 1 from po_lines where product_id = :p and received_at is null limit 1"), {"p": product_id}
+        ).first()
+    )
+
+
 @router.put("/products/{product_id}/on-order")
 @needs("inventory.adjust")
 def set_on_order(product_id: int, body: OnOrderIn, db: Session = Depends(get_db)):
-    """A purchase order has been placed for this part. While it is sold out, the site says
-    Backordered instead of Sold out. Receiving the part clears this by itself."""
+    """Backordered on / off. A part can only be Backordered while it is on a purchase order that has not
+    been received. Creating the PO ticks this by itself; here it can be un-ticked (or ticked again).
+    Turning it off also clears the expected date."""
+    if body.on_order and not _has_open_po(db, product_id):
+        db.rollback()
+        raise HTTPException(400, "This part isn't on a purchase order yet. Create a purchase order for it first.")
     got = db.execute(
-        text("update products set on_order = :v, updated_at = now() where id = :id returning on_order"),
+        text(
+            "update products set on_order = :v, "
+            + ("" if body.on_order else "expected_date = null, ")
+            + "updated_at = now() where id = :id returning on_order, expected_date"
+        ),
         {"v": body.on_order, "id": product_id},
     ).first()
     if not got:
         db.rollback()
         raise HTTPException(404, "That product no longer exists")
     db.commit()
-    return {"product_id": product_id, "on_order": got.on_order}
+    return {"product_id": product_id, "on_order": got.on_order, "expected_date": got.expected_date}
+
+
+class ExpectedDateIn(BaseModel):
+    expected_date: Optional[date] = None  # empty clears it
+
+
+@router.put("/products/{product_id}/expected-date")
+@needs("inventory.adjust")
+def set_expected_date(product_id: int, body: ExpectedDateIn, db: Session = Depends(get_db)):
+    """When a backordered part is expected. Customers see it on the product page and on their order."""
+    got = db.execute(
+        text("select on_order from products where id = :id for update"), {"id": product_id}
+    ).first()
+    if not got:
+        db.rollback()
+        raise HTTPException(404, "That product no longer exists")
+    if body.expected_date and not got.on_order:
+        db.rollback()
+        raise HTTPException(400, "Only a backordered part has an expected date. Tick Backordered first.")
+    db.execute(
+        text("update products set expected_date = :d, updated_at = now() where id = :id"),
+        {"d": body.expected_date, "id": product_id},
+    )
+    db.commit()
+    return {"product_id": product_id, "expected_date": body.expected_date}
 
 
 # --------------------------------------------------------------------------

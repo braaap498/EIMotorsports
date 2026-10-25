@@ -82,7 +82,7 @@ function orderCategories(cats: Cat[]): { cat: Cat; depth: number }[] {
   return out;
 }
 
-type Flags = { is_published: boolean; is_active: boolean; is_universal: boolean };
+type Flags = { is_published: boolean; is_active: boolean; is_universal: boolean; show_part_number: boolean };
 
 // Turns what is on screen into what the API expects. Used for saving, and once
 // at load time so that saving can send only what the person actually changed.
@@ -124,7 +124,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [baseline, setBaseline] = useState<Record<string, unknown> | null>(null);
   const router = useRouter();
   const [vals, setVals] = useState<Record<string, string>>({});
-  const [flags, setFlags] = useState<Flags>({ is_published: false, is_active: true, is_universal: false });
+  const [flags, setFlags] = useState<Flags>({ is_published: false, is_active: true, is_universal: false, show_part_number: false });
   const [cats, setCats] = useState<Cat[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [photosDirty, setPhotosDirty] = useState(false); // unsaved main-photo / order changes in the photos panel
@@ -183,6 +183,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
           is_published: !!p.is_published,
           is_active: !!p.is_active,
           is_universal: !!p.is_universal,
+          show_part_number: !!p.show_part_number,
         };
         setVals(next);
         setFlags(loadedFlags);
@@ -288,6 +289,17 @@ export default function ProductForm({ productId }: { productId?: number }) {
           value={vals[f.key] ?? ""}
           onChange={(e) => set(f.key, e.target.value)}
         />
+        {f.key === "manufacturer_part_number" && (
+          <label className="mt-1 flex items-center gap-2 text-xs font-normal text-gray-600">
+            <input
+              type="checkbox"
+              disabled={!mayDetails}
+              checked={flags.show_part_number}
+              onChange={(e) => setFlags((fl) => ({ ...fl, show_part_number: e.target.checked }))}
+            />
+            Show this part number to customers
+          </label>
+        )}
       </Field>
     ));
 

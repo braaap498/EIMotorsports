@@ -1,5 +1,6 @@
 "use client";
 
+import { backorderText } from "../../lib/backorder";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -18,6 +19,8 @@ type Priced = {
   price?: string | null;
   available?: number;
   backordered?: boolean;
+  expected_date?: string | null;
+  days_until?: number | null;
   qty?: number;
   image_url?: string | null;
   image_fallback?: string | null;
@@ -133,7 +136,7 @@ export default function CartPage() {
                 {p && p.problem === "unavailable" && <p className="mt-1 text-sm font-semibold text-red-700">This part is no longer available.</p>}
                 {p && p.problem === "sold_out" && (
                   <p className="mt-1 text-sm font-semibold text-red-700">
-                    {p.backordered ? "Backordered. More are on order, but none are in stock right now." : "Sold out."}
+                    {p.backordered ? `Backordered. More are on order, but none are in stock right now. ${backorderText(p.expected_date, p.days_until)}` : "Sold out."}
                   </p>
                 )}
                 {p && p.problem === "no_price" && <p className="mt-1 text-sm font-semibold text-red-700">Pricing unavailable. Contact us to order.</p>}

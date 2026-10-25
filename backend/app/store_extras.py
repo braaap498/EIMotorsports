@@ -177,7 +177,8 @@ def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
     rows = db.execute(
         text(
             f"""
-            select p.id, p.slug, p.sku, p.title, p.list_price, p.on_order,
+            select p.id, p.slug, p.sku, p.title, p.list_price, p.on_order, p.expected_date,
+              (p.expected_date - current_date) as days_until,
               {available_sql("p")} as available_qty,
               (select ph.source_url from product_photos ph
                 where ph.product_id = p.id
@@ -219,6 +220,8 @@ def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
                 "price": f"{r.list_price:.2f}" if r.list_price is not None else None,
                 "available": available,
                 "backordered": bool(r.on_order) and available <= 0,
+                "expected_date": r.expected_date.isoformat() if r.on_order and available <= 0 and r.expected_date else None,
+                "days_until": int(r.days_until) if r.on_order and available <= 0 and r.days_until is not None else None,
                 "qty": qty,
                 "problem": problem,
                 **card_image(r.photo_image_key, r.photo_source_url),
