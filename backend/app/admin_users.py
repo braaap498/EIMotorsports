@@ -654,6 +654,139 @@ _SORT_KEYS = {
 }
 
 
+_SYNC_READY = False
+
+
+def _sync_columns_ready(db: Session) -> bool:
+    """True once customers_sync.sql has added the account columns to the `customers` table."""
+    global _SYNC_READY
+    if _SYNC_READY:
+        return True
+    try:
+        n = db.execute(
+            text(
+                "select count(*) from information_schema.columns where table_schema = 'public' "
+                "and table_name = 'customers' and column_name in ('account_status', 'last_sign_in_at', 'account_created_at')"
+            )
+        ).scalar()
+    except Exception:
+        db.rollback()
+        return False
+    _SYNC_READY = n == 3
+    return _SYNC_READY
+
+
+# Everything the list shows, worked out inside the database so only one page of rows ever travels.
+_LIST_CTE = """
+with base as (
+  select c.id as rec_id, c.user_id, c.email,
+         nullif(btrim(coalesce(c.full_name, '')), '') as name,
+         coalesce(nullif(btrim(coalesce(c.phone, '')), ''), nullif(btrim(coalesce(a.phone, '')), '')) as phone,
+         coalesce(a.addr, cast(c.last_shipping_address as jsonb)) as addr,
+         c.source, c.email_kind, c.marketplace, c.account_status, c.last_sign_in_at,
+         coalesce(c.account_created_at, c.created_at) as signed_up
+  from customers c
+  left join lateral (
+    select jsonb_build_object('line1', x.line1, 'line2', x.line2, 'city', x.city, 'region', x.region,
+                              'postal_code', x.postal_code, 'country', x.country) as addr, x.phone
+    from customer_addresses x
+    where x.user_id = c.user_id
+    order by (x.kind = 'shipping' and x.is_default) desc, x.is_default desc, (x.kind = 'shipping') desc, x.id
+    limit 1
+  ) a on c.user_id is not null
+  where coalesce(c.account_status, '') <> 'staff'
+), d as (
+  select base.*,
+         case when lower(coalesce(marketplace, '')) = 'ebay' then 'ebay'
+              when user_id is not null or lower(coalesce(source, '')) <> 'quickbooks' then 'website'
+              else 'other' end as grp,
+         concat_ws(', ', nullif(addr->>'line1', ''), nullif(addr->>'line2', ''), nullif(addr->>'city', ''),
+                   nullif(btrim(concat_ws(' ', addr->>'region', addr->>'postal_code')), '')) as address_text
+  from base
+), e as (
+  select d.*,
+         case grp when 'ebay' then 'eBay' when 'website' then 'Website'
+              else case when lower(coalesce(marketplace, '')) = 'amazon' then 'Amazon' else 'QuickBooks' end end as source_label,
+         case when user_id is null then 'No login'
+              when account_status = 'blocked' then 'Blocked'
+              when account_status = 'unconfirmed' then 'Waiting for verification'
+              else 'Active' end as status_label
+  from d
+)
+"""
+_LIST_SEARCH = "(:pat = '' or lower(concat_ws(' ', name, email, phone, address_text)) like :pat escape '!')"
+_LIST_ORDER = {
+    "customer": "lower(coalesce(name, email, ''))",
+    "source": "lower(source_label)",
+    "phone": r"nullif(regexp_replace(phone, '\D', '', 'g'), '')",
+    "status": "lower(status_label)",
+    "signed_up": "signed_up",
+    "last_sign_in": "last_sign_in_at",
+    "address": "nullif(lower(address_text), '')",
+}
+
+
+def _list_customers_fast(q, source, sort, direction, page, db: Session):
+    needle = q.strip().lower()[:100]
+    pat = "%" + re.sub(r"([%_!])", r"!\1", needle) + "%" if needle else ""
+    counts = {"all": 0, "website": 0, "ebay": 0}
+    for grp, n in db.execute(
+        text(_LIST_CTE + f"select grp, count(*) from e where {_LIST_SEARCH} group by grp"), {"pat": pat}
+    ).all():
+        counts["all"] += n
+        if grp in counts:
+            counts[grp] = n
+    matched = counts["all"] if source == "all" else counts[source]
+    pages = max(1, -(-matched // CUSTOMER_PAGE_SIZE))
+    page = min(page, pages)
+    recs = db.execute(
+        text(
+            _LIST_CTE
+            + "select rec_id, user_id, email, name, phone, addr, email_kind, status_label, grp, source_label, "
+            "signed_up, last_sign_in_at from e "
+            f"where {_LIST_SEARCH} and (:grp = 'all' or grp = :grp) "
+            f"order by {_LIST_ORDER[sort]} {direction} nulls last, rec_id "
+            "limit :lim offset :off"
+        ),
+        {"pat": pat, "grp": source, "lim": CUSTOMER_PAGE_SIZE, "off": (page - 1) * CUSTOMER_PAGE_SIZE},
+    ).all()
+    rows = []
+    for r in recs:
+        addr = r.addr
+        if isinstance(addr, str):
+            try:
+                addr = json.loads(addr)
+            except ValueError:
+                addr = None
+        has_account = r.user_id is not None
+        rows.append({
+            "id": str(r.user_id) if has_account else str(r.rec_id),
+            "has_account": has_account,
+            "email": r.email,
+            "email_masked": (r.email_kind or "") == "masked",
+            "name": r.name or "",
+            "phone": r.phone or "",
+            "status": r.status_label,
+            "confirmed": has_account and r.status_label != "Waiting for verification",
+            "blocked": r.status_label == "Blocked",
+            "created_at": _iso(r.signed_up),
+            "last_sign_in_at": _iso(r.last_sign_in_at),
+            "address": (_format_address(addr) if isinstance(addr, dict) else "") or None,
+            "group": r.grp,
+            "source": r.source_label,
+        })
+    return {
+        "customers": rows,
+        "matched": matched,
+        "counts": counts,
+        "page": page,
+        "pages": pages,
+        "page_size": CUSTOMER_PAGE_SIZE,
+        "addresses_error": None,
+        "customers_error": None,
+    }
+
+
 @router.get("/customers")
 def list_customers(
     q: str = "",
@@ -667,8 +800,23 @@ def list_customers(
     """
     Everyone: login accounts, guest checkouts and the QuickBooks import, one page at a time.
     `q` searches name, email, phone and address; `source` narrows to Website or eBay; `sort` and `dir`
-    order the whole list (not just the page on screen). `refresh` skips the one-minute reuse of the
-    login-account list (used right after block / delete and so on).
+    order the whole list (not just the page on screen).
+    Fast path: the `customers` table is kept in step with the logins by customers_sync.sql, so the
+    database does the searching, sorting and paging. Without that script, the slower merge is used.
+    """
+    if _sync_columns_ready(db):
+        try:
+            return _list_customers_fast(q, source, sort, direction, page, db)
+        except Exception as e:
+            db.rollback()
+            log.warning("fast customer list failed; falling back to the slow one", exc_info=True)
+    return _list_customers_slow(q, source, sort, direction, page, refresh, db)
+
+
+def _list_customers_slow(q, source, sort, direction, page, refresh, db: Session):
+    """
+    The original way: read every login account from Supabase and every row of `customers`, merge them in
+    Python. Only used until customers_sync.sql has been run (see _sync_columns_ready).
     """
     rows, problems = _customer_directory(db, fresh=refresh)
     needle = q.strip().lower()
@@ -900,21 +1048,44 @@ def export_customers(
     )
 
 
+def _mirror_account(db: Session, user_id: str, status: Optional[str], unlink: bool = False) -> None:
+    """Best effort: copy an admin action into the `customers` row at once. (customers_sync.sql's trigger does the same.)"""
+    try:
+        if unlink:
+            db.execute(
+                text(
+                    "update customers set user_id = null, account_status = null, last_sign_in_at = null, "
+                    "account_created_at = null where user_id = cast(:u as uuid)"
+                ),
+                {"u": user_id},
+            )
+        else:
+            db.execute(
+                text("update customers set account_status = :s, updated_at = now() where user_id = cast(:u as uuid)"),
+                {"s": status, "u": user_id},
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
 @router.post("/customers/{user_id}/block")
-def block_customer(user_id: str, me: AuthUser = Depends(require_admin)):
+def block_customer(user_id: str, me: AuthUser = Depends(require_admin), db: Session = Depends(get_db)):
     """Stop them signing in. Their records are kept; undo with /unblock."""
     _load_customer(user_id)
     out = _call("PUT", f"/users/{user_id}", {"ban_duration": BLOCK_FOR})
     _forget_auth_cache()
+    _mirror_account(db, user_id, "blocked")
     log.info("customer %s blocked by %s", user_id, me.email or me.user_id)
     return _public_customer(out)
 
 
 @router.post("/customers/{user_id}/unblock")
-def unblock_customer(user_id: str, me: AuthUser = Depends(require_admin)):
+def unblock_customer(user_id: str, me: AuthUser = Depends(require_admin), db: Session = Depends(get_db)):
     _load_customer(user_id)
     out = _call("PUT", f"/users/{user_id}", {"ban_duration": "none"})
     _forget_auth_cache()
+    _mirror_account(db, user_id, "active" if _is_confirmed(out) else "unconfirmed")
     log.info("customer %s unblocked by %s", user_id, me.email or me.user_id)
     return _public_customer(out)
 
@@ -942,7 +1113,9 @@ def send_customer_reset(user_id: str, me: AuthUser = Depends(require_admin)):
 
 
 @router.post("/customers/{user_id}/delete", status_code=204)
-def delete_customer(user_id: str, body: ConfirmDelete, me: AuthUser = Depends(require_admin)):
+def delete_customer(
+    user_id: str, body: ConfirmDelete, me: AuthUser = Depends(require_admin), db: Session = Depends(get_db)
+):
     """Permanently delete a customer account. The email must be typed back to confirm."""
     u = _load_customer(user_id)
     if (body.confirm_email or "").strip().lower() != (u.get("email") or "").strip().lower():
@@ -958,5 +1131,6 @@ def delete_customer(user_id: str, body: ConfirmDelete, me: AuthUser = Depends(re
             )
         raise
     _forget_auth_cache()
+    _mirror_account(db, user_id, None, unlink=True)  # the order history stays; the record just has no login now
     log.info("customer %s deleted by %s", user_id, me.email or me.user_id)
     return Response(status_code=204)
