@@ -39,6 +39,7 @@ type PoDetail = {
   created_by_name: string | null;
   status: "open" | "received" | "cancelled";
   cancelled_at: string | null;
+  cancelled_by: string | null;
   cancelled_by_name: string | null;
   vendor_name: string;
   vendor_address: string | null;
