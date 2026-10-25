@@ -945,6 +945,7 @@ def record(entity: str, qb_id: str, db: Session = Depends(get_db)):
 MASKED_EMAIL_DOMAINS = {
     "members.ebay.com": "ebay",
     "marketplace.amazon.com": "amazon",
+    "privaterelay.appleid.com": "apple_relay",  # Apple "Hide My Email": a forwarding alias, not the person's own address
 }
 _EMAIL_OK = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
 _TS_OK = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2}|Z)?$")
