@@ -469,7 +469,9 @@ def po_issues(
     db: Session = Depends(get_db),
 ):
     """The shortage / overage report: every PO that had a problem when it was received, with each problem.
-    short = fewer arrived than ordered; over = more than ordered; not_on_po = a part that wasn't on the PO at all.
+    short = fewer arrived than ordered and the rest isn't coming; over = more than ordered, or a part that wasn't on
+    the PO at all (not_on_po marks that second kind, so it can be filtered on its own).
+    A short line whose rest is expected on a later delivery is NOT here: that PO simply stays open.
     Each one records who acknowledged it and when. Search by PO number, distributor, part number, SKU or description."""
     import re
 
@@ -477,7 +479,12 @@ def po_issues(
     conds = []
     if kind:
         params["kind"] = kind
-        conds.append("exists (select 1 from po_receiving_issues k where k.po_id = h.id and k.kind = :kind)")
+        # "over" means every overage, including parts that were not on the PO at all; "not_on_po" is just those.
+        conds.append(
+            "exists (select 1 from po_receiving_issues k where k.po_id = h.id and "
+            + ("k.kind in ('over', 'not_on_po')" if kind == "over" else "k.kind = :kind")
+            + ")"
+        )
     for i, w in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:6]):
         params[f"w{i}"] = f"%{w}%"
         conds.append(
@@ -582,7 +589,7 @@ def edit_po(po_id: int, body: PoEdit, db: Session = Depends(get_db)):
             sets["sent_at"] = None   # a new number is a new document to send
 
         existing = db.execute(
-            text("select id, product_id, quantity, rate, received_at from po_lines where po_id = :id order by id for update"),
+            text("select id, product_id, quantity, rate, received_at, coalesce(received_qty, 0) as got from po_lines where po_id = :id order by id for update"),
             {"id": po_id},
         ).all()
         open_by_id = {l.id: l for l in existing if l.received_at is None}
@@ -619,6 +626,9 @@ def edit_po(po_id: int, body: PoEdit, db: Session = Depends(get_db)):
             if l.line_id is not None:
                 kept_ids.add(l.line_id)
                 old = open_by_id[l.line_id]
+                if l.quantity < old.got:
+                    db.rollback()
+                    raise HTTPException(400, f"{old.got} of that part were already received on this PO, so the quantity can't go below {old.got}.")
                 if old.product_id != l.product_id:
                     db.rollback()
                     raise HTTPException(400, "A line's part can't be swapped. Remove the line and add the other part.")
@@ -638,6 +648,9 @@ def edit_po(po_id: int, body: PoEdit, db: Session = Depends(get_db)):
                 )
                 added.append(l.product_id)
 
+        if any(open_by_id[i].got > 0 for i in open_by_id if i not in kept_ids):
+            db.rollback()
+            raise HTTPException(400, "A line that is already partly received can't be removed from the PO.")
         removed = [open_by_id[i].product_id for i in open_by_id if i not in kept_ids]
         for i in open_by_id:
             if i not in kept_ids:

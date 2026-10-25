@@ -98,8 +98,8 @@ const money = (n: number) => `$${n.toFixed(2)}`;
 // One size bigger than the rest of the admin screens, so a purchase order is easy to read.
 const inp = inputCls.replace("text-sm", "text-base");
 const who = (name: string | null, email: string | null) => name ?? email ?? "—";
-const KIND_LABEL: Record<Issue["kind"], string> = { short: "Short", over: "Over", not_on_po: "Not on PO" };
-const KIND_TONE: Record<Issue["kind"], "amber" | "blue" | "gray"> = { short: "amber", over: "blue", not_on_po: "gray" };
+const KIND_LABEL: Record<Issue["kind"], string> = { short: "Short", over: "Over", not_on_po: "Over (not on PO)" };
+const KIND_TONE: Record<Issue["kind"], "amber" | "blue" | "gray"> = { short: "amber", over: "blue", not_on_po: "blue" };
 
 async function download(po: { id: number; po_number: number }, fmt: "pdf" | "xlsx") {
   const blob = await apiDownload(`/purchase-orders/${po.id}/export?format=${fmt}`);
@@ -783,6 +783,8 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                           </Badge>
                         ) : open.status === "cancelled" ? (
                           <Badge tone="gray">cancelled</Badge>
+                        ) : (l.received_qty ?? 0) > 0 ? (
+                          <Badge tone="amber">{l.received_qty} of {l.quantity} in · rest expected</Badge>
                         ) : (
                           <Badge tone="amber">open</Badge>
                         )}
@@ -868,8 +870,9 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
   return (
     <div className="space-y-4">
       <p className="text-base text-gray-600">
-        Every purchase order that had a problem when it was received: <strong>short</strong> (fewer than ordered),{" "}
-        <strong>over</strong> (more than ordered) or <strong>not on the PO</strong>. Each one shows who acknowledged it and when.
+        Every purchase order that had a problem when it was received: <strong>short</strong> (fewer than ordered and the
+        rest isn’t coming) or <strong>over</strong> (more than ordered, or a part that wasn’t on the PO). A short line whose
+        rest is still expected stays on its open PO and isn’t listed here. Each one shows who acknowledged it and when.
       </p>
       <div className="flex flex-wrap items-center gap-3">
         <input
@@ -888,8 +891,8 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
         >
           <option value="">All problems</option>
           <option value="short">Short</option>
-          <option value="over">Over</option>
-          <option value="not_on_po">Not on the PO</option>
+          <option value="over">Over (including not on the PO)</option>
+          <option value="not_on_po">Over: not on the PO only</option>
         </select>
       </div>
 
@@ -980,6 +983,8 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
                           <Badge tone={l.received_qty != null && l.received_qty !== l.quantity ? "amber" : "green"}>
                             received {l.received_qty ?? l.quantity} of {l.quantity}
                           </Badge>
+                        ) : (l.received_qty ?? 0) > 0 ? (
+                          <Badge tone="amber">{l.received_qty} of {l.quantity} in · rest expected</Badge>
                         ) : (
                           <Badge tone="amber">open</Badge>
                         )}

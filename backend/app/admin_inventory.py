@@ -35,7 +35,7 @@ Routes
   POST   /inventory/receive                 commit a receiving batch with no PO (adds stock)
   GET    /inventory/receiving/pos           sent POs that still have lines to receive (searchable)
   GET    /inventory/receiving/pos/{id}      one PO with its lines, ready to scan against
-  POST   /inventory/receiving/pos/{id}/lines/{line_id}/receive   close one PO line with the counted quantity
+  POST   /inventory/receiving/pos/{id}/lines/{line_id}/receive   receive the counted quantity for one PO line (closes it, or keeps it open if the rest is coming later)
   POST   /inventory/receiving/pos/{id}/extras   receive parts that were not on the PO (or more than ordered)
   GET    /inventory/orders/to-ship          paid website orders: to pick, and picked / ready to ship
   GET    /inventory/orders/{order_number}   one order with what is still to scan
@@ -55,7 +55,7 @@ import logging
 import re
 import uuid
 from datetime import date
-from typing import Optional
+from typing import Literal, Optional
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -475,7 +475,7 @@ def receiving_pos(q: Optional[str] = Query(None, max_length=100), db: Session = 
             select h.id, h.po_number, h.vendor_name, h.sent_at, h.created_at,
                    count(l.id) as line_count,
                    count(l.id) filter (where l.received_at is null) as open_lines,
-                   coalesce(sum(l.quantity) filter (where l.received_at is null), 0) as open_units
+                   coalesce(sum(l.quantity - coalesce(l.received_qty, 0)) filter (where l.received_at is null), 0) as open_units
             from po_headers h join po_lines l on l.po_id = h.id
             where {" and ".join(conds)}
             group by h.id
@@ -556,8 +556,11 @@ def receiving_po(po_id: int, db: Session = Depends(get_db)):
 
 class ReceiveLineIn(BaseModel):
     batch_id: uuid.UUID
-    quantity: int = Field(..., ge=0, le=MAX_QTY)   # what was actually counted (0 = none of this line arrived)
-    acknowledged: bool = False                     # required when the count is not exactly what was ordered
+    quantity: int = Field(..., ge=0, le=MAX_QTY)   # counted NOW, against what is still outstanding on the line
+    acknowledged: bool = False                     # required when the count is not exactly what is outstanding
+    # When the count is short: "error" = they won't send the rest, close the line and report the shortage;
+    # "later" = the rest is expected on a later delivery, keep the line (and the PO) open.
+    short_choice: Optional[Literal["error", "later"]] = None
     barcode_id: Optional[int] = None
     note: Optional[str] = Field(None, max_length=300)
 
@@ -583,10 +586,16 @@ def _record_issue(db: Session, po_id: int, line_id, product_id, kind: str, item,
 def receive_po_line(
     po_id: int, line_id: int, body: ReceiveLineIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)
 ):
-    """Close ONE line of a PO with the quantity counted. Adds that quantity to on hand (available follows, because
-    available is on hand minus what is set aside). If the count is not exactly the ordered quantity the person must
-    acknowledge it: a short / over record is written with their name and the time. When no open line is left the
-    PO becomes 'received'."""
+    """Receive the quantity counted for ONE line of a PO. It is added to on hand (available follows, because
+    available is on hand minus what is set aside). The count is compared with what is still outstanding on the line:
+      * exactly right      -> the line is closed.
+      * over               -> acknowledge it; the line is closed and an overage is reported.
+      * short, "error"     -> acknowledge it; the line is closed and a shortage is reported (the distributor couldn't
+                              or won't send the rest).
+      * short, "later"     -> acknowledge it; what arrived is added to stock, the line STAYS OPEN for the rest and
+                              nothing goes on the shortage report. A later delivery is received against the same line.
+    Every acknowledgement keeps who and when (po_line_receipts, and po_receiving_issues for a reported problem).
+    When no open line is left the PO becomes 'received'."""
     try:
         h = db.execute(
             text("select id, po_number, status, sent_at from po_headers where id = :id for update"), {"id": po_id}
@@ -602,8 +611,8 @@ def receive_po_line(
             raise HTTPException(409, f"Purchase order {h.po_number} is not marked as sent yet. Nothing was received.")
         line = db.execute(
             text(
-                "select id, product_id, item, description, quantity, received_at from po_lines "
-                "where id = :l and po_id = :po for update"
+                "select id, product_id, item, description, quantity, received_at, coalesce(received_qty, 0) as got "
+                "from po_lines where id = :l and po_id = :po for update"
             ),
             {"l": line_id, "po": po_id},
         ).first()
@@ -617,13 +626,24 @@ def receive_po_line(
             db.rollback()
             raise HTTPException(400, "This line's part no longer exists, so nothing can be added to stock for it.")
 
-        diff = body.quantity - line.quantity
-        if diff != 0 and not body.acknowledged:
-            db.rollback()
-            word = "short" if diff < 0 else "over"
-            raise HTTPException(
-                400, f"The count is {abs(diff)} {word}. Confirm and acknowledge it before this line can be received."
-            )
+        outstanding = max(line.quantity - line.got, 0)
+        diff = body.quantity - outstanding
+        later = False
+        if diff != 0:
+            if not body.acknowledged:
+                db.rollback()
+                word = "short" if diff < 0 else "over"
+                raise HTTPException(
+                    400, f"The count is {abs(diff)} {word}. Confirm and acknowledge it before this line can be received."
+                )
+            if diff < 0:
+                if body.short_choice not in ("error", "later"):
+                    db.rollback()
+                    raise HTTPException(400, "Say whether the shortage is an error or the rest is coming on a later delivery.")
+                later = body.short_choice == "later"
+                if later and body.quantity == 0:
+                    db.rollback()
+                    raise HTTPException(400, "Nothing was counted, so there is nothing to receive now. Leave the line open instead.")
 
         new_qty = None
         if line.product_id is not None:
@@ -655,15 +675,37 @@ def receive_po_line(
             )
             _insert_line(db, body.batch_id, line.product_id, body.barcode_id, body.quantity)
 
+        total_got = line.got + body.quantity
+        if later:
+            db.execute(
+                text("update po_lines set received_qty = :t, received_by = :by where id = :id"),
+                {"t": total_got, "by": user.email, "id": line.id},
+            )
+        else:
+            db.execute(
+                text("update po_lines set received_at = now(), received_qty = :t, received_by = :by where id = :id"),
+                {"t": total_got, "by": user.email, "id": line.id},
+            )
+            if diff != 0:
+                _record_issue(db, po_id, line.id, line.product_id, "short" if diff < 0 else "over",
+                              line.item, line.description, line.quantity, total_got, user, body.note)
+            if line.product_id is not None:
+                _clear_backorder_if_done(db, line.product_id)
+
+        # An audit row for every receipt, with the acknowledgement when there was one.
         db.execute(
-            text("update po_lines set received_at = now(), received_qty = :q, received_by = :by where id = :id"),
-            {"q": body.quantity, "by": user.email, "id": line.id},
+            text(
+                "insert into po_line_receipts (po_id, po_line_id, product_id, quantity, outcome, note, "
+                "  acknowledged_by, acknowledged_at, received_by) "
+                "values (:po, :l, :p, :q, :out, :note, :ack_by, case when :ack then now() end, :by)"
+            ),
+            {
+                "po": po_id, "l": line.id, "p": line.product_id, "q": body.quantity,
+                "out": "later" if later else ("short" if diff < 0 else "over" if diff > 0 else "exact"),
+                "note": (body.note or "").strip() or None,
+                "ack_by": user.email if diff != 0 else None, "ack": diff != 0, "by": user.email,
+            },
         )
-        if diff != 0:
-            _record_issue(db, po_id, line.id, line.product_id, "short" if diff < 0 else "over",
-                          line.item, line.description, line.quantity, body.quantity, user, body.note)
-        if line.product_id is not None:
-            _clear_backorder_if_done(db, line.product_id)
 
         left = db.execute(
             text("select count(*) from po_lines where po_id = :id and received_at is null"), {"id": po_id}
@@ -684,6 +726,8 @@ def receive_po_line(
         "line_id": line_id,
         "received": body.quantity,
         "difference": diff,
+        "line_closed": not later,
+        "still_expected": (line.quantity - total_got) if later else 0,
         "quantity_on_hand": new_qty,
         "po_status": "received" if left == 0 else "open",
         "lines_left": left,

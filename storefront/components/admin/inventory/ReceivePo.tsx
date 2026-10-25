@@ -50,18 +50,22 @@ type RPo = {
 };
 type Flash = { kind: "success" | "error" | "info"; text: string };
 
-const KIND_LABEL = { short: "Short", over: "Over", not_on_po: "Not on PO" } as const;
+/** How many of a line are still expected (a line can be received in more than one delivery). */
+const remaining = (l: RLine) => Math.max(l.quantity - (l.received_qty ?? 0), 0);
+
+const KIND_LABEL = { short: "Short", over: "Over", not_on_po: "Over (not on PO)" } as const;
 
 /**
  * Receive tab, "against a PO" mode.
  *  1. A list of purchase orders that were sent and still have parts to receive. Click one.
  *  2. Scan the parts in. Each scan counts toward that part's line on the PO.
- *  3. Press "Finish this line". If the count is exactly what was ordered it is received at once; if it is short
- *     (or over) the person has to confirm and acknowledge it. Their name and the time are saved and the problem
- *     goes on the shortage / overage report. Then the next line is up.
- *  4. Received lines add to on hand (and so to available). When every line is closed the PO becomes "received".
+ *  3. Press "Finish this line". If the count is exactly what is still expected it is received at once. If it is
+ *     over, the person acknowledges it (name + time saved) and it goes on the shortage / overage report. If it is
+ *     short they acknowledge it and say which it is: an ERROR (the rest won't come: the line closes and the
+ *     shortage is reported) or EXPECTED LATER (what arrived is received, the line and the PO stay open for the rest).
+ *  4. Received parts add to on hand (and so to available). When every line is closed the PO becomes "received".
  *  5. A part that is not on the PO can still be scanned. It goes in the "Not on this PO" box and is received,
- *     acknowledged and reported the same way.
+ *     acknowledged and reported as an overage.
  */
 export default function ReceivePo({ active }: { active: boolean }) {
   const [rows, setRows] = useState<PoRow[]>([]);
@@ -217,6 +221,7 @@ function PoScreen({
   const [ackLine, setAckLine] = useState<number | null>(null);
   const [ackChecked, setAckChecked] = useState(false);
   const [ackNote, setAckNote] = useState("");
+  const [shortChoice, setShortChoice] = useState<"error" | "later" | null>(null);
   // Extras (not on the PO)
   const [extrasBatch, setExtrasBatch] = useState(newId);
   const [extrasAck, setExtrasAck] = useState(false);
@@ -283,6 +288,7 @@ function PoScreen({
 
   async function commitLine(line: RLine, acknowledged: boolean) {
     const n = counts[line.id] ?? 0;
+    const later = shortChoice === "later" && n < remaining(line);
     setBusy(true);
     setFlash(null);
     const batch = (batchIds.current[line.id] ??= newId());
@@ -294,6 +300,7 @@ function PoScreen({
           batch_id: batch,
           quantity: n,
           acknowledged,
+          short_choice: acknowledged && n < remaining(line) ? shortChoice : null,
           barcode_id: barcodes[line.id] ?? null,
           note: ackNote.trim() || null,
         },
@@ -316,6 +323,7 @@ function PoScreen({
       setAckLine(null);
       setAckChecked(false);
       setAckNote("");
+      setShortChoice(null);
       try {
         const fresh = await reload();
         const stillOpen = fresh.lines.filter((l) => !l.received_at);
@@ -325,10 +333,11 @@ function PoScreen({
         setCurrentId(next ? next.id : null);
         setFlash({
           kind: "success",
-          text:
-            fresh.status === "received"
-              ? `Received ${n} of ${line.quantity}. That was the last line: PO ${fresh.po_number} is now received in.`
-              : `Received ${n} of ${line.quantity} for ${line.product?.sku ?? line.description}. Stock counts are updated.`,
+          text: later
+            ? `Received ${n} for ${line.product?.sku ?? line.description}. ${remaining(line) - n} are still expected on a later delivery, so this line and PO ${fresh.po_number} stay open. Stock counts are updated.`
+            : fresh.status === "received"
+            ? `Received ${n} for ${line.product?.sku ?? line.description}. That was the last line: PO ${fresh.po_number} is now received in.`
+            : `Received ${n} for ${line.product?.sku ?? line.description}. Stock counts are updated.`,
         });
       } catch (e) {
         setFlash({ kind: "error", text: `Saved, but the PO could not be reloaded: ${errMsg(e)}` });
@@ -340,11 +349,12 @@ function PoScreen({
 
   function finishLine(line: RLine) {
     const n = counts[line.id] ?? 0;
-    if (n === line.quantity) {
+    if (n === remaining(line)) {
       commitLine(line, false);
     } else {
       setAckChecked(false);
       setAckNote("");
+      setShortChoice(n === 0 ? "error" : null);
       setAckLine(line.id);
     }
   }
@@ -455,7 +465,8 @@ function PoScreen({
         {po.lines.map((l) => {
           const n = counts[l.id] ?? 0;
           const isCurrent = !l.received_at && current?.id === l.id;
-          const diff = n - l.quantity;
+          const rem = remaining(l);
+          const diff = n - rem;
           return (
             <div
               key={l.id}
@@ -480,8 +491,13 @@ function PoScreen({
                   {!l.product && <div className="text-xs text-red-700">This part no longer exists in the catalog.</div>}
                 </div>
                 <div className="text-center">
-                  <div className="text-xs uppercase text-gray-500">Ordered</div>
-                  <div className="text-lg font-semibold">{l.quantity}</div>
+                  <div className="text-xs uppercase text-gray-500">{!l.received_at && (l.received_qty ?? 0) > 0 ? "Still expected" : "Ordered"}</div>
+                  <div className="text-lg font-semibold">{!l.received_at ? rem : l.quantity}</div>
+                  {!l.received_at && (l.received_qty ?? 0) > 0 && (
+                    <div className="text-xs text-gray-500">
+                      {l.received_qty} of {l.quantity} already in
+                    </div>
+                  )}
                 </div>
 
                 {l.received_at ? (
@@ -535,24 +551,42 @@ function PoScreen({
                 <div className="mt-3 space-y-2 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
                   <p className="font-semibold text-amber-900">
                     {n === 0
-                      ? `None of this part were counted, but ${l.quantity} were ordered.`
+                      ? `None were counted, but ${rem} ${rem === 1 ? "is" : "are"} still expected.`
                       : diff < 0
-                      ? `Short: ${n} counted, ${l.quantity} ordered (${-diff} missing).`
-                      : `Over: ${n} counted, ${l.quantity} ordered (${diff} extra).`}
+                      ? `Short: ${n} counted, ${rem} expected (${-diff} missing).`
+                      : `Over: ${n} counted, ${rem} expected (${diff} extra).`}
                   </p>
-                  <p className="text-amber-900">
-                    If you continue, {n} will be added to stock and this line is closed. It goes on the shortage / overage
-                    report with your name and the time.
-                  </p>
+                  {diff < 0 ? (
+                    <div className="space-y-1 text-amber-900">
+                      <p className="font-medium">Was this shortage an error, or are the rest coming on a later delivery?</p>
+                      <label className="flex items-start gap-2">
+                        <input type="radio" name={`short-${l.id}`} className="mt-1" checked={shortChoice === "error"} onChange={() => setShortChoice("error")} />
+                        <span>
+                          <strong>It’s an error / they won’t send the rest.</strong> Receive {n}, close this line, and put the
+                          shortage on the shortage report.
+                        </span>
+                      </label>
+                      {n > 0 && (
+                        <label className="flex items-start gap-2">
+                          <input type="radio" name={`short-${l.id}`} className="mt-1" checked={shortChoice === "later"} onChange={() => setShortChoice("later")} />
+                          <span>
+                            <strong>We’re expecting the rest later.</strong> Receive {n} now and keep this line (and the PO)
+                            open until the other {-diff} arrive. Nothing goes on the shortage report.
+                          </span>
+                        </label>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-amber-900">
+                      If you continue, {n} will be added to stock and this line is closed. It goes on the shortage / overage
+                      report with your name and the time.
+                    </p>
+                  )}
                   <label className="flex items-start gap-2 text-amber-900">
-                    <input
-                      type="checkbox"
-                      className="mt-1"
-                      checked={ackChecked}
-                      onChange={(e) => setAckChecked(e.target.checked)}
-                    />
+                    <input type="checkbox" className="mt-1" checked={ackChecked} onChange={(e) => setAckChecked(e.target.checked)} />
                     <span>
-                      I confirm the count of {n} is right and I acknowledge the {diff < 0 ? "shortage" : "overage"}.
+                      I confirm the count of {n} is right and I acknowledge the {diff < 0 ? "shortage" : "overage"}. My name and the
+                      time are recorded.
                     </span>
                   </label>
                   <input
@@ -563,8 +597,12 @@ function PoScreen({
                     onChange={(e) => setAckNote(e.target.value)}
                   />
                   <div className="flex gap-2">
-                    <button className={btnCls} disabled={!ackChecked || busy} onClick={() => commitLine(l, true)}>
-                      {busy ? "Saving…" : `Confirm and receive ${n}`}
+                    <button
+                      className={btnCls}
+                      disabled={!ackChecked || busy || (diff < 0 && !shortChoice)}
+                      onClick={() => commitLine(l, true)}
+                    >
+                      {busy ? "Saving…" : diff < 0 && shortChoice === "later" ? `Receive ${n} and keep line open` : `Confirm and receive ${n}`}
                     </button>
                     <button className={btn2Cls} disabled={busy} onClick={() => setAckLine(null)}>
                       Keep counting
@@ -652,7 +690,7 @@ function PoScreen({
           <ul className="space-y-1">
             {po.issues.map((i) => (
               <li key={i.id} className="flex flex-wrap items-center gap-2">
-                <Badge tone={i.kind === "short" ? "amber" : i.kind === "over" ? "blue" : "gray"}>{KIND_LABEL[i.kind]}</Badge>
+                <Badge tone={i.kind === "short" ? "amber" : "blue"}>{KIND_LABEL[i.kind]}</Badge>
                 <span>{i.description ?? i.sku}</span>
                 <span className="text-gray-500">
                   ordered {i.expected_qty}, received {i.received_qty} · acknowledged by{" "}
