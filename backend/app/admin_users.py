@@ -904,58 +904,44 @@ def _fmt_date(v) -> str:
         return str(v)[:10]
 
 
-def _export_rows(db: Session) -> tuple[list[list[str]], int, int, list[str]]:
-    """Every customer, uncapped: accounts (newest first) then guest checkouts (newest first).
+_EXPORT_GROUPS = {"all": "All customers", "website": "Website", "quickbooks": "QuickBooks", "masked": "QuickBooks (Masked)"}
 
-    Returns (rows, account_count, guest_count, notes). `notes` says what could not be loaded, if anything,
+
+def _export_rows(db: Session, source: str = "all") -> tuple[list[list[str]], int, int, list[str]]:
+    """Customers for the export, grouped exactly like the filter buttons on the Customers tab.
+
+    `source` is all, website, quickbooks or masked. Login accounts come first (newest first), then everyone
+    who only exists in the `customers` table (newest first). Staff logins are not included.
+
+    Returns (rows, account_count, other_count, notes). `notes` says what could not be loaded, if anything,
     so a partial export is never mistaken for a complete one.
     """
     notes: list[str] = []
-    users: list[dict] = []
-    for page in range(1, 51):  # 200 per page; up to 10,000 accounts
-        data = _call("GET", f"/users?page={page}&per_page=200")
-        batch = data.get("users") or []
-        users.extend(u for u in batch if _is_customer(u))
-        if len(batch) < 200:
-            break
-    users.sort(key=lambda u: u.get("created_at") or "", reverse=True)
-    accounts = [_public_customer(u) for u in users]
-    if _attach_addresses(accounts, db, limit=200000):
+    directory, problems = _customer_directory(db, fresh=True)
+    if problems.get("addresses"):
         notes.append("Saved addresses could not be loaded, so the Address column is incomplete.")
+    if problems.get("customers_table"):
+        notes.append("Guest and QuickBooks customers could not be loaded, so they are not in this file.")
+    if source != "all":
+        directory = [r for r in directory if r["group"] == source]
+
+    accounts = sorted((r for r in directory if r["has_account"]), key=lambda r: _ts(r["created_at"]) or 0, reverse=True)
+    others = sorted((r for r in directory if not r["has_account"]), key=lambda r: _ts(r["created_at"]) or 0, reverse=True)
 
     rows: list[list[str]] = []
-    for c in accounts:
-        status = "Blocked" if c["blocked"] else ("Active" if c["confirmed"] else "Waiting for verification")
+    for r in accounts:
         rows.append([
-            "Account", c["name"] or "", c["email"] or "", c["phone"] or "", status,
-            _fmt_date(c["created_at"]), _fmt_date(c["last_sign_in_at"]) if c["last_sign_in_at"] else "Never",
-            c["address"] or "",
+            "Account", r["name"] or "", r["email"] or "", r["phone"] or "", r["status"],
+            _fmt_date(r["created_at"]), _fmt_date(r["last_sign_in_at"]) if r["last_sign_in_at"] else "Never",
+            r["address"] or "",
         ])
-
-    guests = []
-    try:
-        guests = db.execute(
-            text(
-                "select email, full_name, phone, last_shipping_address, created_at from customers "
-                "where user_id is null order by created_at desc"
-            )
-        ).all()
-    except Exception:
-        db.rollback()
-        log.warning("guest customers could not be loaded for the export", exc_info=True)
-        notes.append("Guest customers could not be loaded, so they are not in this file.")
-    for g in guests:
-        addr = g.last_shipping_address
-        if isinstance(addr, str):
-            try:
-                addr = json.loads(addr)
-            except ValueError:
-                addr = {}
+    for r in others:
+        kind = "Guest" if r["group"] == "website" else r["source"]  # Guest, QuickBooks or Masked
         rows.append([
-            "Guest", g.full_name or "", g.email or "", g.phone or "", "", _fmt_date(g.created_at), "",
-            _format_address(addr or {}),
+            kind, r["name"] or "", r["email"] or "", r["phone"] or "", "",
+            _fmt_date(r["created_at"]), "", r["address"] or "",
         ])
-    return rows, len(accounts), len(guests), notes
+    return rows, len(accounts), len(others), notes
 
 
 def _build_xlsx(rows: list[list[str]], notes: list[str]) -> bytes:
@@ -997,7 +983,7 @@ def _build_xlsx(rows: list[list[str]], notes: list[str]) -> bytes:
     return buf.getvalue()
 
 
-def _build_pdf(rows: list[list[str]], accounts: int, guests: int, notes: list[str]) -> bytes:
+def _build_pdf(rows: list[list[str]], accounts: int, guests: int, notes: list[str], label: str = "All customers") -> bytes:
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import landscape, letter
@@ -1021,8 +1007,8 @@ def _build_pdf(rows: list[list[str]], accounts: int, guests: int, notes: list[st
         Paragraph("Customers", base["Title"]),
         Paragraph(
             escape(
-                f"Exported {datetime.now(timezone.utc).strftime('%Y-%m-%d')} · {len(rows)} customers "
-                f"({accounts} accounts, {guests} guests)"
+                f"{label} · Exported {datetime.now(timezone.utc).strftime('%Y-%m-%d')} · {len(rows)} customers "
+                f"({accounts} with a login, {guests} without)"
             ),
             base["Normal"],
         ),
@@ -1061,23 +1047,25 @@ def _build_pdf(rows: list[list[str]], accounts: int, guests: int, notes: list[st
 @router.get("/customers/export")
 def export_customers(
     fmt: Literal["xlsx", "pdf"] = Query("xlsx", alias="format"),
+    source: Literal["all", "website", "quickbooks", "masked"] = "all",
     db: Session = Depends(get_db),
     me: AuthUser = Depends(require_admin),
 ):
-    """The whole customer list (accounts and guest checkouts, no cap, ignores any search) as Excel or PDF."""
-    rows, accounts, guests, notes = _export_rows(db)
+    """The customers in one filter group (Website, QuickBooks, QuickBooks (Masked) or All; no cap, ignores any search) as Excel or PDF."""
+    rows, accounts, guests, notes = _export_rows(db, source)
     if fmt == "xlsx":
         body = _build_xlsx(rows, notes)
         media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     else:
-        body = _build_pdf(rows, accounts, guests, notes)
+        body = _build_pdf(rows, accounts, guests, notes, _EXPORT_GROUPS[source])
         media = "application/pdf"
-    log.info("customer list exported as %s (%d accounts, %d guests) by %s", fmt, accounts, guests, me.email or me.user_id)
+    log.info("customer list (%s) exported as %s (%d with a login, %d without) by %s", source, fmt, accounts, guests, me.email or me.user_id)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    name = "customers" if source == "all" else f"customers-{source}"
     return Response(
         content=body,
         media_type=media,
-        headers={"Content-Disposition": f'attachment; filename="customers-{stamp}.{fmt}"', "Cache-Control": "no-store"},
+        headers={"Content-Disposition": f'attachment; filename="{name}-{stamp}.{fmt}"', "Cache-Control": "no-store"},
     )
 
 

@@ -562,20 +562,29 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
 }
 
 /** Downloads the whole customer list (not just what's on screen) as Excel or PDF. */
-function ExportMenu({ onError }: { onError: (message: string) => void }) {
+function ExportMenu({
+  current,
+  counts,
+  onError,
+}: {
+  current: SourceFilter;
+  counts?: CustomerList["counts"];
+  onError: (message: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState("");
+  const [which, setWhich] = useState<SourceFilter>(current);
 
   async function run(format: "xlsx" | "pdf") {
     setOpen(false);
     setBusy(format);
     onError("");
     try {
-      const blob = await apiDownload(`/users/customers/export?format=${format}`);
+      const blob = await apiDownload(`/users/customers/export?format=${format}&source=${which}`);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `customers-${new Date().toISOString().slice(0, 10)}.${format}`;
+      a.download = `customers${which === "all" ? "" : `-${which}`}-${new Date().toISOString().slice(0, 10)}.${format}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -595,14 +604,27 @@ function ExportMenu({ onError }: { onError: (message: string) => void }) {
         disabled={!!busy}
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          if (!open) setWhich(current);
+          setOpen((o) => !o);
+        }}
       >
         {busy ? "Exporting…" : "Export ▾"}
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div role="menu" className="absolute right-0 z-50 mt-1 w-48 rounded border border-gray-200 bg-white py-1 shadow-lg">
+          <div role="menu" className="absolute right-0 z-50 mt-1 w-64 rounded border border-gray-200 bg-white py-1 shadow-lg">
+            <p className="px-3 pb-1 pt-2 text-xs font-medium uppercase text-gray-500">Which customers?</p>
+            {SOURCE_BUTTONS.map((b) => (
+              <label key={b.key} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm text-gray-800 hover:bg-gray-50">
+                <input type="radio" name="export-which" checked={which === b.key} onChange={() => setWhich(b.key)} />
+                <span>{b.label}</span>
+                {counts && <span className="ml-auto text-xs text-gray-500">{counts[b.key].toLocaleString()}</span>}
+              </label>
+            ))}
+            <div className="my-1 border-t border-gray-200" />
+            <p className="px-3 pb-1 pt-1 text-xs font-medium uppercase text-gray-500">Download as</p>
             <button
               type="button"
               role="menuitem"
@@ -773,7 +795,7 @@ function CustomersPanel() {
           </span>
         )}
         <div className="ml-auto">
-          <ExportMenu onError={setError} />
+          <ExportMenu current={source} counts={counts} onError={setError} />
         </div>
       </div>
       <details className="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
