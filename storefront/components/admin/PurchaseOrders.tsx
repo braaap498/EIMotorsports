@@ -1,0 +1,778 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { api, apiDownload, errMsg } from "../../lib/adminApi";
+import { Badge, Modal, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "./ui";
+
+type Part = {
+  id: number;
+  sku: string;
+  title: string;
+  part_number: string | null;
+  cost: number | null;
+  on_hand: number;
+  reserved: number;
+  available: number;
+  reorder_point: number | null;
+  on_order: boolean;
+  open_pos: number[];
+  suggested_qty: number;
+};
+type Dist = { id: number; name: string; address: string | null; email: string | null; phone: string | null; notes: string | null };
+type PoLine = {
+  id: number;
+  sku: string | null;
+  item: string | null;
+  description: string;
+  quantity: number;
+  rate: number;
+  amount: number;
+  received_at: string | null;
+};
+type PoDetail = {
+  id: number;
+  po_number: number;
+  vendor_name: string;
+  vendor_address: string | null;
+  ship_to: string | null;
+  note: string | null;
+  total: number;
+  created_by: string | null;
+  created_at: string;
+  date: string;
+  lines: PoLine[];
+  missing_part_numbers?: string[];
+};
+type PoRow = {
+  id: number;
+  po_number: number;
+  vendor_name: string;
+  total_cents: number;
+  created_by: string | null;
+  created_at: string;
+  line_count: number;
+  open_lines: number;
+};
+type Sel = { part: Part; qty: string; rate: string };
+type Tab = "reorder" | "history" | "distributors";
+
+const PARTS_LIMIT = 50;
+const PO_LIMIT = 30;
+const money = (n: number) => `$${n.toFixed(2)}`;
+const DEFAULT_SHIP_TO_HINT = "Leave blank to use the default ship-to address";
+
+async function download(po: { id: number; po_number: number }, fmt: "pdf" | "xlsx") {
+  const blob = await apiDownload(`/purchase-orders/${po.id}/export?format=${fmt}`);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `PO-${po.po_number}.${fmt}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+/**
+ * Purchase orders.
+ *  - Reorder: low and out-of-stock parts (or every part). Tick parts, press Create PO, pick a distributor.
+ *  - History: every PO ever made, searchable; view it or download it again as PDF or Excel.
+ *  - Distributors: add, edit and delete the distributors you order from.
+ * Creating a PO marks its parts Backordered by default (un-tick on the Inventory > Stock tab).
+ */
+export default function PurchaseOrders() {
+  const [tab, setTab] = useState<Tab>("reorder");
+  const [dists, setDists] = useState<Dist[]>([]);
+  const [flash, setFlash] = useState<{ kind: "success" | "error" | "info"; text: string } | null>(null);
+  const [sel, setSel] = useState<Record<number, Sel>>({});
+  const [historyKey, setHistoryKey] = useState(0); // bump to reload the history list after a new PO
+  const [partsKey, setPartsKey] = useState(0);
+
+  const loadDists = useCallback(() => {
+    api<{ items: Dist[] }>("/purchase-orders/distributors")
+      .then((r) => setDists(r.items))
+      .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
+  }, []);
+  useEffect(loadDists, [loadDists]);
+
+  const tabBtn = (key: Tab, label: string) => (
+    <button
+      key={key}
+      onClick={() => setTab(key)}
+      className={`whitespace-nowrap px-4 py-2 text-sm font-medium ${
+        tab === key ? "border-b-2 border-black text-black" : "text-gray-500 hover:text-black"
+      }`}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="space-y-5">
+      <h1 className="text-2xl font-semibold">Purchase orders</h1>
+      <div className="flex gap-1 overflow-x-auto border-b border-gray-200">
+        {tabBtn("reorder", `Reorder parts${Object.keys(sel).length ? ` (${Object.keys(sel).length} ticked)` : ""}`)}
+        {tabBtn("history", "PO history")}
+        {tabBtn("distributors", "Distributors")}
+      </div>
+
+      {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
+
+      <div className={tab === "reorder" ? "" : "hidden"}>
+        <Reorder
+          dists={dists}
+          sel={sel}
+          setSel={setSel}
+          partsKey={partsKey}
+          goDistributors={() => setTab("distributors")}
+          onCreated={() => {
+            setSel({});
+            setHistoryKey((k) => k + 1);
+            setPartsKey((k) => k + 1);
+          }}
+          setFlash={setFlash}
+        />
+      </div>
+      <div className={tab === "history" ? "" : "hidden"}>
+        <History reloadKey={historyKey} active={tab === "history"} setFlash={setFlash} />
+      </div>
+      <div className={tab === "distributors" ? "" : "hidden"}>
+        <Distributors dists={dists} reload={loadDists} setFlash={setFlash} />
+      </div>
+    </div>
+  );
+}
+
+type FlashFn = (f: { kind: "success" | "error" | "info"; text: string } | null) => void;
+
+/* ============================================================== Reorder */
+function Reorder({
+  dists,
+  sel,
+  setSel,
+  partsKey,
+  goDistributors,
+  onCreated,
+  setFlash,
+}: {
+  dists: Dist[];
+  sel: Record<number, Sel>;
+  setSel: React.Dispatch<React.SetStateAction<Record<number, Sel>>>;
+  partsKey: number;
+  goDistributors: () => void;
+  onCreated: () => void;
+  setFlash: FlashFn;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const [qInput, setQInput] = useState("");
+  const [q, setQ] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [data, setData] = useState<{ total: number; items: Part[] }>({ total: 0, items: [] });
+  const [loaded, setLoaded] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [made, setMade] = useState<PoDetail | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQ(qInput.trim());
+      setOffset(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [qInput]);
+
+  useEffect(() => {
+    const p = new URLSearchParams({ limit: String(PARTS_LIMIT), offset: String(offset) });
+    if (q) p.set("q", q);
+    if (showAll) p.set("show_all", "true");
+    api<{ total: number; items: Part[] }>(`/purchase-orders/parts?${p}`)
+      .then((d) => {
+        setData(d);
+        setLoaded(true);
+      })
+      .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
+  }, [q, offset, showAll, partsKey, setFlash]);
+
+  function toggle(p: Part) {
+    setSel((s) => {
+      const next = { ...s };
+      if (next[p.id]) delete next[p.id];
+      else next[p.id] = { part: p, qty: String(p.suggested_qty), rate: p.cost != null ? p.cost.toFixed(2) : "" };
+      return next;
+    });
+  }
+
+  const ticked = Object.values(sel);
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-gray-600">
+        Parts that are low or out of stock. Parts with a restock level come first, biggest shortfall first. Tick the
+        parts you want to reorder, then press Create PO. Tick “Show all parts” to add any part.
+      </p>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <input
+          className={`${inputCls} max-w-xs`}
+          value={qInput}
+          onChange={(e) => setQInput(e.target.value)}
+          placeholder="Search title, SKU or part number"
+        />
+        <label className="flex items-center gap-2 text-sm text-gray-700">
+          <input
+            type="checkbox"
+            checked={showAll}
+            onChange={(e) => {
+              setShowAll(e.target.checked);
+              setOffset(0);
+            }}
+          />
+          Show all parts
+        </label>
+        <button className={btnCls} disabled={ticked.length === 0} onClick={() => setCreating(true)}>
+          Create PO{ticked.length ? ` (${ticked.length})` : ""}
+        </button>
+        {ticked.length > 0 && (
+          <button className="text-sm underline" onClick={() => setSel({})}>
+            Clear ticks
+          </button>
+        )}
+      </div>
+
+      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+            <tr>
+              <th className="px-3 py-2"></th>
+              <th className="px-3 py-2">Part</th>
+              <th className="px-3 py-2">Part #</th>
+              <th className="px-3 py-2">On hand</th>
+              <th className="px-3 py-2">Reserved</th>
+              <th className="px-3 py-2">Available</th>
+              <th className="px-3 py-2">Restock level</th>
+              <th className="px-3 py-2">Cost</th>
+              <th className="px-3 py-2">On a PO</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {data.items.map((p) => (
+              <tr key={p.id} className={sel[p.id] ? "bg-blue-50" : ""}>
+                <td className="px-3 py-2">
+                  <input type="checkbox" checked={!!sel[p.id]} onChange={() => toggle(p)} aria-label={`Select ${p.sku}`} />
+                </td>
+                <td className="px-3 py-2">
+                  <div className="font-medium">{p.title}</div>
+                  <div className="text-xs text-gray-500">{p.sku}</div>
+                </td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {p.part_number ?? <span className="text-xs text-amber-700">none on file</span>}
+                </td>
+                <td className="px-3 py-2">{p.on_hand}</td>
+                <td className="px-3 py-2">{p.reserved}</td>
+                <td className="px-3 py-2 font-semibold">{p.available}</td>
+                <td className="px-3 py-2">{p.reorder_point ?? "—"}</td>
+                <td className="px-3 py-2">{p.cost != null ? money(p.cost) : "—"}</td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {p.open_pos.length > 0 ? <Badge tone="blue">PO {p.open_pos.join(", ")}</Badge> : "—"}
+                </td>
+              </tr>
+            ))}
+            {loaded && data.items.length === 0 && (
+              <tr>
+                <td colSpan={9} className="px-3 py-6 text-center text-gray-500">
+                  {showAll || q ? "No parts match." : "Nothing is low or out of stock."}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Pager total={data.total} limit={PARTS_LIMIT} offset={offset} onChange={setOffset} />
+
+      {creating && (
+        <CreatePo
+          dists={dists}
+          sel={sel}
+          setSel={setSel}
+          goDistributors={() => {
+            setCreating(false);
+            goDistributors();
+          }}
+          onClose={() => setCreating(false)}
+          onCreated={(po) => {
+            setCreating(false);
+            setMade(po);
+            onCreated();
+          }}
+          setFlash={setFlash}
+        />
+      )}
+
+      {made && (
+        <Modal title={`PO ${made.po_number} created`} onClose={() => setMade(null)}>
+          <div className="space-y-4 text-sm">
+            <p>
+              Purchase order <b>{made.po_number}</b> to <b>{made.vendor_name}</b> for <b>{money(made.total)}</b> is saved in
+              PO history. Its parts are now marked Backordered on the Stock tab (un-tick any you don’t want shown that way).
+            </p>
+            {made.missing_part_numbers && made.missing_part_numbers.length > 0 && (
+              <Notice kind="error">
+                No manufacturer part number is on file for: {made.missing_part_numbers.join("; ")}. The Item column is blank for
+                those lines. Add the part number on the product page and download the PO again.
+              </Notice>
+            )}
+            <p className="font-medium">Download it as:</p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                className={btnCls}
+                onClick={() => download(made, "pdf").catch((e) => setFlash({ kind: "error", text: errMsg(e) }))}
+              >
+                PDF
+              </button>
+              <button
+                className={btnCls}
+                onClick={() => download(made, "xlsx").catch((e) => setFlash({ kind: "error", text: errMsg(e) }))}
+              >
+                Excel
+              </button>
+              <button className={btn2Cls} onClick={() => setMade(null)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================== Create PO dialog */
+function CreatePo({
+  dists,
+  sel,
+  setSel,
+  goDistributors,
+  onClose,
+  onCreated,
+  setFlash,
+}: {
+  dists: Dist[];
+  sel: Record<number, Sel>;
+  setSel: React.Dispatch<React.SetStateAction<Record<number, Sel>>>;
+  goDistributors: () => void;
+  onClose: () => void;
+  onCreated: (po: PoDetail) => void;
+  setFlash: FlashFn;
+}) {
+  const [distId, setDistId] = useState<number | "">(dists.length === 1 ? dists[0].id : "");
+  const [shipTo, setShipTo] = useState("");
+  const [note, setNote] = useState("");
+  const [expected, setExpected] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const lines = Object.values(sel);
+
+  const edit = (id: number, patch: Partial<Sel>) => setSel((s) => (s[id] ? { ...s, [id]: { ...s[id], ...patch } } : s));
+  const bad = lines.some((l) => !Number.isInteger(Number(l.qty)) || Number(l.qty) < 1 || (l.rate !== "" && !(Number(l.rate) >= 0)));
+  const total = lines.reduce((n, l) => n + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0);
+
+  async function create() {
+    if (distId === "") return setError("Pick a distributor first.");
+    if (bad) return setError("Every line needs a whole-number quantity of at least 1 and a rate of 0 or more.");
+    setBusy(true);
+    setError("");
+    try {
+      const po = await api<PoDetail>("/purchase-orders", {
+        method: "POST",
+        body: {
+          distributor_id: distId,
+          ship_to: shipTo.trim() || null,
+          note: note.trim() || null,
+          expected_date: expected || null,
+          lines: lines.map((l) => ({
+            product_id: l.part.id,
+            quantity: Number(l.qty),
+            rate: l.rate === "" ? null : Number(l.rate),
+          })),
+        },
+      });
+      onCreated(po);
+    } catch (e) {
+      setError(errMsg(e));
+      setFlash(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Create purchase order" onClose={onClose}>
+      <div className="space-y-4 text-sm">
+        {error && <Notice kind="error">{error}</Notice>}
+
+        <div className="space-y-2">
+          <div className="font-medium">1. Distributor</div>
+          {dists.length === 0 ? (
+            <p className="text-gray-600">
+              You haven’t added a distributor yet.{" "}
+              <button className="underline" onClick={goDistributors}>
+                Add one on the Distributors tab
+              </button>{" "}
+              (your ticked parts are kept).
+            </p>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3">
+              <select className={`${inputCls} max-w-sm`} value={distId} onChange={(e) => setDistId(e.target.value ? Number(e.target.value) : "")}>
+                <option value="">Choose a distributor…</option>
+                {dists.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+              <button className="underline" onClick={goDistributors}>
+                Add / edit / delete distributors
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <div className="font-medium">2. Parts, quantities and rates</div>
+          <div className="overflow-x-auto rounded border border-gray-200">
+            <table className="w-full text-left">
+              <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+                <tr>
+                  <th className="px-2 py-1">Item (part #)</th>
+                  <th className="px-2 py-1">Description</th>
+                  <th className="px-2 py-1">Qty</th>
+                  <th className="px-2 py-1">Rate</th>
+                  <th className="px-2 py-1"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {lines.map((l) => (
+                  <tr key={l.part.id}>
+                    <td className="whitespace-nowrap px-2 py-1">{l.part.part_number ?? <span className="text-xs text-amber-700">none on file</span>}</td>
+                    <td className="px-2 py-1">{l.part.title}</td>
+                    <td className="px-2 py-1">
+                      <input type="number" min={1} className={`${inputCls} w-20`} value={l.qty} onChange={(e) => edit(l.part.id, { qty: e.target.value })} />
+                    </td>
+                    <td className="px-2 py-1">
+                      <input type="number" min={0} step="0.01" className={`${inputCls} w-24`} value={l.rate} onChange={(e) => edit(l.part.id, { rate: e.target.value })} />
+                    </td>
+                    <td className="px-2 py-1">
+                      <button
+                        className="text-red-700 underline"
+                        onClick={() =>
+                          setSel((s) => {
+                            const n = { ...s };
+                            delete n[l.part.id];
+                            return n;
+                          })
+                        }
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="text-right font-semibold">Total {money(total)}</div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block font-medium text-gray-700">
+            <span className="mb-1 block">Ship To (optional)</span>
+            <textarea className={inputCls} rows={3} value={shipTo} placeholder={DEFAULT_SHIP_TO_HINT} onChange={(e) => setShipTo(e.target.value)} />
+          </label>
+          <div className="space-y-3">
+            <label className="block font-medium text-gray-700">
+              <span className="mb-1 block">Date you expect the parts (optional)</span>
+              <input type="date" className={inputCls} value={expected} onChange={(e) => setExpected(e.target.value)} />
+            </label>
+            <label className="block font-medium text-gray-700">
+              <span className="mb-1 block">Note on the PO (optional)</span>
+              <input className={inputCls} value={note} maxLength={300} onChange={(e) => setNote(e.target.value)} />
+            </label>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button className={btnCls} disabled={busy || lines.length === 0} onClick={create}>
+            {busy ? "Creating…" : "Create PO"}
+          </button>
+          <button className={btn2Cls} disabled={busy} onClick={onClose}>
+            Cancel
+          </button>
+          <span className="text-xs text-gray-500">The part numbers come from each product’s manufacturer part number.</span>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================== History */
+function History({ reloadKey, active, setFlash }: { reloadKey: number; active: boolean; setFlash: FlashFn }) {
+  const [qInput, setQInput] = useState("");
+  const [q, setQ] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [data, setData] = useState<{ total: number; items: PoRow[] }>({ total: 0, items: [] });
+  const [loaded, setLoaded] = useState(false);
+  const [open, setOpen] = useState<PoDetail | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQ(qInput.trim());
+      setOffset(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [qInput]);
+
+  useEffect(() => {
+    if (!active) return;
+    const p = new URLSearchParams({ limit: String(PO_LIMIT), offset: String(offset) });
+    if (q) p.set("q", q);
+    api<{ total: number; items: PoRow[] }>(`/purchase-orders?${p}`)
+      .then((d) => {
+        setData(d);
+        setLoaded(true);
+      })
+      .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
+  }, [active, q, offset, reloadKey, setFlash]);
+
+  const view = (id: number) =>
+    api<PoDetail>(`/purchase-orders/${id}`)
+      .then(setOpen)
+      .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
+  const dl = (po: { id: number; po_number: number }, fmt: "pdf" | "xlsx") =>
+    download(po, fmt).catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
+
+  return (
+    <div className="space-y-4">
+      <input
+        className={`${inputCls} max-w-md`}
+        value={qInput}
+        onChange={(e) => setQInput(e.target.value)}
+        placeholder="Search PO number, distributor, part number, SKU or description"
+      />
+      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+            <tr>
+              <th className="px-3 py-2">PO #</th>
+              <th className="px-3 py-2">Date</th>
+              <th className="px-3 py-2">Distributor</th>
+              <th className="px-3 py-2">Lines</th>
+              <th className="px-3 py-2">Total</th>
+              <th className="px-3 py-2">Made by</th>
+              <th className="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {data.items.map((r) => (
+              <tr key={r.id}>
+                <td className="px-3 py-2 font-semibold">{r.po_number}</td>
+                <td className="whitespace-nowrap px-3 py-2">{new Date(r.created_at).toLocaleDateString()}</td>
+                <td className="px-3 py-2">{r.vendor_name}</td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {r.line_count}
+                  {r.open_lines === 0 ? <span className="ml-2"><Badge tone="green">received</Badge></span> : r.open_lines < r.line_count ? <span className="ml-2"><Badge tone="amber">{r.open_lines} open</Badge></span> : null}
+                </td>
+                <td className="px-3 py-2">{money(r.total_cents / 100)}</td>
+                <td className="px-3 py-2 text-gray-600">{r.created_by ?? "—"}</td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  <div className="flex gap-2">
+                    <button className={btn2Cls} onClick={() => view(r.id)}>View</button>
+                    <button className={btn2Cls} onClick={() => dl(r, "pdf")}>PDF</button>
+                    <button className={btn2Cls} onClick={() => dl(r, "xlsx")}>Excel</button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {loaded && data.items.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
+                  {q ? "No purchase orders match." : "No purchase orders yet. Create one on the Reorder parts tab."}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Pager total={data.total} limit={PO_LIMIT} offset={offset} onChange={setOffset} />
+
+      {open && (
+        <Modal title={`Purchase order ${open.po_number}`} onClose={() => setOpen(null)}>
+          <div className="space-y-3 text-sm">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <div className="text-xs font-semibold uppercase text-gray-500">Vendor</div>
+                <div className="font-medium">{open.vendor_name}</div>
+                <div className="whitespace-pre-line text-gray-600">{open.vendor_address}</div>
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase text-gray-500">Ship to</div>
+                <div className="whitespace-pre-line text-gray-600">{open.ship_to}</div>
+              </div>
+            </div>
+            <div className="text-gray-600">
+              Dated {new Date(open.date + "T12:00:00").toLocaleDateString()} · made by {open.created_by ?? "—"}
+              {open.note ? ` · ${open.note}` : ""}
+            </div>
+            <div className="overflow-x-auto rounded border border-gray-200">
+              <table className="w-full text-left">
+                <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+                  <tr>
+                    <th className="px-2 py-1">Item</th>
+                    <th className="px-2 py-1">Description</th>
+                    <th className="px-2 py-1">Qty</th>
+                    <th className="px-2 py-1">Rate</th>
+                    <th className="px-2 py-1">Amount</th>
+                    <th className="px-2 py-1">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {open.lines.map((l) => (
+                    <tr key={l.id}>
+                      <td className="whitespace-nowrap px-2 py-1">{l.item ?? "—"}</td>
+                      <td className="px-2 py-1">{l.description}</td>
+                      <td className="px-2 py-1">{l.quantity}</td>
+                      <td className="px-2 py-1">{money(l.rate)}</td>
+                      <td className="px-2 py-1">{money(l.amount)}</td>
+                      <td className="whitespace-nowrap px-2 py-1">
+                        {l.received_at ? <Badge tone="green">received {new Date(l.received_at).toLocaleDateString()}</Badge> : <Badge tone="amber">open</Badge>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="text-right text-base font-semibold">Total {money(open.total)}</div>
+            <div className="flex gap-2">
+              <button className={btnCls} onClick={() => dl(open, "pdf")}>Download PDF</button>
+              <button className={btnCls} onClick={() => dl(open, "xlsx")}>Download Excel</button>
+              <button className={btn2Cls} onClick={() => setOpen(null)}>Close</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================== Distributors */
+type DForm = { name: string; address: string; email: string; phone: string; notes: string };
+const blank: DForm = { name: "", address: "", email: "", phone: "", notes: "" };
+
+function Distributors({ dists, reload, setFlash }: { dists: Dist[]; reload: () => void; setFlash: FlashFn }) {
+  const [editing, setEditing] = useState<number | "new" | null>(null);
+  const [form, setForm] = useState<DForm>(blank);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  function start(d?: Dist) {
+    setError("");
+    setEditing(d ? d.id : "new");
+    setForm(d ? { name: d.name, address: d.address ?? "", email: d.email ?? "", phone: d.phone ?? "", notes: d.notes ?? "" } : blank);
+  }
+
+  async function save() {
+    if (!form.name.trim()) return setError("A distributor needs a name.");
+    setBusy(true);
+    setError("");
+    try {
+      await api(editing === "new" ? "/purchase-orders/distributors" : `/purchase-orders/distributors/${editing}`, {
+        method: editing === "new" ? "POST" : "PUT",
+        body: form,
+      });
+      setEditing(null);
+      reload();
+      setFlash({ kind: "success", text: "Distributor saved." });
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(d: Dist) {
+    if (!window.confirm(`Delete ${d.name}? Purchase orders already made keep their own copy of the vendor.`)) return;
+    try {
+      await api(`/purchase-orders/distributors/${d.id}`, { method: "DELETE" });
+      reload();
+      setFlash({ kind: "success", text: `${d.name} deleted.` });
+    } catch (e) {
+      setFlash({ kind: "error", text: errMsg(e) });
+    }
+  }
+
+  const set = (k: keyof DForm, v: string) => setForm((f) => ({ ...f, [k]: v }));
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-gray-600">
+        The distributors you order from. The address prints in the Vendor box on the PO, one line per line you type.
+      </p>
+      <button className={btnCls} onClick={() => start()}>
+        Add a distributor
+      </button>
+
+      {editing !== null && (
+        <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4 text-sm">
+          <div className="font-semibold">{editing === "new" ? "New distributor" : "Edit distributor"}</div>
+          {error && <Notice kind="error">{error}</Notice>}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block font-medium text-gray-700">
+              <span className="mb-1 block">Name</span>
+              <input className={inputCls} value={form.name} maxLength={100} onChange={(e) => set("name", e.target.value)} />
+            </label>
+            <label className="block font-medium text-gray-700">
+              <span className="mb-1 block">Email</span>
+              <input className={inputCls} value={form.email} onChange={(e) => set("email", e.target.value)} />
+            </label>
+            <label className="block font-medium text-gray-700 sm:row-span-2">
+              <span className="mb-1 block">Address (prints in the Vendor box)</span>
+              <textarea className={inputCls} rows={4} value={form.address} onChange={(e) => set("address", e.target.value)} />
+            </label>
+            <label className="block font-medium text-gray-700">
+              <span className="mb-1 block">Phone</span>
+              <input className={inputCls} value={form.phone} onChange={(e) => set("phone", e.target.value)} />
+            </label>
+            <label className="block font-medium text-gray-700">
+              <span className="mb-1 block">Notes (not printed)</span>
+              <input className={inputCls} value={form.notes} onChange={(e) => set("notes", e.target.value)} />
+            </label>
+          </div>
+          <div className="flex gap-2">
+            <button className={btnCls} disabled={busy} onClick={save}>
+              {busy ? "Saving…" : "Save"}
+            </button>
+            <button className={btn2Cls} disabled={busy} onClick={() => setEditing(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 bg-white">
+        {dists.length === 0 && <li className="p-6 text-center text-sm text-gray-500">No distributors yet.</li>}
+        {dists.map((d) => (
+          <li key={d.id} className="flex flex-wrap items-start justify-between gap-3 p-4 text-sm">
+            <div>
+              <div className="font-semibold">{d.name}</div>
+              <div className="whitespace-pre-line text-gray-600">{d.address}</div>
+              <div className="text-gray-500">{[d.email, d.phone].filter(Boolean).join(" · ")}</div>
+              {d.notes && <div className="text-xs text-gray-500">{d.notes}</div>}
+            </div>
+            <div className="flex gap-2">
+              <button className={btn2Cls} onClick={() => start(d)}>Edit</button>
+              <button className={dangerCls} onClick={() => remove(d)}>Delete</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}

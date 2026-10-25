@@ -20,6 +20,7 @@ from app.admin_cleanup import router as admin_cleanup_router
 from app.admin_ebay_new import router as admin_ebay_new_router
 from app.admin_inventory import router as admin_inventory_router
 from app.admin_photos import router as admin_photos_router
+from app.admin_purchase_orders import router as admin_purchase_orders_router
 from app.admin_users import router as admin_users_router
 from app.auth import AuthUser, require_staff
 from app.config import get_settings
@@ -33,6 +34,7 @@ from app.reviews import admin_router as admin_reviews_router
 from app.reviews import store_router as store_reviews_router
 from app.store_checkout import router as store_checkout_router
 from app.store_extras import router as store_extras_router
+from app.store_orders import router as store_orders_router
 
 settings = get_settings()
 
@@ -78,6 +80,7 @@ admin_router.include_router(admin_cleanup_router)
 admin_router.include_router(admin_ebay_new_router)
 admin_router.include_router(admin_quickbooks_router)
 admin_router.include_router(admin_inventory_router)
+admin_router.include_router(admin_purchase_orders_router)
 admin_router.include_router(admin_photos_router)
 admin_router.include_router(admin_users_router)
 admin_router.include_router(admin_about_router)
@@ -88,6 +91,7 @@ app.include_router(admin_router)
 app.include_router(fitment_router)
 app.include_router(store_extras_router)
 app.include_router(store_checkout_router)
+app.include_router(store_orders_router)
 app.include_router(store_about_router)
 app.include_router(store_reviews_router)
 app.include_router(store_help_router)

@@ -21,6 +21,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
     label: "Inventory",
     any: ["inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust"],
   },
+  { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
   { href: "/admin/cleanup", label: "Parts clean-up" },
   { href: "/admin/ebay-new", label: "New eBay listings" },

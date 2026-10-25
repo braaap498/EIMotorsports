@@ -35,6 +35,7 @@ GROUPS: list[dict] = [
             ("receive", "Receive stock (scan new parts in)"),
             ("ship", "Ship orders (scan parts out)"),
             ("barcodes", "Link barcodes, set bin locations, print shelf labels"),
+            ("purchase", "Purchase orders (reorder parts, manage distributors)"),
         ],
     },
     {

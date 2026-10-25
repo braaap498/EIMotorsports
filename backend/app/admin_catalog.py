@@ -469,6 +469,7 @@ class ProductFields(BaseModel):
     title: Optional[str] = None
     internal_part_number: Optional[str] = None
     manufacturer_part_number: Optional[str] = None
+    show_part_number: Optional[bool] = None   # customers can only see the manufacturer part number when true
     category_id: Optional[int] = None
     part_manufacturer_id: Optional[int] = None
     part_type: Optional[str] = None
@@ -519,7 +520,7 @@ def _product_or_404(db: Session, product_id: int):
 
 # A new product starts from these values, so a form that always sends them
 # (published = off, active = on, universal = off) is not treated as a change.
-_NEW_PRODUCT_DEFAULTS = {"is_published": False, "is_active": True, "is_universal": False}
+_NEW_PRODUCT_DEFAULTS = {"is_published": False, "is_active": True, "is_universal": False, "show_part_number": False}
 
 
 def _same(old, new) -> bool:
