@@ -87,13 +87,23 @@ def _clean_last_name(v: Optional[str]) -> Optional[str]:
     return v
 
 
+def _forget_names() -> None:
+    """Purchase orders cache staff names for a few minutes; drop that so a new or edited name shows at once."""
+    try:
+        from app.admin_purchase_orders import _NAMES
+
+        _NAMES["at"] = 0.0
+    except Exception:
+        pass
+
+
 def _clean_permissions(v: Optional[list[str]]) -> Optional[list[str]]:
     return None if v is None else normalize(v)
 
 
 class NewUser(BaseModel):
     display_name: str = Field(max_length=40)
-    last_name: Optional[str] = Field(default=None, max_length=40)
+    last_name: str = Field(min_length=1, max_length=40)   # required for new accounts
     email: str = Field(max_length=200)
     role: Literal["admin", "staff"]
     password: str = Field(min_length=12, max_length=72)
@@ -111,8 +121,11 @@ class NewUser(BaseModel):
 
     @field_validator("last_name")
     @classmethod
-    def _last(cls, v: Optional[str]) -> Optional[str]:
-        return _clean_last_name(v)
+    def _last(cls, v: str) -> str:
+        v = _clean_last_name(v) or ""
+        if not v:
+            raise ValueError("Last name is required")
+        return v
 
     @field_validator("email")
     @classmethod
@@ -243,6 +256,7 @@ def add_staff(body: NewUser):
             },
         },
     )
+    _forget_names()
     return _public(created)
 
 
@@ -290,7 +304,9 @@ def edit_staff(user_id: str, body: EditUser, me: AuthUser = Depends(require_admi
         elif body.role is not None and cur_role != "staff":
             meta["permissions"] = []  # demoted to employee: start with nothing
         update["app_metadata"] = meta
-    return _public(_call("PUT", f"/users/{user_id}", update))
+    saved = _public(_call("PUT", f"/users/{user_id}", update))
+    _forget_names()
+    return saved
 
 
 @router.post("/{user_id}/password", status_code=204)

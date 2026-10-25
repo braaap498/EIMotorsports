@@ -116,8 +116,8 @@ function Row({
   catalog: PermCatalog | null;
   onSaved: () => void;
 }) {
-  const [name, setName] = useState(s.display_name);
-  const [lastName, setLastName] = useState(s.last_name ?? "");
+  const fullName = [s.display_name, s.last_name].filter(Boolean).join(" ");
+  const [name, setName] = useState(fullName);
   const [role, setRole] = useState(s.role);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -136,15 +136,23 @@ function Row({
 
   const isMe = s.id === meId;
   const roleLocked = isMe || s.role === "owner";
-  const changed = name.trim() !== s.display_name || lastName.trim() !== (s.last_name ?? "") || role !== s.role;
+  // The name box holds "First Last". The last word is the last name; everything before it is the first name.
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const newLast = parts.length > 1 ? parts[parts.length - 1] : "";
+  const newFirst = parts.length > 1 ? parts.slice(0, -1).join(" ") : parts[0] ?? "";
+  const nameChanged = name.trim().replace(/\s+/g, " ") !== fullName;
+  const nameOk = !nameChanged || (newFirst !== "" && newLast !== "");
+  const changed = nameChanged || role !== s.role;
 
   async function save() {
     setBusy(true);
     setError("");
     try {
       const body: Record<string, string> = {};
-      if (name.trim() !== s.display_name) body.display_name = name.trim();
-      if (lastName.trim() !== (s.last_name ?? "")) body.last_name = lastName.trim();
+      if (nameChanged) {
+        body.display_name = newFirst;
+        body.last_name = newLast;
+      }
       if (role !== s.role) body.role = role;
       await api(`/users/${s.id}`, { method: "PATCH", body });
       onSaved();
@@ -196,17 +204,12 @@ function Row({
         <input
           className={inputCls}
           value={name}
-          maxLength={40}
-          placeholder="Display name (required)"
+          maxLength={81}
+          placeholder="First and last name (required)"
           onChange={(e) => setName(e.target.value)}
         />
-        <input
-          className={`${inputCls} mt-1`}
-          value={lastName}
-          maxLength={40}
-          placeholder="Last name (shown on purchase orders)"
-          onChange={(e) => setLastName(e.target.value)}
-        />
+        {nameChanged && !nameOk && <p className="mt-1 text-xs text-amber-700">Type the first name, then the last name.</p>}
+        {!nameChanged && s.display_name && !s.last_name && <p className="mt-1 text-xs text-amber-700">No last name yet. Type it after the first name.</p>}
         {!s.display_name && <p className="mt-1 text-xs text-amber-700">No display name yet. The site greets them by their email.</p>}
         {error && <p className="mt-1 text-xs text-red-700">{error}</p>}
       </td>
@@ -225,7 +228,7 @@ function Row({
         {s.last_sign_in_at ? new Date(s.last_sign_in_at).toLocaleDateString() : "Never"}
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-right">
-        <button className={btnCls} disabled={busy || !changed || !name.trim()} onClick={save}>
+        <button className={btnCls} disabled={busy || !changed || !name.trim() || !nameOk} onClick={save}>
           {busy ? "Saving…" : "Save"}
         </button>{" "}
         {s.role === "staff" && (
@@ -772,7 +775,7 @@ export default function AdminUsersPage() {
   const shown = tab === "employees" ? employeeList : adminList;
 
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
-  const canAdd = displayName.trim().length > 0 && emailOk && password.length >= 12 && !adding;
+  const canAdd = displayName.trim().length > 0 && newLastName.trim().length > 0 && emailOk && password.length >= 12 && !adding;
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
@@ -785,14 +788,14 @@ export default function AdminUsersPage() {
         method: "POST",
         body: {
           display_name: displayName.trim(),
-          last_name: newLastName.trim() || null,
+          last_name: newLastName.trim(),
           email: email.trim(),
           role,
           password,
           permissions: role === "staff" ? newPerms : [],
         },
       });
-      setCreated({ email: email.trim().toLowerCase(), display_name: displayName.trim(), password });
+      setCreated({ email: email.trim().toLowerCase(), display_name: `${displayName.trim()} ${newLastName.trim()}`, password });
       setDisplayName("");
       setNewLastName("");
       setEmail("");
@@ -819,8 +822,8 @@ export default function AdminUsersPage() {
             <Field label="Display name (required) — shown as “Hi, …” on the site">
               <input className={inputCls} value={displayName} maxLength={40} onChange={(e) => setDisplayName(e.target.value)} placeholder="e.g. Eric" required />
             </Field>
-            <Field label="Last name (optional) — shown with the first name on purchase orders">
-              <input className={inputCls} value={newLastName} maxLength={40} onChange={(e) => setNewLastName(e.target.value)} placeholder="e.g. Smith" />
+            <Field label="Last name">
+              <input className={inputCls} value={newLastName} maxLength={40} onChange={(e) => setNewLastName(e.target.value)} placeholder="e.g. Smith" required />
             </Field>
             <Field label="Email (they sign in with this)">
               <input className={inputCls} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com" required />
@@ -861,7 +864,7 @@ export default function AdminUsersPage() {
             <button className={btnCls} disabled={!canAdd}>
               {adding ? "Adding…" : role === "staff" ? "Add employee" : "Add admin"}
             </button>
-            {!displayName.trim() && <span className="text-xs text-gray-500">A display name is required.</span>}
+            {(!displayName.trim() || !newLastName.trim()) && <span className="text-xs text-gray-500">A display name and last name are required.</span>}
           </div>
         </form>
 
@@ -934,7 +937,7 @@ export default function AdminUsersPage() {
           <table className="w-full text-left text-sm">
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
-                <th className="px-3 py-2">Display name</th>
+                <th className="px-3 py-2">Name</th>
                 <th className="px-3 py-2">Email</th>
                 <th className="px-3 py-2">Role</th>
                 <th className="px-3 py-2">Last sign-in</th>
