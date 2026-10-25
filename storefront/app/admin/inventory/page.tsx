@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { api } from "../../../lib/adminApi";
 import { useAccess } from "../../../components/admin/AdminAccess";
 import { Notice } from "../../../components/admin/ui";
 import BarcodePanel from "../../../components/admin/inventory/BarcodePanel";
@@ -12,7 +13,7 @@ import WebOrderShip from "../../../components/admin/inventory/WebOrderShip";
 const ANY = ["inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust"];
 const TABS = [
   { key: "receive", label: "Receive (scan in)", perms: ["inventory.receive"] },
-  { key: "ship", label: "Ship (scan out)", perms: ["inventory.ship"] },
+  { key: "ship", label: "Pick & ship", perms: ["inventory.ship"] },
   { key: "stock", label: "Stock", perms: ANY },
   { key: "barcodes", label: "Barcodes & labels", perms: ["inventory.barcodes"] },
   { key: "history", label: "History", perms: ANY },
@@ -23,6 +24,19 @@ export default function InventoryPage() {
   const tabs = TABS.filter((t) => can(...t.perms));
   const [tab, setTab] = useState("");
   const [shipMode, setShipMode] = useState<"web" | "other">("web");
+  // Orders with a red flag (short pick / oversold), shown on the Ship tab so they can't be missed.
+  const [flagged, setFlagged] = useState(0);
+  const canShip = can("inventory.ship");
+  useEffect(() => {
+    if (!canShip) return;
+    const load = () =>
+      api<{ attention_count: number }>("/inventory/orders/to-ship")
+        .then((r) => setFlagged(r.attention_count))
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, [canShip, tab]);
 
   // Open on ?tab=... if given, otherwise the first tab this person may use.
   useEffect(() => {
@@ -52,6 +66,11 @@ export default function InventoryPage() {
             }`}
           >
             {t.label}
+            {t.key === "ship" && flagged > 0 && (
+              <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs font-semibold text-white">
+                {flagged} need attention
+              </span>
+            )}
           </button>
         ))}
       </div>

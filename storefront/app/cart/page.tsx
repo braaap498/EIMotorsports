@@ -17,6 +17,7 @@ type Priced = {
   title?: string;
   price?: string | null;
   available?: number;
+  backordered?: boolean;
   qty?: number;
   image_url?: string | null;
   image_fallback?: string | null;
@@ -130,7 +131,11 @@ export default function CartPage() {
                 {p?.sku && <p className="text-xs text-gray-500">SKU {p.sku}</p>}
 
                 {p && p.problem === "unavailable" && <p className="mt-1 text-sm font-semibold text-red-700">This part is no longer available.</p>}
-                {p && p.problem === "sold_out" && <p className="mt-1 text-sm font-semibold text-red-700">Sold out.</p>}
+                {p && p.problem === "sold_out" && (
+                  <p className="mt-1 text-sm font-semibold text-red-700">
+                    {p.backordered ? "Backordered. More are on order, but none are in stock right now." : "Sold out."}
+                  </p>
+                )}
                 {p && p.problem === "no_price" && <p className="mt-1 text-sm font-semibold text-red-700">Pricing unavailable. Contact us to order.</p>}
                 {p && p.problem === "reduced" && <p className="mt-1 text-sm font-semibold text-amber-700">Only {p.available} in stock. We lowered your quantity.</p>}
 

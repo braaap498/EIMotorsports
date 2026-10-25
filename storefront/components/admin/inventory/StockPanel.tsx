@@ -14,14 +14,18 @@ type Row = {
   reorder_point: number | null;
   bin_location: string | null;
   is_active: boolean;
+  reserved: number; // promised to paid orders and open checkouts
+  available: number; // what customers can still buy
+  on_order: boolean; // a purchase order is placed; the site says Backordered instead of Sold out
+  oversold: boolean; // more promised to paid orders than the shelf count says is there
 };
-type Resp = { total: number; low_count: number; out_count: number; items: Row[] };
+type Resp = { total: number; low_count: number; out_count: number; oversold_count?: number; items: Row[] };
 type View = "all" | "low" | "out";
 type Note = "" | "saving" | "saved";
 
 const LIMIT = 50;
 const SAVE_DELAY_MS = 700;
-const isLow = (r: Row) => (r.reorder_point ?? 0) > 0 && r.quantity_on_hand <= (r.reorder_point ?? 0);
+const isLow = (r: Row) => (r.reorder_point ?? 0) > 0 && r.available <= (r.reorder_point ?? 0);
 
 /** Every product with its stock, manual count changes, restock levels, and the list of what needs reordering. */
 export default function StockPanel({ active }: { active: boolean }) {
@@ -93,8 +97,10 @@ export default function StockPanel({ active }: { active: boolean }) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-gray-600">
-        Every part and how many you have. Use the arrows or type the real number; changes save by themselves a moment
-        after you stop. Set a restock level on a part and it shows up under Low stock when you reach or drop below it.
+        Every part and how many you have. “On hand” is what is physically on the shelf: use the arrows or type the real
+        number and it saves by itself. “Reserved” is promised to paid orders that haven’t been picked yet, and
+        “Available” is what customers can still buy. Set a restock level on a part and it shows up under Low stock when
+        available reaches or drops below it.
       </p>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -134,6 +140,8 @@ export default function StockPanel({ active }: { active: boolean }) {
               <th className="px-3 py-2">Part</th>
               <th className="px-3 py-2">Bin</th>
               <th className="px-3 py-2">On hand</th>
+              <th className="px-3 py-2">Reserved</th>
+              <th className="px-3 py-2">Available</th>
               <th className="px-3 py-2">Restock level</th>
               {view === "low" && <th className="px-3 py-2">Short by</th>}
               <th className="px-3 py-2">Status</th>
@@ -145,7 +153,7 @@ export default function StockPanel({ active }: { active: boolean }) {
             ))}
             {loaded && data.items.length === 0 && (
               <tr>
-                <td colSpan={view === "low" ? 6 : 5} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={view === "low" ? 8 : 7} className="px-3 py-6 text-center text-gray-500">
                   {view === "low"
                     ? "Nothing is at or below its restock level."
                     : view === "out"
@@ -239,7 +247,10 @@ function StockRow({
       if (seq !== countSeq.current) return;
       if (!countTimer.current) countDirty.current = false;
       sentCount.current = r.quantity_on_hand;
-      onUpdate(row.id, { quantity_on_hand: r.quantity_on_hand });
+      onUpdate(row.id, {
+        quantity_on_hand: r.quantity_on_hand,
+        available: Math.max(0, r.quantity_on_hand - rowRef.current.reserved),
+      });
       flash(setCountNote);
     } catch (e) {
       if (seq !== countSeq.current) return;
@@ -334,7 +345,25 @@ function StockRow({
 
   const noteText = (n: Note) => (n === "saving" ? "Saving…" : n === "saved" ? "Saved" : "");
   const low = isLow(row);
-  const out = row.quantity_on_hand <= 0;
+  const out = row.available <= 0;
+  const [onOrder, setOnOrder] = useState(row.on_order);
+  useEffect(() => setOnOrder(row.on_order), [row.on_order]);
+
+  async function toggleOnOrder(next: boolean) {
+    setOnOrder(next);
+    onError("");
+    try {
+      const r = await api<{ on_order: boolean }>(`/inventory/products/${row.id}/on-order`, {
+        method: "PUT",
+        body: { on_order: next },
+      });
+      setOnOrder(r.on_order);
+      onUpdate(row.id, { on_order: r.on_order });
+    } catch (e) {
+      setOnOrder(!next);
+      onError(errMsg(e));
+    }
+  }
 
   return (
     <tr>
@@ -367,6 +396,8 @@ function StockRow({
           row.quantity_on_hand
         )}
       </td>
+      <td className="px-3 py-2 text-gray-700">{row.reserved}</td>
+      <td className="px-3 py-2 font-semibold">{row.available}</td>
       <td className="whitespace-nowrap px-3 py-2">
         {canEdit ? (
           <div className="flex items-center gap-2">
@@ -389,9 +420,22 @@ function StockRow({
       </td>
       {showShort && <td className="px-3 py-2 font-semibold">{Math.max(0, (row.reorder_point ?? 0) - row.quantity_on_hand)}</td>}
       <td className="whitespace-nowrap px-3 py-2">
-        <span className="whitespace-nowrap">
-          {out ? <Badge tone="amber">Out of stock</Badge> : low ? <Badge tone="amber">Low</Badge> : <Badge tone="green">Ok</Badge>}
+        <span className="flex flex-wrap items-center gap-1 whitespace-nowrap">
+          {row.oversold && <span className="rounded bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-800">OVERSOLD</span>}
+          {out ? (
+            <Badge tone="amber">{onOrder ? "Backordered" : "Out of stock"}</Badge>
+          ) : low ? (
+            <Badge tone="amber">Low</Badge>
+          ) : (
+            <Badge tone="green">Ok</Badge>
+          )}
         </span>
+        {canEdit && (
+          <label className="mt-1 flex items-center gap-1 text-xs text-gray-600">
+            <input type="checkbox" checked={onOrder} onChange={(e) => toggleOnOrder(e.target.checked)} />
+            On order (PO placed)
+          </label>
+        )}
       </td>
     </tr>
   );

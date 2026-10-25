@@ -10,11 +10,13 @@ export default function AddToCart({
   slug,
   price,
   available,
+  backordered = false,
 }: {
   productId: number;
   slug: string;
   price: string | null;
   available: number;
+  backordered?: boolean;
 }) {
   const { lines, add } = useCart();
   const inCart = lines.find((l) => l.product_id === productId)?.qty ?? 0;
@@ -27,7 +29,15 @@ export default function AddToCart({
     return <p className="mt-6 text-sm font-semibold text-gray-600">Call or message us for pricing on this part.</p>;
   }
   if (available <= 0) {
-    return <p className="mt-6 inline-block rounded bg-gray-100 px-3 py-2 text-sm font-semibold text-gray-700">Out of stock</p>;
+    // Never a negative number or an "oversold" message: just sold out, or Backordered when more are on order.
+    return backordered ? (
+      <div className="mt-6">
+        <p className="inline-block rounded bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800">Backordered</p>
+        <p className="mt-2 text-sm text-gray-600">More are on order but haven’t arrived yet. Check back soon.</p>
+      </div>
+    ) : (
+      <p className="mt-6 inline-block rounded bg-gray-100 px-3 py-2 text-sm font-semibold text-gray-700">Out of stock</p>
+    );
   }
 
   const clamp = (n: number) => Math.max(1, Math.min(Number.isFinite(n) ? Math.floor(n) : 1, Math.max(room, 1)));
