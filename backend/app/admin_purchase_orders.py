@@ -13,11 +13,17 @@ Mounted at /admin/purchase-orders/* (owner / admin, plus staff holding "inventor
   GET    /purchase-orders/{id}             one PO with its lines
   PUT    /purchase-orders/{id}             edit a PO (vendor, ship-to, note, open lines, and its PO number)
   PUT    /purchase-orders/{id}/sent        mark it sent to the distributor (or not)
-  DELETE /purchase-orders/{id}             delete a PO (parts that are on no other open PO stop being Backordered)
+  POST   /purchase-orders/{id}/cancel      cancel a PO (it is kept, with its number; parts that are on no other open PO stop being Backordered)
+  GET    /purchase-orders/issues           POs with receiving problems (short, over, or not on the PO), searchable
   GET    /purchase-orders/{id}/export?format=pdf|xlsx     download it again, any time
 
 The "Cost" on a PO line is what you pay the distributor. It starts from the product's cost (admin only, never shown
 to customers) and can be changed per PO line.
+
+A PO is never deleted. It is "open" until every line has been received (then "received"), or "cancelled".
+PO numbers count up from the highest one used (cancelled POs keep theirs), so the first PO ever made is 1.
+Receiving against a PO happens on the Inventory > Receive tab (see admin_inventory.py); anything short, over or
+not on the PO is written to po_receiving_issues, which the "Shortages / overages" tab here reads.
 
 Creating a PO also marks each part on it Backordered (on_order = true), because a part can only be
 Backordered once it is on a PO. That is ticked by default and can be un-ticked on the Stock tab.
@@ -81,7 +87,10 @@ def _staff_names() -> dict[str, str]:
             users = (_call("GET", f"/users?page={page}&per_page=200").get("users")) or []
             for u in users:
                 um = u.get("user_metadata") or {}
-                name = (um.get("display_name") or um.get("full_name") or "").strip()
+                first = (um.get("display_name") or um.get("full_name") or "").strip()
+                last = (um.get("last_name") or "").strip()
+                # "Eric" + "Smith" -> "Eric Smith" (but don't repeat it if the display name already has it)
+                name = first if (not last or first.lower().endswith(last.lower())) else f"{first} {last}".strip()
                 if u.get("email") and name:
                     found[u["email"].strip().lower()] = name
             if len(users) < 200:
@@ -99,13 +108,15 @@ def _who(email: Optional[str]) -> Optional[str]:
     return _staff_names().get(email.strip().lower()) or email
 
 
+# Open = not received yet AND on a PO that is not cancelled. Use this wherever "is this part still on order?" matters.
+OPEN_LINE = "l.received_at is null and exists (select 1 from po_headers hh where hh.id = l.po_id and hh.status <> 'cancelled')"
+
+
 def _free_number(db: Session) -> int:
-    """The next PO number from the sequence that no purchase order uses yet."""
-    for _ in range(1000):
-        n = db.execute(text("select nextval('public.po_number_seq')")).scalar()
-        if not db.execute(text("select 1 from po_headers where po_number = :n"), {"n": n}).first():
-            return int(n)
-    raise HTTPException(500, "Couldn't find an unused PO number. Nothing was ordered.")
+    """The next PO number: one more than the highest used (1 when there are none). POs are never deleted,
+    so a number is never reused or skipped. The lock keeps two people creating a PO at once from getting the same number."""
+    db.execute(text("select pg_advisory_xact_lock(7001)"))
+    return int(db.execute(text("select coalesce(max(po_number), 0) + 1 from po_headers")).scalar())
 
 
 def _release_parts(db: Session, product_ids) -> None:
@@ -117,7 +128,7 @@ def _release_parts(db: Session, product_ids) -> None:
         text(
             "update products p set on_order = false, expected_date = null, updated_at = now() "
             "where p.id = any(cast(:ids as bigint[])) "
-            "and not exists (select 1 from po_lines l where l.product_id = p.id and l.received_at is null)"
+            f"and not exists (select 1 from po_lines l where l.product_id = p.id and {OPEN_LINE})"
         ),
         {"ids": ids},
     )
@@ -163,7 +174,7 @@ def parts(
                    {avail} as available, p.reorder_point, coalesce(p.on_order, false) as on_order,
                    (select array_agg(h.po_number order by h.po_number)
                       from po_lines l join po_headers h on h.id = l.po_id
-                     where l.product_id = p.id and l.received_at is null) as open_pos
+                     where l.product_id = p.id and l.received_at is null and h.status <> 'cancelled') as open_pos
             from products p {where}
             order by (coalesce(p.reorder_point, 0) > 0) desc,
                      greatest(coalesce(p.reorder_point, 0) - {avail}, 0) desc, p.title, p.id
@@ -277,7 +288,8 @@ def _po_detail(db: Session, po_id: int) -> dict:
     h = db.execute(
         text(
             "select id, po_number, distributor_id, vendor_name, vendor_address, ship_to, note, total_cents, "
-            "       created_by, created_at, sent_at, updated_at from po_headers where id = :id"
+            "       created_by, created_at, sent_at, updated_at, status, received_at, cancelled_at, cancelled_by "
+            "from po_headers where id = :id"
         ),
         {"id": po_id},
     ).first()
@@ -285,7 +297,7 @@ def _po_detail(db: Session, po_id: int) -> dict:
         raise HTTPException(404, "That purchase order doesn't exist")
     lines = db.execute(
         text(
-            "select l.id, l.product_id, p.sku, l.item, l.description, l.quantity, l.rate, l.received_at "
+            "select l.id, l.product_id, p.sku, l.item, l.description, l.quantity, l.rate, l.received_at, l.received_qty "
             "from po_lines l left join products p on p.id = l.product_id where l.po_id = :id order by l.id"
         ),
         {"id": po_id},
@@ -296,6 +308,7 @@ def _po_detail(db: Session, po_id: int) -> dict:
     return {
         **dict(h._mapping),
         "created_by_name": _who(h.created_by),
+        "cancelled_by_name": _who(h.cancelled_by),
         "date": _local_date(h.created_at).isoformat(),
         "total": h.total_cents / 100,
         "lines": out_lines,
@@ -396,6 +409,7 @@ def create_po(body: PoIn, db: Session = Depends(get_db), user: AuthUser = Depend
 @needs("inventory.purchase")
 def list_pos(
     q: Optional[str] = Query(None, max_length=100),
+    status: Optional[str] = Query(None, pattern="^(open|received|cancelled)$"),
     limit: int = Query(30, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -404,6 +418,9 @@ def list_pos(
 
     params: dict = {"limit": limit, "offset": offset}
     conds = []
+    if status:
+        params["status"] = status
+        conds.append("h.status = :status")
     for i, w in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:6]):
         params[f"w{i}"] = f"%{w}%"
         conds.append(
@@ -417,7 +434,8 @@ def list_pos(
     rows = db.execute(
         text(
             f"""
-            select h.id, h.po_number, h.vendor_name, h.total_cents, h.created_by, h.created_at, h.sent_at,
+            select h.id, h.po_number, h.vendor_name, h.total_cents, h.created_by, h.created_at, h.sent_at, h.status,
+                   (select count(*) from po_receiving_issues i where i.po_id = h.id) as issue_count,
                    (select count(*) from po_lines l where l.po_id = h.id) as line_count,
                    (select count(*) from po_lines l where l.po_id = h.id and l.received_at is null) as open_lines
             from po_headers h {where} order by h.po_number desc limit :limit offset :offset
@@ -439,6 +457,66 @@ def defaults(db: Session = Depends(get_db)):
     """What the Create / Edit screens fill in: the usual Ship To address, and a PO number nobody uses yet."""
     nxt = db.execute(text("select coalesce(max(po_number), 0) + 1 from po_headers")).scalar()
     return {"ship_to": DEFAULT_SHIP_TO, "next_po_number": int(nxt)}
+
+
+@router.get("/issues")
+@needs("inventory.purchase")
+def po_issues(
+    q: Optional[str] = Query(None, max_length=100),
+    kind: Optional[str] = Query(None, pattern="^(short|over|not_on_po)$"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """The shortage / overage report: every PO that had a problem when it was received, with each problem.
+    short = fewer arrived than ordered; over = more than ordered; not_on_po = a part that wasn't on the PO at all.
+    Each one records who acknowledged it and when. Search by PO number, distributor, part number, SKU or description."""
+    import re
+
+    params: dict = {"limit": limit, "offset": offset}
+    conds = []
+    if kind:
+        params["kind"] = kind
+        conds.append("exists (select 1 from po_receiving_issues k where k.po_id = h.id and k.kind = :kind)")
+    for i, w in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:6]):
+        params[f"w{i}"] = f"%{w}%"
+        conds.append(
+            f"(cast(h.po_number as text) ilike cast(:w{i} as text) or h.vendor_name ilike cast(:w{i} as text) "
+            f"or exists (select 1 from po_receiving_issues k where k.po_id = h.id and "
+            f"(k.sku ilike cast(:w{i} as text) or k.item ilike cast(:w{i} as text) or k.description ilike cast(:w{i} as text))))"
+        )
+    where = " and ".join(["exists (select 1 from po_receiving_issues x where x.po_id = h.id)"] + conds)
+    total = db.execute(text(f"select count(*) from po_headers h where {where}"), params).scalar()
+    heads = db.execute(
+        text(
+            f"select h.id, h.po_number, h.vendor_name, h.status, h.created_at, h.sent_at, h.received_at "
+            f"from po_headers h where {where} order by h.po_number desc limit :limit offset :offset"
+        ),
+        params,
+    ).all()
+    ids = [h.id for h in heads]
+    by_po: dict[int, list] = {i: [] for i in ids}
+    if ids:
+        rows = db.execute(
+            text(
+                "select id, po_id, kind, sku, item, description, expected_qty, received_qty, note, "
+                "       acknowledged_by, acknowledged_at "
+                "from po_receiving_issues where po_id = any(cast(:ids as bigint[])) order by id"
+            ),
+            {"ids": ids},
+        ).all()
+        for r in rows:
+            d = dict(r._mapping)
+            d["difference"] = d["received_qty"] - d["expected_qty"]
+            d["acknowledged_by_name"] = _who(d["acknowledged_by"])
+            by_po[r.po_id].append(d)
+    items = []
+    for h in heads:
+        d = dict(h._mapping)
+        d["issues"] = by_po.get(h.id, [])
+        d["issue_count"] = len(d["issues"])
+        items.append(d)
+    return {"total": total, "items": items}
 
 
 @router.get("/{po_id}")
@@ -469,12 +547,15 @@ class PoEdit(BaseModel):
 def edit_po(po_id: int, body: PoEdit, db: Session = Depends(get_db)):
     try:
         h = db.execute(
-            text("select id, po_number, distributor_id, sent_at from po_headers where id = :id for update"),
+            text("select id, po_number, distributor_id, sent_at, status from po_headers where id = :id for update"),
             {"id": po_id},
         ).first()
         if not h:
             db.rollback()
-            raise HTTPException(404, "That purchase order doesn't exist (it may have been deleted).")
+            raise HTTPException(404, "That purchase order doesn't exist.")
+        if h.status == "cancelled":
+            db.rollback()
+            raise HTTPException(409, "This purchase order was cancelled, so it can't be edited.")
 
         renumbered = body.po_number is not None and body.po_number != h.po_number
         if renumbered and db.execute(
@@ -518,7 +599,7 @@ def edit_po(po_id: int, body: PoEdit, db: Session = Depends(get_db)):
             wanted_products.add(l.product_id)
         if not body.lines and received_count == 0:
             db.rollback()
-            raise HTTPException(400, "A purchase order needs at least one part. To get rid of it, delete the PO instead.")
+            raise HTTPException(400, "A purchase order needs at least one part. To get rid of it, cancel the PO instead.")
 
         prods = {
             r.id: r
@@ -605,38 +686,59 @@ class SentIn(BaseModel):
 @needs("inventory.purchase")
 def mark_sent(po_id: int, body: SentIn, db: Session = Depends(get_db)):
     got = db.execute(
-        text("update po_headers set sent_at = case when :s then now() else null end where id = :id returning sent_at"),
+        text(
+            "update po_headers set sent_at = case when :s then now() else null end "
+            "where id = :id and status <> 'cancelled' returning sent_at"
+        ),
         {"s": body.sent, "id": po_id},
     ).first()
     if not got:
         db.rollback()
-        raise HTTPException(404, "That purchase order doesn't exist.")
+        raise HTTPException(404, "That purchase order doesn't exist, or it was cancelled.")
     db.commit()
     return {"id": po_id, "sent_at": got.sent_at}
 
 
-@router.delete("/{po_id}")
+class CancelIn(BaseModel):
+    reason: Optional[str] = Field(None, max_length=300)
+
+
+@router.post("/{po_id}/cancel")
 @needs("inventory.purchase")
-def delete_po(po_id: int, db: Session = Depends(get_db)):
-    """Delete a PO. Stock counts are never touched. Parts that were only on this PO stop being Backordered."""
+def cancel_po(po_id: int, body: CancelIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Cancel a PO. It is never deleted: it keeps its number and stays in the history, marked cancelled.
+    Stock counts are not touched. Parts that were only on this PO stop being Backordered. A PO that has
+    been received in full can't be cancelled; one that is part-received keeps what was already received."""
     try:
         h = db.execute(
-            text("select id, po_number from po_headers where id = :id for update"), {"id": po_id}
+            text("select id, po_number, status from po_headers where id = :id for update"), {"id": po_id}
         ).first()
         if not h:
             db.rollback()
-            raise HTTPException(404, "That purchase order doesn't exist (it may already be deleted).")
+            raise HTTPException(404, "That purchase order doesn't exist.")
+        if h.status == "cancelled":
+            db.rollback()
+            raise HTTPException(409, f"Purchase order {h.po_number} is already cancelled.")
+        if h.status == "received":
+            db.rollback()
+            raise HTTPException(409, f"Purchase order {h.po_number} was already received in full, so it can't be cancelled.")
         lines = db.execute(text("select product_id, received_at from po_lines where po_id = :id"), {"id": po_id}).all()
-        open_products = [l.product_id for l in lines if l.received_at is None]
-        db.execute(text("delete from po_headers where id = :id"), {"id": po_id})  # its lines go with it
+        open_products = [l.product_id for l in lines if l.received_at is None and l.product_id is not None]
+        db.execute(
+            text(
+                "update po_headers set status = 'cancelled', cancelled_at = now(), cancelled_by = :by, "
+                "cancel_reason = :why, updated_at = now() where id = :id"
+            ),
+            {"id": po_id, "by": user.email, "why": (body.reason or "").strip() or None},
+        )
         _release_parts(db, open_products)
         db.commit()
     except HTTPException:
         raise
     except Exception as exc:
         db.rollback()
-        log.exception("Deleting a purchase order failed")
-        raise HTTPException(500, f"The purchase order was not deleted. ({type(exc).__name__})")
+        log.exception("Cancelling a purchase order failed")
+        raise HTTPException(500, f"The purchase order was not cancelled. ({type(exc).__name__})")
     return {"ok": True, "po_number": h.po_number, "received_lines": sum(1 for l in lines if l.received_at is not None)}
 
 

@@ -16,8 +16,11 @@ HOW STOCK IS COUNTED - read this before changing anything (rules live in app/sto
     taken at payment, so picking them takes nothing a second time.
   * eBay / other sales are decreased by whatever records them (outside this file); scanning those
     out only records who shipped what.
-  * Receiving scans ADD stock, write an inventory_transactions ledger row, clear "on order" and the expected
-    date, and close the part's open purchase order lines (oldest first).
+  * Receiving scans ADD stock and write an inventory_transactions ledger row. Parts that came on a purchase
+    order are received AGAINST that PO, line by line (see "receiving a PO" below): the count is checked
+    against what was ordered, a short or over count must be acknowledged (who + when is kept), and the PO
+    becomes "received" once every line is closed. The plain "scan in without a PO" receive only adds stock;
+    it never closes PO lines.
   * Every commit is ONE database transaction, tagged with a batch id made by the browser, so a
     double click or a retry after a dropped connection can never be applied twice.
 
@@ -29,7 +32,11 @@ Routes
   DELETE /inventory/barcodes/{id}           unlink a barcode
   POST   /inventory/products/{id}/shelf-barcode   make (or fetch) the shelf label code
   PUT    /inventory/products/{id}/bin       set the shelf / bin location text
-  POST   /inventory/receive                 commit a receiving batch (adds stock)
+  POST   /inventory/receive                 commit a receiving batch with no PO (adds stock)
+  GET    /inventory/receiving/pos           sent POs that still have lines to receive (searchable)
+  GET    /inventory/receiving/pos/{id}      one PO with its lines, ready to scan against
+  POST   /inventory/receiving/pos/{id}/lines/{line_id}/receive   close one PO line with the counted quantity
+  POST   /inventory/receiving/pos/{id}/extras   receive parts that were not on the PO (or more than ordered)
   GET    /inventory/orders/to-ship          paid website orders: to pick, and picked / ready to ship
   GET    /inventory/orders/{order_number}   one order with what is still to scan
   POST   /inventory/ship                    commit a scan-out batch (website order pick, or eBay / other)
@@ -127,19 +134,16 @@ def _barcode_owner(db: Session, code: str):
     ).first()
 
 
-def _close_po_lines(db: Session, product_id: int, qty: int) -> None:
-    """Parts arrived: mark this part's open purchase order lines received, oldest PO first, until the
-    received quantity is used up. That is what takes the Backordered tick away on the Stock tab."""
-    left = qty
-    lines = db.execute(
-        text("select id, quantity from po_lines where product_id = :p and received_at is null order by id"),
+def _clear_backorder_if_done(db: Session, product_id: int) -> None:
+    """A part stops being Backordered (and loses its expected date) once no open, uncancelled PO line wants it."""
+    db.execute(
+        text(
+            "update products p set on_order = false, expected_date = null, updated_at = now() "
+            "where p.id = :p and not exists (select 1 from po_lines l join po_headers h on h.id = l.po_id "
+            "  where l.product_id = p.id and l.received_at is null and h.status <> 'cancelled')"
+        ),
         {"p": product_id},
-    ).all()
-    for l in lines:
-        if left <= 0:
-            break
-        db.execute(text("update po_lines set received_at = now() where id = :id"), {"id": l.id})
-        left -= l.quantity
+    )
 
 
 def _merge_lines(lines: list) -> dict[int, dict]:
@@ -419,8 +423,8 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
             m = merged[pid]
             new_qty = db.execute(
                 text(
-                    "update products set quantity_on_hand = coalesce(quantity_on_hand, 0) + :q, on_order = false, "
-                    "expected_date = null, updated_at = now() where id = :id returning quantity_on_hand"
+                    "update products set quantity_on_hand = coalesce(quantity_on_hand, 0) + :q, "
+                    "updated_at = now() where id = :id returning quantity_on_hand"
                 ),
                 {"q": m["qty"], "id": pid},
             ).scalar()
@@ -433,7 +437,6 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
                 {"p": pid, "q": m["qty"], "ref": ref[:200], "by": user.email},
             )
             _insert_line(db, body.batch_id, pid, m["barcode_id"], m["qty"])
-            _close_po_lines(db, pid, m["qty"])
             result.append({"product_id": pid, "received": m["qty"], "quantity_on_hand": new_qty})
         db.commit()
         return {"batch_id": str(body.batch_id), "lines": result}
@@ -442,6 +445,338 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
     except Exception as exc:  # any surprise = nothing changed
         db.rollback()
         raise HTTPException(500, f"Receiving failed and was rolled back; no stock changed. ({type(exc).__name__})")
+
+
+# --------------------------------------------------------------------------
+# receiving a PO (adds stock, line by line, and keeps the shortage / overage record)
+# --------------------------------------------------------------------------
+def _po_search_conds(q: Optional[str], params: dict) -> list[str]:
+    conds = []
+    for i, w in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:6]):
+        params[f"w{i}"] = f"%{w}%"
+        conds.append(
+            f"(cast(h.po_number as text) ilike cast(:w{i} as text) or h.vendor_name ilike cast(:w{i} as text) "
+            f"or exists (select 1 from po_lines l left join products p on p.id = l.product_id "
+            f"  where l.po_id = h.id and (l.item ilike cast(:w{i} as text) or l.description ilike cast(:w{i} as text) "
+            f"  or p.sku ilike cast(:w{i} as text))))"
+        )
+    return conds
+
+
+@router.get("/receiving/pos")
+@needs("inventory.receive")
+def receiving_pos(q: Optional[str] = Query(None, max_length=100), db: Session = Depends(get_db)):
+    """Purchase orders that were sent to the distributor and still have parts to receive. Oldest first."""
+    params: dict = {}
+    conds = ["h.status = 'open'", "h.sent_at is not null"] + _po_search_conds(q, params)
+    rows = db.execute(
+        text(
+            f"""
+            select h.id, h.po_number, h.vendor_name, h.sent_at, h.created_at,
+                   count(l.id) as line_count,
+                   count(l.id) filter (where l.received_at is null) as open_lines,
+                   coalesce(sum(l.quantity) filter (where l.received_at is null), 0) as open_units
+            from po_headers h join po_lines l on l.po_id = h.id
+            where {" and ".join(conds)}
+            group by h.id
+            having count(l.id) filter (where l.received_at is null) > 0
+            order by h.po_number
+            limit 200
+            """
+        ),
+        params,
+    ).all()
+    return {"items": [dict(r._mapping) for r in rows]}
+
+
+def _receiving_detail(db: Session, po_id: int) -> dict:
+    from app.admin_purchase_orders import _who
+
+    h = db.execute(
+        text("select id, po_number, vendor_name, status, sent_at, received_at from po_headers where id = :id"),
+        {"id": po_id},
+    ).first()
+    if not h:
+        raise HTTPException(404, "That purchase order doesn't exist.")
+    rows = db.execute(
+        text(
+            "select l.id, l.product_id, l.item, l.description, l.quantity, l.received_at, l.received_qty, "
+            "       p.id as pid, p.sku, p.title, p.quantity_on_hand, p.bin_location "
+            "from po_lines l left join products p on p.id = l.product_id where l.po_id = :id order by l.id"
+        ),
+        {"id": po_id},
+    ).all()
+    lines = []
+    for r in rows:
+        product = (
+            {
+                "id": r.pid,
+                "sku": r.sku,
+                "title": r.title,
+                "quantity_on_hand": r.quantity_on_hand or 0,
+                "bin_location": r.bin_location,
+                "thumb": _thumb(db, r.pid),
+            }
+            if r.pid is not None
+            else None
+        )
+        lines.append(
+            {
+                "id": r.id,
+                "product_id": r.product_id,
+                "item": r.item,
+                "description": r.description,
+                "quantity": r.quantity,
+                "received_at": r.received_at,
+                "received_qty": r.received_qty,
+                "product": product,
+            }
+        )
+    issues = db.execute(
+        text(
+            "select id, kind, sku, description, expected_qty, received_qty, acknowledged_by, acknowledged_at "
+            "from po_receiving_issues where po_id = :id order by id"
+        ),
+        {"id": po_id},
+    ).all()
+    return {
+        **dict(h._mapping),
+        "lines": lines,
+        "issues": [
+            {**dict(i._mapping), "acknowledged_by_name": _who(i.acknowledged_by)} for i in issues
+        ],
+    }
+
+
+@router.get("/receiving/pos/{po_id}")
+@needs("inventory.receive")
+def receiving_po(po_id: int, db: Session = Depends(get_db)):
+    return _receiving_detail(db, po_id)
+
+
+class ReceiveLineIn(BaseModel):
+    batch_id: uuid.UUID
+    quantity: int = Field(..., ge=0, le=MAX_QTY)   # what was actually counted (0 = none of this line arrived)
+    acknowledged: bool = False                     # required when the count is not exactly what was ordered
+    barcode_id: Optional[int] = None
+    note: Optional[str] = Field(None, max_length=300)
+
+
+def _record_issue(db: Session, po_id: int, line_id, product_id, kind: str, item, description, expected: int, got: int,
+                  user: AuthUser, note) -> None:
+    db.execute(
+        text(
+            "insert into po_receiving_issues (po_id, po_line_id, product_id, kind, sku, item, description, "
+            "  expected_qty, received_qty, note, acknowledged_by, acknowledged_at) "
+            "values (:po, :line, :p, :kind, (select sku from products where id = :p), :item, :desc, :e, :g, :note, :by, now())"
+        ),
+        {
+            "po": po_id, "line": line_id, "p": product_id, "kind": kind, "item": item,
+            "desc": (description or "")[:250], "e": expected, "g": got,
+            "note": (note or "").strip() or None, "by": user.email,
+        },
+    )
+
+
+@router.post("/receiving/pos/{po_id}/lines/{line_id}/receive")
+@needs("inventory.receive")
+def receive_po_line(
+    po_id: int, line_id: int, body: ReceiveLineIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)
+):
+    """Close ONE line of a PO with the quantity counted. Adds that quantity to on hand (available follows, because
+    available is on hand minus what is set aside). If the count is not exactly the ordered quantity the person must
+    acknowledge it: a short / over record is written with their name and the time. When no open line is left the
+    PO becomes 'received'."""
+    try:
+        h = db.execute(
+            text("select id, po_number, status, sent_at from po_headers where id = :id for update"), {"id": po_id}
+        ).first()
+        if not h:
+            db.rollback()
+            raise HTTPException(404, "That purchase order doesn't exist.")
+        if h.status == "cancelled":
+            db.rollback()
+            raise HTTPException(409, f"Purchase order {h.po_number} was cancelled. Nothing was received.")
+        if h.sent_at is None:
+            db.rollback()
+            raise HTTPException(409, f"Purchase order {h.po_number} is not marked as sent yet. Nothing was received.")
+        line = db.execute(
+            text(
+                "select id, product_id, item, description, quantity, received_at from po_lines "
+                "where id = :l and po_id = :po for update"
+            ),
+            {"l": line_id, "po": po_id},
+        ).first()
+        if not line:
+            db.rollback()
+            raise HTTPException(404, "That line is no longer on this purchase order. Reload it.")
+        if line.received_at is not None:
+            db.rollback()
+            raise HTTPException(409, "This line was already received (maybe on another screen). Reload the purchase order.")
+        if line.product_id is None and body.quantity > 0:
+            db.rollback()
+            raise HTTPException(400, "This line's part no longer exists, so nothing can be added to stock for it.")
+
+        diff = body.quantity - line.quantity
+        if diff != 0 and not body.acknowledged:
+            db.rollback()
+            word = "short" if diff < 0 else "over"
+            raise HTTPException(
+                400, f"The count is {abs(diff)} {word}. Confirm and acknowledge it before this line can be received."
+            )
+
+        new_qty = None
+        if line.product_id is not None:
+            locked = db.execute(
+                text("select id from products where id = :p for update"), {"p": line.product_id}
+            ).first()
+            if not locked:
+                db.rollback()
+                raise HTTPException(404, "That product no longer exists. Nothing was received.")
+
+        _open_batch(db, body.batch_id, "receive", user, f"PO {h.po_number}", body.note, None)
+
+        if body.quantity > 0:
+            new_qty = db.execute(
+                text(
+                    "update products set quantity_on_hand = coalesce(quantity_on_hand, 0) + :q, "
+                    "updated_at = now() where id = :id returning quantity_on_hand"
+                ),
+                {"q": body.quantity, "id": line.product_id},
+            ).scalar()
+            db.execute(
+                text(
+                    "insert into inventory_transactions "
+                    "(product_id, transaction_type, quantity_change, reference, legacy_created_by) "
+                    "values (:p, 'Receive', :q, :ref, :by)"
+                ),
+                {"p": line.product_id, "q": body.quantity,
+                 "ref": f"Receive {str(body.batch_id)[:8]} - PO {h.po_number}", "by": user.email},
+            )
+            _insert_line(db, body.batch_id, line.product_id, body.barcode_id, body.quantity)
+
+        db.execute(
+            text("update po_lines set received_at = now(), received_qty = :q, received_by = :by where id = :id"),
+            {"q": body.quantity, "by": user.email, "id": line.id},
+        )
+        if diff != 0:
+            _record_issue(db, po_id, line.id, line.product_id, "short" if diff < 0 else "over",
+                          line.item, line.description, line.quantity, body.quantity, user, body.note)
+        if line.product_id is not None:
+            _clear_backorder_if_done(db, line.product_id)
+
+        left = db.execute(
+            text("select count(*) from po_lines where po_id = :id and received_at is null"), {"id": po_id}
+        ).scalar()
+        if left == 0:
+            db.execute(
+                text("update po_headers set status = 'received', received_at = now(), updated_at = now() where id = :id"),
+                {"id": po_id},
+            )
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        log.exception("Receiving a PO line failed")
+        raise HTTPException(500, f"Receiving failed and was rolled back; no stock changed. ({type(exc).__name__})")
+    return {
+        "line_id": line_id,
+        "received": body.quantity,
+        "difference": diff,
+        "quantity_on_hand": new_qty,
+        "po_status": "received" if left == 0 else "open",
+        "lines_left": left,
+    }
+
+
+class ExtraLineIn(BaseModel):
+    product_id: int
+    quantity: int = Field(..., ge=1, le=MAX_QTY)
+    barcode_id: Optional[int] = None
+
+
+class ReceiveExtrasIn(BaseModel):
+    batch_id: uuid.UUID
+    lines: list[ExtraLineIn] = Field(..., min_length=1, max_length=200)
+    acknowledged: bool = False
+    note: Optional[str] = Field(None, max_length=300)
+
+
+@router.post("/receiving/pos/{po_id}/extras")
+@needs("inventory.receive")
+def receive_po_extras(
+    po_id: int, body: ReceiveExtrasIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)
+):
+    """Parts that arrived with this PO but were not on it (or more of a part than its line asked for, after that
+    line was closed). They are added to stock and written to the shortage / overage report as overages, with the
+    name of the person who acknowledged them and the time."""
+    if not body.acknowledged:
+        raise HTTPException(400, "These parts are not on the purchase order. Acknowledge that to receive them.")
+    merged = _merge_lines(body.lines)
+    ids = sorted(merged)
+    try:
+        h = db.execute(
+            text("select id, po_number, status from po_headers where id = :id for update"), {"id": po_id}
+        ).first()
+        if not h:
+            db.rollback()
+            raise HTTPException(404, "That purchase order doesn't exist.")
+        if h.status == "cancelled":
+            db.rollback()
+            raise HTTPException(409, f"Purchase order {h.po_number} was cancelled. Nothing was received.")
+        prods = {
+            r.id: r
+            for r in db.execute(
+                text("select id, sku, title from products where id = any(cast(:ids as bigint[])) order by id for update"),
+                {"ids": ids},
+            ).all()
+        }
+        if len(prods) != len(ids):
+            db.rollback()
+            raise HTTPException(404, "One of these products no longer exists. Nothing was received - scan again.")
+        on_po = {
+            r.product_id: r
+            for r in db.execute(
+                text("select id, product_id, item, quantity from po_lines where po_id = :id and product_id = any(cast(:ids as bigint[]))"),
+                {"id": po_id, "ids": ids},
+            ).all()
+        }
+
+        _open_batch(db, body.batch_id, "receive", user, f"PO {h.po_number} (extra)", body.note, None)
+        out = []
+        for pid in ids:
+            m = merged[pid]
+            new_qty = db.execute(
+                text(
+                    "update products set quantity_on_hand = coalesce(quantity_on_hand, 0) + :q, "
+                    "updated_at = now() where id = :id returning quantity_on_hand"
+                ),
+                {"q": m["qty"], "id": pid},
+            ).scalar()
+            db.execute(
+                text(
+                    "insert into inventory_transactions "
+                    "(product_id, transaction_type, quantity_change, reference, legacy_created_by) "
+                    "values (:p, 'Receive', :q, :ref, :by)"
+                ),
+                {"p": pid, "q": m["qty"], "ref": f"Receive {str(body.batch_id)[:8]} - PO {h.po_number} (not on PO)", "by": user.email},
+            )
+            _insert_line(db, body.batch_id, pid, m["barcode_id"], m["qty"])
+            ln = on_po.get(pid)
+            _record_issue(
+                db, po_id, ln.id if ln else None, pid, "over" if ln else "not_on_po",
+                ln.item if ln else None, prods[pid].title, ln.quantity if ln else 0, m["qty"], user, body.note,
+            )
+            out.append({"product_id": pid, "received": m["qty"], "quantity_on_hand": new_qty})
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        log.exception("Receiving extra parts failed")
+        raise HTTPException(500, f"Receiving failed and was rolled back; no stock changed. ({type(exc).__name__})")
+    return {"lines": out}
 
 
 # --------------------------------------------------------------------------
@@ -500,7 +835,8 @@ def stock_list(
             "       p.reorder_point, p.bin_location, coalesce(p.is_active, true) as is_active, "
             f"       {set_aside_sql('p')} as reserved, {_AVAIL_SQL} as available, "
             f"       coalesce(p.on_order, false) as on_order, p.expected_date, "
-            f"       exists (select 1 from po_lines l where l.product_id = p.id and l.received_at is null) as has_open_po, "
+            f"       exists (select 1 from po_lines l join po_headers ph on ph.id = l.po_id "
+            f"         where l.product_id = p.id and l.received_at is null and ph.status <> 'cancelled') as has_open_po, "
             f"       {_OVERSOLD_SQL} as oversold "
             f"from products p {where} order by {order} limit :limit offset :offset"
         ),
@@ -609,7 +945,11 @@ class OnOrderIn(BaseModel):
 def _has_open_po(db: Session, product_id: int) -> bool:
     return bool(
         db.execute(
-            text("select 1 from po_lines where product_id = :p and received_at is null limit 1"), {"p": product_id}
+            text(
+                "select 1 from po_lines l join po_headers h on h.id = l.po_id "
+                "where l.product_id = :p and l.received_at is null and h.status <> 'cancelled' limit 1"
+            ),
+            {"p": product_id},
         ).first()
     )
 

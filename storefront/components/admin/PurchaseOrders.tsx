@@ -29,6 +29,7 @@ type PoLine = {
   rate: number;
   amount: number;
   received_at: string | null;
+  received_qty: number | null;
 };
 type PoDetail = {
   id: number;
@@ -36,6 +37,9 @@ type PoDetail = {
   distributor_id: number | null;
   sent_at: string | null;
   created_by_name: string | null;
+  status: "open" | "received" | "cancelled";
+  cancelled_at: string | null;
+  cancelled_by_name: string | null;
   vendor_name: string;
   vendor_address: string | null;
   ship_to: string | null;
@@ -59,9 +63,34 @@ type PoRow = {
   created_at: string;
   line_count: number;
   open_lines: number;
+  status: "open" | "received" | "cancelled";
+  issue_count: number;
+};
+type Issue = {
+  id: number;
+  kind: "short" | "over" | "not_on_po";
+  sku: string | null;
+  item: string | null;
+  description: string | null;
+  expected_qty: number;
+  received_qty: number;
+  difference: number;
+  note: string | null;
+  acknowledged_by: string | null;
+  acknowledged_by_name: string | null;
+  acknowledged_at: string;
+};
+type IssuePo = {
+  id: number;
+  po_number: number;
+  vendor_name: string;
+  status: "open" | "received" | "cancelled";
+  created_at: string;
+  issue_count: number;
+  issues: Issue[];
 };
 type Sel = { part: Part; qty: string; rate: string };
-type Tab = "reorder" | "history" | "distributors";
+type Tab = "reorder" | "history" | "issues" | "distributors";
 
 const PARTS_LIMIT = 50;
 const PO_LIMIT = 30;
@@ -69,6 +98,8 @@ const money = (n: number) => `$${n.toFixed(2)}`;
 // One size bigger than the rest of the admin screens, so a purchase order is easy to read.
 const inp = inputCls.replace("text-sm", "text-base");
 const who = (name: string | null, email: string | null) => name ?? email ?? "—";
+const KIND_LABEL: Record<Issue["kind"], string> = { short: "Short", over: "Over", not_on_po: "Not on PO" };
+const KIND_TONE: Record<Issue["kind"], "amber" | "blue" | "gray"> = { short: "amber", over: "blue", not_on_po: "gray" };
 
 async function download(po: { id: number; po_number: number }, fmt: "pdf" | "xlsx") {
   const blob = await apiDownload(`/purchase-orders/${po.id}/export?format=${fmt}`);
@@ -85,7 +116,8 @@ async function download(po: { id: number; po_number: number }, fmt: "pdf" | "xls
 /**
  * Purchase orders.
  *  - Reorder: low and out-of-stock parts (or every part). Tick parts, press Create PO, pick a distributor.
- *  - History: every PO ever made, searchable; view it or download it again as PDF or Excel.
+ *  - History: every PO ever made (they are never deleted, only cancelled), searchable; view it or download it again as PDF or Excel.
+ *  - Shortages / overages: every PO that had a receiving problem, searchable.
  *  - Distributors: add, edit and delete the distributors you order from.
  * Creating a PO marks its parts Backordered by default (un-tick on the Inventory > Stock tab).
  */
@@ -122,6 +154,7 @@ export default function PurchaseOrders() {
       <div className="flex gap-1 overflow-x-auto border-b border-gray-200">
         {tabBtn("reorder", `Reorder parts${Object.keys(sel).length ? ` (${Object.keys(sel).length} ticked)` : ""}`)}
         {tabBtn("history", "PO history")}
+        {tabBtn("issues", "Shortages / overages")}
         {tabBtn("distributors", "Distributors")}
       </div>
 
@@ -144,6 +177,9 @@ export default function PurchaseOrders() {
       </div>
       <div className={tab === "history" ? "" : "hidden"}>
         <History dists={dists} reloadKey={historyKey} active={tab === "history"} setFlash={setFlash} />
+      </div>
+      <div className={tab === "issues" ? "" : "hidden"}>
+        <Issues reloadKey={historyKey} active={tab === "issues"} setFlash={setFlash} />
       </div>
       <div className={tab === "distributors" ? "" : "hidden"}>
         <Distributors dists={dists} reload={loadDists} setFlash={setFlash} />
@@ -221,7 +257,7 @@ function Reorder({
 
       <div className="flex flex-wrap items-center gap-3">
         <input
-          className={`${inp} max-w-xs`}
+          className={`${inp} w-full max-w-md`}
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}
           placeholder="Search title, SKU or part number"
@@ -579,19 +615,19 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
       .then((po) => (edit ? setEditing(po) : setOpen(po)))
       .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
 
-  async function remove(po: { id: number; po_number: number }) {
+  async function cancelPo(po: { id: number; po_number: number }) {
     if (
       !window.confirm(
-        `Delete purchase order ${po.po_number}? This can’t be undone. Stock counts are not changed, and parts that are on no other open PO stop being Backordered.`
+        `Cancel purchase order ${po.po_number}? It stays in the history, marked cancelled, and its number is not reused. Stock counts are not changed, and parts that are on no other open PO stop being Backordered.`
       )
     )
       return;
     try {
-      await api(`/purchase-orders/${po.id}`, { method: "DELETE" });
+      await api(`/purchase-orders/${po.id}/cancel`, { method: "POST", body: {} });
       setOpen(null);
       setEditing(null);
       setBump((b) => b + 1);
-      setFlash({ kind: "success", text: `Purchase order ${po.po_number} deleted.` });
+      setFlash({ kind: "success", text: `Purchase order ${po.po_number} cancelled.` });
     } catch (e) {
       setFlash({ kind: "error", text: errMsg(e) });
     }
@@ -612,7 +648,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
   return (
     <div className="space-y-4">
       <input
-        className={`${inp} max-w-md`}
+        className={`${inp} w-full max-w-3xl`}
         value={qInput}
         onChange={(e) => setQInput(e.target.value)}
         placeholder="Search PO number, distributor, part number, SKU or description"
@@ -639,20 +675,27 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                 <td className="px-3 py-2">{r.vendor_name}</td>
                 <td className="whitespace-nowrap px-3 py-2">
                   {r.line_count}
-                  {r.open_lines === 0 ? <span className="ml-2"><Badge tone="green">received</Badge></span> : r.open_lines < r.line_count ? <span className="ml-2"><Badge tone="amber">{r.open_lines} open</Badge></span> : null}
+                  {r.status === "cancelled" ? (
+                    <span className="ml-2"><Badge tone="gray">cancelled</Badge></span>
+                  ) : r.status === "received" ? (
+                    <span className="ml-2"><Badge tone="green">received</Badge></span>
+                  ) : r.open_lines < r.line_count ? (
+                    <span className="ml-2"><Badge tone="amber">{r.open_lines} open</Badge></span>
+                  ) : null}
+                  {r.issue_count > 0 && <span className="ml-2"><Badge tone="amber">{r.issue_count} issue{r.issue_count === 1 ? "" : "s"}</Badge></span>}
                 </td>
                 <td className="px-3 py-2">{money(r.total_cents / 100)}</td>
                 <td className="px-3 py-2 text-gray-600">{who(r.created_by_name, r.created_by)}</td>
                 <td className="whitespace-nowrap px-3 py-2">
-                  {r.sent_at ? <Badge tone="green">sent {new Date(r.sent_at).toLocaleDateString()}</Badge> : <Badge tone="amber">not sent</Badge>}
+                  {r.status === "cancelled" ? <Badge tone="gray">cancelled</Badge> : r.sent_at ? <Badge tone="green">sent {new Date(r.sent_at).toLocaleDateString()}</Badge> : <Badge tone="amber">not sent</Badge>}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2">
                   <div className="flex gap-2">
                     <button className={btn2Cls} onClick={() => view(r.id)}>View</button>
-                    <button className={btn2Cls} onClick={() => view(r.id, true)}>Edit</button>
+                    {r.status !== "cancelled" && <button className={btn2Cls} onClick={() => view(r.id, true)}>Edit</button>}
                     <button className={btn2Cls} onClick={() => dl(r, "pdf")}>PDF</button>
                     <button className={btn2Cls} onClick={() => dl(r, "xlsx")}>Excel</button>
-                    <button className={dangerCls} onClick={() => remove(r)}>Delete</button>
+                    {r.status === "open" && <button className={dangerCls} onClick={() => cancelPo(r)}>Cancel PO</button>}
                   </div>
                 </td>
               </tr>
@@ -707,6 +750,12 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
               Dated {new Date(open.date + "T12:00:00").toLocaleDateString()} · made by {who(open.created_by_name, open.created_by)}
               {open.note ? ` · ${open.note}` : ""}
             </div>
+            {open.status === "cancelled" && (
+              <Notice kind="error">
+                Cancelled{open.cancelled_at ? ` ${new Date(open.cancelled_at).toLocaleDateString()}` : ""}
+                {open.cancelled_by_name || open.cancelled_by ? ` by ${who(open.cancelled_by_name, open.cancelled_by)}` : ""}. It is kept for the record and its number won’t be reused.
+              </Notice>
+            )}
             <div className="overflow-x-auto rounded border border-gray-200">
               <table className="w-full text-left">
                 <thead className="bg-gray-50 text-sm uppercase text-gray-500">
@@ -728,7 +777,15 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                       <td className="px-2 py-1">{money(l.rate)}</td>
                       <td className="px-2 py-1">{money(l.amount)}</td>
                       <td className="whitespace-nowrap px-2 py-1">
-                        {l.received_at ? <Badge tone="green">received {new Date(l.received_at).toLocaleDateString()}</Badge> : <Badge tone="amber">open</Badge>}
+                        {l.received_at ? (
+                          <Badge tone={l.received_qty != null && l.received_qty !== l.quantity ? "amber" : "green"}>
+                            received {l.received_qty ?? l.quantity} of {l.quantity} · {new Date(l.received_at).toLocaleDateString()}
+                          </Badge>
+                        ) : open.status === "cancelled" ? (
+                          <Badge tone="gray">cancelled</Badge>
+                        ) : (
+                          <Badge tone="amber">open</Badge>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -738,25 +795,201 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
             <div className="text-right text-base font-semibold">Total {money(open.total)}</div>
             <div className="flex flex-wrap items-center gap-2">
               {open.sent_at ? <Badge tone="green">sent {new Date(open.sent_at).toLocaleDateString()}</Badge> : <Badge tone="amber">not sent</Badge>}
-              <button className={btn2Cls} onClick={() => markSent(open, !open.sent_at)}>
-                {open.sent_at ? "Mark as not sent" : "Mark as sent"}
-              </button>
+              {open.status === "received" && <Badge tone="green">received in</Badge>}
+              {open.status !== "cancelled" && (
+                <button className={btn2Cls} onClick={() => markSent(open, !open.sent_at)}>
+                  {open.sent_at ? "Mark as not sent" : "Mark as sent"}
+                </button>
+              )}
+              {open.status === "open" && !open.sent_at && (
+                <span className="text-sm text-gray-500">Mark it sent to make it appear on Inventory › Receive.</span>
+              )}
             </div>
             <div className="flex flex-wrap gap-2">
               <button className={btnCls} onClick={() => dl(open, "pdf")}>Download PDF</button>
               <button className={btnCls} onClick={() => dl(open, "xlsx")}>Download Excel</button>
-              <button
-                className={btn2Cls}
-                onClick={() => {
-                  setEditing(open);
-                  setOpen(null);
-                }}
-              >
-                Edit PO
-              </button>
-              <button className={dangerCls} onClick={() => remove(open)}>Delete PO</button>
+              {open.status !== "cancelled" && (
+                <button
+                  className={btn2Cls}
+                  onClick={() => {
+                    setEditing(open);
+                    setOpen(null);
+                  }}
+                >
+                  Edit PO
+                </button>
+              )}
+              {open.status === "open" && <button className={dangerCls} onClick={() => cancelPo(open)}>Cancel PO</button>}
               <button className={btn2Cls} onClick={() => setOpen(null)}>Close</button>
             </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================== Shortages / overages */
+function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: boolean; setFlash: FlashFn }) {
+  const [qInput, setQInput] = useState("");
+  const [q, setQ] = useState("");
+  const [kind, setKind] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [data, setData] = useState<{ total: number; items: IssuePo[] }>({ total: 0, items: [] });
+  const [loaded, setLoaded] = useState(false);
+  const [open, setOpen] = useState<PoDetail | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQ(qInput.trim());
+      setOffset(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [qInput]);
+
+  useEffect(() => {
+    if (!active) return;
+    const p = new URLSearchParams({ limit: String(PO_LIMIT), offset: String(offset) });
+    if (q) p.set("q", q);
+    if (kind) p.set("kind", kind);
+    api<{ total: number; items: IssuePo[] }>(`/purchase-orders/issues?${p}`)
+      .then((d) => {
+        setData(d);
+        setLoaded(true);
+      })
+      .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
+  }, [active, q, kind, offset, reloadKey, setFlash]);
+
+  const view = (id: number) =>
+    api<PoDetail>(`/purchase-orders/${id}`)
+      .then(setOpen)
+      .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
+
+  return (
+    <div className="space-y-4">
+      <p className="text-base text-gray-600">
+        Every purchase order that had a problem when it was received: <strong>short</strong> (fewer than ordered),{" "}
+        <strong>over</strong> (more than ordered) or <strong>not on the PO</strong>. Each one shows who acknowledged it and when.
+      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        <input
+          className={`${inp} w-full max-w-3xl`}
+          value={qInput}
+          onChange={(e) => setQInput(e.target.value)}
+          placeholder="Search PO number, distributor, part number, SKU or description"
+        />
+        <select
+          className={`${inp} w-auto`}
+          value={kind}
+          onChange={(e) => {
+            setKind(e.target.value);
+            setOffset(0);
+          }}
+        >
+          <option value="">All problems</option>
+          <option value="short">Short</option>
+          <option value="over">Over</option>
+          <option value="not_on_po">Not on the PO</option>
+        </select>
+      </div>
+
+      <div className="space-y-3">
+        {data.items.map((po) => (
+          <div key={po.id} className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-gray-50 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-lg font-semibold">PO {po.po_number}</span>
+                <span className="text-gray-600">{po.vendor_name}</span>
+                <span className="text-sm text-gray-500">{new Date(po.created_at).toLocaleDateString()}</span>
+                {po.status === "received" && <Badge tone="green">received</Badge>}
+                {po.status === "open" && <Badge tone="amber">still receiving</Badge>}
+                {po.status === "cancelled" && <Badge tone="gray">cancelled</Badge>}
+                <Badge tone="amber">{po.issue_count} issue{po.issue_count === 1 ? "" : "s"}</Badge>
+              </div>
+              <button className={btn2Cls} onClick={() => view(po.id)}>View PO</button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-base">
+                <thead className="text-sm uppercase text-gray-500">
+                  <tr>
+                    <th className="px-3 py-1">Problem</th>
+                    <th className="px-3 py-1">Part</th>
+                    <th className="px-3 py-1">Ordered</th>
+                    <th className="px-3 py-1">Received</th>
+                    <th className="px-3 py-1">Difference</th>
+                    <th className="px-3 py-1">Acknowledged by</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {po.issues.map((i) => (
+                    <tr key={i.id}>
+                      <td className="whitespace-nowrap px-3 py-1"><Badge tone={KIND_TONE[i.kind]}>{KIND_LABEL[i.kind]}</Badge></td>
+                      <td className="px-3 py-1">
+                        <div>{i.description ?? "—"}</div>
+                        <div className="text-sm text-gray-500">{[i.item, i.sku].filter(Boolean).join(" · ")}</div>
+                      </td>
+                      <td className="px-3 py-1">{i.expected_qty}</td>
+                      <td className="px-3 py-1">{i.received_qty}</td>
+                      <td className={`px-3 py-1 font-semibold ${i.difference < 0 ? "text-red-700" : "text-blue-700"}`}>
+                        {i.difference > 0 ? `+${i.difference}` : i.difference}
+                      </td>
+                      <td className="px-3 py-1">
+                        <div>{who(i.acknowledged_by_name, i.acknowledged_by)}</div>
+                        <div className="text-sm text-gray-500">{new Date(i.acknowledged_at).toLocaleString()}</div>
+                        {i.note && <div className="text-sm text-gray-600">{i.note}</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ))}
+        {loaded && data.items.length === 0 && (
+          <p className="rounded border border-dashed border-gray-300 p-6 text-center text-gray-500">
+            {q || kind ? "No purchase orders with issues match." : "No shortages or overages have been recorded."}
+          </p>
+        )}
+      </div>
+      <Pager total={data.total} limit={PO_LIMIT} offset={offset} onChange={setOffset} />
+
+      {open && (
+        <Modal title={`Purchase order ${open.po_number}`} onClose={() => setOpen(null)}>
+          <div className="space-y-3 text-base">
+            <div className="text-gray-600">
+              {open.vendor_name} · dated {new Date(open.date + "T12:00:00").toLocaleDateString()} · made by {who(open.created_by_name, open.created_by)}
+            </div>
+            <div className="overflow-x-auto rounded border border-gray-200">
+              <table className="w-full text-left">
+                <thead className="bg-gray-50 text-sm uppercase text-gray-500">
+                  <tr>
+                    <th className="px-2 py-1">Item</th>
+                    <th className="px-2 py-1">Description</th>
+                    <th className="px-2 py-1">Ordered</th>
+                    <th className="px-2 py-1">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {open.lines.map((l) => (
+                    <tr key={l.id}>
+                      <td className="whitespace-nowrap px-2 py-1">{l.item ?? "—"}</td>
+                      <td className="px-2 py-1">{l.description}</td>
+                      <td className="px-2 py-1">{l.quantity}</td>
+                      <td className="whitespace-nowrap px-2 py-1">
+                        {l.received_at ? (
+                          <Badge tone={l.received_qty != null && l.received_qty !== l.quantity ? "amber" : "green"}>
+                            received {l.received_qty ?? l.quantity} of {l.quantity}
+                          </Badge>
+                        ) : (
+                          <Badge tone="amber">open</Badge>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <button className={btn2Cls} onClick={() => setOpen(null)}>Close</button>
           </div>
         </Modal>
       )}
@@ -966,7 +1199,7 @@ function EditPo({
     if (!Number.isInteger(Number(number)) || Number(number) < 1) return setError("The PO number must be a whole number, 1 or more.");
     if (lines.some((l) => !Number.isInteger(Number(l.qty)) || Number(l.qty) < 1 || (l.cost !== "" && !(Number(l.cost) >= 0))))
       return setError("Every line needs a whole-number quantity of at least 1 and a cost of 0 or more.");
-    if (lines.length === 0 && received.length === 0) return setError("A PO needs at least one part. To get rid of it, use Delete PO.");
+    if (lines.length === 0 && received.length === 0) return setError("A PO needs at least one part. To get rid of it, cancel the PO from the history list.");
     setBusy(true);
     setError("");
     try {

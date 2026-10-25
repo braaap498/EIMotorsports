@@ -9,6 +9,7 @@ type Staff = {
   id: string;
   email: string | null;
   display_name: string;
+  last_name: string;
   role: string;
   permissions: string[];
   last_sign_in_at: string | null;
@@ -116,6 +117,7 @@ function Row({
   onSaved: () => void;
 }) {
   const [name, setName] = useState(s.display_name);
+  const [lastName, setLastName] = useState(s.last_name ?? "");
   const [role, setRole] = useState(s.role);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -134,7 +136,7 @@ function Row({
 
   const isMe = s.id === meId;
   const roleLocked = isMe || s.role === "owner";
-  const changed = name.trim() !== s.display_name || role !== s.role;
+  const changed = name.trim() !== s.display_name || lastName.trim() !== (s.last_name ?? "") || role !== s.role;
 
   async function save() {
     setBusy(true);
@@ -142,6 +144,7 @@ function Row({
     try {
       const body: Record<string, string> = {};
       if (name.trim() !== s.display_name) body.display_name = name.trim();
+      if (lastName.trim() !== (s.last_name ?? "")) body.last_name = lastName.trim();
       if (role !== s.role) body.role = role;
       await api(`/users/${s.id}`, { method: "PATCH", body });
       onSaved();
@@ -196,6 +199,13 @@ function Row({
           maxLength={40}
           placeholder="Display name (required)"
           onChange={(e) => setName(e.target.value)}
+        />
+        <input
+          className={`${inputCls} mt-1`}
+          value={lastName}
+          maxLength={40}
+          placeholder="Last name (shown on purchase orders)"
+          onChange={(e) => setLastName(e.target.value)}
         />
         {!s.display_name && <p className="mt-1 text-xs text-amber-700">No display name yet. The site greets them by their email.</p>}
         {error && <p className="mt-1 text-xs text-red-700">{error}</p>}
@@ -725,6 +735,7 @@ export default function AdminUsersPage() {
   const [loaded, setLoaded] = useState(false);
 
   const [displayName, setDisplayName] = useState("");
+  const [newLastName, setNewLastName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("admin");
   const [password, setPassword] = useState("");
@@ -774,6 +785,7 @@ export default function AdminUsersPage() {
         method: "POST",
         body: {
           display_name: displayName.trim(),
+          last_name: newLastName.trim() || null,
           email: email.trim(),
           role,
           password,
@@ -782,6 +794,7 @@ export default function AdminUsersPage() {
       });
       setCreated({ email: email.trim().toLowerCase(), display_name: displayName.trim(), password });
       setDisplayName("");
+      setNewLastName("");
       setEmail("");
       setPassword("");
       setShowPw(false);
@@ -805,6 +818,9 @@ export default function AdminUsersPage() {
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Display name (required) — shown as “Hi, …” on the site">
               <input className={inputCls} value={displayName} maxLength={40} onChange={(e) => setDisplayName(e.target.value)} placeholder="e.g. Eric" required />
+            </Field>
+            <Field label="Last name (optional) — shown with the first name on purchase orders">
+              <input className={inputCls} value={newLastName} maxLength={40} onChange={(e) => setNewLastName(e.target.value)} placeholder="e.g. Smith" />
             </Field>
             <Field label="Email (they sign in with this)">
               <input className={inputCls} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com" required />
@@ -928,7 +944,7 @@ export default function AdminUsersPage() {
             <tbody className="divide-y divide-gray-100">
               {shown.map((s) => (
                 <Row
-                  key={`${s.id}:${s.display_name}:${s.role}:${(s.permissions ?? []).join(",")}`}
+                  key={`${s.id}:${s.display_name}:${s.last_name}:${s.role}:${(s.permissions ?? []).join(",")}`}
                   s={s}
                   meId={meId}
                   catalog={catalog}

@@ -8,6 +8,7 @@ import BarcodePanel from "../../../components/admin/inventory/BarcodePanel";
 import HistoryPanel from "../../../components/admin/inventory/HistoryPanel";
 import StockPanel from "../../../components/admin/inventory/StockPanel";
 import ScanSession from "../../../components/admin/inventory/ScanSession";
+import ReceivePo from "../../../components/admin/inventory/ReceivePo";
 import WebOrderShip from "../../../components/admin/inventory/WebOrderShip";
 
 const ANY = ["inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust"];
@@ -24,6 +25,7 @@ export default function InventoryPage() {
   const tabs = TABS.filter((t) => can(...t.perms));
   const [tab, setTab] = useState("");
   const [shipMode, setShipMode] = useState<"web" | "other">("web");
+  const [receiveMode, setReceiveMode] = useState<"po" | "free">("po");
   // Orders with a red flag (short pick / oversold), shown on the Ship tab so they can't be missed.
   const [flagged, setFlagged] = useState(0);
   const canShip = can("inventory.ship");
@@ -76,8 +78,27 @@ export default function InventoryPage() {
       </div>
 
       {can("inventory.receive") && (
-        <div className={tab === "receive" ? "" : "hidden"}>
-          <ScanSession mode="receive" active={tab === "receive"} />
+        <div className={tab === "receive" ? "space-y-4" : "hidden"}>
+          <div className="inline-flex overflow-hidden rounded border border-gray-300 text-sm">
+            <button
+              className={`px-4 py-2 ${receiveMode === "po" ? "bg-black text-white" : "bg-white text-gray-700"}`}
+              onClick={() => setReceiveMode("po")}
+            >
+              Receive a purchase order
+            </button>
+            <button
+              className={`px-4 py-2 ${receiveMode === "free" ? "bg-black text-white" : "bg-white text-gray-700"}`}
+              onClick={() => setReceiveMode("free")}
+            >
+              Scan in without a PO
+            </button>
+          </div>
+          <div className={receiveMode === "po" ? "" : "hidden"}>
+            <ReceivePo active={tab === "receive" && receiveMode === "po"} />
+          </div>
+          <div className={receiveMode === "free" ? "" : "hidden"}>
+            <ScanSession mode="receive" active={tab === "receive" && receiveMode === "free"} />
+          </div>
         </div>
       )}
 

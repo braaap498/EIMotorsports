@@ -9,6 +9,9 @@ SUPABASE_SERVICE_KEY on Render); the browser never sees it.
   - The display name is stored on the account as user_metadata.display_name.
     The storefront header shows it ("Hi, Eric") and falls back to the part of
     the email before the @ when an account has none.
+  - An optional last name is stored as user_metadata.last_name. Purchase orders
+    and the receiving reports show "First Last" (the storefront still only
+    greets by the display name).
   - The role is stored as app_metadata.role, which a user cannot edit
     themselves.
 
@@ -74,12 +77,23 @@ def _clean_name(v: str) -> str:
     return v
 
 
+def _clean_last_name(v: Optional[str]) -> Optional[str]:
+    """Optional. An empty string clears it. None means \"leave it alone\"."""
+    if v is None:
+        return None
+    v = re.sub(r"\s+", " ", v.strip())
+    if re.search(r"[\x00-\x1f<>]", v):
+        raise ValueError("Last name contains characters that are not allowed")
+    return v
+
+
 def _clean_permissions(v: Optional[list[str]]) -> Optional[list[str]]:
     return None if v is None else normalize(v)
 
 
 class NewUser(BaseModel):
     display_name: str = Field(max_length=40)
+    last_name: Optional[str] = Field(default=None, max_length=40)
     email: str = Field(max_length=200)
     role: Literal["admin", "staff"]
     password: str = Field(min_length=12, max_length=72)
@@ -94,6 +108,11 @@ class NewUser(BaseModel):
     @classmethod
     def _name(cls, v: str) -> str:
         return _clean_name(v)
+
+    @field_validator("last_name")
+    @classmethod
+    def _last(cls, v: Optional[str]) -> Optional[str]:
+        return _clean_last_name(v)
 
     @field_validator("email")
     @classmethod
@@ -110,6 +129,7 @@ class SetPassword(BaseModel):
 
 class EditUser(BaseModel):
     display_name: Optional[str] = Field(default=None, max_length=40)
+    last_name: Optional[str] = Field(default=None, max_length=40)
     role: Optional[Literal["admin", "staff"]] = None
     permissions: Optional[list[str]] = Field(default=None, max_length=100)
 
@@ -117,6 +137,11 @@ class EditUser(BaseModel):
     @classmethod
     def _name(cls, v: Optional[str]) -> Optional[str]:
         return None if v is None else _clean_name(v)
+
+    @field_validator("last_name")
+    @classmethod
+    def _last(cls, v: Optional[str]) -> Optional[str]:
+        return _clean_last_name(v)
 
     @field_validator("permissions")
     @classmethod
@@ -173,6 +198,7 @@ def _public(u: dict) -> dict:
         "id": u.get("id"),
         "email": u.get("email"),
         "display_name": um.get("display_name") or "",
+        "last_name": um.get("last_name") or "",
         "role": am.get("role") or "",
         "permissions": am.get("permissions") if isinstance(am.get("permissions"), list) else [],
         "last_sign_in_at": u.get("last_sign_in_at"),
@@ -211,7 +237,10 @@ def add_staff(body: NewUser):
             "password": body.password,
             "email_confirm": True,
             "app_metadata": {"role": body.role, "permissions": body.permissions if body.role == "staff" else []},
-            "user_metadata": {"display_name": body.display_name},
+            "user_metadata": {
+                "display_name": body.display_name,
+                **({"last_name": body.last_name} if body.last_name else {}),
+            },
         },
     )
     return _public(created)
@@ -219,7 +248,7 @@ def add_staff(body: NewUser):
 
 @router.patch("/{user_id}")
 def edit_staff(user_id: str, body: EditUser, me: AuthUser = Depends(require_admin)):
-    if body.display_name is None and body.role is None and body.permissions is None:
+    if body.display_name is None and body.last_name is None and body.role is None and body.permissions is None:
         raise HTTPException(400, "Nothing to change.")
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", user_id):
         raise HTTPException(400, "Invalid account id.")
@@ -240,8 +269,16 @@ def edit_staff(user_id: str, body: EditUser, me: AuthUser = Depends(require_admi
         raise HTTPException(400, "Admins and owners can already do everything; permissions only apply to employees.")
 
     update: dict = {}
-    if body.display_name is not None:
-        update["user_metadata"] = {**(current.get("user_metadata") or {}), "display_name": body.display_name}
+    if body.display_name is not None or body.last_name is not None:
+        meta_u = {**(current.get("user_metadata") or {})}
+        if body.display_name is not None:
+            meta_u["display_name"] = body.display_name
+        if body.last_name is not None:
+            if body.last_name:
+                meta_u["last_name"] = body.last_name
+            else:
+                meta_u.pop("last_name", None)
+        update["user_metadata"] = meta_u
     if body.role is not None or body.permissions is not None:
         meta = {**(current.get("app_metadata") or {})}
         if body.role is not None:
