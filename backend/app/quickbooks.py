@@ -44,6 +44,7 @@ import logging
 import os
 import re
 import secrets
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -772,23 +773,17 @@ def _public_url(request: Request) -> str:
     return f"https://{host}"
 
 
-@admin_router.get("/status")
-def status(request: Request, db: Session = Depends(get_db)):
-    configured = bool(os.environ.get("QBWC_USERNAME") and os.environ.get("QBWC_PASSWORD"))
-    out = {
-        "tables_ready": _tables_ready(db),
-        "credentials_set": configured,
-        "username": os.environ.get("QBWC_USERNAME", ""),
-        "endpoint": f"{_public_url(request)}/qbwc",
-        "entities_filter": os.environ.get("QB_ENTITIES", ""),
-        "full_refresh_hours": full_refresh_hours(),
-        "run_every_minutes": run_every_minutes(),
-    }
-    if not out["tables_ready"]:
-        return out
-    out["control"] = dict(_control(db)._mapping)
-    db.commit()
-    out["entities"] = [
+# The per-entity record counts read the whole qb_records table, which is the slowest thing on this page.
+# Reuse the answer for a few seconds so several open tabs (or a quick refresh) never pile up identical scans.
+_ENTITY_CACHE: dict = {"at": 0.0, "rows": None}
+_ENTITY_CACHE_SECONDS = 10.0
+
+
+def _entity_summary(db: Session) -> list[dict]:
+    now = time.monotonic()
+    if _ENTITY_CACHE["rows"] is not None and now - _ENTITY_CACHE["at"] < _ENTITY_CACHE_SECONDS:
+        return _ENTITY_CACHE["rows"]
+    rows = [
         dict(r._mapping)
         for r in db.execute(
             text(
@@ -805,6 +800,28 @@ def status(request: Request, db: Session = Depends(get_db)):
             )
         ).all()
     ]
+    _ENTITY_CACHE["rows"] = rows
+    _ENTITY_CACHE["at"] = now
+    return rows
+
+
+@admin_router.get("/status")
+def status(request: Request, db: Session = Depends(get_db)):
+    configured = bool(os.environ.get("QBWC_USERNAME") and os.environ.get("QBWC_PASSWORD"))
+    out = {
+        "tables_ready": _tables_ready(db),
+        "credentials_set": configured,
+        "username": os.environ.get("QBWC_USERNAME", ""),
+        "endpoint": f"{_public_url(request)}/qbwc",
+        "entities_filter": os.environ.get("QB_ENTITIES", ""),
+        "full_refresh_hours": full_refresh_hours(),
+        "run_every_minutes": run_every_minutes(),
+    }
+    if not out["tables_ready"]:
+        return out
+    out["control"] = dict(_control(db)._mapping)
+    db.commit()
+    out["entities"] = _entity_summary(db)
     out["errors_by_entity"] = [
         dict(r._mapping)
         for r in db.execute(text("select entity, last_error from qb_sync_state where last_error is not null order by entity")).all()

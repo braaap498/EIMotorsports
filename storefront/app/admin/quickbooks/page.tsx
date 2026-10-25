@@ -216,10 +216,21 @@ export default function QuickBooksPage() {
 
   // While a sync is queued or running, refresh every few seconds.
   const active = status?.last_run?.status === "running" || status?.control?.sync_requested;
+  // Each refresh waits for the previous one to finish (they used to overlap and pile up on the database),
+  // and nothing is requested while this browser tab is in the background.
   useEffect(() => {
     if (!active) return;
-    const t = setInterval(() => void loadStatus(), 5000);
-    return () => clearInterval(t);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      if (!document.hidden) await loadStatus();
+      if (!stopped) timer = setTimeout(() => void tick(), 8000);
+    };
+    timer = setTimeout(() => void tick(), 8000);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
   }, [active, loadStatus]);
 
   const loadList = useCallback(async () => {
