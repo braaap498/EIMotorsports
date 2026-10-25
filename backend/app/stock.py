@@ -145,3 +145,38 @@ def confirm_holds(db: Session, order_id: int) -> None:
             {"o": order_id, "p": i.product_id, "q": int(i.q)},
         )
     db.execute(text("update orders set reserved_stock = true where id = :o"), {"o": order_id})
+
+
+def order_shortfalls(db: Session, order_ids) -> list:
+    """Paid, un-picked orders whose parts the shelf can't cover yet.
+
+    Paid orders for a part are served oldest first: the earlier ones keep their parts and only the
+    order(s) that push the total past what is on the shelf come up short. Each row has product_id,
+    short (units this order is short), on_order (a purchase order is placed), expected_date and
+    days_until (days from today, when an arrival date was entered). Customers see only
+    "backordered" and the date; the numbers here are never sent to the browser as stock counts.
+    """
+    ids = [int(i) for i in order_ids]
+    if not ids:
+        return []
+    return db.execute(
+        text(
+            """
+            with r as (
+              select s.order_id, s.product_id, s.quantity,
+                     sum(s.quantity) over (partition by s.product_id order by o.paid_at nulls last, o.id) as running
+              from stock_reservations s join orders o on o.id = s.order_id
+              where s.status = 'reserved'
+            )
+            select r.order_id, r.product_id,
+                   greatest(0, least(r.quantity, r.running - coalesce(p.quantity_on_hand, 0)))::int as short,
+                   coalesce(p.on_order, false) as on_order,
+                   p.expected_date,
+                   case when p.expected_date is null then null else (p.expected_date - current_date) end as days_until
+            from r join products p on p.id = r.product_id
+            where r.order_id = any(cast(:ids as bigint[]))
+              and r.running - coalesce(p.quantity_on_hand, 0) > 0
+            """
+        ),
+        {"ids": ids},
+    ).all()
