@@ -914,3 +914,214 @@ def record(entity: str, qb_id: str, db: Session = Depends(get_db)):
     d = dict(row._mapping)
     d["data"] = _j(d["data"])
     return d
+
+
+# ==========================================================================
+# QuickBooks customers -> the store's `customers` table
+# ==========================================================================
+# Re-runnable: a customer is "new" only if no store row has its QuickBooks ListID and none has its email.
+# Existing store customers with the same email are linked (ListID stored) and only get BLANK fields filled in;
+# nothing already in the store table is ever overwritten. Customers without a usable email cannot be stored
+# (customers.email is required), and QuickBooks "jobs" (sub-entries under a customer) are skipped.
+#
+# Masked marketplace addresses (eBay, Amazon ...) are stored in `email` like any other (the column is required and
+# unique), but tagged email_kind = 'masked' and marketplace = 'ebay' / 'amazon', so they sort and filter apart from
+# real ones. Imported rows are never opted in to marketing.
+MASKED_EMAIL_DOMAINS = {
+    "members.ebay.com": "ebay",
+    "marketplace.amazon.com": "amazon",
+}
+_EMAIL_OK = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
+_TS_OK = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2}|Z)?$")
+_CUST_COLS = ("qb_list_id", "source", "email_kind", "marketplace")
+
+
+def _classify_email(raw: Optional[str]) -> tuple[Optional[str], str, Optional[str]]:
+    """(clean email or None, 'real' | 'masked', marketplace or None)."""
+    e = (raw or "").strip().lower()
+    if not e or not _EMAIL_OK.match(e):
+        return None, "real", None
+    mkt = MASKED_EMAIL_DOMAINS.get(e.rsplit("@", 1)[1])
+    return e, ("masked" if mkt else "real"), mkt
+
+
+def _s(v: Any) -> str:
+    return v.strip() if isinstance(v, str) else ""
+
+
+def _store_address(o: dict, full_name: Optional[str], phone: Optional[str]) -> Optional[dict]:
+    a = o.get("ShipAddress") if isinstance(o.get("ShipAddress"), dict) else None
+    if not a or not any(_s(v) for v in a.values()):
+        a = o.get("BillAddress") if isinstance(o.get("BillAddress"), dict) else None
+    if not a:
+        return None
+    skip = {x.lower() for x in (full_name, _s(o.get("Name")), _s(o.get("CompanyName"))) if x}
+    lines = [t for t in (_s(a.get(f"Addr{i}")) for i in range(1, 6)) if t and t.lower() not in skip]
+    city, region, postal = _s(a.get("City")), _s(a.get("State")), _s(a.get("PostalCode"))
+    if not lines or not (city or postal):
+        return None
+    c = _s(a.get("Country")).lower()
+    country = c.upper() if len(c) == 2 else {"united states": "US", "usa": "US", "united states of america": "US", "canada": "CA"}.get(c)
+    out = {"full_name": full_name, "line1": lines[0], "line2": lines[1] if len(lines) > 1 else None,
+           "city": city or None, "region": region or None, "postal_code": postal or None, "phone": phone}
+    if country:
+        out["country"] = country
+    return out
+
+
+def _customer_row(r) -> dict:
+    """One QuickBooks customer (a row from the chunk query) -> the fields we store."""
+    fn, ln = _s(r.first), _s(r.last)
+    name = " ".join(x for x in (fn, ln) if x) or _s(r.company) or _s(r.name) or None
+    phone = _s(r.phone) or _s(r.mobile) or _s(r.alt) or None
+    email, kind, mkt = _classify_email(r.email)
+    o = {"ShipAddress": _j(r.ship), "BillAddress": _j(r.bill), "Name": r.name, "CompanyName": r.company}
+    addr = _store_address(o, name, phone)
+    created = _s(r.created)
+    return {
+        "lid": r.qb_id, "email": email, "raw_email": _s(r.email), "kind": kind, "mkt": mkt, "name": name, "phone": phone,
+        "addr": json.dumps(addr) if addr else None, "created": created if _TS_OK.match(created) else None,
+    }
+
+
+def _customer_columns_ready(db: Session) -> bool:
+    n = db.execute(
+        text(
+            "select count(*) from information_schema.columns where table_schema = 'public' "
+            "and table_name = 'customers' and column_name = any(cast(:c as text[]))"
+        ),
+        {"c": list(_CUST_COLS)},
+    ).scalar()
+    return n == len(_CUST_COLS)
+
+
+def _customers_to_store(db: Session, dry_run: bool, limit: int) -> dict:
+    stats: dict[str, Any] = {
+        "dry_run": dry_run, "qb_customers": 0, "jobs_skipped": 0, "no_email": 0, "bad_email": 0, "duplicate_email_in_qb": 0,
+        "already_imported": 0, "matched_existing": 0, "new_real": 0, "new_masked": {}, "added": 0, "linked": 0,
+        "stopped_at_limit": False, "samples": {"new_real": [], "new_masked": [], "bad_email": []},
+    }
+    seen_emails: set[str] = set()
+    last = ""
+    new_total = 0
+    while True:
+        rows = db.execute(
+            text(
+                """
+                select qb_id, data->>'Email' as email, data->>'FirstName' as first, data->>'LastName' as last,
+                       data->>'CompanyName' as company, data->>'Name' as name, data->>'Phone' as phone,
+                       data->>'Mobile' as mobile, data->>'AltPhone' as alt, data->>'TimeCreated' as created,
+                       data->'ShipAddress' as ship, data->'BillAddress' as bill,
+                       case when (data->>'Sublevel') ~ '^[0-9]+$' then cast(data->>'Sublevel' as int) else 0 end as sublevel
+                from qb_records
+                where entity = 'Customer' and deleted_at is null and qb_id > :last
+                order by qb_id limit 2000
+                """
+            ),
+            {"last": last},
+        ).all()
+        if not rows:
+            break
+        last = rows[-1].qb_id
+        cands = []
+        for r in rows:
+            stats["qb_customers"] += 1
+            if r.sublevel > 0:
+                stats["jobs_skipped"] += 1
+                continue
+            c = _customer_row(r)
+            if not c["email"]:
+                if c["raw_email"]:
+                    stats["bad_email"] += 1
+                    if len(stats["samples"]["bad_email"]) < 5:
+                        stats["samples"]["bad_email"].append(c["raw_email"][:80])
+                else:
+                    stats["no_email"] += 1
+                continue
+            cands.append(c)
+        if not cands:
+            continue
+        have = db.execute(
+            text(
+                "select id, lower(email) as e, qb_list_id from customers "
+                "where lower(email) = any(cast(:e as text[])) or qb_list_id = any(cast(:l as text[]))"
+            ),
+            {"e": [c["email"] for c in cands], "l": [c["lid"] for c in cands]},
+        ).all()
+        by_email = {h.e: h for h in have}
+        by_lid = {h.qb_list_id for h in have if h.qb_list_id}
+        to_add, to_link = [], []
+        for c in cands:
+            if c["lid"] in by_lid:
+                stats["already_imported"] += 1
+                seen_emails.add(c["email"])
+                continue
+            if c["email"] in seen_emails:
+                stats["duplicate_email_in_qb"] += 1
+                continue
+            seen_emails.add(c["email"])
+            h = by_email.get(c["email"])
+            if h is not None:
+                stats["matched_existing"] += 1
+                if h.qb_list_id is None:
+                    to_link.append({**c, "id": h.id})
+                continue
+            if not dry_run and new_total >= limit:
+                stats["stopped_at_limit"] = True
+                continue
+            new_total += 1
+            to_add.append(c)
+            if c["kind"] == "masked":
+                stats["new_masked"][c["mkt"]] = stats["new_masked"].get(c["mkt"], 0) + 1
+                if len(stats["samples"]["new_masked"]) < 5:
+                    stats["samples"]["new_masked"].append({"email": c["email"], "name": c["name"], "marketplace": c["mkt"]})
+            else:
+                stats["new_real"] += 1
+                if len(stats["samples"]["new_real"]) < 5:
+                    stats["samples"]["new_real"].append({"email": c["email"], "name": c["name"]})
+        if not dry_run:
+            if to_add:
+                db.execute(
+                    text(
+                        "insert into customers (email, full_name, phone, last_shipping_address, marketing_opt_in, "
+                        "created_at, source, qb_list_id, email_kind, marketplace) "
+                        "values (:email, :name, :phone, cast(:addr as jsonb), false, coalesce(cast(:created as timestamptz), now()), "
+                        "'quickbooks', :lid, :kind, :mkt) on conflict ((lower(email))) do nothing"
+                    ),
+                    to_add,
+                )
+                stats["added"] += len(to_add)
+            if to_link:
+                db.execute(
+                    text(
+                        "update customers set qb_list_id = :lid, full_name = coalesce(nullif(full_name, ''), :name), "
+                        "phone = coalesce(nullif(phone, ''), :phone), "
+                        "last_shipping_address = coalesce(last_shipping_address, cast(:addr as jsonb)), updated_at = now() "
+                        "where id = :id and qb_list_id is null"
+                    ),
+                    to_link,
+                )
+                stats["linked"] += len(to_link)
+            db.commit()
+    stats["new_masked_total"] = sum(stats["new_masked"].values())
+    return stats
+
+
+class CustToStoreIn(BaseModel):
+    dry_run: bool = True
+    limit: int = 20000
+
+
+@admin_router.post("/customers-to-store")
+def customers_to_store(body: CustToStoreIn, db: Session = Depends(get_db)):
+    """Preview (dry_run true, the default) or perform the copy of QuickBooks customers into the store's customers."""
+    _need_tables(db)
+    if not _customer_columns_ready(db):
+        raise HTTPException(409, "The customers table does not have the QuickBooks columns yet (qb_list_id, source, email_kind, marketplace).")
+    limit = max(1, min(body.limit, 50000))
+    try:
+        return _customers_to_store(db, body.dry_run, limit)
+    except Exception:
+        db.rollback()
+        log.exception("customer copy failed")
+        raise HTTPException(500, "The customer copy stopped with an error. Nothing half-finished is kept; run it again.")

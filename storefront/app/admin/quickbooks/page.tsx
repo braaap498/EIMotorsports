@@ -90,6 +90,100 @@ function RecordModal({ entity, id, onClose }: { entity: string; id: string; onCl
 
 /* ------------------------------------------------------------------- page */
 
+/* ------------------------------------------------- copy customers to the store */
+
+type CopyResult = {
+  dry_run: boolean;
+  qb_customers: number;
+  jobs_skipped: number;
+  no_email: number;
+  bad_email: number;
+  duplicate_email_in_qb: number;
+  already_imported: number;
+  matched_existing: number;
+  new_real: number;
+  new_masked: Record<string, number>;
+  new_masked_total: number;
+  added: number;
+  linked: number;
+  stopped_at_limit: boolean;
+  samples: { new_real: { email: string; name: string | null }[]; new_masked: { email: string; name: string | null; marketplace: string }[]; bad_email: string[] };
+};
+
+function CustomerCopy() {
+  const [res, setRes] = useState<CopyResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function run(dryRun: boolean) {
+    if (!dryRun && !window.confirm("Add the new QuickBooks customers to the store's customers now? Existing customers are never overwritten.")) return;
+    setBusy(true);
+    setError("");
+    try {
+      setRes(await api<CopyResult>("/quickbooks/customers-to-store", { method: "POST", body: { dry_run: dryRun } }));
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const n = (v: number) => v.toLocaleString();
+  const masked = res ? Object.entries(res.new_masked).map(([k, v]) => `${k} ${n(v)}`).join(", ") : "";
+
+  return (
+    <section className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+      <div>
+        <h2 className="text-lg font-semibold">Copy customers to the store</h2>
+        <p className="mt-1 max-w-3xl text-sm text-gray-600">
+          Adds QuickBooks customers that are not in the store yet. Run it again any time: only new ones are added, and anything already in the store is
+          left as it is (blank fields are filled in). Masked marketplace emails (eBay, Amazon) are tagged so they sort apart from real ones.
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-3">
+        <button type="button" className={btn2Cls} disabled={busy} onClick={() => void run(true)}>
+          {busy ? "Working…" : "Preview"}
+        </button>
+        <button type="button" className={btnCls} disabled={busy || !res || !res.dry_run} onClick={() => void run(false)}>
+          Add new customers
+        </button>
+      </div>
+      {error && <Notice kind="error">{error}</Notice>}
+      {res && (
+        <div className="space-y-2 text-sm">
+          <Notice kind={res.dry_run ? "info" : "success"}>
+            {res.dry_run
+              ? `Preview only, nothing was changed. Would add ${n(res.new_real + res.new_masked_total)} new customers (${n(res.new_real)} real email, ${n(res.new_masked_total)} masked${masked ? `: ${masked}` : ""}).`
+              : `Added ${n(res.added)} new customers and linked ${n(res.linked)} existing ones.${res.stopped_at_limit ? " More are waiting: click Preview, then Add again." : ""}`}
+          </Notice>
+          <ul className="grid gap-x-8 gap-y-1 text-gray-700 sm:grid-cols-2">
+            <li>QuickBooks customers read: {n(res.qb_customers)}</li>
+            <li>Already copied before: {n(res.already_imported)}</li>
+            <li>Already in the store (same email): {n(res.matched_existing)}</li>
+            <li>No email, not copied: {n(res.no_email)}</li>
+            <li>Unusable email, not copied: {n(res.bad_email)}</li>
+            <li>Same email used by another QuickBooks customer: {n(res.duplicate_email_in_qb)}</li>
+            <li>Jobs under a customer, skipped: {n(res.jobs_skipped)}</li>
+          </ul>
+          {(res.samples.new_real.length > 0 || res.samples.new_masked.length > 0) && (
+            <details className="text-gray-700">
+              <summary className="cursor-pointer text-gray-600 underline">Examples</summary>
+              <ul className="mt-1 list-disc pl-5">
+                {res.samples.new_real.map((s) => (
+                  <li key={s.email}>real: {s.name || "(no name)"}, {s.email}</li>
+                ))}
+                {res.samples.new_masked.map((s) => (
+                  <li key={s.email}>masked ({s.marketplace}): {s.name || "(no name)"}, {s.email}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function QuickBooksPage() {
   const [status, setStatus] = useState<Status | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -278,6 +372,8 @@ export default function QuickBooksPage() {
               </ol>
             )}
           </section>
+
+          <CustomerCopy />
 
           {/* errors */}
           {(status.errors_by_entity?.length ?? 0) > 0 && (
