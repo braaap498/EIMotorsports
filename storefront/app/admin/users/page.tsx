@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, apiDownload, errMsg } from "../../../lib/adminApi";
-import { Badge, Field, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
+import { Badge, Field, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
 import PasswordInput from "../../../components/admin/PasswordInput";
 
 type Staff = {
@@ -28,8 +28,24 @@ type Customer = {
   created_at: string | null;
   last_sign_in_at: string | null;
   address: string | null;
+  has_account: boolean; // false = guest checkout or imported customer: no login, so no block / reset / delete
+  email_masked: boolean; // a marketplace relay address (eBay, Amazon ...), not the person's own email
+  status: string;
+  source: string; // Website, eBay, Amazon, QuickBooks
+  group: "website" | "ebay" | "other";
 };
-type CustomerList = { customers: Customer[]; matched: number; total: number; addresses_error?: string | null };
+type SourceFilter = "website" | "ebay" | "all";
+type SortKey = "customer" | "source" | "phone" | "status" | "signed_up" | "last_sign_in" | "address";
+type CustomerList = {
+  customers: Customer[];
+  matched: number;
+  counts: { all: number; website: number; ebay: number };
+  page: number;
+  pages: number;
+  page_size: number;
+  addresses_error?: string | null;
+  customers_error?: string | null;
+};
 
 const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", staff: "Employee" };
 
@@ -460,11 +476,25 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
       <tr className="align-top">
         <td className="px-3 py-2">
           <div className="font-medium text-gray-900">{c.name || <span className="text-gray-400">No name</span>}</div>
-          <div className="text-xs text-gray-600">{c.email}</div>
+          <div className="text-xs text-gray-600">
+            {c.email}
+            {c.email_masked && (
+              <span className="ml-1.5 align-middle" title="A marketplace relay address, not the customer's own email">
+                <Badge tone="gray">masked</Badge>
+              </span>
+            )}
+          </div>
+        </td>
+        <td className="whitespace-nowrap px-3 py-2">
+          <Badge tone={c.group === "website" ? "blue" : c.group === "ebay" ? "amber" : "gray"}>{c.source}</Badge>
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-sm text-gray-700">{c.phone || <span className="text-gray-400">—</span>}</td>
         <td className="px-3 py-2">
-          {c.blocked ? (
+          {!c.has_account ? (
+            <span title="Bought as a guest or imported from QuickBooks. There is no login to manage.">
+              <Badge tone="gray">No login</Badge>
+            </span>
+          ) : c.blocked ? (
             <span className="inline-block rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">Blocked</span>
           ) : c.confirmed ? (
             <Badge tone="green">Active</Badge>
@@ -476,18 +506,18 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
           {c.created_at ? new Date(c.created_at).toLocaleDateString() : "—"}
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
-          {c.last_sign_in_at ? new Date(c.last_sign_in_at).toLocaleDateString() : "Never"}
+          {c.last_sign_in_at ? new Date(c.last_sign_in_at).toLocaleDateString() : c.has_account ? "Never" : "—"}
         </td>
         <td className="px-3 py-2 text-xs text-gray-700">{c.address || <span className="text-gray-400">None saved</span>}</td>
         <td className="whitespace-nowrap px-3 py-2 text-right">
           {busy && <span className="mr-2 text-xs text-gray-500">Working…</span>}
-          <RowMenu items={items} disabled={!!busy} label={label} />
+          {c.has_account && <RowMenu items={items} disabled={!!busy} label={label} />}
           {error && <p className="mt-1 text-right text-xs text-red-700">{error}</p>}
         </td>
       </tr>
       {delOpen && (
         <tr className="bg-red-50">
-          <td colSpan={7} className="px-3 py-3">
+          <td colSpan={8} className="px-3 py-3">
             <div className="max-w-xl space-y-2 text-sm">
               <p className="font-medium text-red-900">Permanently delete {label}?</p>
               <p className="text-red-900">
@@ -587,25 +617,82 @@ function ExportMenu({ onError }: { onError: (message: string) => void }) {
   );
 }
 
+const SOURCE_BUTTONS: { key: SourceFilter; label: string }[] = [
+  { key: "website", label: "Website" },
+  { key: "ebay", label: "eBay" },
+  { key: "all", label: "All" },
+];
+
+// Text columns start A to Z; date columns start with the newest.
+const FIRST_DIRECTION: Record<SortKey, "asc" | "desc"> = {
+  customer: "asc",
+  source: "asc",
+  phone: "asc",
+  status: "asc",
+  signed_up: "desc",
+  last_sign_in: "desc",
+  address: "asc",
+};
+
+function SortHeader({
+  label,
+  k,
+  sort,
+  dir,
+  onSort,
+}: {
+  label: string;
+  k: SortKey;
+  sort: SortKey;
+  dir: "asc" | "desc";
+  onSort: (k: SortKey) => void;
+}) {
+  const active = sort === k;
+  return (
+    <th className="px-3 py-2" aria-sort={active ? (dir === "asc" ? "ascending" : "descending") : "none"}>
+      <button
+        type="button"
+        className={`inline-flex items-center gap-1 uppercase hover:text-gray-900 ${active ? "text-gray-900" : ""}`}
+        onClick={() => onSort(k)}
+        title={`Sort by ${label.toLowerCase()}`}
+      >
+        {label}
+        <span className={`text-[10px] ${active ? "" : "text-gray-300"}`}>{active ? (dir === "asc" ? "▲" : "▼") : "▲▼"}</span>
+      </button>
+    </th>
+  );
+}
+
 function CustomersPanel() {
   const [q, setQ] = useState("");
+  const [source, setSource] = useState<SourceFilter>("all");
+  const [sort, setSort] = useState<SortKey>("signed_up");
+  const [dir, setDir] = useState<"asc" | "desc">("desc");
+  const [page, setPage] = useState(1);
   const [data, setData] = useState<CustomerList | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
+  const refreshNext = useRef(false); // set after block / delete etc. so the list is read fresh
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    const params = new URLSearchParams({ q: q.trim(), source, sort, dir, page: String(page) });
+    if (refreshNext.current) {
+      params.set("refresh", "true");
+      refreshNext.current = false;
+    }
     // Wait a moment after the last keystroke so we don't ask the server on every letter.
     const t = setTimeout(
       () => {
-        api<CustomerList>(`/users/customers?q=${encodeURIComponent(q.trim())}`)
+        api<CustomerList>(`/users/customers?${params.toString()}`)
           .then((r) => {
             if (cancelled) return;
             setData(r);
             setError("");
+            if (r.page !== page) setPage(r.page);
           })
           .catch((e) => {
             if (!cancelled) setError(errMsg(e));
@@ -620,22 +707,58 @@ function CustomersPanel() {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [q, reloadKey]);
+  }, [q, source, sort, dir, page, reloadKey]);
+
+  function onSort(k: SortKey) {
+    if (k === sort) setDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSort(k);
+      setDir(FIRST_DIRECTION[k]);
+    }
+    setPage(1);
+  }
 
   const rows = data?.customers ?? [];
+  const counts = data?.counts;
 
   return (
     <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Show customers from">
+        {SOURCE_BUTTONS.map((b) => {
+          const on = source === b.key;
+          return (
+            <button
+              key={b.key}
+              type="button"
+              aria-pressed={on}
+              onClick={() => {
+                setSource(b.key);
+                setPage(1);
+              }}
+              className={`rounded border px-4 py-1.5 text-sm font-medium ${
+                on ? "border-gray-900 bg-gray-900 text-white" : "border-gray-300 bg-white text-gray-800 hover:bg-gray-50"
+              }`}
+            >
+              {b.label}
+              {counts && <span className={`ml-1.5 text-xs ${on ? "text-gray-300" : "text-gray-500"}`}>{counts[b.key].toLocaleString()}</span>}
+            </button>
+          );
+        })}
+      </div>
       <div className="flex flex-wrap items-center gap-3">
         <input
           className={`${inputCls} max-w-md`}
           value={q}
-          onChange={(e) => setQ(e.target.value)}
+          onChange={(e) => {
+            setQ(e.target.value);
+            setPage(1);
+          }}
           placeholder="Search customers by name, email, phone or address"
         />
         {data && (
           <span className="text-xs text-gray-500">
-            {data.total} customer{data.total === 1 ? "" : "s"} in total
+            {data.matched.toLocaleString()} customer{data.matched === 1 ? "" : "s"}
+            {q.trim() || source !== "all" ? " match" : " in total"}
           </span>
         )}
         <div className="ml-auto">
@@ -643,10 +766,18 @@ function CustomersPanel() {
         </div>
       </div>
       <details className="rounded border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-        <summary className="cursor-pointer font-medium">? What do the actions in the ⋯ menu do</summary>
+        <summary className="cursor-pointer font-medium">? What am I looking at, and what do the actions in the ⋯ menu do</summary>
         <ul className="mt-2 list-disc space-y-1.5 pl-5">
           <li>
-            Click the <strong>⋯</strong> button at the end of a customer&apos;s row to see their actions.
+            This list has <strong>everyone</strong>: people with a login on the site, guests who checked out without
+            an account, and customers imported from QuickBooks. <strong>Website</strong> shows the first two,{" "}
+            <strong>eBay</strong> shows customers whose address is an eBay relay address, and <strong>All</strong>{" "}
+            shows everyone (including Amazon and other QuickBooks customers). Click a column heading to sort the whole
+            list by it; click again to reverse.
+          </li>
+          <li>
+            Only customers with a login have the <strong>⋯</strong> button at the end of their row. Guests and imported
+            customers show <strong>No login</strong> and can&apos;t be blocked, reset or deleted from here.
           </li>
           <li>
             <strong>Block</strong> stops the customer signing in. Their account, saved addresses, garage and order history
@@ -675,46 +806,54 @@ function CustomersPanel() {
       </details>
       {notice && <Notice kind="success">{notice}</Notice>}
       {error && <Notice kind="error">{error}</Notice>}
+      {data?.customers_error && (
+        <Notice kind="error">
+          The saved customer records (guests and imports) couldn&apos;t be loaded, so only customers with a login are shown.
+          Reason: {data.customers_error}
+        </Notice>
+      )}
       {data?.addresses_error && (
         <Notice kind="error">
-          Saved addresses couldn&apos;t be loaded, so the Address column is empty and address search is off. Reason:{" "}
+          Saved addresses couldn&apos;t be loaded, so some addresses are empty and address search is limited. Reason:{" "}
           {data.addresses_error}
         </Notice>
       )}
-      <div className="overflow-x-auto">
+      <div className={`overflow-x-auto ${loading && rows.length > 0 ? "opacity-60" : ""}`}>
         <table className="w-full text-left text-sm">
-          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+          <thead className="bg-gray-50 text-xs text-gray-500">
             <tr>
-              <th className="px-3 py-2">Customer</th>
-              <th className="px-3 py-2">Phone</th>
-              <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2">Signed up</th>
-              <th className="px-3 py-2">Last sign-in</th>
-              <th className="px-3 py-2">Address</th>
+              <SortHeader label="Customer" k="customer" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Source" k="source" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Phone" k="phone" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Status" k="status" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Signed up" k="signed_up" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Last sign-in" k="last_sign_in" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Address" k="address" sort={sort} dir={dir} onSort={onSort} />
               <th className="px-3 py-2" />
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {rows.map((c) => (
               <CustomerRow
-                key={`${c.id}:${c.blocked}:${c.confirmed}`}
+                key={`${c.id}:${c.has_account}:${c.blocked}:${c.confirmed}`}
                 c={c}
                 onChanged={(m) => {
                   setNotice(m);
+                  refreshNext.current = true;
                   setReloadKey((k) => k + 1);
                 }}
               />
             ))}
             {!loading && !error && rows.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
-                  {q.trim() ? "No customers match that search." : "No customer accounts yet."}
+                <td colSpan={8} className="px-3 py-6 text-center text-gray-500">
+                  {q.trim() ? "No customers match that search." : source === "all" ? "No customers yet." : "No customers in this group."}
                 </td>
               </tr>
             )}
             {loading && rows.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={8} className="px-3 py-6 text-center text-gray-500">
                   Loading…
                 </td>
               </tr>
@@ -722,10 +861,13 @@ function CustomersPanel() {
           </tbody>
         </table>
       </div>
-      {data && data.matched > rows.length && (
-        <p className="text-xs text-gray-500">
-          Showing the newest {rows.length} of {data.matched} matches. Type more of the name or email to narrow it down.
-        </p>
+      {data && data.matched > 0 && (
+        <Pager
+          total={data.matched}
+          limit={data.page_size}
+          offset={(data.page - 1) * data.page_size}
+          onChange={(offset) => setPage(Math.floor(offset / data.page_size) + 1)}
+        />
       )}
     </div>
   );

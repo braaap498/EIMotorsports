@@ -30,10 +30,11 @@ Safeguards:
     only kept for the "staff" role (admins and owners can do everything), and
     are cleared when someone is promoted to admin.
 
-Customer support (the Customers tab on the Team page): search customer
-accounts (by name, email, phone or saved address), block / unblock them, resend the confirmation email, send a
-password-reset email, delete the account, or export the whole list (accounts and guest
-checkouts) as Excel or PDF. Only accounts WITHOUT a staff
+Customer support (the Customers tab on the Team page): lists EVERY customer (login accounts,
+guest checkouts and the QuickBooks import) with Website / eBay / All filter buttons and sortable
+columns, 50 per page. Search by name, email, phone or saved address. For login accounts you can also
+block / unblock, resend the confirmation email, send a password-reset email or delete the account;
+the whole list (accounts and guest checkouts) can be exported as Excel or PDF. Only accounts WITHOUT a staff
 role are reachable through the /users/customers routes, so an owner or admin
 can never be blocked or deleted from there. Deleting also requires the
 customer's email to be typed back (checked here, not just in the browser).
@@ -45,6 +46,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -327,7 +329,8 @@ def set_staff_password(user_id: str, body: SetPassword, me: AuthUser = Depends(r
 
 # =================================================================== CUSTOMERS
 # Customer accounts are the Supabase users that do NOT have a staff role.
-CUSTOMER_LIST_CAP = 50
+CUSTOMER_PAGE_SIZE = 50
+AUTH_CACHE_SECONDS = 60  # how long the list of login accounts is reused between clicks (sort, filter, page)
 BLOCK_FOR = "876000h"  # about 100 years; Supabase has no "forever"
 UUID_RE = re.compile(r"[0-9a-fA-F-]{36}")
 
@@ -451,32 +454,6 @@ def _format_address(a: dict) -> str:
     return ", ".join(p.strip() for p in parts if p and p.strip())
 
 
-def _address_search_ids(needle: str, db: Session) -> tuple[set[str], Optional[str]]:
-    """Ids of customers with a saved address matching the search text, plus an error note if the lookup failed.
-
-    Reads the database directly (the same connection checkout uses) rather than through Supabase's REST
-    service, so a hiccup in that service cannot blank out this column.
-    """
-    n = re.sub(r"[^\w \-#./']", " ", needle).strip()
-    if len(n) < 2:
-        return set(), None
-    pat = "%" + n.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-    try:
-        rows = db.execute(
-            text(
-                "select distinct user_id from customer_addresses where "
-                "full_name ilike :p or line1 ilike :p or line2 ilike :p or city ilike :p "
-                "or region ilike :p or postal_code ilike :p or phone ilike :p limit 500"
-            ),
-            {"p": pat},
-        ).all()
-    except Exception as e:
-        db.rollback()
-        log.warning("address search failed; falling back to name/email/phone only", exc_info=True)
-        return set(), _describe_error(e)
-    return {str(r.user_id) for r in rows if r.user_id}, None
-
-
 def _attach_addresses(rows: list[dict], db: Session, limit: int = 1000) -> Optional[str]:
     """
     Set row["address"] to each customer's default shipping address (or the best one they have),
@@ -527,39 +504,207 @@ def _load_customer(user_id: str) -> dict:
     return u
 
 
-@router.get("/customers")
-def list_customers(q: str = "", db: Session = Depends(get_db)):
-    """Newest customers first; `q` filters by name, email, phone or a saved address."""
-    needle = q.strip().lower()
-    address_ids, search_err = _address_search_ids(needle, db) if needle else (set(), None)
-    matches: list[dict] = []
-    total = 0
-    for page in range(1, 21):  # the list is paged; stop after 20 pages
+_AUTH_CACHE: dict = {"at": 0.0, "users": []}
+
+
+def _auth_customers(fresh: bool = False) -> list[dict]:
+    """Every login account without a staff role. Reused for a minute so sorting and paging stay quick."""
+    if not fresh and _AUTH_CACHE["users"] and time.monotonic() - _AUTH_CACHE["at"] < AUTH_CACHE_SECONDS:
+        return _AUTH_CACHE["users"]
+    users: list[dict] = []
+    for page in range(1, 51):  # 200 per page; up to 10,000 accounts
         data = _call("GET", f"/users?page={page}&per_page=200")
-        users = data.get("users") or []
-        for u in users:
-            if not _is_customer(u):
-                continue
-            total += 1
-            if needle:
-                um = u.get("user_metadata") or {}
-                hay = " ".join(
-                    str(x or "") for x in (u.get("email"), um.get("full_name"), um.get("display_name"), u.get("phone"))
-                ).lower()
-                if needle not in hay and u.get("id") not in address_ids:
-                    continue
-            matches.append(u)
-        if len(users) < 200:
+        batch = data.get("users") or []
+        users.extend(u for u in batch if _is_customer(u))
+        if len(batch) < 200:
             break
-    matches.sort(key=lambda u: u.get("created_at") or "", reverse=True)
-    rows = [_public_customer(u) for u in matches[:CUSTOMER_LIST_CAP]]
-    lookup_err = _attach_addresses(rows, db)
+    _AUTH_CACHE["users"] = users
+    _AUTH_CACHE["at"] = time.monotonic()
+    return users
+
+
+def _forget_auth_cache() -> None:
+    _AUTH_CACHE["at"] = 0.0
+    _AUTH_CACHE["users"] = []
+
+
+def _ts(v) -> Optional[float]:
+    """A date as a number, so dates from the login system and from the database sort together."""
+    if not v:
+        return None
+    if isinstance(v, datetime):
+        return (v if v.tzinfo else v.replace(tzinfo=timezone.utc)).timestamp()
+    try:
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()
+    except ValueError:
+        return None
+
+
+def _iso(v) -> Optional[str]:
+    if not v:
+        return None
+    return v.isoformat() if isinstance(v, datetime) else str(v)
+
+
+_SOURCE_LABELS = {"ebay": "eBay", "amazon": "Amazon"}
+
+
+def _customer_directory(db: Session, fresh: bool = False) -> tuple[list[dict], dict]:
+    """
+    One list of everybody: login accounts (from Supabase) plus the rows of the `customers` table
+    (guest checkouts and the QuickBooks import). A login account and a customers row with the same
+    user id, or the same email, are one person and show as one row.
+    Returns (rows, problems) where problems says what could not be loaded.
+    """
+    problems: dict = {"addresses": None, "customers_table": None}
+    accounts = [_public_customer(u) for u in _auth_customers(fresh)]
+    problems["addresses"] = _attach_addresses(accounts, db, limit=200000)
+
+    records: list = []
+    try:
+        records = db.execute(
+            text(
+                "select id, user_id, email, full_name, phone, last_shipping_address, created_at, "
+                "source, email_kind, marketplace from customers limit 200000"
+            )
+        ).all()
+    except Exception:
+        db.rollback()
+        try:  # the QuickBooks columns may not exist yet
+            records = db.execute(
+                text(
+                    "select id, user_id, email, full_name, phone, last_shipping_address, created_at, "
+                    "null as source, null as email_kind, null as marketplace from customers limit 200000"
+                )
+            ).all()
+        except Exception as e:
+            db.rollback()
+            log.warning("customers table could not be read for the Customers tab", exc_info=True)
+            problems["customers_table"] = _describe_error(e)
+
+    by_id = {a["id"]: a for a in accounts}
+    by_email = {(a["email"] or "").strip().lower(): a for a in accounts if a.get("email")}
+    claimed: dict[str, object] = {}
+    loose: list = []
+    for rec in records:
+        acct = by_id.get(str(rec.user_id)) if rec.user_id else None
+        if acct is None:
+            acct = by_email.get((rec.email or "").strip().lower())
+        if acct is not None and acct["id"] not in claimed:
+            claimed[acct["id"]] = rec
+        elif acct is None:
+            loose.append(rec)
+
+    def addr_text(rec) -> str:
+        addr = rec.last_shipping_address if rec is not None else None
+        if isinstance(addr, str):
+            try:
+                addr = json.loads(addr)
+            except ValueError:
+                addr = {}
+        return _format_address(addr) if isinstance(addr, dict) else ""
+
+    def source_of(rec, has_account: bool) -> tuple[str, str]:
+        mkt = (getattr(rec, "marketplace", None) or "").strip().lower() if rec is not None else ""
+        src = (getattr(rec, "source", None) or "").strip().lower() if rec is not None else ""
+        if mkt == "ebay":
+            return "ebay", "eBay"
+        if has_account or src != "quickbooks":
+            return "website", "Website"
+        return "other", _SOURCE_LABELS.get(mkt, "QuickBooks")
+
+    rows: list[dict] = []
+    for a in accounts:
+        rec = claimed.get(a["id"])
+        group, label = source_of(rec, True)
+        status = "Blocked" if a["blocked"] else ("Active" if a["confirmed"] else "Waiting for verification")
+        rows.append({
+            "id": a["id"], "has_account": True,
+            "email": a["email"], "email_masked": (getattr(rec, "email_kind", None) or "") == "masked",
+            "name": a["name"] or (getattr(rec, "full_name", None) or "") or "",
+            "phone": a["phone"] or (getattr(rec, "phone", None) or "") or "",
+            "status": status, "confirmed": a["confirmed"], "blocked": a["blocked"],
+            "created_at": a["created_at"], "last_sign_in_at": a["last_sign_in_at"],
+            "address": a["address"] or addr_text(rec) or None,
+            "group": group, "source": label,
+        })
+    for rec in loose:
+        group, label = source_of(rec, False)
+        rows.append({
+            "id": str(rec.id), "has_account": False,
+            "email": rec.email, "email_masked": (rec.email_kind or "") == "masked",
+            "name": rec.full_name or "", "phone": rec.phone or "",
+            "status": "No login", "confirmed": False, "blocked": False,
+            "created_at": _iso(rec.created_at), "last_sign_in_at": None,
+            "address": addr_text(rec) or None,
+            "group": group, "source": label,
+        })
+    return rows, problems
+
+
+_SORT_KEYS = {
+    "customer": lambda r: (r["name"] or r["email"] or "").lower(),
+    "source": lambda r: r["source"].lower(),
+    "phone": lambda r: re.sub(r"\D", "", r["phone"] or ""),
+    "status": lambda r: r["status"].lower(),
+    "signed_up": lambda r: _ts(r["created_at"]),
+    "last_sign_in": lambda r: _ts(r["last_sign_in_at"]),
+    "address": lambda r: (r["address"] or "").lower(),
+}
+
+
+@router.get("/customers")
+def list_customers(
+    q: str = "",
+    source: Literal["all", "website", "ebay"] = "all",
+    sort: Literal["customer", "source", "phone", "status", "signed_up", "last_sign_in", "address"] = "signed_up",
+    direction: Literal["asc", "desc"] = Query("desc", alias="dir"),
+    page: int = Query(1, ge=1),
+    refresh: bool = False,
+    db: Session = Depends(get_db),
+):
+    """
+    Everyone: login accounts, guest checkouts and the QuickBooks import, one page at a time.
+    `q` searches name, email, phone and address; `source` narrows to Website or eBay; `sort` and `dir`
+    order the whole list (not just the page on screen). `refresh` skips the one-minute reuse of the
+    login-account list (used right after block / delete and so on).
+    """
+    rows, problems = _customer_directory(db, fresh=refresh)
+    needle = q.strip().lower()
+    if needle:
+        rows = [
+            r for r in rows
+            if needle in " ".join(str(x or "") for x in (r["name"], r["email"], r["phone"], r["address"])).lower()
+        ]
+    counts = {
+        "all": len(rows),
+        "website": sum(1 for r in rows if r["group"] == "website"),
+        "ebay": sum(1 for r in rows if r["group"] == "ebay"),
+    }
+    if source != "all":
+        rows = [r for r in rows if r["group"] == source]
+
+    key = _SORT_KEYS[sort]
+    rows.sort(key=lambda r: (r["email"] or "").lower())  # steady order for ties
+    filled = [r for r in rows if key(r) not in (None, "")]
+    blank = [r for r in rows if key(r) in (None, "")]
+    filled.sort(key=key, reverse=(direction == "desc"))
+    rows = filled + blank  # empty cells always go last, whichever way it is sorted
+
+    matched = len(rows)
+    pages = max(1, -(-matched // CUSTOMER_PAGE_SIZE))
+    page = min(page, pages)
+    start = (page - 1) * CUSTOMER_PAGE_SIZE
     return {
-        "customers": rows,
-        "matched": len(matches),
-        "total": total,
-        # None when addresses loaded fine; otherwise why they didn't (shown on the page).
-        "addresses_error": lookup_err or search_err,
+        "customers": rows[start : start + CUSTOMER_PAGE_SIZE],
+        "matched": matched,
+        "counts": counts,
+        "page": page,
+        "pages": pages,
+        "page_size": CUSTOMER_PAGE_SIZE,
+        "addresses_error": problems["addresses"],
+        "customers_error": problems["customers_table"],
     }
 
 
@@ -760,6 +905,7 @@ def block_customer(user_id: str, me: AuthUser = Depends(require_admin)):
     """Stop them signing in. Their records are kept; undo with /unblock."""
     _load_customer(user_id)
     out = _call("PUT", f"/users/{user_id}", {"ban_duration": BLOCK_FOR})
+    _forget_auth_cache()
     log.info("customer %s blocked by %s", user_id, me.email or me.user_id)
     return _public_customer(out)
 
@@ -768,6 +914,7 @@ def block_customer(user_id: str, me: AuthUser = Depends(require_admin)):
 def unblock_customer(user_id: str, me: AuthUser = Depends(require_admin)):
     _load_customer(user_id)
     out = _call("PUT", f"/users/{user_id}", {"ban_duration": "none"})
+    _forget_auth_cache()
     log.info("customer %s unblocked by %s", user_id, me.email or me.user_id)
     return _public_customer(out)
 
@@ -779,6 +926,7 @@ def resend_confirmation(user_id: str, me: AuthUser = Depends(require_admin)):
         raise HTTPException(400, "That customer has already confirmed their email.")
     base = _storefront_url()
     _auth_public_call("/resend", {"type": "signup", "email": u.get("email")}, f"{base}/auth/confirmed" if base else None)
+    _forget_auth_cache()
     log.info("confirmation email re-sent for customer %s by %s", user_id, me.email or me.user_id)
     return Response(status_code=204)
 
@@ -809,5 +957,6 @@ def delete_customer(user_id: str, body: ConfirmDelete, me: AuthUser = Depends(re
                 "an order). Block the account instead, or tell your developer what's linked to it.",
             )
         raise
+    _forget_auth_cache()
     log.info("customer %s deleted by %s", user_id, me.email or me.user_id)
     return Response(status_code=204)
