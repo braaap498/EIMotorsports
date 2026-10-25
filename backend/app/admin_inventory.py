@@ -2,13 +2,21 @@
 Inventory control: barcodes, receiving (scan in) and shipping (scan out).
 Mounted at /admin/inventory/* (admins, plus employees holding the matching permission).
 
-HOW STOCK IS COUNTED - read this before changing anything
-  * products.quantity_on_hand is what the store can SELL. A website order takes its stock the
-    moment Stripe confirms payment (store_checkout._mark_paid), and eBay sales take theirs
-    elsewhere. So SCANNING A PART OUT NEVER SUBTRACTS STOCK A SECOND TIME. The ship scan
-    checks the pick (right part, right quantity, nothing missing), records who shipped what,
-    and sets the website order to 'shipped'.
-  * Receiving scans ADD stock, and write an inventory_transactions ledger row.
+HOW STOCK IS COUNTED - read this before changing anything (rules live in app/stock.py)
+  * products.quantity_on_hand is what is PHYSICALLY ON THE SHELF.
+  * A website order does not touch it when paid. It SETS PARTS ASIDE (stock_reservations), so the
+    number customers can buy ("available") drops at once while the shelf count stays true.
+  * COMMITTING A PICK (scan-out on the Ship tab) is what takes the parts off the shelf: on hand
+    and the reservation both go down in one database transaction, and a ledger row is written.
+    When every line is picked the order moves to the shipping stage (picked_at is set).
+  * Mark shipped (with a tracking number) completes the order.
+  * Cancelling an unshipped order releases its reservation; parts already picked go back on the
+    shelf. Refunding is a separate, admin-only action through Stripe.
+  * Orders paid BEFORE reservations existed (orders.reserved_stock = false) already had their stock
+    taken at payment, so picking them takes nothing a second time.
+  * eBay / other sales are decreased by whatever records them (outside this file); scanning those
+    out only records who shipped what.
+  * Receiving scans ADD stock, write an inventory_transactions ledger row, and clear "on order".
   * Every commit is ONE database transaction, tagged with a batch id made by the browser, so a
     double click or a retry after a dropped connection can never be applied twice.
 
@@ -21,18 +29,25 @@ Routes
   POST   /inventory/products/{id}/shelf-barcode   make (or fetch) the shelf label code
   PUT    /inventory/products/{id}/bin       set the shelf / bin location text
   POST   /inventory/receive                 commit a receiving batch (adds stock)
-  GET    /inventory/orders/to-ship          paid website orders not yet shipped
+  GET    /inventory/orders/to-ship          paid website orders: to pick, and picked / ready to ship
   GET    /inventory/orders/{order_number}   one order with what is still to scan
-  POST   /inventory/ship                    commit a shipping batch
+  POST   /inventory/ship                    commit a scan-out batch (website order pick, or eBay / other)
+  POST   /inventory/orders/{n}/short        flag a line that could not be picked (missing / damaged)
+  POST   /inventory/orders/{n}/shipped      picked order -> shipped, with its tracking number
+  POST   /inventory/orders/{n}/cancel       cancel an unshipped paid order (releases / restores stock)
+  POST   /inventory/orders/{n}/refund       refund through Stripe (owner / admin only)
+  PUT    /inventory/products/{id}/on-order  mark a part as on order (shows Backordered on the site)
   GET    /inventory/history                 recent batches (audit trail)
   GET    /inventory/stock                   every product with on-hand + restock level (search, low, out)
   POST   /inventory/products/{id}/adjust    manual +/- or set-the-count (writes an 'Adjustment' ledger row)
   PUT    /inventory/products/{id}/reorder-point   set or clear the restock level
 """
+import logging
 import re
 import uuid
 from typing import Optional
 
+import stripe
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -42,9 +57,11 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, current_user, needs, require_route_access
 from app.database import get_db
 from app.images import thumb_url
+from app.stock import available_sql, lock_products, reserved_paid_sql, set_aside_sql
 
 # No prefix for "/admin": main.py mounts this inside admin_router. require_route_access makes
 # every route admin-only unless it carries a @needs(...) marker.
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/inventory", tags=["admin-inventory"], dependencies=[Depends(require_route_access)])
 
 ANY_INVENTORY = ("inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust")
@@ -384,8 +401,8 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
             m = merged[pid]
             new_qty = db.execute(
                 text(
-                    "update products set quantity_on_hand = coalesce(quantity_on_hand, 0) + :q, updated_at = now() "
-                    "where id = :id returning quantity_on_hand"
+                    "update products set quantity_on_hand = coalesce(quantity_on_hand, 0) + :q, on_order = false, "
+                    "updated_at = now() where id = :id returning quantity_on_hand"
                 ),
                 {"q": m["qty"], "id": pid},
             ).scalar()
@@ -411,9 +428,13 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
 # --------------------------------------------------------------------------
 # stock list, manual adjustments, restock levels
 # --------------------------------------------------------------------------
-# "Low" = a restock level is set (above 0) and on-hand is AT or BELOW it.
-_LOW_SQL = "(coalesce(p.reorder_point, 0) > 0 and coalesce(p.quantity_on_hand, 0) <= p.reorder_point)"
-_OUT_SQL = "(coalesce(p.quantity_on_hand, 0) <= 0)"
+# "Low" = a restock level is set (above 0) and what can still be SOLD (available) is AT or BELOW it.
+# "Out" = nothing left to sell. Parts promised to paid orders are not counted as sellable.
+_AVAIL_SQL = available_sql("p")
+_LOW_SQL = f"(coalesce(p.reorder_point, 0) > 0 and {_AVAIL_SQL} <= p.reorder_point)"
+_OUT_SQL = f"({_AVAIL_SQL} <= 0)"
+# Oversold = more promised to paid orders than the shelf count says is there. Staff-only warning.
+_OVERSOLD_SQL = f"({reserved_paid_sql('p')} > coalesce(p.quantity_on_hand, 0))"
 
 
 @router.get("/stock")
@@ -447,7 +468,7 @@ def stock_list(
         conds.append(_OUT_SQL)
     where = ("where " + " and ".join(conds)) if conds else ""
     order = (
-        "(p.reorder_point - coalesce(p.quantity_on_hand, 0)) desc, p.title, p.id"
+        f"(p.reorder_point - {_AVAIL_SQL}) desc, p.title, p.id"
         if view == "low"
         else "p.title, p.id"
     )
@@ -456,7 +477,9 @@ def stock_list(
     rows = db.execute(
         text(
             "select p.id, p.sku, p.title, coalesce(p.quantity_on_hand, 0) as quantity_on_hand, "
-            "       p.reorder_point, p.bin_location, coalesce(p.is_active, true) as is_active "
+            "       p.reorder_point, p.bin_location, coalesce(p.is_active, true) as is_active, "
+            f"       {set_aside_sql('p')} as reserved, {_AVAIL_SQL} as available, "
+            f"       coalesce(p.on_order, false) as on_order, {_OVERSOLD_SQL} as oversold "
             f"from products p {where} order by {order} limit :limit offset :offset"
         ),
         params,
@@ -465,7 +488,8 @@ def stock_list(
     counts = db.execute(
         text(
             f"select count(*) filter (where {_LOW_SQL}) as low_count, "
-            f"       count(*) filter (where {_OUT_SQL}) as out_count "
+            f"       count(*) filter (where {_OUT_SQL}) as out_count, "
+            f"       count(*) filter (where {_OVERSOLD_SQL}) as oversold_count "
             f"from products p {scope_where}"
         )
     ).first()
@@ -473,6 +497,7 @@ def stock_list(
         "total": total,
         "low_count": counts.low_count if counts else 0,
         "out_count": counts.out_count if counts else 0,
+        "oversold_count": counts.oversold_count if counts else 0,
         "items": [dict(r._mapping) for r in rows],
     }
 
@@ -555,13 +580,36 @@ def set_reorder_point(product_id: int, body: ReorderIn, db: Session = Depends(ge
     return {"product_id": product_id, "reorder_point": got.reorder_point}
 
 
+class OnOrderIn(BaseModel):
+    on_order: bool
+
+
+@router.put("/products/{product_id}/on-order")
+@needs("inventory.adjust")
+def set_on_order(product_id: int, body: OnOrderIn, db: Session = Depends(get_db)):
+    """A purchase order has been placed for this part. While it is sold out, the site says
+    Backordered instead of Sold out. Receiving the part clears this by itself."""
+    got = db.execute(
+        text("update products set on_order = :v, updated_at = now() where id = :id returning on_order"),
+        {"v": body.on_order, "id": product_id},
+    ).first()
+    if not got:
+        db.rollback()
+        raise HTTPException(404, "That product no longer exists")
+    db.commit()
+    return {"product_id": product_id, "on_order": got.on_order}
+
+
 # --------------------------------------------------------------------------
-# shipping (verifies the pick; does NOT subtract stock again - see top of file)
+# website orders: pick (scan out) -> ship (tracking number) -> done.
+# Also: short picks, cancelling, refunding. See the top of this file for the stock rules.
 # --------------------------------------------------------------------------
 def _order_by_number(db: Session, order_number: str):
     return db.execute(
         text(
-            "select id, order_number, status, customer_name, shipping_address, notes, paid_at, shipped_at "
+            "select id, order_number, status, customer_name, shipping_address, notes, paid_at, shipped_at, "
+            "       picked_at, reserved_stock, tracking_number, carrier, cancelled_at, cancel_reason, "
+            "       total_cents, refunded_cents, payment_provider "
             "from orders where lower(order_number) = lower(:n)"
         ),
         {"n": order_number.strip()},
@@ -569,6 +617,7 @@ def _order_by_number(db: Session, order_number: str):
 
 
 def _ordered_and_shipped(db: Session, order_id: int) -> tuple[dict, dict]:
+    """(units ordered, units scanned out so far) per product. Scanned-out = picked."""
     ordered = {
         r.product_id: int(r.q)
         for r in db.execute(
@@ -591,18 +640,65 @@ def _ordered_and_shipped(db: Session, order_id: int) -> tuple[dict, dict]:
     return ordered, shipped
 
 
+def _attention(db: Session, order_ids: list[int]) -> dict[int, list[str]]:
+    """Red-flag reasons per order: a line that came up short, or not enough on the shelf to cover
+    every paid order for a part. Staff only; customers never see any of this."""
+    out: dict[int, list[str]] = {i: [] for i in order_ids}
+    if not order_ids:
+        return out
+    rows = db.execute(
+        text(
+            """
+            select oi.order_id, p.sku, 'short' as kind
+            from order_items oi join products p on p.id = oi.product_id
+            where oi.order_id = any(cast(:ids as bigint[])) and oi.short_qty > 0
+            union
+            select r.order_id, p.sku, 'oversold' as kind
+            from stock_reservations r join products p on p.id = r.product_id
+            where r.order_id = any(cast(:ids as bigint[])) and r.status = 'reserved'
+              and coalesce(p.quantity_on_hand, 0) <
+                  (select coalesce(sum(r2.quantity), 0) from stock_reservations r2
+                    where r2.product_id = r.product_id and r2.status = 'reserved')
+            """
+        ),
+        {"ids": order_ids},
+    ).all()
+    for r in rows:
+        out[r.order_id].append(
+            f"SHORT PICK: {r.sku} could not be found or was damaged"
+            if r.kind == "short"
+            else f"OVERSOLD: not enough {r.sku} on the shelf to cover every paid order"
+        )
+    return out
+
+
 @router.get("/orders/to-ship")
 @needs("inventory.ship")
 def orders_to_ship(db: Session = Depends(get_db)):
+    """Paid website orders that have not shipped. stage 'pick' = still to scan, 'ship' = every part
+    is picked and it is waiting for a tracking number. Orders needing attention come first."""
     rows = db.execute(
         text(
-            "select o.order_number, o.customer_name, o.paid_at, "
+            "select o.id, o.order_number, o.customer_name, o.paid_at, o.picked_at, "
             "       coalesce((select sum(oi.quantity) from order_items oi where oi.order_id = o.id), 0) as units "
             "from orders o where o.status = 'paid' and o.shipped_at is null "
-            "order by o.paid_at nulls last, o.id limit 100"
+            "order by o.paid_at nulls last, o.id limit 200"
         )
     ).all()
-    return {"items": [dict(r._mapping) for r in rows]}
+    flags = _attention(db, [r.id for r in rows])
+    items = [
+        {
+            "order_number": r.order_number,
+            "customer_name": r.customer_name,
+            "paid_at": r.paid_at,
+            "units": int(r.units),
+            "stage": "ship" if r.picked_at else "pick",
+            "attention": flags.get(r.id, []),
+        }
+        for r in rows
+    ]
+    items.sort(key=lambda i: 0 if i["attention"] else 1)  # stable: flagged first, then oldest first
+    return {"items": items, "attention_count": sum(1 for i in items if i["attention"])}
 
 
 @router.get("/orders/{order_number}")
@@ -613,7 +709,8 @@ def get_order(order_number: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "No order with that number")
     items = db.execute(
         text(
-            "select oi.id as item_id, oi.product_id, oi.title, oi.quantity, p.sku, p.bin_location "
+            "select oi.id as item_id, oi.product_id, oi.title, oi.quantity, oi.short_qty, "
+            "       p.sku, p.bin_location, p.quantity_on_hand "
             "from order_items oi left join products p on p.id = oi.product_id "
             "where oi.order_id = :o order by oi.id"
         ),
@@ -626,7 +723,16 @@ def get_order(order_number: str, db: Session = Depends(get_db)):
         "status": o.status,
         "customer_name": o.customer_name,
         "paid_at": o.paid_at,
+        "picked_at": o.picked_at,
         "shipped_at": o.shipped_at,
+        "tracking_number": o.tracking_number,
+        "carrier": o.carrier,
+        "cancelled_at": o.cancelled_at,
+        "cancel_reason": o.cancel_reason,
+        "total_cents": o.total_cents,
+        "refunded_cents": o.refunded_cents or 0,
+        "pays_by_stripe": o.payment_provider == "stripe",
+        "attention": _attention(db, [o.id]).get(o.id, []),
         "shipping_method": (o.notes or "").removeprefix("Shipping: ").split(" | ")[0] or None,
         "ship_to": {
             "name": addr.get("full_name"),
@@ -645,6 +751,8 @@ def get_order(order_number: str, db: Session = Depends(get_db)):
                 "bin_location": i.bin_location,
                 "ordered": i.quantity,
                 "shipped_before": shipped.get(i.product_id, 0) if i.product_id is not None else 0,
+                "short_qty": i.short_qty or 0,
+                "on_hand": i.quantity_on_hand or 0,
                 "thumb": _thumb(db, i.product_id) if i.product_id is not None else None,
             }
             for i in items
@@ -657,22 +765,78 @@ class ShipIn(BaseModel):
     order_number: Optional[str] = Field(None, max_length=40)   # website order, or leave empty...
     reference: Optional[str] = Field(None, max_length=100)     # ...and give the eBay / other order number
     lines: list[LineIn] = Field(..., min_length=1, max_length=500)
-    partial: bool = False                                       # ship what's here, finish the order later
+    partial: bool = False                                       # commit what's here, finish the order later
     note: Optional[str] = Field(None, max_length=500)
+
+
+def _take_stock_for_pick(db: Session, order, merged: dict[int, dict], user: AuthUser) -> None:
+    """The parts in this pick leave the shelf: on hand goes down and so does the order's reservation.
+
+    Orders paid before reservations existed (reserved_stock = false) already had their stock taken
+    at payment, so nothing is taken again. The shelf count never goes below zero; if the shelf
+    count was lower than what was physically picked, the ledger records the real change.
+    """
+    if not order.reserved_stock:
+        return
+    lock_products(db, merged)
+    for pid in sorted(merged):
+        res = db.execute(
+            text(
+                "select id, quantity from stock_reservations "
+                "where order_id = :o and product_id = :p and status = 'reserved' for update"
+            ),
+            {"o": order.id, "p": pid},
+        ).first()
+        take = min(merged[pid]["qty"], res.quantity) if res else 0
+        if take <= 0:
+            continue
+        before = db.execute(
+            text("select coalesce(quantity_on_hand, 0) from products where id = :id"), {"id": pid}
+        ).scalar()
+        after = db.execute(
+            text(
+                "update products set quantity_on_hand = greatest(0, coalesce(quantity_on_hand, 0) - :t), "
+                "updated_at = now() where id = :id returning quantity_on_hand"
+            ),
+            {"t": take, "id": pid},
+        ).scalar()
+        if after != before:
+            db.execute(
+                text(
+                    "insert into inventory_transactions "
+                    "(product_id, transaction_type, quantity_change, reference, legacy_created_by) "
+                    "values (:p, 'Adjustment', :d, :ref, :by)"
+                ),
+                {"p": pid, "d": after - before, "ref": f"Picked for order {order.order_number}", "by": user.email},
+            )
+        if res.quantity - take > 0:
+            db.execute(
+                text("update stock_reservations set quantity = quantity - :t where id = :id"),
+                {"t": take, "id": res.id},
+            )
+        else:
+            db.execute(text("delete from stock_reservations where id = :id"), {"id": res.id})
 
 
 @router.post("/ship")
 @needs("inventory.ship")
 def ship(body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Commit a scan-out batch.
+
+    Website order: the scanned parts come off the shelf (see _take_stock_for_pick) and the order
+    advances to the shipping stage once every part is picked. It is NOT shipped yet; that needs a
+    tracking number (see mark_shipped). Partial commits are fine: the order stays open for the rest.
+    eBay / other sale: only records who shipped what; whatever recorded the sale handles the stock.
+    """
     merged = _merge_lines(body.lines)
     try:
         order = None
-        complete = False
+        fully_picked = False
         remaining_after: dict[int, int] = {}
         if body.order_number:
             order = db.execute(
                 text(
-                    "select id, order_number, status, shipped_at from orders "
+                    "select id, order_number, status, shipped_at, picked_at, reserved_stock from orders "
                     "where lower(order_number) = lower(:n) for update"
                 ),
                 {"n": body.order_number.strip()},
@@ -682,10 +846,15 @@ def ship(body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(c
                 raise HTTPException(404, "No order with that number")
             if order.status != "paid":
                 db.rollback()
-                raise HTTPException(409, f"Order {order.order_number} is '{order.status}', not paid - it can't be shipped.")
+                raise HTTPException(409, f"Order {order.order_number} is '{order.status}', not paid - it can't be picked.")
             if order.shipped_at:
                 db.rollback()
                 raise HTTPException(409, f"Order {order.order_number} was already marked shipped.")
+            if order.picked_at:
+                db.rollback()
+                raise HTTPException(
+                    409, f"Order {order.order_number} is already fully picked. Enter its tracking number to ship it."
+                )
             ordered, shipped = _ordered_and_shipped(db, order.id)
             for pid, m in merged.items():
                 if pid not in ordered:
@@ -694,12 +863,12 @@ def ship(body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(c
                 left = ordered[pid] - shipped.get(pid, 0)
                 if m["qty"] > left:
                     db.rollback()
-                    raise HTTPException(400, f"Too many scanned for a part on this order (only {left} still to ship).")
+                    raise HTTPException(400, f"Too many scanned for a part on this order (only {left} still to pick).")
             remaining_after = {
                 pid: ordered[pid] - shipped.get(pid, 0) - merged.get(pid, {"qty": 0})["qty"] for pid in ordered
             }
-            complete = all(v == 0 for v in remaining_after.values())
-            if not complete and not body.partial:
+            fully_picked = all(v == 0 for v in remaining_after.values())
+            if not fully_picked and not body.partial:
                 db.rollback()
                 raise HTTPException(409, "Not every item on the order has been scanned yet.")
         elif not (body.reference or "").strip():
@@ -712,22 +881,309 @@ def ship(body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(c
         )
         for pid, m in merged.items():
             _insert_line(db, body.batch_id, pid, m["barcode_id"], m["qty"])
-        if order and complete:
-            db.execute(
-                text("update orders set status = 'shipped', shipped_at = now(), shipped_by = :by where id = :id"),
-                {"by": user.email, "id": order.id},
-            )
+        if order:
+            _take_stock_for_pick(db, order, merged, user)
+            # A line that was flagged short is only still short for what has not been picked.
+            for pid in merged:
+                db.execute(
+                    text(
+                        "update order_items set short_qty = least(short_qty, :r) "
+                        "where order_id = :o and product_id = :p and short_qty > 0"
+                    ),
+                    {"r": remaining_after.get(pid, 0), "o": order.id, "p": pid},
+                )
+            if fully_picked:
+                db.execute(
+                    text("update orders set picked_at = now(), picked_by = :by where id = :id"),
+                    {"by": user.email, "id": order.id},
+                )
         db.commit()
         return {
             "batch_id": str(body.batch_id),
-            "order_complete": complete,
+            "fully_picked": fully_picked,
             "remaining": {str(k): v for k, v in remaining_after.items() if v > 0},
         }
     except HTTPException:
         raise
     except Exception as exc:
         db.rollback()
-        raise HTTPException(500, f"Shipping record failed and was rolled back; nothing changed. ({type(exc).__name__})")
+        raise HTTPException(500, f"Pick failed and was rolled back; nothing changed. ({type(exc).__name__})")
+
+
+class ShortIn(BaseModel):
+    product_id: int
+    quantity: int = Field(..., ge=1, le=MAX_QTY)               # units that could not be found / were damaged
+    actual_on_hand: Optional[int] = Field(None, ge=0, le=MAX_QTY)  # the real shelf count, if they counted
+    note: Optional[str] = Field(None, max_length=200)
+
+
+@router.post("/orders/{order_number}/short")
+@needs("inventory.ship")
+def short_pick(
+    order_number: str,
+    body: ShortIn,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(current_user),
+):
+    """The part is not on the shelf (or is damaged). Flags the order red so it gets looked at, and
+    optionally fixes the shelf count. Nothing is cancelled; that is a separate decision."""
+    try:
+        order = db.execute(
+            text(
+                "select id, order_number, status, shipped_at, picked_at from orders "
+                "where lower(order_number) = lower(:n) for update"
+            ),
+            {"n": order_number.strip()},
+        ).first()
+        if not order:
+            db.rollback()
+            raise HTTPException(404, "No order with that number")
+        if order.status != "paid" or order.shipped_at or order.picked_at:
+            db.rollback()
+            raise HTTPException(409, "Only an order that is paid and still being picked can be flagged short.")
+        ordered, shipped = _ordered_and_shipped(db, order.id)
+        if body.product_id not in ordered:
+            db.rollback()
+            raise HTTPException(400, "That part is not on this order.")
+        left = ordered[body.product_id] - shipped.get(body.product_id, 0)
+        if body.quantity > left:
+            db.rollback()
+            raise HTTPException(400, f"Only {left} of that part are still to pick on this order.")
+        db.execute(
+            text("update order_items set short_qty = :q where order_id = :o and product_id = :p"),
+            {"q": body.quantity, "o": order.id, "p": body.product_id},
+        )
+        if body.actual_on_hand is not None:
+            lock_products(db, [body.product_id])
+            before = db.execute(
+                text("select coalesce(quantity_on_hand, 0) from products where id = :id"), {"id": body.product_id}
+            ).scalar()
+            if before != body.actual_on_hand:
+                db.execute(
+                    text("update products set quantity_on_hand = :q, updated_at = now() where id = :id"),
+                    {"q": body.actual_on_hand, "id": body.product_id},
+                )
+                ref = f"Short pick, order {order.order_number}: shelf counted at {body.actual_on_hand}"
+                if (body.note or "").strip():
+                    ref += f" - {body.note.strip()}"
+                db.execute(
+                    text(
+                        "insert into inventory_transactions "
+                        "(product_id, transaction_type, quantity_change, reference, legacy_created_by) "
+                        "values (:p, 'Adjustment', :d, :ref, :by)"
+                    ),
+                    {"p": body.product_id, "d": body.actual_on_hand - before, "ref": ref[:200], "by": user.email},
+                )
+        db.commit()
+        return {"ok": True, "attention": _attention(db, [order.id]).get(order.id, [])}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, f"Could not flag the short pick; nothing changed. ({type(exc).__name__})")
+
+
+class ShippedIn(BaseModel):
+    tracking_number: str = Field(..., min_length=3, max_length=100)
+    carrier: Optional[str] = Field(None, max_length=40)
+
+
+@router.post("/orders/{order_number}/shipped")
+@needs("inventory.ship")
+def mark_shipped(
+    order_number: str,
+    body: ShippedIn,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(current_user),
+):
+    """The order is in the carrier's hands. Needs every part picked first, and the tracking number."""
+    order = db.execute(
+        text(
+            "select id, order_number, status, shipped_at, picked_at from orders "
+            "where lower(order_number) = lower(:n) for update"
+        ),
+        {"n": order_number.strip()},
+    ).first()
+    if not order:
+        db.rollback()
+        raise HTTPException(404, "No order with that number")
+    if order.status != "paid":
+        db.rollback()
+        raise HTTPException(409, f"Order {order.order_number} is '{order.status}', not paid - it can't be shipped.")
+    if order.shipped_at:
+        db.rollback()
+        raise HTTPException(409, f"Order {order.order_number} was already marked shipped.")
+    if not order.picked_at:
+        db.rollback()
+        raise HTTPException(409, "Scan every part of the order first. It can only ship once it is fully picked.")
+    db.execute(
+        text(
+            "update orders set status = 'shipped', shipped_at = now(), shipped_by = :by, "
+            "tracking_number = :t, carrier = :c where id = :id"
+        ),
+        {
+            "by": user.email,
+            "t": body.tracking_number.strip(),
+            "c": (body.carrier or "").strip() or None,
+            "id": order.id,
+        },
+    )
+    db.commit()
+    return {"ok": True, "order_number": order.order_number}
+
+
+class CancelIn(BaseModel):
+    reason: Optional[str] = Field(None, max_length=200)
+
+
+def _add_back(db: Session, pid: int, qty: int, ref: str, by: Optional[str]) -> None:
+    db.execute(
+        text(
+            "update products set quantity_on_hand = coalesce(quantity_on_hand, 0) + :q, updated_at = now() "
+            "where id = :id"
+        ),
+        {"q": qty, "id": pid},
+    )
+    db.execute(
+        text(
+            "insert into inventory_transactions "
+            "(product_id, transaction_type, quantity_change, reference, legacy_created_by) "
+            "values (:p, 'Adjustment', :q, :ref, :by)"
+        ),
+        {"p": pid, "q": qty, "ref": ref[:200], "by": by},
+    )
+
+
+@router.post("/orders/{order_number}/cancel")
+@needs("inventory.ship")
+def cancel_order(
+    order_number: str,
+    body: CancelIn,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(current_user),
+):
+    """Cancel a paid order that has not shipped. The money is NOT refunded here (see refund_order).
+
+      * Parts still waiting to be picked: the reservation is released, so they can be sold again.
+        The shelf count was never reduced, so it does not change.
+      * Parts already picked: they go back on the shelf, so on hand goes back up.
+      * Orders paid before reservations existed: their stock was taken at payment, so everything
+        not already scanned out is put back.
+    """
+    try:
+        order = db.execute(
+            text(
+                "select id, order_number, status, shipped_at, reserved_stock, total_cents, refunded_cents "
+                "from orders where lower(order_number) = lower(:n) for update"
+            ),
+            {"n": order_number.strip()},
+        ).first()
+        if not order:
+            db.rollback()
+            raise HTTPException(404, "No order with that number")
+        if order.shipped_at or order.status == "shipped":
+            db.rollback()
+            raise HTTPException(409, "This order has already shipped, so it can't be cancelled. It would be a return.")
+        if order.status != "paid":
+            db.rollback()
+            raise HTTPException(409, f"Only paid orders can be cancelled here. This one is '{order.status}'.")
+
+        ordered, picked = _ordered_and_shipped(db, order.id)
+        lock_products(db, ordered)
+        if order.reserved_stock:
+            back = {pid: q for pid, q in picked.items() if pid in ordered}
+        else:
+            back = {pid: ordered[pid] - picked.get(pid, 0) for pid in ordered}
+        restored = {}
+        for pid, q in sorted(back.items()):
+            if q > 0:
+                _add_back(db, pid, q, f"Order {order.order_number} cancelled: parts back in stock", user.email)
+                restored[str(pid)] = q
+        db.execute(text("delete from stock_reservations where order_id = :o"), {"o": order.id})
+        db.execute(
+            text(
+                "update orders set status = 'cancelled', cancelled_at = now(), cancelled_by = :by, "
+                "cancel_reason = :why where id = :id"
+            ),
+            {"by": user.email, "why": (body.reason or "").strip() or None, "id": order.id},
+        )
+        db.commit()
+        return {
+            "ok": True,
+            "put_back": sum(restored.values()),
+            "refundable_cents": max(0, (order.total_cents or 0) - (order.refunded_cents or 0)),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, f"Cancelling failed and was rolled back; nothing changed. ({type(exc).__name__})")
+
+
+class RefundIn(BaseModel):
+    amount_cents: Optional[int] = Field(None, ge=1, le=10_000_000)  # leave empty to refund everything left
+
+
+@router.post("/orders/{order_number}/refund")
+def refund_order(
+    order_number: str,
+    body: RefundIn,
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(current_user),
+):
+    """Send money back to the customer's card through Stripe. Owner / admin only (no @needs marker).
+
+    Separate from cancelling on purpose: you can refund after a cancellation, or on its own (a
+    return, a short pick on one line). The amount is capped at what is still unrefunded, and the
+    Stripe idempotency key makes a double click or a retry refund only once.
+    """
+    from app.store_checkout import _open_stripe  # same Stripe key handling as checkout
+
+    _open_stripe()
+    order = db.execute(
+        text(
+            "select id, order_number, payment_provider, payment_reference, paid_at, total_cents, refunded_cents "
+            "from orders where lower(order_number) = lower(:n) for update"
+        ),
+        {"n": order_number.strip()},
+    ).first()
+    if not order:
+        db.rollback()
+        raise HTTPException(404, "No order with that number")
+    if not order.paid_at or order.payment_provider != "stripe" or not order.payment_reference:
+        db.rollback()
+        raise HTTPException(409, "This order wasn't paid through Stripe on the website, so it can't be refunded here.")
+    already = order.refunded_cents or 0
+    left = (order.total_cents or 0) - already
+    if left <= 0:
+        db.rollback()
+        raise HTTPException(409, "This order has already been fully refunded.")
+    amount = body.amount_cents or left
+    if amount > left:
+        db.rollback()
+        raise HTTPException(400, f"That is more than is left to refund (${left / 100:,.2f}).")
+    try:
+        session = stripe.checkout.Session.retrieve(order.payment_reference)
+        intent = session.get("payment_intent")
+        if not intent:
+            raise ValueError("Stripe has no payment on file for this order")
+        stripe.Refund.create(
+            payment_intent=intent,
+            amount=amount,
+            metadata={"order_number": order.order_number, "refunded_by": user.email or ""},
+            idempotency_key=f"refund-{order.id}-{already}-{amount}",
+        )
+    except Exception as exc:
+        db.rollback()
+        log.exception("Stripe refund failed for order %s", order.order_number)
+        detail = getattr(exc, "user_message", None) or str(exc) or type(exc).__name__
+        raise HTTPException(502, f"Stripe did not issue the refund, so nothing was recorded. ({detail})")
+    db.execute(
+        text("update orders set refunded_cents = coalesce(refunded_cents, 0) + :a, refunded_at = now() where id = :id"),
+        {"a": amount, "id": order.id},
+    )
+    db.commit()
+    return {"ok": True, "refunded_cents": already + amount, "left_cents": left - amount}
 
 
 # --------------------------------------------------------------------------

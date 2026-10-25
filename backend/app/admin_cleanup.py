@@ -55,6 +55,7 @@ DROP_TABLES = {
     "product_item_specifics",
     "fitment_parse_review",
     "category_assignment_review",
+    "stock_reservations",  # only live holds / reservations; none can exist for a product with order rows
 }
 
 # Where the part number lives (it is not in products.manufacturer_part_number).

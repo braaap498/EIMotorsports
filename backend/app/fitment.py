@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.images import card_image, gallery
 from app.sanitize import clean_description
+from app.stock import available_sql
 
 router = APIRouter(prefix="/store/fitment", tags=["store"])
 
@@ -155,7 +156,8 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
     p = db.execute(
         text(
             "select id, sku, title, slug, list_price, condition, description, "
-            "manufacturer_part_number, quantity_on_hand from products p "
+            "manufacturer_part_number, on_order, "
+            f"{available_sql('p')} as available_qty from products p "
             f"where p.slug = :slug and {PUBLISHED_FILTER}"
         ),
         {"slug": slug},
@@ -184,7 +186,8 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         "price": f"{p.list_price:.2f}" if p.list_price is not None else None,
         "condition": p.condition,
         "part_number": p.manufacturer_part_number,
-        "available": max(0, p.quantity_on_hand or 0),
+        "available": max(0, int(p.available_qty or 0)),
+        "backordered": bool(p.on_order) and int(p.available_qty or 0) <= 0,
         "description": clean_description(p.description),
         "photos": gallery(photos),
         "specifics": [{"name": s.name, "value": s.value} for s in specifics],

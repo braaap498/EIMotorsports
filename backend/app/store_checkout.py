@@ -16,6 +16,9 @@ Rules this file follows:
   * Cart pricing is the cart's own function (store_extras.cart_price), so the cart and
     checkout cannot disagree about price or availability.
   * An order is 'paid' only when Stripe's signed webhook says so AND the amount matches.
+  * Stock is SET ASIDE, not removed: starting checkout holds the parts for CHECKOUT_MINUTES, payment
+    turns the hold into a reservation, and the shelf count (quantity_on_hand) only drops when the
+    warehouse commits the pick. See app/stock.py.
   * Card details never touch this server; they are entered on Stripe's page.
   * When an order is paid, the buyer gets a row in `customers` (guest = no user_id). That step is
     best-effort: if it fails, the payment is still recorded (see _record_customer).
@@ -45,6 +48,7 @@ from app.auth import AuthUser, decode_token
 from app.config import Settings, get_settings
 from app.database import get_db
 from app.shipping import find_option, shipping_options
+from app.stock import CHECKOUT_MINUTES, confirm_holds, place_holds, release_holds
 from app.store_extras import AddressIn, CartItemIn, CartPriceIn, _clean_address, cart_price
 
 log = logging.getLogger(__name__)
@@ -146,6 +150,36 @@ def checkout_quote(body: QuoteIn, db: Session = Depends(get_db)):
 # --------------------------------------------------------------------------
 # start (create order + Stripe payment page)
 # --------------------------------------------------------------------------
+def _close_stale_checkouts(db: Session, email: str) -> None:
+    """A customer who starts checkout again (back button, second tab) must not be blocked by
+    their own earlier hold. Close their older unpaid checkouts first.
+
+    A checkout is only cancelled if Stripe confirms its payment page was closed. If Stripe says it
+    can't (it was paid a moment ago, or already expired), the order is left alone and the webhook
+    deals with it, so a real payment is never cancelled by mistake.
+    """
+    rows = db.execute(
+        text(
+            "select id, payment_reference from orders "
+            "where payment_provider = 'stripe' and status = 'pending_payment' "
+            "and lower(customer_email) = :e and payment_reference is not null"
+        ),
+        {"e": email},
+    ).all()
+    for r in rows:
+        try:
+            stripe.checkout.Session.expire(r.payment_reference)
+        except Exception:
+            continue
+        closed = db.execute(
+            text("update orders set status = 'cancelled' where id = :id and status = 'pending_payment' returning id"),
+            {"id": r.id},
+        ).first()
+        if closed:
+            release_holds(db, r.id)
+    db.commit()
+
+
 class CheckoutAddress(BaseModel):
     full_name: str = Field(..., max_length=100)
     line1: str = Field(..., max_length=120)
@@ -191,6 +225,8 @@ def checkout_start(
     if addr["country"] != "US":
         raise HTTPException(400, "We currently ship within the United States only")
 
+    _close_stale_checkouts(db, email)  # so the customer's own old hold can't block this checkout
+
     lines = _price_cart(body.items, db)
     if any(l.get("problem") for l in lines):
         raise HTTPException(
@@ -232,6 +268,8 @@ def checkout_start(
             for l in lines
         ],
     )
+    # Set the parts aside. Re-checked under a lock, so two customers can't both take the last unit.
+    place_holds(db, order.id, {l["product_id"]: l["qty"] for l in lines})
     db.commit()
 
     site = _env("SITE_URL").rstrip("/")
@@ -268,7 +306,7 @@ def checkout_start(
             "shipping": ship_name,
         },
         billing_address_collection="auto",
-        expires_at=int(time.time()) + 3600,
+        expires_at=int(time.time()) + CHECKOUT_MINUTES * 60,  # the parts are held for this long
         success_url=f"{site}/checkout/confirmation?session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{site}/checkout",
     )
@@ -286,6 +324,7 @@ def checkout_start(
     except Exception:
         log.exception("Stripe could not create a session for order %s", order.order_number)
         db.execute(text("update orders set status = 'cancelled' where id = :id"), {"id": order.id})
+        release_holds(db, order.id)
         db.commit()
         raise HTTPException(502, "We couldn't reach the payment provider. Please try again in a moment.")
 
@@ -444,14 +483,9 @@ def _mark_paid(db: Session, session: dict) -> None:
         ),
         {"id": order.id, "tax": tax, "total": amount_total, "bill": json.dumps(billing) if billing else None},
     )
-    # Take the stock now that the money is in. Never goes below zero.
-    db.execute(
-        text(
-            "update products p set quantity_on_hand = greatest(0, coalesce(p.quantity_on_hand, 0) - oi.quantity) "
-            "from order_items oi where oi.order_id = :id and oi.product_id = p.id"
-        ),
-        {"id": order.id},
-    )
+    # Money is in: turn the checkout hold into a firm reservation. The website count drops now;
+    # the shelf count (quantity_on_hand) drops when the warehouse commits the pick.
+    confirm_holds(db, order.id)
     # Record the buyer as a customer. Inside a savepoint so a problem here can never undo the payment.
     try:
         with db.begin_nested():
@@ -481,9 +515,12 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
         if session.get("payment_status") == "paid":
             _mark_paid(db, session)
     elif kind in ("checkout.session.expired", "checkout.session.async_payment_failed"):
-        db.execute(
-            text("update orders set status = 'cancelled' where id = :id and status = 'pending_payment'"),
-            {"id": _order_id_of(session)},
-        )
+        oid = _order_id_of(session)
+        closed = db.execute(
+            text("update orders set status = 'cancelled' where id = :id and status = 'pending_payment' returning id"),
+            {"id": oid},
+        ).first()
+        if closed:
+            release_holds(db, oid)
         db.commit()
     return {"received": True}

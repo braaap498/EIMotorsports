@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, current_user
 from app.database import get_db
 from app.images import card_image
+from app.stock import available_sql
 
 router = APIRouter(prefix="/store", tags=["store"])
 
@@ -176,7 +177,8 @@ def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
     rows = db.execute(
         text(
             f"""
-            select p.id, p.slug, p.sku, p.title, p.list_price, p.quantity_on_hand,
+            select p.id, p.slug, p.sku, p.title, p.list_price, p.on_order,
+              {available_sql("p")} as available_qty,
               (select ph.source_url from product_photos ph
                 where ph.product_id = p.id
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_source_url,
@@ -196,7 +198,9 @@ def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
         if not r:
             out.append({"product_id": it.product_id, "problem": "unavailable"})
             continue
-        available = max(0, r.quantity_on_hand or 0)
+        # What can still be bought: the shelf count minus parts promised to paid orders and to
+        # other customers' open checkouts. Never negative.
+        available = max(0, int(r.available_qty or 0))
         qty = it.qty
         problem = None
         if r.list_price is None:
@@ -214,6 +218,7 @@ def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
                 "title": r.title,
                 "price": f"{r.list_price:.2f}" if r.list_price is not None else None,
                 "available": available,
+                "backordered": bool(r.on_order) and available <= 0,
                 "qty": qty,
                 "problem": problem,
                 **card_image(r.photo_image_key, r.photo_source_url),
