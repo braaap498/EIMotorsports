@@ -200,7 +200,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
   return (
     <AdminAccessProvider role={role} permissions={permissions}>
     <div className="flex min-h-screen flex-col bg-gray-50 text-gray-900 md:flex-row">
-      <aside className="border-b border-gray-200 bg-white md:w-56 md:border-b-0 md:border-r">
+      <aside className="border-b border-gray-200 bg-white md:sticky md:top-0 md:flex md:h-screen md:w-56 md:shrink-0 md:flex-col md:self-start md:overflow-y-auto md:border-b-0 md:border-r">
         <div className="px-4 py-4 text-sm font-bold uppercase tracking-wide">E&amp;I Admin</div>
         <nav className="flex gap-1 overflow-x-auto px-2 pb-2 md:flex-col md:pb-0">
           {navItems.map((n) => {
@@ -218,7 +218,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
             );
           })}
         </nav>
-        <div className="hidden px-4 py-4 text-xs text-gray-500 md:block">
+        <div className="hidden px-4 py-4 text-xs text-gray-500 md:mt-auto md:block">
           <div className="mb-2 break-all">{email}</div>
           <Link href="/" className="mr-3 underline">View store</Link>
           <button onClick={signOut} className="underline">Sign out</button>

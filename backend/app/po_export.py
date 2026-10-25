@@ -15,6 +15,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.properties import PageSetupProperties
 from reportlab.lib.utils import simpleSplit
 from reportlab.pdfgen import canvas
 
@@ -186,64 +187,142 @@ def build_pdf(po: dict) -> bytes:
 
 
 # --------------------------------------------------------------------------
-# Excel
+# Excel: laid out like the PDF - a letter-size page with boxes around the date / PO number, the Vendor and
+# Ship To addresses, every table cell and the Total. Prints on one page width (as many pages tall as needed).
 # --------------------------------------------------------------------------
+def _box(ws, ref: str, style: str = "thin") -> None:
+    """Draw an outline around a block of cells (keeping any borders the cells already have)."""
+    side = Side(style=style, color="000000")
+    rows = list(ws[ref])
+    for r, row in enumerate(rows):
+        for c, cell in enumerate(row):
+            old = cell.border
+            cell.border = Border(
+                left=side if c == 0 else old.left,
+                right=side if c == len(row) - 1 else old.right,
+                top=side if r == 0 else old.top,
+                bottom=side if r == len(rows) - 1 else old.bottom,
+            )
+
+
+def _wrapped_lines(text_value: str, chars: int) -> int:
+    return sum(max(1, -(-len(part) // chars)) for part in (text_value or "").splitlines() or [""])
+
+
 def build_xlsx(po: dict) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = f"PO {po['po_number']}"
-    bold = Font(bold=True)
-    thin = Side(style="thin", color="000000")
+    wb.properties.title = f"Purchase Order {po['po_number']}"
+
+    SZ = 12  # body text size (one size up from the old sheet)
     grey = PatternFill("solid", fgColor="E6E6E6")
+    thin = Side(style="thin", color="000000")
+    grid = Border(left=thin, right=thin, top=thin, bottom=thin)
+    top_wrap = Alignment(wrap_text=True, vertical="top")
+    centre = Alignment(horizontal="center", vertical="center")
 
+    # Columns A-E: Item | Description | Qty | Cost | Amount  (about 7.3 inches wide, so it fits a letter page)
+    for col, width in zip("ABCDE", (20, 52, 8, 13, 15)):
+        ws.column_dimensions[col].width = width
+    ws.sheet_view.showGridLines = False
+
+    def put(ref, value, bold=False, size=SZ, align=None, fill=None, italic=False, fmt=None):
+        cell = ws[ref]
+        cell.value = value
+        cell.font = Font(bold=bold, size=size, italic=italic)
+        if align:
+            cell.alignment = align
+        if fill:
+            cell.fill = fill
+        if fmt:
+            cell.number_format = fmt
+        return cell
+
+    # ---- top: company block (left) and the title with the Date / P.O. No. box (right)
     for n, t in enumerate(COMPANY_LINES):
-        ws.cell(row=1 + n, column=1, value=t).font = Font(bold=(n == 0))
-    ws["D1"] = "Purchase Order"
-    ws["D1"].font = Font(bold=True, size=16)
-    ws["D2"], ws["E2"] = "Date", _date_text(po.get("date"))
-    ws["D3"], ws["E3"] = "P.O. No.", po["po_number"]
-    for ref in ("D2", "D3"):
-        ws[ref].font = bold
+        put(f"A{1 + n}", t, bold=(n == 0), size=SZ + (1 if n == 0 else 0))
+    ws.merge_cells("C1:E2")
+    put("C1", "Purchase Order", bold=True, size=20, align=Alignment(horizontal="right", vertical="center"))
+    put("D3", "Date", bold=True, align=centre, fill=grey)
+    put("E3", "P.O. No.", bold=True, align=centre, fill=grey)
+    put("D4", _date_text(po.get("date")), align=centre)
+    put("E4", po["po_number"], align=centre)
+    for ref in ("D3:E3", "D4:E4", "D3:E4"):
+        _box(ws, ref)
+    ws.row_dimensions[4].height = 20
 
-    ws["A5"], ws["D5"] = "Vendor", "Ship To"
-    ws["A5"].font = ws["D5"].font = bold
-    vendor = [po["vendor_name"]] + [l for l in (po.get("vendor_address") or "").splitlines() if l.strip()]
-    ship = [l for l in (po.get("ship_to") or "").splitlines() if l.strip()]
-    for n in range(max(len(vendor), len(ship))):
-        if n < len(vendor):
-            ws.cell(row=6 + n, column=1, value=vendor[n])
-        if n < len(ship):
-            ws.cell(row=6 + n, column=4, value=ship[n])
+    # ---- Vendor box (A:B) and Ship To box (C:E), same height
+    vendor = [po["vendor_name"]] + [l.strip() for l in (po.get("vendor_address") or "").splitlines() if l.strip()]
+    ship = [l.strip() for l in (po.get("ship_to") or "").splitlines() if l.strip()]
+    need = max(_wrapped_lines("\n".join(vendor), 70), _wrapped_lines("\n".join(ship), 34), 5)
+    top, first, last = 6, 7, 7 + need - 1
+    ws.merge_cells(f"A{top}:B{top}")
+    ws.merge_cells(f"C{top}:E{top}")
+    put(f"A{top}", "Vendor", bold=True, fill=grey, align=Alignment(vertical="center", indent=1))
+    put(f"C{top}", "Ship To", bold=True, fill=grey, align=Alignment(vertical="center", indent=1))
+    ws.merge_cells(f"A{first}:B{last}")
+    ws.merge_cells(f"C{first}:E{last}")
+    put(f"A{first}", "\n".join(vendor), align=Alignment(wrap_text=True, vertical="top", indent=1))
+    put(f"C{first}", "\n".join(ship), align=Alignment(wrap_text=True, vertical="top", indent=1))
+    for r in range(first, last + 1):
+        ws.row_dimensions[r].height = 17
+    for ref in (f"A{top}:B{top}", f"C{top}:E{top}", f"A{top}:B{last}", f"C{top}:E{last}"):
+        _box(ws, ref)
 
-    head = 6 + max(len(vendor), len(ship), 4) + 1
-    for col, label in enumerate(("Item", "Description", "Qty", "Cost", "Amount"), start=1):
-        cell = ws.cell(row=head, column=col, value=label)
-        cell.font, cell.fill = bold, grey
-        cell.alignment = Alignment(horizontal="center")
-        cell.border = Border(top=thin, bottom=thin, left=thin, right=thin)
+    # ---- item table: every cell boxed
+    head = last + 2
+    for col, label in zip("ABCDE", ("Item", "Description", "Qty", "Cost", "Amount")):
+        put(f"{col}{head}", label, bold=True, align=centre, fill=grey).border = grid
+    ws.row_dimensions[head].height = 20
     r = head + 1
     for line in po["lines"]:
-        ws.cell(row=r, column=1, value=line.get("item") or "")
-        ws.cell(row=r, column=2, value=line["description"]).alignment = Alignment(wrap_text=True, vertical="top")
-        ws.cell(row=r, column=3, value=int(line["quantity"]))
-        ws.cell(row=r, column=4, value=float(_money(line["rate"]))).number_format = "#,##0.00"
-        ws.cell(row=r, column=5, value=float(line_amount(line))).number_format = "#,##0.00"
+        put(f"A{r}", line.get("item") or "", align=top_wrap)
+        put(f"B{r}", line["description"], align=top_wrap)
+        put(f"C{r}", int(line["quantity"]), align=Alignment(horizontal="right", vertical="top"))
+        put(f"D{r}", float(_money(line["rate"])), align=Alignment(horizontal="right", vertical="top"), fmt="#,##0.00")
+        put(f"E{r}", float(line_amount(line)), align=Alignment(horizontal="right", vertical="top"), fmt="#,##0.00")
+        for col in "ABCDE":
+            ws[f"{col}{r}"].border = grid
+        ws.row_dimensions[r].height = 17 * max(_wrapped_lines(str(line["description"]), 46), _wrapped_lines(str(line.get("item") or ""), 18))
         r += 1
-    ws.cell(row=r + 1, column=4, value="Total").font = Font(bold=True, size=12)
-    tot = ws.cell(row=r + 1, column=5, value=float(po_total(po["lines"])))
-    tot.font, tot.number_format = Font(bold=True, size=12), '"$"#,##0.00'
+    last_row = r - 1
+
+    # ---- total, boxed, under the Amount column
+    r += 0
+    ws.merge_cells(f"C{r}:D{r}")
+    put(f"C{r}", "Total", bold=True, size=SZ + 2, align=Alignment(horizontal="right", vertical="center", indent=1))
+    put(f"E{r}", float(po_total(po["lines"])), bold=True, size=SZ + 2, align=Alignment(horizontal="right", vertical="center"), fmt='"$"#,##0.00')
+    ws.row_dimensions[r].height = 22
+    _box(ws, f"C{r}:E{r}", "medium")
+    last_row = r
+
+    # ---- note, in its own box
     if po.get("note"):
-        ws.cell(row=r + 3, column=1, value=f"Note: {po['note']}")
+        r += 2
+        ws.merge_cells(f"A{r}:E{r}")
+        put(f"A{r}", "Note", bold=True, fill=grey, align=Alignment(vertical="center", indent=1))
+        ws.merge_cells(f"A{r + 1}:E{r + 1}")
+        put(f"A{r + 1}", str(po["note"]), italic=True, align=Alignment(wrap_text=True, vertical="top", indent=1))
+        ws.row_dimensions[r + 1].height = 17 * _wrapped_lines(str(po["note"]), 95)
+        _box(ws, f"A{r}:E{r}")
+        _box(ws, f"A{r}:E{r + 1}")
+        last_row = r + 1
 
-    from copy import copy
+    # ---- page setup: US Letter, portrait, one page wide, repeat the table heading on every page
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_margins.left = ws.page_margins.right = 0.5
+    ws.page_margins.top = 0.6
+    ws.page_margins.bottom = 0.7
+    ws.print_options.horizontalCentered = True
+    ws.print_area = f"A1:E{last_row}"
+    ws.print_title_rows = f"{head}:{head}"
+    ws.oddFooter.center.text = f"Purchase Order {po['po_number']}  -  Page &P of &N"
 
-    for row in ws.iter_rows():
-        for cell in row:
-            f = copy(cell.font)
-            f.size = (f.size or 11) + 1  # one size bigger than before
-            cell.font = f
-    for col, width in zip("ABCDE", (20, 62, 8, 12, 14)):
-        ws.column_dimensions[col].width = width
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
