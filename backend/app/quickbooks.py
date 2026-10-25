@@ -614,7 +614,24 @@ def m_receiveResponseXML(db: Session, a: dict) -> str:
         return _res("receiveResponseXML", -1)
     if a.get("hresult"):
         # QuickBooks or the Web Connector itself could not run the request (file closed, a dialog is open ...)
-        _add_error(db, run.id, None, f"{a.get('hresult')}: {a.get('message', '')}", "hresult")
+        hr = str(a.get("hresult"))
+        plan, i = _j(run.plan), run.step
+        step = plan[i] if 0 <= i < len(plan) else {}
+        ent = step.get("entity") or ("TxnDeleted" if step.get("t") == "del" else None)
+        _add_error(db, run.id, ent, f"{hr}: {a.get('message', '')}", "hresult")
+        if hr.lower() == "0x80040400" and ent:
+            # QuickBooks could not understand our request for this one record type. Note it, skip it and carry
+            # on, so one bad request does not stop everything after it (and fail the same way on every retry).
+            if step.get("t") == "q":
+                db.execute(
+                    text(
+                        "insert into qb_sync_state (entity, last_error) values (:e, :m) "
+                        "on conflict (entity) do update set last_error = excluded.last_error"
+                    ),
+                    {"e": ent, "m": f"{hr}: {a.get('message', '')}"[:500]},
+                )
+            percent = _advance(db, run, plan, i, _j(run.counts) or {}, failed=True)
+            return _res("receiveResponseXML", percent)
         db.commit()
         return _res("receiveResponseXML", -1)
     try:
@@ -826,14 +843,14 @@ def qwc(request: Request):
     if not username or not os.environ.get("QBWC_PASSWORD"):
         raise HTTPException(409, "Set QBWC_USERNAME and QBWC_PASSWORD on the API first, then download this file.")
     base = _public_url(request)
-    owner = str(uuid.uuid5(uuid.NAMESPACE_URL, "ei-motorsports/qbwc/owner")).upper()
-    file_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "ei-motorsports/qbwc/file")).upper()
+    owner = str(uuid.uuid5(uuid.NAMESPACE_URL, "ei-motorsports/qbwc/owner/v2")).upper()
+    file_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "ei-motorsports/qbwc/file/v2")).upper()
     xml = f"""<?xml version="1.0"?>
 <QBWCXML>
   <AppName>E&amp;I Motorsports</AppName>
   <AppID></AppID>
   <AppURL>{escape(base)}/qbwc</AppURL>
-  <AppDescription>Read-only copy of QuickBooks data for the E&amp;I Motorsports back office.</AppDescription>
+  <AppDescription>Copies QuickBooks data to the E&amp;I Motorsports back office. It only reads your data and never changes your books.</AppDescription>
   <AppSupport>{escape(base)}/qbwc</AppSupport>
   <UserName>{escape(username)}</UserName>
   <OwnerID>{{{owner}}}</OwnerID>
