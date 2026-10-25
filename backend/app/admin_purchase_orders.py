@@ -9,8 +9,15 @@ Mounted at /admin/purchase-orders/* (owner / admin, plus staff holding "inventor
   DELETE /purchase-orders/distributors/{id}   delete one (old POs keep their own copy of the vendor)
   POST   /purchase-orders                  create a PO from the ticked parts
   GET    /purchase-orders                  history, searchable (PO number, vendor, part number, SKU, title)
+  GET    /purchase-orders/defaults         the default Ship To address and the next unused PO number
   GET    /purchase-orders/{id}             one PO with its lines
+  PUT    /purchase-orders/{id}             edit a PO (vendor, ship-to, note, open lines, and its PO number)
+  PUT    /purchase-orders/{id}/sent        mark it sent to the distributor (or not)
+  DELETE /purchase-orders/{id}             delete a PO (parts that are on no other open PO stop being Backordered)
   GET    /purchase-orders/{id}/export?format=pdf|xlsx     download it again, any time
+
+The "Cost" on a PO line is what you pay the distributor. It starts from the product's cost (admin only, never shown
+to customers) and can be changed per PO line.
 
 Creating a PO also marks each part on it Backordered (on_order = true), because a part can only be
 Backordered once it is on a PO. That is ticked by default and can be un-ticked on the Stock tab.
@@ -18,6 +25,7 @@ The PO's "Item" column is the product's manufacturer part number (the field on t
 "Manufacturer Part Number" item specific when that field is empty), copied onto the PO when it is made.
 """
 import logging
+import time
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -25,6 +33,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, current_user, needs, require_route_access
@@ -53,6 +62,65 @@ def _local_date(ts) -> date:
         return ts.astimezone(ZoneInfo("America/Detroit")).date()
     except Exception:
         return ts.date()
+
+
+# Who made a PO: their full name, not their email. Names live on the staff accounts in Supabase, so they are
+# looked up (and kept for a few minutes). If that lookup isn't possible, the email is shown instead.
+_NAMES: dict = {"at": 0.0, "map": {}}
+
+
+def _staff_names() -> dict[str, str]:
+    now = time.time()
+    if now - _NAMES["at"] < 300:
+        return _NAMES["map"]
+    found: dict[str, str] = {}
+    try:
+        from app.admin_users import _call
+
+        for page in range(1, 21):
+            users = (_call("GET", f"/users?page={page}&per_page=200").get("users")) or []
+            for u in users:
+                um = u.get("user_metadata") or {}
+                name = (um.get("display_name") or um.get("full_name") or "").strip()
+                if u.get("email") and name:
+                    found[u["email"].strip().lower()] = name
+            if len(users) < 200:
+                break
+        _NAMES.update(at=now, map=found)
+    except Exception:
+        log.warning("Could not look up staff names for purchase orders; showing emails instead")
+        _NAMES["at"] = now - 240  # try again in about a minute
+    return _NAMES["map"]
+
+
+def _who(email: Optional[str]) -> Optional[str]:
+    if not email:
+        return None
+    return _staff_names().get(email.strip().lower()) or email
+
+
+def _free_number(db: Session) -> int:
+    """The next PO number from the sequence that no purchase order uses yet."""
+    for _ in range(1000):
+        n = db.execute(text("select nextval('public.po_number_seq')")).scalar()
+        if not db.execute(text("select 1 from po_headers where po_number = :n"), {"n": n}).first():
+            return int(n)
+    raise HTTPException(500, "Couldn't find an unused PO number. Nothing was ordered.")
+
+
+def _release_parts(db: Session, product_ids) -> None:
+    """Parts that are no longer on any open purchase order stop being Backordered (and lose their date)."""
+    ids = sorted({int(i) for i in product_ids})
+    if not ids:
+        return
+    db.execute(
+        text(
+            "update products p set on_order = false, expected_date = null, updated_at = now() "
+            "where p.id = any(cast(:ids as bigint[])) "
+            "and not exists (select 1 from po_lines l where l.product_id = p.id and l.received_at is null)"
+        ),
+        {"ids": ids},
+    )
 
 
 # --------------------------------------------------------------------------
@@ -199,7 +267,7 @@ class PoLineIn(BaseModel):
 
 class PoIn(BaseModel):
     distributor_id: int
-    ship_to: Optional[str] = Field(None, max_length=400)
+    ship_to: Optional[str] = Field(None, max_length=400)   # empty text = no ship-to; missing = the default address
     note: Optional[str] = Field(None, max_length=300)
     expected_date: Optional[date] = None   # when the parts are expected; sets the backorder date on each part
     lines: list[PoLineIn] = Field(..., min_length=1, max_length=200)
@@ -209,7 +277,7 @@ def _po_detail(db: Session, po_id: int) -> dict:
     h = db.execute(
         text(
             "select id, po_number, distributor_id, vendor_name, vendor_address, ship_to, note, total_cents, "
-            "       created_by, created_at from po_headers where id = :id"
+            "       created_by, created_at, sent_at, updated_at from po_headers where id = :id"
         ),
         {"id": po_id},
     ).first()
@@ -227,6 +295,7 @@ def _po_detail(db: Session, po_id: int) -> dict:
     ]
     return {
         **dict(h._mapping),
+        "created_by_name": _who(h.created_by),
         "date": _local_date(h.created_at).isoformat(),
         "total": h.total_cents / 100,
         "lines": out_lines,
@@ -278,10 +347,11 @@ def create_po(body: PoIn, db: Session = Depends(get_db), user: AuthUser = Depend
         total = po_total(rows)
         header = db.execute(
             text(
-                "insert into po_headers (distributor_id, vendor_name, vendor_address, ship_to, note, total_cents, created_by) "
-                "values (:d, :vn, :va, :st, :note, :tc, :by) returning id, po_number"
+                "insert into po_headers (po_number, distributor_id, vendor_name, vendor_address, ship_to, note, total_cents, created_by) "
+                "values (:pn, :d, :vn, :va, :st, :note, :tc, :by) returning id, po_number"
             ),
             {
+                "pn": _free_number(db),
                 "d": dist.id,
                 "vn": dist.name,
                 "va": dist.address,
@@ -347,7 +417,7 @@ def list_pos(
     rows = db.execute(
         text(
             f"""
-            select h.id, h.po_number, h.vendor_name, h.total_cents, h.created_by, h.created_at,
+            select h.id, h.po_number, h.vendor_name, h.total_cents, h.created_by, h.created_at, h.sent_at,
                    (select count(*) from po_lines l where l.po_id = h.id) as line_count,
                    (select count(*) from po_lines l where l.po_id = h.id and l.received_at is null) as open_lines
             from po_headers h {where} order by h.po_number desc limit :limit offset :offset
@@ -355,13 +425,219 @@ def list_pos(
         ),
         params,
     ).all()
-    return {"total": total, "items": [dict(r._mapping) for r in rows]}
+    items = []
+    for r in rows:
+        d = dict(r._mapping)
+        d["created_by_name"] = _who(d["created_by"])
+        items.append(d)
+    return {"total": total, "items": items}
+
+
+@router.get("/defaults")
+@needs("inventory.purchase")
+def defaults(db: Session = Depends(get_db)):
+    """What the Create / Edit screens fill in: the usual Ship To address, and a PO number nobody uses yet."""
+    nxt = db.execute(text("select coalesce(max(po_number), 0) + 1 from po_headers")).scalar()
+    return {"ship_to": DEFAULT_SHIP_TO, "next_po_number": int(nxt)}
 
 
 @router.get("/{po_id}")
 @needs("inventory.purchase")
 def get_po(po_id: int, db: Session = Depends(get_db)):
     return _po_detail(db, po_id)
+
+
+class PoEditLine(BaseModel):
+    line_id: Optional[int] = None          # an existing open line; missing = a part added now
+    product_id: int
+    quantity: int = Field(..., ge=1, le=MAX_QTY)
+    rate: Optional[float] = Field(None, ge=0, le=1_000_000)   # the cost; empty = keep (or the product's cost for a new line)
+    description: Optional[str] = Field(None, max_length=250)
+
+
+class PoEdit(BaseModel):
+    distributor_id: Optional[int] = None
+    po_number: Optional[int] = Field(None, ge=1, le=99_999_999)   # a NEW number; it must not be used by another PO
+    ship_to: Optional[str] = Field(None, max_length=400)          # missing = unchanged, empty = none
+    note: Optional[str] = Field(None, max_length=300)
+    expected_date: Optional[date] = None
+    lines: list[PoEditLine] = Field(..., max_length=200)          # the lines that are still open; received lines are locked
+
+
+@router.put("/{po_id}")
+@needs("inventory.purchase")
+def edit_po(po_id: int, body: PoEdit, db: Session = Depends(get_db)):
+    try:
+        h = db.execute(
+            text("select id, po_number, distributor_id, sent_at from po_headers where id = :id for update"),
+            {"id": po_id},
+        ).first()
+        if not h:
+            db.rollback()
+            raise HTTPException(404, "That purchase order doesn't exist (it may have been deleted).")
+
+        renumbered = body.po_number is not None and body.po_number != h.po_number
+        if renumbered and db.execute(
+            text("select 1 from po_headers where po_number = :n and id <> :id"), {"n": body.po_number, "id": po_id}
+        ).first():
+            db.rollback()
+            raise HTTPException(409, f"PO number {body.po_number} is already used by another purchase order. Pick an unused one.")
+
+        sets: dict = {}
+        if body.distributor_id is not None and body.distributor_id != h.distributor_id:
+            dist = db.execute(
+                text("select id, name, address from po_distributors where id = :id"), {"id": body.distributor_id}
+            ).first()
+            if not dist:
+                db.rollback()
+                raise HTTPException(404, "That distributor no longer exists.")
+            sets.update(distributor_id=dist.id, vendor_name=dist.name, vendor_address=dist.address)
+        if body.ship_to is not None:
+            sets["ship_to"] = body.ship_to.strip() or None
+        if body.note is not None:
+            sets["note"] = body.note.strip() or None
+        if renumbered:
+            sets["po_number"] = body.po_number
+            sets["sent_at"] = None   # a new number is a new document to send
+
+        existing = db.execute(
+            text("select id, product_id, quantity, rate, received_at from po_lines where po_id = :id order by id for update"),
+            {"id": po_id},
+        ).all()
+        open_by_id = {l.id: l for l in existing if l.received_at is None}
+        received_count = sum(1 for l in existing if l.received_at is not None)
+
+        wanted_products: set[int] = set()
+        for l in body.lines:
+            if l.line_id is not None and l.line_id not in open_by_id:
+                db.rollback()
+                raise HTTPException(409, "A line on this PO was received or changed meanwhile. Reload the PO and try again.")
+            if l.product_id in wanted_products:
+                db.rollback()
+                raise HTTPException(400, "The same part is on this PO twice. Combine them into one line.")
+            wanted_products.add(l.product_id)
+        if not body.lines and received_count == 0:
+            db.rollback()
+            raise HTTPException(400, "A purchase order needs at least one part. To get rid of it, delete the PO instead.")
+
+        prods = {
+            r.id: r
+            for r in db.execute(
+                text(f"select p.id, p.title, p.cost, {_MPN} as part_number from products p "
+                     "where p.id = any(cast(:ids as bigint[])) order by p.id for update of p"),
+                {"ids": sorted(wanted_products) or [0]},
+            ).all()
+        }
+        if len(prods) != len(wanted_products):
+            db.rollback()
+            raise HTTPException(404, "One of those parts no longer exists. Nothing was changed.")
+
+        kept_ids = set()
+        added: list[int] = []
+        for l in body.lines:
+            if l.line_id is not None:
+                kept_ids.add(l.line_id)
+                old = open_by_id[l.line_id]
+                if old.product_id != l.product_id:
+                    db.rollback()
+                    raise HTTPException(400, "A line's part can't be swapped. Remove the line and add the other part.")
+                db.execute(
+                    text("update po_lines set quantity = :q, rate = coalesce(cast(:r as numeric), rate), "
+                         "description = coalesce(nullif(btrim(cast(:d as text)), ''), description) where id = :id"),
+                    {"q": l.quantity, "r": l.rate, "d": l.description, "id": l.line_id},
+                )
+            else:
+                p = prods[l.product_id]
+                rate = l.rate if l.rate is not None else (float(p.cost) if p.cost is not None else 0.0)
+                db.execute(
+                    text("insert into po_lines (po_id, product_id, item, description, quantity, rate) "
+                         "values (:po, :p, :item, :desc, :q, :rate)"),
+                    {"po": po_id, "p": l.product_id, "item": p.part_number,
+                     "desc": ((l.description or "").strip() or p.title or "")[:250], "q": l.quantity, "rate": rate},
+                )
+                added.append(l.product_id)
+
+        removed = [open_by_id[i].product_id for i in open_by_id if i not in kept_ids]
+        for i in open_by_id:
+            if i not in kept_ids:
+                db.execute(text("delete from po_lines where id = :id"), {"id": i})
+
+        totals = db.execute(
+            text("select quantity, rate from po_lines where po_id = :id"), {"id": po_id}
+        ).all()
+        sets["total_cents"] = int(po_total([{"quantity": t.quantity, "rate": t.rate} for t in totals]) * 100)
+        cols = ", ".join(f"{k} = :{k}" for k in sets)  # keys are set above in this function, never from the client
+        db.execute(text(f"update po_headers set {cols}, updated_at = now() where id = :id"), {**sets, "id": po_id})
+
+        if added:
+            db.execute(
+                text("update products set on_order = true, updated_at = now() where id = any(cast(:ids as bigint[]))"),
+                {"ids": added},
+            )
+        if body.expected_date and wanted_products:
+            db.execute(
+                text("update products set expected_date = :d, updated_at = now() "
+                     "where id = any(cast(:ids as bigint[])) and on_order"),
+                {"d": body.expected_date, "ids": sorted(wanted_products)},
+            )
+        _release_parts(db, removed)
+        db.commit()
+    except HTTPException:
+        raise
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "That PO number is already used by another purchase order. Pick an unused one.")
+    except Exception as exc:
+        db.rollback()
+        log.exception("Editing a purchase order failed")
+        raise HTTPException(500, f"The purchase order was not changed. ({type(exc).__name__})")
+
+    po = _po_detail(db, po_id)
+    po["renumbered"] = bool(renumbered)
+    return po
+
+
+class SentIn(BaseModel):
+    sent: bool
+
+
+@router.put("/{po_id}/sent")
+@needs("inventory.purchase")
+def mark_sent(po_id: int, body: SentIn, db: Session = Depends(get_db)):
+    got = db.execute(
+        text("update po_headers set sent_at = case when :s then now() else null end where id = :id returning sent_at"),
+        {"s": body.sent, "id": po_id},
+    ).first()
+    if not got:
+        db.rollback()
+        raise HTTPException(404, "That purchase order doesn't exist.")
+    db.commit()
+    return {"id": po_id, "sent_at": got.sent_at}
+
+
+@router.delete("/{po_id}")
+@needs("inventory.purchase")
+def delete_po(po_id: int, db: Session = Depends(get_db)):
+    """Delete a PO. Stock counts are never touched. Parts that were only on this PO stop being Backordered."""
+    try:
+        h = db.execute(
+            text("select id, po_number from po_headers where id = :id for update"), {"id": po_id}
+        ).first()
+        if not h:
+            db.rollback()
+            raise HTTPException(404, "That purchase order doesn't exist (it may already be deleted).")
+        lines = db.execute(text("select product_id, received_at from po_lines where po_id = :id"), {"id": po_id}).all()
+        open_products = [l.product_id for l in lines if l.received_at is None]
+        db.execute(text("delete from po_headers where id = :id"), {"id": po_id})  # its lines go with it
+        _release_parts(db, open_products)
+        db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        log.exception("Deleting a purchase order failed")
+        raise HTTPException(500, f"The purchase order was not deleted. ({type(exc).__name__})")
+    return {"ok": True, "po_number": h.po_number, "received_lines": sum(1 for l in lines if l.received_at is not None)}
 
 
 @router.get("/{po_id}/export")

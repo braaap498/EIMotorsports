@@ -1,13 +1,13 @@
 """
 Purchase order files: a PDF laid out like the QuickBooks purchase order (company block top left,
-Date / P.O. No. box top right, Vendor and Ship To boxes, then Item / Description / Qty / Rate / Amount
+Date / P.O. No. box top right, Vendor and Ship To boxes, then Item / Description / Qty / Cost / Amount
 with the Total at the bottom), and an Excel file with the same information.
 
 Needs two packages in requirements.txt:   reportlab    openpyxl
 
 build_pdf(po) and build_xlsx(po) both take the same dict (see _example in the tests) and return bytes:
     po_number, date (a date), vendor_name, vendor_address, ship_to, note,
-    lines: [{item, description, quantity, rate}]
+    lines: [{item, description, quantity, rate}  (rate is printed under the heading "Cost")]
 """
 import io
 from datetime import date
@@ -82,19 +82,19 @@ def build_pdf(po: dict) -> bytes:
     total = po_total(lines)
 
     def page_one_header():
-        c.setFont("Times-Roman", 10.5)
+        c.setFont("Times-Roman", 11.5)
         for n, t in enumerate(COMPANY_LINES):
             c.drawString(X(38), Y(48 + (0 if n == 0 else 28 + (n - 1) * 16)), t)
-        c.setFont("Helvetica-Bold", 18.5)
+        c.setFont("Helvetica-Bold", 19.5)
         c.drawString(X(404), Y(57), "Purchase Order")
         # date / PO number box
         box(428, 64, 560, 108)
         hline(428, 560, 88)
         vline(493, 64, 108)
-        c.setFont("Helvetica", 8.5)
+        c.setFont("Helvetica", 9.5)
         c.drawCentredString(X(460), Y(80), "Date")
         c.drawCentredString(X(526), Y(80), "P.O. No.")
-        c.setFont("Times-Roman", 8.5)
+        c.setFont("Times-Roman", 9.5)
         c.drawCentredString(X(460), Y(101), _date_text(po.get("date")))
         c.drawCentredString(X(526), Y(101), str(po["po_number"]))
         # vendor and ship to
@@ -104,23 +104,23 @@ def build_pdf(po: dict) -> bytes:
         ):
             box(x1, 126, x2, 231)
             hline(x1, x2, 147)
-            c.setFont("Helvetica", 8.5)
+            c.setFont("Helvetica", 9.5)
             c.drawString(X(x1 + 12), Y(140), title)
-            c.setFont("Times-Roman", 8)
+            c.setFont("Times-Roman", 9)
             yy = 160
             for raw in body.splitlines():
-                for part in simpleSplit(raw, "Times-Roman", 8, X(x2 - x1 - 12)) or [""]:
+                for part in simpleSplit(raw, "Times-Roman", 9, X(x2 - x1 - 12)) or [""]:
                     if yy > 226:
                         break
                     c.drawString(X(x1 + 3), Y(yy), part)
-                    yy += 10.5
+                    yy += 11.5
         return 300
 
     def table_frame(top, last):
         head_bottom = top + 24
         box(TX1, top, TX2, head_bottom, fill=0.9)
-        c.setFont("Helvetica", 8.5)
-        for label, x1, x2 in zip(("Item", "Description", "Qty", "Rate", "Amount"), COLS, COLS[1:]):
+        c.setFont("Helvetica", 9.5)
+        for label, x1, x2 in zip(("Item", "Description", "Qty", "Cost", "Amount"), COLS, COLS[1:]):
             c.drawCentredString(X((x1 + x2) / 2), Y(top + 15), label)
         for x in COLS[1:-1]:
             vline(x, top, BODY_BOTTOM)
@@ -130,19 +130,19 @@ def build_pdf(po: dict) -> bytes:
         if last:
             box(TX1, BODY_BOTTOM, TX2, TOTAL_BOTTOM)
             vline(367, BODY_BOTTOM, TOTAL_BOTTOM)
-            c.setFont("Helvetica-Bold", 13)
+            c.setFont("Helvetica-Bold", 14)
             c.drawString(X(380), Y(718), "Total")
-            c.setFont("Times-Roman", 8.5)
+            c.setFont("Times-Roman", 9.5)
             c.drawRightString(X(551), Y(718), f"${total:,.2f}")
         return head_bottom
 
-    LH = 10.5  # row line height
+    LH = 11.5  # row line height
 
     # Work out which rows go on which page first, so the Total is only drawn on the last page.
     desc_w = X(COLS[2] - COLS[1] - 8)
 
     def wrap(line):
-        return simpleSplit(str(line["description"]), "Times-Roman", 8, desc_w) or [""]
+        return simpleSplit(str(line["description"]), "Times-Roman", 9, desc_w) or [""]
 
     pages: list[list[dict]] = [[]]
     first_top = 300 + 24
@@ -165,11 +165,11 @@ def build_pdf(po: dict) -> bytes:
             top = page_one_header()
         else:
             top = 70
-            c.setFont("Helvetica", 9)
+            c.setFont("Helvetica", 10)
             c.drawString(X(36), Y(52), f"Purchase Order {po['po_number']} (continued, page {n + 1})")
         y = table_frame(top, last) + 14
         for line, wrapped in rows:
-            c.setFont("Times-Roman", 8)
+            c.setFont("Times-Roman", 9)
             c.drawString(X(COLS[0] + 3), Y(y), str(line.get("item") or ""))
             for k, part in enumerate(wrapped):
                 c.drawString(X(COLS[1] + 4), Y(y + k * LH), part)
@@ -178,7 +178,7 @@ def build_pdf(po: dict) -> bytes:
             c.drawRightString(X(COLS[5] - 4), Y(y), f"{line_amount(line):,.2f}")
             y += max(len(wrapped), 1) * LH + 3
         if last and po.get("note"):
-            c.setFont("Times-Italic", 8)
+            c.setFont("Times-Italic", 9)
             c.drawString(X(COLS[1] + 4), Y(y + 6), f"Note: {po['note']}"[:110])
         c.showPage()
     c.save()
@@ -216,7 +216,7 @@ def build_xlsx(po: dict) -> bytes:
             ws.cell(row=6 + n, column=4, value=ship[n])
 
     head = 6 + max(len(vendor), len(ship), 4) + 1
-    for col, label in enumerate(("Item", "Description", "Qty", "Rate", "Amount"), start=1):
+    for col, label in enumerate(("Item", "Description", "Qty", "Cost", "Amount"), start=1):
         cell = ws.cell(row=head, column=col, value=label)
         cell.font, cell.fill = bold, grey
         cell.alignment = Alignment(horizontal="center")
@@ -235,7 +235,14 @@ def build_xlsx(po: dict) -> bytes:
     if po.get("note"):
         ws.cell(row=r + 3, column=1, value=f"Note: {po['note']}")
 
-    for col, width in zip("ABCDE", (18, 60, 8, 12, 14)):
+    from copy import copy
+
+    for row in ws.iter_rows():
+        for cell in row:
+            f = copy(cell.font)
+            f.size = (f.size or 11) + 1  # one size bigger than before
+            cell.font = f
+    for col, width in zip("ABCDE", (20, 62, 8, 12, 14)):
         ws.column_dimensions[col].width = width
     out = io.BytesIO()
     wb.save(out)

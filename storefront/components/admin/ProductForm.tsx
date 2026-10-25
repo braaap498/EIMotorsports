@@ -289,6 +289,11 @@ export default function ProductForm({ productId }: { productId?: number }) {
           value={vals[f.key] ?? ""}
           onChange={(e) => set(f.key, e.target.value)}
         />
+        {f.key === "cost" && (
+          <span className="mt-1 block text-xs font-normal text-gray-500">
+            What you pay for this part. Admin only: customers never see it anywhere on the website. It is the starting cost on purchase orders.
+          </span>
+        )}
         {f.key === "manufacturer_part_number" && (
           <label className="mt-1 flex items-center gap-2 text-xs font-normal text-gray-600">
             <input
