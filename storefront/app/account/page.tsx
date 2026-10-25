@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../../components/site/AuthProvider";
 import { storeApi } from "../../lib/storeApi";
 
@@ -17,6 +17,12 @@ type Address = {
   country: string;
   phone: string | null;
   is_default: boolean;
+};
+type Prefill = {
+  found: boolean;
+  full_name?: string;
+  phone?: string;
+  address?: Omit<Address, "id" | "kind" | "is_default" | "line2" | "phone"> & { line2: string; phone: string } | null;
 };
 type Draft = Omit<Address, "id" | "line2" | "phone"> & { id?: number; line2: string; phone: string };
 
@@ -133,6 +139,7 @@ function AddressSection({
   fullName,
   onChanged,
   copyFrom,
+  suggested,
 }: {
   kind: Kind;
   title: string;
@@ -141,8 +148,19 @@ function AddressSection({
   fullName: string;
   onChanged: () => void;
   copyFrom?: Address; // a shipping address that can be reused as billing
+  suggested?: Draft | null; // details from an earlier purchase, opened in the form to review
 }) {
   const [editing, setEditing] = useState<Draft | null>(null);
+  const [fromPast, setFromPast] = useState(false);
+  const offered = useRef(false);
+
+  useEffect(() => {
+    if (suggested && !offered.current && addresses.length === 0) {
+      offered.current = true;
+      setEditing(suggested);
+      setFromPast(true);
+    }
+  }, [suggested, addresses.length]);
   const [removing, setRemoving] = useState<number | null>(null);
   const [error, setError] = useState("");
 
@@ -207,6 +225,12 @@ function AddressSection({
 
       {editing ? (
         <div className="mt-4">
+          {fromPast && !editing.id && (
+            <p className="mb-3 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+              We found the details from your earlier order with us. Check them, change anything that is out of date,
+              then save to add this address to your account.
+            </p>
+          )}
           <AddressForm
             key={editing.id ?? "new"}
             initial={editing}
@@ -248,6 +272,7 @@ export default function AccountPage() {
   const { user, ready, openAuth } = useAuth();
   const [addresses, setAddresses] = useState<Address[] | null>(null);
   const [error, setError] = useState("");
+  const [prefill, setPrefill] = useState<Prefill | null>(null);
 
   const load = useCallback(() => {
     storeApi<Address[]>("/addresses")
@@ -262,8 +287,20 @@ export default function AccountPage() {
     if (user) load();
   }, [user, load]);
 
+  // A new account whose email is already in our customer records: offer those details to review.
+  // (The server only answers once the email is confirmed and the account has no saved address yet.)
+  const needsPrefill = addresses !== null && addresses.length === 0;
+  useEffect(() => {
+    if (!user || !needsPrefill || prefill) return;
+    storeApi<Prefill>("/addresses/prefill")
+      .then((p) => {
+        if (p.found) setPrefill(p);
+      })
+      .catch(() => {}); // a suggestion is a nicety; never block the page
+  }, [user, needsPrefill, prefill]);
+
   const meta = user?.user_metadata as { full_name?: string } | undefined;
-  const fullName = meta?.full_name ?? "";
+  const fullName = meta?.full_name || prefill?.full_name || "";
 
   if (!ready) return <main className="mx-auto max-w-3xl px-4 py-10 text-gray-600">Loading…</main>;
 
@@ -304,6 +341,13 @@ export default function AccountPage() {
             addresses={shipping}
             fullName={fullName}
             onChanged={load}
+            suggested={
+              prefill?.address
+                ? { ...blank("shipping", fullName), ...prefill.address, kind: "shipping", is_default: true }
+                : prefill
+                  ? { ...blank("shipping", fullName), phone: prefill.phone ?? "", is_default: true }
+                  : null
+            }
           />
           <AddressSection
             kind="billing"

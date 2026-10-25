@@ -9,6 +9,7 @@ Mounted at /store/*.
   POST   /store/garage          signed-in customer
   DELETE /store/garage/{id}     signed-in customer
   GET    /store/addresses       signed-in customer (shipping and billing addresses)
+  GET    /store/addresses/prefill  signed-in customer (details from an earlier purchase or import, to review)
   POST   /store/addresses       signed-in customer
   POST   /store/addresses/{id}  signed-in customer (edit)
   POST   /store/addresses/{id}/default   signed-in customer
@@ -17,6 +18,7 @@ Mounted at /store/*.
 Garage routes use the Supabase login (any signed-in user, not just staff) and
 only ever touch rows belonging to the caller's own user id.
 """
+import json
 import re
 from typing import Literal, Optional
 
@@ -25,6 +27,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
+from app.admin_users import _call as _auth_admin_call
 from app.auth import AuthUser, current_user
 from app.database import get_db
 from app.images import card_image
@@ -373,6 +376,69 @@ def addresses_list(user: AuthUser = Depends(current_user), db: Session = Depends
         {"uid": user.user_id},
     ).all()
     return [dict(r._mapping) for r in rows]
+
+
+@router.get("/addresses/prefill")
+def address_prefill(user: AuthUser = Depends(current_user), db: Session = Depends(get_db)):
+    """
+    Suggested details for a brand-new account whose email already exists in `customers` (a guest checkout
+    or a QuickBooks import). Only offered when:
+      - the account has no saved addresses yet, and
+      - the email address is CONFIRMED (a link in the confirmation email was clicked), so a stranger who
+        merely types somebody else's email can never see that person's name, phone or address.
+    Nothing is saved here: the account page shows the details in the address form to review and edit.
+    """
+    none = {"found": False}
+    email = (user.email or "").strip().lower()
+    if not email:
+        return none
+    if db.execute(
+        text("select 1 from customer_addresses where user_id = cast(:uid as uuid) limit 1"), {"uid": user.user_id}
+    ).first():
+        return none
+    try:
+        auth_user = _auth_admin_call("GET", f"/users/{user.user_id}")
+    except HTTPException:
+        return none  # can't prove the email is confirmed, so offer nothing
+    if not (auth_user.get("email_confirmed_at") or auth_user.get("confirmed_at")):
+        return none
+    row = db.execute(
+        text(
+            "select full_name, phone, last_shipping_address from customers "
+            "where lower(email) = :e and (user_id is null or user_id = cast(:uid as uuid)) limit 1"
+        ),
+        {"e": email, "uid": user.user_id},
+    ).first()
+    if row is None:
+        return none
+    addr = row.last_shipping_address
+    if isinstance(addr, str):
+        try:
+            addr = json.loads(addr)
+        except ValueError:
+            addr = None
+    addr = addr if isinstance(addr, dict) else {}
+
+    def clean(v) -> str:
+        return str(v or "").strip()
+
+    name = clean(row.full_name) or clean(addr.get("full_name"))
+    phone = clean(row.phone) or clean(addr.get("phone"))
+    address = None
+    if clean(addr.get("line1")):
+        address = {
+            "full_name": clean(addr.get("full_name")) or name,
+            "line1": clean(addr.get("line1")),
+            "line2": clean(addr.get("line2")),
+            "city": clean(addr.get("city")),
+            "region": clean(addr.get("region")),
+            "postal_code": clean(addr.get("postal_code")),
+            "country": clean(addr.get("country")).upper()[:2] or "US",
+            "phone": clean(addr.get("phone")) or phone,
+        }
+    if not (name or phone or address):
+        return none
+    return {"found": True, "full_name": name, "phone": phone, "address": address}
 
 
 @router.post("/addresses", status_code=201)
