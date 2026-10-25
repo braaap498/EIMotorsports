@@ -890,7 +890,7 @@ def _list_customers_slow(q, source, sort, direction, page, refresh, db: Session)
 
 
 # ----------------------------------------------------------------- export
-EXPORT_COLUMNS = ["Type", "Name", "Email", "Phone", "Status", "Signed up", "Last sign-in", "Address"]
+EXPORT_COLUMNS = ["Type", "Name", "Email", "Phone", "Status", "Signed up", "Last purchase", "Last sign-in", "Address"]
 
 
 def _fmt_date(v) -> str:
@@ -907,8 +907,8 @@ def _fmt_date(v) -> str:
 _EXPORT_GROUPS = {"all": "All customers", "website": "Website", "quickbooks": "QuickBooks", "masked": "QuickBooks (Masked)"}
 
 
-def _export_rows(db: Session, source: str = "all") -> tuple[list[list[str]], int, int, list[str]]:
-    """Customers for the export, grouped exactly like the filter buttons on the Customers tab.
+def _export_rows_slow(db: Session, source: str = "all") -> tuple[list[list[str]], int, int, list[str]]:
+    """The fallback export, used until customers_sync.sql has been run. Customers for the export, grouped like the filter buttons.
 
     `source` is all, website, quickbooks or masked. Login accounts come first (newest first), then everyone
     who only exists in the `customers` table (newest first). Staff logins are not included.
@@ -932,16 +932,63 @@ def _export_rows(db: Session, source: str = "all") -> tuple[list[list[str]], int
     for r in accounts:
         rows.append([
             "Account", r["name"] or "", r["email"] or "", r["phone"] or "", r["status"],
-            _fmt_date(r["created_at"]), _fmt_date(r["last_sign_in_at"]) if r["last_sign_in_at"] else "Never",
+            _fmt_date(r["created_at"]), _fmt_date(r.get("last_purchase_at")),
+            _fmt_date(r["last_sign_in_at"]) if r["last_sign_in_at"] else "Never",
             r["address"] or "",
         ])
     for r in others:
         kind = "Guest" if r["group"] == "website" else r["source"]  # Guest, QuickBooks or Masked
         rows.append([
             kind, r["name"] or "", r["email"] or "", r["phone"] or "", "",
-            _fmt_date(r["created_at"]), "", r["address"] or "",
+            _fmt_date(r["created_at"]), _fmt_date(r.get("last_purchase_at")), "", r["address"] or "",
         ])
+    notes.append("Last purchase dates are not in this file: the customer list has not been set up for them yet (customers_sync.sql).")
     return rows, len(accounts), len(others), notes
+
+
+def _export_rows(db: Session, source: str = "all") -> tuple[list[list[str]], int, int, list[str]]:
+    """Customers for the export, exactly as the Customers tab lists them (same grouping, same columns, plus last purchase).
+
+    `source` is all, website, quickbooks or masked. Login accounts come first (newest first), then everyone
+    who only exists in the `customers` table (newest first). Staff logins are not included.
+
+    Returns (rows, account_count, other_count, notes). `notes` says what could not be loaded, if anything,
+    so a partial export is never mistaken for a complete one.
+    """
+    if _sync_columns_ready(db):
+        try:
+            cte = _LIST_CTE.replace("__LP__", "c.last_purchase_at" if _purchase_column_ready(db) else "cast(null as date)")
+            recs = db.execute(
+                text(
+                    cte
+                    + "select user_id, email, name, phone, address_text, status_label, grp, source_label, "
+                    "signed_up, last_sign_in_at, last_purchase_at from e "
+                    "where coalesce(is_staff, false) = false and (:grp = 'all' or grp = :grp) "
+                    "order by (user_id is null), signed_up desc nulls last, lower(coalesce(name, email, '')), rec_id"
+                ),
+                {"grp": source},
+            ).all()
+            rows: list[list[str]] = []
+            accounts = 0
+            for r in recs:
+                if r.user_id is not None:
+                    accounts += 1
+                    kind, status = "Account", r.status_label
+                    sign_in = _fmt_date(r.last_sign_in_at) if r.last_sign_in_at else "Never"
+                else:
+                    kind, status, sign_in = ("Guest" if r.grp == "website" else r.source_label), "", ""
+                rows.append([
+                    kind, r.name or "", r.email or "", r.phone or "", status,
+                    _fmt_date(r.signed_up), _fmt_date(r.last_purchase_at), sign_in, r.address_text or "",
+                ])
+            notes = [] if _purchase_column_ready(db) else [
+                "Last purchase dates are not in this file: the last-purchase column has not been set up yet (customers_last_purchase.sql)."
+            ]
+            return rows, accounts, len(rows) - accounts, notes
+        except Exception:
+            db.rollback()
+            log.warning("fast customer export failed; falling back to the slow one", exc_info=True)
+    return _export_rows_slow(db, source)
 
 
 def _build_xlsx(rows: list[list[str]], notes: list[str]) -> bytes:
@@ -965,8 +1012,8 @@ def _build_xlsx(rows: list[list[str]], notes: list[str]) -> bytes:
     for row in ws.iter_rows(min_row=2):
         for cell in row:
             cell.data_type = "s"  # always text, so a name or address starting with "=" can never run as a formula
-            cell.alignment = Alignment(vertical="top", wrap_text=(cell.column == 8))
-    widths = [10, 24, 32, 16, 22, 12, 13, 50]
+            cell.alignment = Alignment(vertical="top", wrap_text=(cell.column == 9))
+    widths = [12, 24, 32, 16, 22, 12, 14, 13, 50]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
@@ -1019,7 +1066,7 @@ def _build_pdf(rows: list[list[str]], accounts: int, guests: int, notes: list[st
     data = [[Paragraph(escape(h), head) for h in EXPORT_COLUMNS]]
     for r in rows:
         data.append([Paragraph(escape(str(v or "")), cell) for v in r])
-    widths = [44, 98, 148, 78, 74, 56, 58, 164]  # adds up to the 720pt between the margins
+    widths = [44, 90, 138, 72, 70, 54, 58, 58, 136]  # adds up to the 720pt between the margins
     table = Table(data, colWidths=widths, repeatRows=1)
     table.setStyle(
         TableStyle([
