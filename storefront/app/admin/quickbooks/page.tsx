@@ -38,6 +38,8 @@ type Status = {
   full_refresh_hours: number;
   run_every_minutes: number;
   control?: { sync_requested: boolean; full_resync: boolean };
+  sync_enabled?: boolean;
+  sync_env_off?: boolean;
   entities?: EntityRow[];
   errors_by_entity?: { entity: string; last_error: string }[];
   last_run?: Run | null;
@@ -269,6 +271,25 @@ export default function QuickBooksPage() {
     }
   }
 
+  async function setSyncEnabled(on: boolean) {
+    setBusy(true);
+    setError("");
+    setInfo("");
+    try {
+      await api("/quickbooks/sync-enabled", { method: "POST", body: { enabled: on } });
+      setInfo(
+        on
+          ? "Syncing is on. The next Web Connector check-in will run normally."
+          : "Syncing is off. The Web Connector can still check in, but it is told there is nothing to do and nothing is read or saved. A sync already running stops at its next step.",
+      );
+      await loadStatus();
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function downloadQwc() {
     setError("");
     try {
@@ -314,10 +335,43 @@ export default function QuickBooksPage() {
           {/* status + controls */}
           <section className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
             <div className="flex flex-wrap items-center gap-3">
-              <button type="button" className={btnCls} disabled={busy || !!status.control?.sync_requested} onClick={() => void syncNow(false)}>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={status.sync_enabled !== false}
+                aria-label="QuickBooks syncing"
+                disabled={busy || !!status.sync_env_off}
+                onClick={() => void setSyncEnabled(status.sync_enabled === false)}
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+                  status.sync_enabled !== false ? "bg-green-600" : "bg-gray-300"
+                }`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                    status.sync_enabled !== false ? "translate-x-5" : "translate-x-0.5"
+                  }`}
+                />
+              </button>
+              <span className="text-sm font-medium">
+                QuickBooks syncing is {status.sync_enabled !== false ? "ON" : "OFF"}
+              </span>
+            </div>
+            {status.sync_env_off && (
+              <Notice kind="info">
+                Syncing is forced off by the <code>QB_SYNC_DISABLED</code> setting on the API. Remove that setting (and
+                redeploy) to use this switch.
+              </Notice>
+            )}
+            {status.sync_enabled === false && !status.sync_env_off && (
+              <Notice kind="info">
+                Syncing is off. Nothing is being read from QuickBooks or saved. Turn it back on when you are ready.
+              </Notice>
+            )}
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" className={btnCls} disabled={busy || status.sync_enabled === false || !!status.control?.sync_requested} onClick={() => void syncNow(false)}>
                 {status.control?.sync_requested ? "Sync requested…" : "Sync now"}
               </button>
-              <button type="button" className={btn2Cls} disabled={busy || !!status.control?.sync_requested} onClick={() => void syncNow(true)}>
+              <button type="button" className={btn2Cls} disabled={busy || status.sync_enabled === false || !!status.control?.sync_requested} onClick={() => void syncNow(true)}>
                 Full re-read
               </button>
               <button type="button" className={btn2Cls} onClick={() => void downloadQwc()} disabled={!status.credentials_set}>

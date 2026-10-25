@@ -37,6 +37,10 @@ Settings (environment variables on the API):
     QB_MIN_MINUTES                 least time between scheduled syncs, default 10
     QBWC_RUN_EVERY_MINUTES         how often the connection file tells the Web Connector to check in, default 60
     QB_ENTITIES                    optional comma list to sync only some kinds, e.g. "Customer,Item"
+    QB_SYNC_DISABLED               set to 1 to switch syncing off without touching the database (emergency stop)
+
+The on/off switch on the QuickBooks admin page is stored in qb_control.sync_enabled (see qb_switch.sql).
+While it is off, every Web Connector check-in is answered "nothing to do" and nothing is read or saved.
 """
 import hmac
 import json
@@ -56,6 +60,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, require_admin
@@ -313,6 +318,36 @@ def _creds_ok(user: str, password: str) -> bool:
 # --------------------------------------------------------------------------
 # database helpers
 # --------------------------------------------------------------------------
+_ENABLED_CACHE: dict = {"at": 0.0, "value": True}
+_ENABLED_CACHE_SECONDS = 15.0
+
+
+def _env_off() -> bool:
+    return (os.environ.get("QB_SYNC_DISABLED") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _sync_enabled(db: Session, fresh: bool = False) -> bool:
+    """Is syncing switched on? Checked on every Web Connector call, so the answer is reused for a few seconds."""
+    if _env_off():
+        return False
+    now = time.monotonic()
+    if not fresh and now - _ENABLED_CACHE["at"] < _ENABLED_CACHE_SECONDS:
+        return _ENABLED_CACHE["value"]
+    try:
+        with db.begin_nested():
+            v = db.execute(text("select sync_enabled from qb_control where id = 1")).scalar()
+        value = True if v is None else bool(v)
+    except ProgrammingError as e:
+        # 42703 = the column does not exist yet (qb_switch.sql has not been run): behave as before, syncing on.
+        if getattr(getattr(e, "orig", None), "sqlstate", None) == "42703":
+            value = True
+        else:
+            raise
+    _ENABLED_CACHE["at"] = now
+    _ENABLED_CACHE["value"] = value
+    return value
+
+
 def _control(db: Session):
     db.execute(text("insert into qb_control (id) values (1) on conflict (id) do nothing"))
     return db.execute(text("select sync_requested, full_resync from qb_control where id = 1")).first()
@@ -386,6 +421,8 @@ def m_clientVersion(db: Session, a: dict) -> str:
 def m_authenticate(db: Session, a: dict) -> str:
     if not _creds_ok(a.get("strUserName", ""), a.get("strPassword", "")):
         return _auth_result("", "nvu")  # not a valid user
+    if not _sync_enabled(db):
+        return _auth_result(secrets.token_urlsafe(8), "none")  # switched off: nothing to do
     # A session that stopped talking to us (PC went to sleep, QuickBooks crashed) must not block forever.
     db.execute(
         text(
@@ -466,6 +503,10 @@ def m_sendRequestXML(db: Session, a: dict) -> str:
     plan, step = _j(run.plan), run.step
     if step >= len(plan):
         return _res("sendRequestXML", "")  # nothing left: ends the session
+    if not _sync_enabled(db):
+        _add_error(db, run.id, None, "Syncing was switched off on the QuickBooks page.", "paused")
+        db.commit()
+        return _res("sendRequestXML", "")  # ends the session early
     try:
         reported = (int(a.get("qbXMLMajorVers") or 0), int(a.get("qbXMLMinorVers") or 0))
     except ValueError:
@@ -821,6 +862,8 @@ def status(request: Request, db: Session = Depends(get_db)):
         return out
     out["control"] = dict(_control(db)._mapping)
     db.commit()
+    out["sync_enabled"] = _sync_enabled(db, fresh=True)
+    out["sync_env_off"] = _env_off()
     out["entities"] = _entity_summary(db)
     out["errors_by_entity"] = [
         dict(r._mapping)
@@ -853,6 +896,8 @@ class SyncIn(BaseModel):
 @admin_router.post("/sync-now")
 def sync_now(body: SyncIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     _need_tables(db)
+    if not _sync_enabled(db, fresh=True):
+        raise HTTPException(409, "Syncing is switched off. Turn it on first, then request a sync.")
     _control(db)
     db.execute(
         text(
@@ -862,6 +907,28 @@ def sync_now(body: SyncIn, db: Session = Depends(get_db), user: AuthUser = Depen
     )
     db.commit()
     return {"ok": True, "full": body.full}
+
+
+class EnabledIn(BaseModel):
+    enabled: bool
+
+
+@admin_router.post("/sync-enabled")
+def set_sync_enabled(body: EnabledIn, db: Session = Depends(get_db)):
+    """The on/off switch on the QuickBooks page."""
+    _need_tables(db)
+    _control(db)
+    try:
+        db.execute(text("update qb_control set sync_enabled = :e where id = 1"), {"e": body.enabled})
+        db.commit()
+    except ProgrammingError as e:
+        db.rollback()
+        if getattr(getattr(e, "orig", None), "sqlstate", None) == "42703":
+            raise HTTPException(409, "Run qb_switch.sql once in the Supabase SQL editor first, then try again.")
+        raise
+    _ENABLED_CACHE["at"] = time.monotonic()
+    _ENABLED_CACHE["value"] = body.enabled
+    return {"ok": True, "enabled": body.enabled}
 
 
 @admin_router.get("/qwc")
