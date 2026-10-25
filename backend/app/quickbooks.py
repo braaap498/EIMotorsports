@@ -102,6 +102,7 @@ class Spec(NamedTuple):
     kind: str  # "list": re-read in full now and then | "txn": only what changed
     lines: bool = False  # ask for the line items too
     linked: bool = False  # ask for linked transactions too
+    paged: bool = True  # False: small lists that do not take iterator / MaxReturned (QuickBooks rejects those with 0x80040400)
 
 
 SPECS: list[Spec] = [
@@ -109,20 +110,20 @@ SPECS: list[Spec] = [
     Spec("Customer", "CustomerQuery", "list"),
     Spec("Vendor", "VendorQuery", "list"),
     Spec("Item", "ItemQuery", "list"),  # every item type; see record_type
-    Spec("Account", "AccountQuery", "list"),
-    Spec("Class", "ClassQuery", "list"),
-    Spec("StandardTerms", "StandardTermsQuery", "list"),
-    Spec("DateDrivenTerms", "DateDrivenTermsQuery", "list"),
-    Spec("SalesTaxCode", "SalesTaxCodeQuery", "list"),
-    Spec("PriceLevel", "PriceLevelQuery", "list"),
-    Spec("PaymentMethod", "PaymentMethodQuery", "list"),
-    Spec("ShipMethod", "ShipMethodQuery", "list"),
-    Spec("CustomerType", "CustomerTypeQuery", "list"),
-    Spec("VendorType", "VendorTypeQuery", "list"),
-    Spec("JobType", "JobTypeQuery", "list"),
-    Spec("SalesRep", "SalesRepQuery", "list"),
-    Spec("CustomerMsg", "CustomerMsgQuery", "list"),
-    Spec("OtherName", "OtherNameQuery", "list"),
+    Spec("Account", "AccountQuery", "list", paged=False),
+    Spec("Class", "ClassQuery", "list", paged=False),
+    Spec("StandardTerms", "StandardTermsQuery", "list", paged=False),
+    Spec("DateDrivenTerms", "DateDrivenTermsQuery", "list", paged=False),
+    Spec("SalesTaxCode", "SalesTaxCodeQuery", "list", paged=False),
+    Spec("PriceLevel", "PriceLevelQuery", "list", paged=False),
+    Spec("PaymentMethod", "PaymentMethodQuery", "list", paged=False),
+    Spec("ShipMethod", "ShipMethodQuery", "list", paged=False),
+    Spec("CustomerType", "CustomerTypeQuery", "list", paged=False),
+    Spec("VendorType", "VendorTypeQuery", "list", paged=False),
+    Spec("JobType", "JobTypeQuery", "list", paged=False),
+    Spec("SalesRep", "SalesRepQuery", "list", paged=False),
+    Spec("CustomerMsg", "CustomerMsgQuery", "list", paged=False),
+    Spec("OtherName", "OtherNameQuery", "list", paged=False),
     # transactions
     Spec("Invoice", "InvoiceQuery", "txn", lines=True, linked=True),
     Spec("SalesReceipt", "SalesReceiptQuery", "txn", lines=True),
@@ -428,8 +429,12 @@ def _request_xml(step: dict, idx: int, iterator_id: Optional[str], page: int, ve
         body = f'<TxnDeletedQueryRq requestID="{rid}">{types}{rng}</TxnDeletedQueryRq>'
     else:
         spec = SPEC_BY_ENTITY[step["entity"]]
-        it = f' iterator="Continue" iteratorID="{escape(iterator_id)}"' if iterator_id else ' iterator="Start"'
-        inner = f"<MaxReturned>{page}</MaxReturned>"
+        plain = spec.kind == "list" and (not spec.paged or bool(step.get("plain")))
+        if plain:  # one answer with everything, no paging
+            it, inner = "", ""
+        else:
+            it = f' iterator="Continue" iteratorID="{escape(iterator_id)}"' if iterator_id else ' iterator="Start"'
+            inner = f"<MaxReturned>{page}</MaxReturned>"
         if spec.kind == "list":
             inner += "<ActiveStatus>All</ActiveStatus>"  # otherwise inactive records are left out
             if step.get("from"):
@@ -618,6 +623,16 @@ def m_receiveResponseXML(db: Session, a: dict) -> str:
         plan, i = _j(run.plan), run.step
         step = plan[i] if 0 <= i < len(plan) else {}
         ent = step.get("entity") or ("TxnDeleted" if step.get("t") == "del" else None)
+        if hr.lower() == "0x80040400" and step.get("t") == "q" and not step.get("plain") and SPEC_BY_ENTITY[ent].kind == "list":
+            # Some small lists do not accept paging. Ask once more for the whole list in one answer before giving up.
+            step["plain"] = True
+            plan[i] = step
+            db.execute(
+                text("update qb_runs set plan = cast(:p as jsonb), iterator_id = null where id = :id"),
+                {"p": json.dumps(plan), "id": run.id},
+            )
+            db.commit()
+            return _res("receiveResponseXML", min(99, int(100 * i / max(1, len(plan)))))
         _add_error(db, run.id, ent, f"{hr}: {a.get('message', '')}", "hresult")
         if hr.lower() == "0x80040400" and ent:
             # QuickBooks could not understand our request for this one record type. Note it, skip it and carry
