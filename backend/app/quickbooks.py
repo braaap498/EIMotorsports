@@ -817,7 +817,11 @@ def sync_now(body: SyncIn, db: Session = Depends(get_db), user: AuthUser = Depen
 
 @admin_router.get("/qwc")
 def qwc(request: Request):
-    """The small connection file the Web Connector loads once. It asks for READ-ONLY access."""
+    """The small connection file the Web Connector loads once.
+
+    IsReadOnly must be false: when the Web Connector registers the app it writes a small marker into the company
+    file, and QuickBooks refuses that for a read-only app (error 3263 / QBWC1039 "Unable to add FileID"). The sync
+    itself still only sends queries and never changes the books."""
     username = os.environ.get("QBWC_USERNAME", "")
     if not username or not os.environ.get("QBWC_PASSWORD"):
         raise HTTPException(409, "Set QBWC_USERNAME and QBWC_PASSWORD on the API first, then download this file.")
@@ -838,7 +842,7 @@ def qwc(request: Request):
   <Scheduler>
     <RunEveryNMinutes>{run_every_minutes()}</RunEveryNMinutes>
   </Scheduler>
-  <IsReadOnly>true</IsReadOnly>
+  <IsReadOnly>false</IsReadOnly>
 </QBWCXML>
 """
     return {"filename": "EI-Motorsports.qwc", "xml": xml, "endpoint": f"{base}/qbwc"}
