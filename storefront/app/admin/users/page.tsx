@@ -33,15 +33,15 @@ type Customer = {
   has_account: boolean; // false = guest checkout or imported customer: no login, so no block / reset / delete
   email_masked: boolean; // a marketplace relay address (eBay, Amazon ...), not the person's own email
   status: string;
-  source: string; // Website, eBay, Amazon, QuickBooks
-  group: "website" | "ebay" | "amazon" | "quickbooks";
+  source: string; // Website, QuickBooks, Masked
+  group: "website" | "quickbooks" | "masked";
 };
-type SourceFilter = "website" | "ebay" | "amazon" | "quickbooks" | "all";
+type SourceFilter = "website" | "quickbooks" | "masked" | "all";
 type SortKey = "customer" | "source" | "phone" | "status" | "signed_up" | "last_purchase" | "last_sign_in" | "address";
 type CustomerList = {
   customers: Customer[];
   matched: number;
-  counts: { all: number; website: number; ebay: number; amazon: number; quickbooks: number };
+  counts: { all: number; website: number; quickbooks: number; masked: number };
   page: number;
   pages: number;
   page_size: number;
@@ -488,7 +488,7 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
           </div>
         </td>
         <td className="whitespace-nowrap px-3 py-2">
-          <Badge tone={c.group === "website" ? "blue" : c.group === "ebay" ? "amber" : c.group === "amazon" ? "green" : "gray"}>{c.source}</Badge>
+          <Badge tone={c.group === "website" ? "blue" : c.group === "masked" ? "amber" : "gray"}>{c.source}</Badge>
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-sm text-gray-700">{c.phone || <span className="text-gray-400">—</span>}</td>
         <td className="px-3 py-2">
@@ -628,9 +628,8 @@ function ExportMenu({ onError }: { onError: (message: string) => void }) {
 
 const SOURCE_BUTTONS: { key: SourceFilter; label: string }[] = [
   { key: "website", label: "Website" },
-  { key: "ebay", label: "eBay" },
-  { key: "amazon", label: "Amazon" },
   { key: "quickbooks", label: "QuickBooks" },
+  { key: "masked", label: "QuickBooks (Masked)" },
   { key: "all", label: "All" },
 ];
 
@@ -666,9 +665,9 @@ function SortHeader({
         type="button"
         className={`inline-flex items-center gap-1 uppercase hover:text-gray-900 ${active ? "text-gray-900" : ""}`}
         onClick={() => onSort(k)}
-        title={`Sort by ${label.toLowerCase()}`}
+        title={`Sort by ${label.replace("\n", " ").toLowerCase()}`}
       >
-        {label}
+        <span className="whitespace-pre-line text-left">{label}</span>
         <span className={`text-[10px] ${active ? "" : "text-gray-300"}`}>{active ? (dir === "asc" ? "▲" : "▼") : "▲▼"}</span>
       </button>
     </th>
@@ -783,15 +782,15 @@ function CustomersPanel() {
           <li>
             This list has <strong>everyone</strong>: people with a login on the site, guests who checked out without
             an account, and customers imported from QuickBooks. <strong>Website</strong> shows logins and guests
-            (including your own staff logins, marked <strong>Staff</strong>), <strong>eBay</strong> and{" "}
-            <strong>Amazon</strong> show customers whose address is that marketplace&apos;s relay address,{" "}
-            <strong>QuickBooks</strong> shows the remaining customers who only exist in QuickBooks, and{" "}
-            <strong>All</strong> shows everyone. Click a column heading to sort the whole list by it; click again to
+            (including your own staff logins, marked <strong>Staff</strong>), <strong>QuickBooks</strong> shows
+            customers who only exist in QuickBooks and have their own email address, and{" "}
+            <strong>QuickBooks (Masked)</strong> shows customers from eBay, Amazon and Apple &quot;Hide My Email&quot;,
+            whose email is a relay address rather than their own. <strong>All</strong> shows everyone. Click a column heading to sort the whole list by it; click again to
             reverse.
           </li>
           <li>
             <strong>Signed up</strong> is only filled in for website logins and guests. It is blank for customers who only
-            exist in QuickBooks, eBay or Amazon. <strong>Last purchase</strong> is the date of their newest QuickBooks
+            exist in QuickBooks. <strong>Last purchase</strong> is the date of their newest QuickBooks
             invoice or sales receipt, or paid website order. It is updated after a QuickBooks sync that brings in
             invoices or sales receipts, and from the QuickBooks page (Update last purchase dates).
           </li>
@@ -848,7 +847,7 @@ function CustomersPanel() {
               <SortHeader label="Status" k="status" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Signed up" k="signed_up" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Last purchase" k="last_purchase" sort={sort} dir={dir} onSort={onSort} />
-              <SortHeader label="Last sign-in" k="last_sign_in" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label={"Last\nsign\u2011in"} k="last_sign_in" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Address" k="address" sort={sort} dir={dir} onSort={onSort} />
               <th className="px-3 py-2" />
             </tr>

@@ -31,7 +31,7 @@ Safeguards:
     are cleared when someone is promoted to admin.
 
 Customer support (the Customers tab on the Team page): lists EVERY customer (login accounts,
-guest checkouts and the QuickBooks import) with Website / eBay / All filter buttons and sortable
+guest checkouts and the QuickBooks import) with Website / QuickBooks / QuickBooks (Masked) / All filter buttons and sortable
 columns, 50 per page. Search by name, email, phone or saved address. For login accounts you can also
 block / unblock, resend the confirmation email, send a password-reset email or delete the account;
 the whole list (accounts and guest checkouts) can be exported as Excel or PDF. Only accounts WITHOUT a staff
@@ -547,9 +547,6 @@ def _iso(v) -> Optional[str]:
     return v.isoformat() if isinstance(v, datetime) else str(v)
 
 
-_SOURCE_LABELS = {"ebay": "eBay", "amazon": "Amazon"}
-
-
 def _customer_directory(db: Session, fresh: bool = False) -> tuple[list[dict], dict]:
     """
     One list of everybody: login accounts (from Supabase) plus the rows of the `customers` table
@@ -608,12 +605,11 @@ def _customer_directory(db: Session, fresh: bool = False) -> tuple[list[dict], d
     def source_of(rec, has_account: bool) -> tuple[str, str]:
         mkt = (getattr(rec, "marketplace", None) or "").strip().lower() if rec is not None else ""
         src = (getattr(rec, "source", None) or "").strip().lower() if rec is not None else ""
-        if mkt == "ebay":
-            return "ebay", "eBay"
         if has_account or src != "quickbooks":
             return "website", "Website"
-        if mkt == "amazon":
-            return "amazon", "Amazon"
+        kind = (getattr(rec, "email_kind", None) or "").strip().lower() if rec is not None else ""
+        if mkt or kind == "masked":  # eBay, Amazon, Apple relay ...: a relay address, not the person's own email
+            return "masked", "Masked"
         return "quickbooks", "QuickBooks"
 
     rows: list[dict] = []
@@ -724,19 +720,18 @@ with base as (
   ) a on c.user_id is not null
 ), d as (
   select base.*,
-         case when lower(coalesce(marketplace, '')) = 'ebay' then 'ebay'
-              when user_id is not null or lower(coalesce(source, '')) <> 'quickbooks' then 'website'
-              when lower(coalesce(marketplace, '')) = 'amazon' then 'amazon'
+         case when user_id is not null or lower(coalesce(source, '')) <> 'quickbooks' then 'website'
+              when btrim(coalesce(marketplace, '')) <> '' or lower(coalesce(email_kind, '')) = 'masked' then 'masked'
               else 'quickbooks' end as grp,
          concat_ws(', ', nullif(addr->>'line1', ''), nullif(addr->>'line2', ''), nullif(addr->>'city', ''),
                    nullif(btrim(concat_ws(' ', addr->>'region', addr->>'postal_code')), '')) as address_text
   from base
 ), e as (
   select d.*,
-         case grp when 'ebay' then 'eBay' when 'website' then 'Website' when 'amazon' then 'Amazon'
+         case grp when 'website' then 'Website' when 'masked' then 'Masked'
               else 'QuickBooks' end as source_label,
          -- Only people who signed up on the site (or checked out as a guest) have a "signed up" date.
-         -- For customers who only exist in QuickBooks / eBay / Amazon it would just be the date they were added there.
+         -- For customers who only exist in QuickBooks (real or masked) it would just be the date they were added there.
          case when grp = 'website' then signed_up_raw else null end as signed_up,
          (account_status = 'staff') as is_staff,
          case when account_status = 'staff' then 'Staff'
@@ -764,7 +759,7 @@ def _list_customers_fast(q, source, sort, direction, page, db: Session):
     needle = q.strip().lower()[:100]
     pat = "%" + re.sub(r"([%_!])", r"!\1", needle) + "%" if needle else ""
     cte = _LIST_CTE.replace("__LP__", "c.last_purchase_at" if _purchase_column_ready(db) else "cast(null as date)")
-    counts = {"all": 0, "website": 0, "ebay": 0, "amazon": 0, "quickbooks": 0}
+    counts = {"all": 0, "website": 0, "quickbooks": 0, "masked": 0}
     for grp, n in db.execute(
         text(cte + f"select grp, count(*) from e where {_LIST_SEARCH} group by grp"), {"pat": pat}
     ).all():
@@ -827,7 +822,7 @@ def _list_customers_fast(q, source, sort, direction, page, db: Session):
 @router.get("/customers")
 def list_customers(
     q: str = "",
-    source: Literal["all", "website", "ebay", "amazon", "quickbooks"] = "all",
+    source: Literal["all", "website", "quickbooks", "masked"] = "all",
     sort: Literal["customer", "source", "phone", "status", "signed_up", "last_purchase", "last_sign_in", "address"] = "signed_up",
     direction: Literal["asc", "desc"] = Query("desc", alias="dir"),
     page: int = Query(1, ge=1),
@@ -836,7 +831,7 @@ def list_customers(
 ):
     """
     Everyone: login accounts, guest checkouts and the QuickBooks import, one page at a time.
-    `q` searches name, email, phone and address; `source` narrows to Website, eBay, Amazon or QuickBooks; `sort` and `dir`
+    `q` searches name, email, phone and address; `source` narrows to Website, QuickBooks or QuickBooks (Masked: eBay, Amazon and Apple relay customers); `sort` and `dir`
     order the whole list (not just the page on screen).
     Fast path: the `customers` table is kept in step with the logins by customers_sync.sql, so the
     database does the searching, sorting and paging. Without that script, the slower merge is used.
@@ -865,9 +860,8 @@ def _list_customers_slow(q, source, sort, direction, page, refresh, db: Session)
     counts = {
         "all": len(rows),
         "website": sum(1 for r in rows if r["group"] == "website"),
-        "ebay": sum(1 for r in rows if r["group"] == "ebay"),
-        "amazon": sum(1 for r in rows if r["group"] == "amazon"),
         "quickbooks": sum(1 for r in rows if r["group"] == "quickbooks"),
+        "masked": sum(1 for r in rows if r["group"] == "masked"),
     }
     if source != "all":
         rows = [r for r in rows if r["group"] == source]
