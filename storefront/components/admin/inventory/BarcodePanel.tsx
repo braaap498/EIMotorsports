@@ -13,6 +13,7 @@ import {
   download,
   renderBarcodePng,
   type LabelSpec,
+  type Paper,
   type Symbology,
 } from "./labels";
 
@@ -37,6 +38,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
   const [sizeId, setSizeId] = useState("4x2");
   const [sym, setSym] = useState<Symbology>("datamatrix");
   const [copies, setCopies] = useState(1);
+  const [paper, setPaper] = useState<Paper>("label");
   const [label, setLabel] = useState<{ spec: LabelSpec; png: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const scanRef = useRef<HTMLInputElement>(null);
@@ -139,7 +141,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
       return;
     }
     w.document.open();
-    w.document.write(buildPrintHtml(label.png, label.spec, size, sym, copies));
+    w.document.write(buildPrintHtml(label.png, label.spec, size, sym, copies, paper));
     w.document.close();
   }
 
@@ -299,6 +301,12 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
                     onChange={(e) => setCopies(Math.min(100, Math.max(1, parseInt(e.target.value || "1", 10) || 1)))}
                   />
                 </Field>
+                <Field label="Print on">
+                  <select className={inputCls} value={paper} onChange={(e) => setPaper(e.target.value as Paper)}>
+                    <option value="label">Label printer (one label per page)</option>
+                    <option value="letter">Regular paper, 8.5 × 11 in (labels at actual size)</option>
+                  </select>
+                </Field>
                 <button className={btnCls} disabled={busy} onClick={makeLabel}>
                   {busy ? "Working…" : "Make / show shelf label"}
                 </button>
@@ -356,7 +364,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
                 </div>
               )}
               <p className="text-xs text-gray-500">
-                “Print label” opens a page sized to the label: choose your Zebra printer and make sure its paper size matches.
+                “Print label” opens a page sized to the label: choose your Zebra printer and make sure its paper size matches. With “Regular paper” it lays the labels out at their real size on an 8.5 × 11 in sheet instead (dashed lines show the edges), so you can test the design on any printer before the Zebra arrives; print it at 100% / actual size.
                 A ZPL file prints straight to a Zebra printer, for example from PowerShell:{" "}
                 <span className="font-mono">copy /b label-SKU.zpl \\localhost\ZebraShareName</span> (the printer must be shared
                 under that name).

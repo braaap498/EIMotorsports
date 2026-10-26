@@ -36,7 +36,17 @@ export async function renderBarcodePng(code: string, sym: Symbology): Promise<st
 }
 
 /** The HTML of the print window: one label per page, exact label size, no margins. */
-export function buildPrintHtml(img: string, spec: LabelSpec, size: LabelSize, sym: Symbology, copies: number): string {
+export type Paper = "label" | "letter";
+
+/** What the print window is laid out for: one label per page (label printer) or a grid of labels on a regular 8.5 × 11 in sheet. */
+export function buildPrintHtml(
+  img: string,
+  spec: LabelSpec,
+  size: LabelSize,
+  sym: Symbology,
+  copies: number,
+  paper: Paper = "label",
+): string {
   const oneD = sym === "code128";
   const label = `
     <div class="lbl ${oneD ? "col" : "row"}">
@@ -50,10 +60,18 @@ export function buildPrintHtml(img: string, spec: LabelSpec, size: LabelSize, sy
   const imgH = oneD ? size.hIn * 0.34 : size.hIn * 0.72;
   return `<!doctype html><html><head><meta charset="utf-8"><title>Shelf labels</title>
 <style>
-  @page { size: ${size.wIn}in ${size.hIn}in; margin: 0; }
+  ${
+    paper === "letter"
+      ? "@page { size: 8.5in 11in; margin: 0.25in; }\n  body { display: flex; flex-wrap: wrap; align-content: flex-start; }"
+      : `@page { size: ${size.wIn}in ${size.hIn}in; margin: 0; }`
+  }
   html, body { margin: 0; padding: 0; }
   .lbl { width: ${size.wIn}in; height: ${size.hIn}in; box-sizing: border-box; padding: 0.07in; overflow: hidden;
-         page-break-after: always; display: flex; gap: 0.1in; font-family: Arial, Helvetica, sans-serif; color: #000; }
+         ${
+           paper === "letter"
+             ? "flex: none; break-inside: avoid; outline: 1px dashed #999; outline-offset: -1px;"
+             : "page-break-after: always;"
+         } display: flex; gap: 0.1in; font-family: Arial, Helvetica, sans-serif; color: #000; }
   .row { flex-direction: row; align-items: center; }
   .col { flex-direction: column; align-items: stretch; }
   img { image-rendering: pixelated; flex: none; }
