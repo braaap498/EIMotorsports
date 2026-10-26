@@ -228,14 +228,16 @@ def lookup(code: str = Query(..., min_length=1, max_length=200), db: Session = D
 @router.get("/products/search")
 @needs(*ANY_INVENTORY)
 def search_products(
-    q: str = Query(..., min_length=2, max_length=100),
+    q: str = Query("", max_length=100),
     limit: int = Query(25, le=50),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
+    # An empty q lists every product A to Z (the Barcodes & labels picker shows that before anything is typed).
+    if len(q.strip()) == 1:
+        raise HTTPException(400, "Type at least 2 characters to search")
     words = [w for w in re.split(r"\s+", q.strip()) if w][:6]
-    if not words:
-        return {"items": []}
-    params: dict = {"limit": limit}
+    params: dict = {"limit": limit, "offset": offset}
     conds = []
     for i, w in enumerate(words):
         params[f"w{i}"] = f"%{w}%"
@@ -251,7 +253,7 @@ def search_products(
         text(
             "select p.id, p.sku, p.title, p.quantity_on_hand, p.bin_location, "
             "       (select count(*) from product_barcodes b where b.product_id = p.id) as barcode_count "
-            f"from products p where {' and '.join(conds)} order by p.title limit :limit"
+            f"from products p where {' and '.join(conds) or 'true'} order by p.title, p.id limit :limit offset :offset"
         ),
         params,
     ).all()

@@ -169,7 +169,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
       </p>
 
       {!data ? (
-        <ProductPicker onPick={(p) => load(p.id)} />
+        <ProductPicker browse onPick={(p) => load(p.id)} />
       ) : (
         <div className="space-y-5">
           <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-gray-200 bg-white p-4">
