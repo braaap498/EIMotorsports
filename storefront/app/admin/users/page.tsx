@@ -231,7 +231,7 @@ function Row({
         {!s.display_name && <p className="mt-1 text-xs text-amber-700">No display name yet. The site greets them by their email.</p>}
         {error && <p className="mt-1 text-xs text-red-700">{error}</p>}
       </td>
-      <td className="px-3 py-2 text-sm text-gray-700">
+      <td className="break-words px-3 py-2 text-sm text-gray-700">
         {s.email}
         {isMe && <span className="ml-2"><Badge tone="blue">You</Badge></span>}
       </td>
@@ -476,7 +476,7 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
   return (
     <>
       <tr className="align-top">
-        <td className="px-3 py-2">
+        <td className="break-words px-3 py-2">
           <div className="font-medium text-gray-900">{c.name || <span className="text-gray-400">No name</span>}</div>
           <div className="text-xs text-gray-600">
             {c.email}
@@ -517,7 +517,7 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
         <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-500">
           {c.last_sign_in_at ? new Date(c.last_sign_in_at).toLocaleDateString() : c.has_account ? "Never" : "—"}
         </td>
-        <td className="px-3 py-2 text-xs text-gray-700">{c.address || <span className="text-gray-400">None saved</span>}</td>
+        <td className="break-words px-3 py-2 text-xs text-gray-700">{c.address || <span className="text-gray-400">None saved</span>}</td>
         <td className="whitespace-nowrap px-3 py-2 text-right">
           {busy && <span className="mr-2 text-xs text-gray-500">Working…</span>}
           {c.has_account && !c.is_staff && <RowMenu items={items} disabled={!!busy} label={label} />}
@@ -860,7 +860,19 @@ function CustomersPanel() {
         </Notice>
       )}
       <div className={`overflow-x-auto ${loading && rows.length > 0 ? "opacity-60" : ""}`}>
-        <table className="w-full text-left text-sm">
+        <table className="w-full table-fixed text-left text-sm">
+          {/* Fixed widths: the columns stay the same size whatever is on the page (search, filter, sort, paging). */}
+          <colgroup>
+            <col className="w-[20rem]" /> {/* Customer */}
+            <col className="w-[6.5rem]" /> {/* Source */}
+            <col className="w-[8.5rem]" /> {/* Phone */}
+            <col className="w-[11rem]" /> {/* Status */}
+            <col className="w-[6.5rem]" /> {/* Signed up */}
+            <col className="w-[7rem]" /> {/* Last purchase */}
+            <col className="w-[6.5rem]" /> {/* Last sign-in */}
+            <col className="w-[16rem]" /> {/* Address */}
+            <col className="w-[5rem]" /> {/* Actions */}
+          </colgroup>
           <thead className="bg-gray-50 text-xs text-gray-500">
             <tr>
               <SortHeader label="Customer" k="customer" sort={sort} dir={dir} onSort={onSort} />
@@ -1118,7 +1130,15 @@ export default function AdminUsersPage() {
         {tab !== "customers" && error && <Notice kind="error">{error}</Notice>}
         {tab !== "customers" && (
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
+          <table className="w-full table-fixed text-left text-sm">
+            {/* Fixed widths, the same on the Admins and Employees tabs. */}
+            <colgroup>
+              <col className="w-[16rem]" /> {/* Name */}
+              <col className="w-[20rem]" /> {/* Email */}
+              <col className="w-[9rem]" /> {/* Role */}
+              <col className="w-[7rem]" /> {/* Last sign-in */}
+              <col className="w-[25rem]" /> {/* Save / Permissions / Change Password */}
+            </colgroup>
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
                 <th className="px-3 py-2">Name</th>
