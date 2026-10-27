@@ -862,17 +862,30 @@ function CustomersPanel() {
         </Notice>
       )}
       <div className={`overflow-x-auto ${loading && rows.length > 0 ? "opacity-60" : ""}`}>
-        <table className="w-full text-left text-sm">
+        <table className="w-full min-w-[80rem] table-fixed text-left text-sm">
+          {/* The short columns have set widths, so nothing moves when you sort or filter. Customer and Address have no
+              width: they share all the space that is left, equally. */}
+          <colgroup>
+            <col /> {/* Customer */}
+            <col className="w-[6.5rem]" /> {/* Source */}
+            <col className="w-[8.5rem]" /> {/* Phone */}
+            <col className="w-[11rem]" /> {/* Status */}
+            <col className="w-[7.5rem]" /> {/* Signed up */}
+            <col className="w-[9rem]" /> {/* Last purchase */}
+            <col className="w-[7.5rem]" /> {/* Last sign-in */}
+            <col /> {/* Address */}
+            <col className="w-[5rem]" /> {/* Actions */}
+          </colgroup>
           <thead className="bg-gray-50 text-xs text-gray-500">
             <tr>
-              <SortHeader label="Customer" k="customer" sort={sort} dir={dir} onSort={onSort} width="w-[38%]" />
+              <SortHeader label="Customer" k="customer" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Source" k="source" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Phone" k="phone" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Status" k="status" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Signed up" k="signed_up" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Last purchase" k="last_purchase" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label={"Last sign\u2011in"} k="last_sign_in" sort={sort} dir={dir} onSort={onSort} />
-              <SortHeader label="Address" k="address" sort={sort} dir={dir} onSort={onSort} width="w-[34%]" />
+              <SortHeader label="Address" k="address" sort={sort} dir={dir} onSort={onSort} />
               <th className="px-3 py-2" />
             </tr>
           </thead>
@@ -1120,11 +1133,19 @@ export default function AdminUsersPage() {
         {tab !== "customers" && error && <Notice kind="error">{error}</Notice>}
         {tab !== "customers" && (
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
+          <table className="w-full min-w-[74rem] table-fixed text-left text-sm">
+            {/* Same widths on the Admins and Employees tabs, whatever order the rows are in. Email takes the spare room. */}
+            <colgroup>
+              <col className="w-[16rem]" /> {/* Name */}
+              <col /> {/* Email */}
+              <col className="w-[9rem]" /> {/* Role */}
+              <col className="w-[8rem]" /> {/* Last sign-in */}
+              <col className="w-[25rem]" /> {/* Save / Permissions / Change Password */}
+            </colgroup>
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
-                <th className="w-[24%] whitespace-nowrap px-3 py-2">Name</th>
-                <th className="w-[34%] whitespace-nowrap px-3 py-2">Email</th>
+                <th className="whitespace-nowrap px-3 py-2">Name</th>
+                <th className="whitespace-nowrap px-3 py-2">Email</th>
                 <th className="whitespace-nowrap px-3 py-2">Role</th>
                 <th className="whitespace-nowrap px-3 py-2">Last sign-in</th>
                 <th className="px-3 py-2" />
