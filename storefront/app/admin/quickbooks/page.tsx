@@ -193,6 +193,10 @@ export default function QuickBooksPage() {
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
+  // collapsible sections (closed until opened)
+  const [openSaved, setOpenSaved] = useState(false);
+  const [openBrowse, setOpenBrowse] = useState(false);
+  const [openRuns, setOpenRuns] = useState(false);
 
   // record browser
   const [entity, setEntity] = useState("");
@@ -236,7 +240,7 @@ export default function QuickBooksPage() {
   }, [active, loadStatus]);
 
   const loadList = useCallback(async () => {
-    if (!status?.tables_ready) return;
+    if (!status?.tables_ready || !openBrowse) return;
     try {
       const qs = new URLSearchParams({ limit: String(PAGE), offset: String(page * PAGE) });
       if (entity) qs.set("entity", entity);
@@ -246,7 +250,7 @@ export default function QuickBooksPage() {
     } catch (e) {
       setError(errMsg(e));
     }
-  }, [status?.tables_ready, entity, q, removed, page]);
+  }, [status?.tables_ready, openBrowse, entity, q, removed, page]);
 
   useEffect(() => {
     void loadList();
@@ -325,6 +329,7 @@ export default function QuickBooksPage() {
 
   const last = status?.last_run ?? null;
   const entities = status?.entities ?? [];
+  const fullyRead = entities.filter((e) => e.last_full_at && !e.last_error).length;
   const totalRecords = entities.reduce((n, e) => n + e.records, 0);
   const pages = list ? Math.max(1, Math.ceil(list.total / PAGE)) : 1;
 
@@ -480,9 +485,14 @@ export default function QuickBooksPage() {
 
           {/* what we have */}
           {entities.length > 0 && (
-            <section>
-              <h2 className="mb-2 text-lg font-semibold">What has been saved</h2>
-              <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+            <details open={openSaved} onToggle={(e) => setOpenSaved((e.currentTarget as HTMLDetailsElement).open)}>
+              <summary className="cursor-pointer select-none text-lg font-semibold">
+                What has been saved
+                <span className="ml-2 text-sm font-normal text-gray-500">
+                  {fullyRead} of {entities.length} kinds fully read
+                </span>
+              </summary>
+              <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200 bg-white">
                 <table className="w-full text-left text-sm">
                   <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                     <tr>
@@ -490,6 +500,7 @@ export default function QuickBooksPage() {
                       <th className="px-3 py-2 text-right">Records</th>
                       <th className="px-3 py-2 text-right">Removed in QuickBooks</th>
                       <th className="px-3 py-2">Last updated</th>
+                      <th className="px-3 py-2">Full read</th>
                       <th className="px-3 py-2"></th>
                     </tr>
                   </thead>
@@ -500,6 +511,19 @@ export default function QuickBooksPage() {
                         <td className="px-3 py-2 text-right">{e.records.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right text-gray-500">{e.removed || ""}</td>
                         <td className="whitespace-nowrap px-3 py-2 text-gray-600">{when(e.last_success_at ?? e.last_synced)}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-xs">
+                          {e.last_error ? (
+                            <span title={e.last_error}>
+                              <Badge tone="amber">Problem</Badge>
+                            </span>
+                          ) : e.last_full_at ? (
+                            <span className="text-gray-600">
+                              <Badge tone="green">Complete</Badge> {when(e.last_full_at)}
+                            </span>
+                          ) : (
+                            <Badge tone="gray">Not fully read yet</Badge>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-right">
                           <button
                             type="button"
@@ -507,6 +531,7 @@ export default function QuickBooksPage() {
                             onClick={() => {
                               setEntity(e.entity);
                               setPage(0);
+                              setOpenBrowse(true);
                             }}
                           >
                             Browse
@@ -517,12 +542,14 @@ export default function QuickBooksPage() {
                   </tbody>
                 </table>
               </div>
-            </section>
+            </details>
           )}
 
           {/* browser */}
-          <section className="space-y-3">
-            <h2 className="text-lg font-semibold">Browse records</h2>
+          <details open={openBrowse} onToggle={(e) => setOpenBrowse((e.currentTarget as HTMLDetailsElement).open)}>
+            <summary className="cursor-pointer select-none text-lg font-semibold">Browse records</summary>
+            {openBrowse && (
+              <div className="mt-3 space-y-3">
             <div className="flex flex-wrap items-center gap-3">
               <select
                 className={`${inputCls} max-w-xs`}
@@ -613,13 +640,16 @@ export default function QuickBooksPage() {
                 </span>
               </div>
             )}
-          </section>
+                        </div>
+            )}
+          </details>
 
           {/* history */}
           {runs.length > 0 && (
-            <section>
-              <h2 className="mb-2 text-lg font-semibold">Recent syncs</h2>
-              <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+            <details open={openRuns} onToggle={(e) => setOpenRuns((e.currentTarget as HTMLDetailsElement).open)}>
+              <summary className="cursor-pointer select-none text-lg font-semibold">Recent syncs</summary>
+              {openRuns && (
+              <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200 bg-white">
                 <table className="w-full text-left text-sm">
                   <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                     <tr>
@@ -669,7 +699,8 @@ export default function QuickBooksPage() {
                   </tbody>
                 </table>
               </div>
-            </section>
+              )}
+            </details>
           )}
         </>
       )}
