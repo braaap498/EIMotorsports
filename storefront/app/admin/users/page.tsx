@@ -491,7 +491,7 @@ function CustomerRow({ c, onChanged }: { c: Customer; onChanged: (message: strin
           <Badge tone={c.group === "website" ? "blue" : c.group === "masked" ? "amber" : "gray"}>{c.source}</Badge>
         </td>
         <td className="whitespace-nowrap px-3 py-2 text-sm text-gray-700">{c.phone || <span className="text-gray-400">—</span>}</td>
-        <td className="px-3 py-2">
+        <td className="whitespace-nowrap px-3 py-2">
           {c.is_staff ? (
             <span title="A staff login (owner, admin or employee). Manage it from the Admins or Employees tab.">
               <Badge tone="blue">Staff</Badge>
@@ -673,23 +673,25 @@ function SortHeader({
   sort,
   dir,
   onSort,
+  width = "",
 }: {
   label: string;
   k: SortKey;
   sort: SortKey;
   dir: "asc" | "desc";
   onSort: (k: SortKey) => void;
+  width?: string; // e.g. "w-[38%]": the columns that should take the spare room
 }) {
   const active = sort === k;
   return (
-    <th className="px-3 py-2" aria-sort={active ? (dir === "asc" ? "ascending" : "descending") : "none"}>
+    <th className={`whitespace-nowrap px-3 py-2 ${width}`} aria-sort={active ? (dir === "asc" ? "ascending" : "descending") : "none"}>
       <button
         type="button"
         className={`inline-flex items-center gap-1 uppercase hover:text-gray-900 ${active ? "text-gray-900" : ""}`}
         onClick={() => onSort(k)}
         title={`Sort by ${label.replace("\n", " ").toLowerCase()}`}
       >
-        <span className="whitespace-pre-line text-left">{label}</span>
+        <span className="whitespace-nowrap text-left">{label}</span>
         <span className={`text-[10px] ${active ? "" : "text-gray-300"}`}>{active ? (dir === "asc" ? "▲" : "▼") : "▲▼"}</span>
       </button>
     </th>
@@ -860,29 +862,17 @@ function CustomersPanel() {
         </Notice>
       )}
       <div className={`overflow-x-auto ${loading && rows.length > 0 ? "opacity-60" : ""}`}>
-        <table className="w-full table-fixed text-left text-sm">
-          {/* Fixed widths: the columns stay the same size whatever is on the page (search, filter, sort, paging). */}
-          <colgroup>
-            <col className="w-[20rem]" /> {/* Customer */}
-            <col className="w-[6.5rem]" /> {/* Source */}
-            <col className="w-[8.5rem]" /> {/* Phone */}
-            <col className="w-[11rem]" /> {/* Status */}
-            <col className="w-[6.5rem]" /> {/* Signed up */}
-            <col className="w-[7rem]" /> {/* Last purchase */}
-            <col className="w-[6.5rem]" /> {/* Last sign-in */}
-            <col className="w-[16rem]" /> {/* Address */}
-            <col className="w-[5rem]" /> {/* Actions */}
-          </colgroup>
+        <table className="w-full text-left text-sm">
           <thead className="bg-gray-50 text-xs text-gray-500">
             <tr>
-              <SortHeader label="Customer" k="customer" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Customer" k="customer" sort={sort} dir={dir} onSort={onSort} width="w-[38%]" />
               <SortHeader label="Source" k="source" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Phone" k="phone" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Status" k="status" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Signed up" k="signed_up" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Last purchase" k="last_purchase" sort={sort} dir={dir} onSort={onSort} />
-              <SortHeader label={"Last\nsign\u2011in"} k="last_sign_in" sort={sort} dir={dir} onSort={onSort} />
-              <SortHeader label="Address" k="address" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label={"Last sign\u2011in"} k="last_sign_in" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Address" k="address" sort={sort} dir={dir} onSort={onSort} width="w-[34%]" />
               <th className="px-3 py-2" />
             </tr>
           </thead>
@@ -1130,21 +1120,13 @@ export default function AdminUsersPage() {
         {tab !== "customers" && error && <Notice kind="error">{error}</Notice>}
         {tab !== "customers" && (
         <div className="overflow-x-auto">
-          <table className="w-full table-fixed text-left text-sm">
-            {/* Fixed widths, the same on the Admins and Employees tabs. */}
-            <colgroup>
-              <col className="w-[16rem]" /> {/* Name */}
-              <col className="w-[20rem]" /> {/* Email */}
-              <col className="w-[9rem]" /> {/* Role */}
-              <col className="w-[7rem]" /> {/* Last sign-in */}
-              <col className="w-[25rem]" /> {/* Save / Permissions / Change Password */}
-            </colgroup>
+          <table className="w-full text-left text-sm">
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
-                <th className="px-3 py-2">Name</th>
-                <th className="px-3 py-2">Email</th>
-                <th className="px-3 py-2">Role</th>
-                <th className="px-3 py-2">Last sign-in</th>
+                <th className="w-[24%] whitespace-nowrap px-3 py-2">Name</th>
+                <th className="w-[34%] whitespace-nowrap px-3 py-2">Email</th>
+                <th className="whitespace-nowrap px-3 py-2">Role</th>
+                <th className="whitespace-nowrap px-3 py-2">Last sign-in</th>
                 <th className="px-3 py-2" />
               </tr>
             </thead>

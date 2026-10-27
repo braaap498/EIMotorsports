@@ -225,7 +225,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <main className="min-w-0 flex-1 p-4 md:p-6">
-        <div className="mx-auto max-w-6xl">
+        <div className="w-full">
           {blocked && pathname === "/admin" && navItems[0] ? (
             <Redirect to={navItems[0].href} />
           ) : nothingGranted || blocked ? (
