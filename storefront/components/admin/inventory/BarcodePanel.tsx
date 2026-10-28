@@ -31,6 +31,9 @@ const KIND_LABEL: Record<string, string> = {
   other: "Other",
 };
 
+/** Where the local print helper (print_helper.py) listens on the PC the Zebra is plugged into. */
+const PRINT_HELPER_URL = "http://127.0.0.1:9123";
+
 /** Link barcodes to a product, set its bin location, and print its shelf label. */
 export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; active: boolean }) {
   const [data, setData] = useState<Loaded | null>(null);
@@ -149,16 +152,55 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
     w.document.close();
   }
 
+  /** The ZPL for the current part and settings (creates the shelf barcode if the part doesn't have one yet). */
+  async function currentZpl(): Promise<string> {
+    if (!data) throw new Error("Pick a part first.");
+    let spec: LabelSpec | undefined = label?.spec;
+    if (!spec) {
+      const r = await api<{ code: string }>(`/inventory/products/${data.product.id}/shelf-barcode`, { method: "POST" });
+      spec = { code: r.code, sku: data.product.sku, title: data.product.title, bin: data.product.bin_location };
+    }
+    return buildZpl(spec, size, sym, copies);
+  }
+
   async function zpl() {
     if (!data) return;
     setBusy(true);
     try {
-      let spec: LabelSpec | undefined = label?.spec;
-      if (!spec) {
-        const r = await api<{ code: string }>(`/inventory/products/${data.product.id}/shelf-barcode`, { method: "POST" });
-        spec = { code: r.code, sku: data.product.sku, title: data.product.title, bin: data.product.bin_location };
+      download(`label-${data.product.sku}.zpl`, await currentZpl());
+      await load(data.product.id, true);
+    } catch (e) {
+      setFlash({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Sends the label straight to the Zebra through the small print helper running on this PC (print_helper.py). */
+  async function printZebra() {
+    if (!data) return;
+    setBusy(true);
+    setFlash(null);
+    try {
+      const text = await currentZpl();
+      let res: Response;
+      try {
+        res = await fetch(`${PRINT_HELPER_URL}/print`, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: text,
+        });
+      } catch {
+        throw new Error(
+          "Can’t reach the label printer helper on this PC. Start print_helper.py and try again, or use “Download ZPL file”.",
+        );
       }
-      download(`label-${data.product.sku}.zpl`, buildZpl(spec, size, sym, copies));
+      const out = (await res.json().catch(() => ({}))) as { printer?: string; error?: string };
+      if (!res.ok) throw new Error(out.error || `The printer helper answered with an error (${res.status}).`);
+      setFlash({
+        kind: "success",
+        text: `Sent ${copies} label${copies === 1 ? "" : "s"} to ${out.printer ?? "the printer"}.`,
+      });
       await load(data.product.id, true);
     } catch (e) {
       setFlash({ kind: "error", text: errMsg(e) });
@@ -358,8 +400,11 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
                     {sym === "code128" ? " with the barcode across the top" : ""}.
                   </p>
                   <div className="flex flex-wrap gap-2">
-                    <button className={btnCls} onClick={printLabel}>
-                      Print label
+                    <button className={btnCls} disabled={busy} onClick={printZebra}>
+                      {busy ? "Working…" : "Print to Zebra"}
+                    </button>
+                    <button className={btn2Cls} onClick={printLabel}>
+                      Print label (browser)
                     </button>
                     <button className={btn2Cls} disabled={busy} onClick={zpl}>
                       Download ZPL file
@@ -368,13 +413,17 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
                 </div>
               )}
               {!label && (
-                <div>
+                <div className="flex flex-wrap items-center gap-4">
+                  <button className={btnCls} disabled={busy} onClick={printZebra}>
+                    {busy ? "Working…" : "Print to Zebra"}
+                  </button>
                   <button className="text-sm underline" disabled={busy} onClick={zpl}>
                     Skip the preview and download the ZPL file
                   </button>
                 </div>
               )}
               <p className="text-xs text-gray-500">
+                “Print to Zebra” sends the label straight to the Zebra plugged into this PC (the print helper, print_helper.py, must be running).
                 “Print label” opens a page sized to the label: choose your Zebra printer and make sure its paper size matches. With “Regular paper” it lays the labels out at their real size on an 8.5 × 11 in sheet instead (dashed lines show the edges), so you can test the design on any printer before the Zebra arrives; print it at 100% / actual size.
                 A ZPL file prints straight to a Zebra printer, for example from PowerShell:{" "}
                 <span className="font-mono">copy /b label-SKU.zpl \\localhost\ZebraShareName</span> (the printer must be shared
