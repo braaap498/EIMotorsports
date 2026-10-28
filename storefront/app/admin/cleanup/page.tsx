@@ -20,6 +20,7 @@ type Item = {
   part_number: string | null;
 };
 type SearchResp = { total: number; shown: number; items: Item[] };
+type ItemsResp = { items: Item[]; not_found: string[] };
 
 type YearFit = { vehicle_id: number; year: number; submodel: string | null; from_product_ids: number[] };
 type ModelFit = { model_id: number; make: string; model: string; vehicle_type: string | null; years: YearFit[] };
@@ -468,6 +469,11 @@ export default function PartsCleanupPage() {
   const [total, setTotal] = useState(0);
   const [searching, setSearching] = useState(false);
   const [searchErr, setSearchErr] = useState("");
+  // "Search Item Number" box: the list is built up one lookup at a time
+  const [itemInput, setItemInput] = useState("");
+  const [listMode, setListMode] = useState<"title" | "items">("title");
+  const [itemSearching, setItemSearching] = useState(false);
+  const [notFound, setNotFound] = useState<string[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [keeper, setKeeper] = useState<number | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -505,6 +511,8 @@ export default function PartsCleanupPage() {
       setItems(r.items);
       setTotal(r.total);
       setSearchedQ(q);
+      setListMode("title");
+      setNotFound([]);
       setSelected(new Set());
       setKeeper(null);
     } catch (e) {
@@ -513,6 +521,70 @@ export default function PartsCleanupPage() {
       setSearching(false);
     }
   }, []);
+
+  /** Item-number search: adds the part(s) to the list instead of replacing it. */
+  async function addByItemNumbers(raw: string) {
+    setItemSearching(true);
+    setSearchErr("");
+    try {
+      const r = await api<ItemsResp>(`/cleanup/by-items?ids=${encodeURIComponent(raw)}`);
+      // A list that came from a title search is replaced, so only the numbers typed here are shown.
+      const base = listMode === "items" ? items : [];
+      const have = new Set(base.map((i) => i.id));
+      const merged = [...base, ...r.items.filter((i) => !have.has(i.id))];
+      setItems(merged);
+      setTotal(merged.length);
+      setListMode("items");
+      setSearchedQ("item numbers");
+      setNotFound(r.not_found);
+      if (listMode !== "items") {
+        setSelected(new Set());
+        setKeeper(null);
+      }
+      setItemInput("");
+    } catch (e) {
+      setSearchErr(errMsg(e));
+    } finally {
+      setItemSearching(false);
+    }
+  }
+
+  /** Re-reads the current list from the database (after a merge, or after "Start again"). */
+  async function reloadList() {
+    if (listMode === "items") {
+      if (items.length === 0) return;
+      try {
+        const r = await api<ItemsResp>(`/cleanup/by-items?ids=${encodeURIComponent(items.map((i) => i.sku).join(","))}`);
+        setItems(r.items); // parts that were merged away simply drop out of the list
+        setTotal(r.items.length);
+        setNotFound([]);
+        setSelected(new Set());
+        setKeeper(null);
+      } catch (e) {
+        setSearchErr(errMsg(e));
+      }
+    } else if (searchedQ) {
+      await runSearch(searchedQ);
+    }
+  }
+
+  function removeFromList(id: number) {
+    setItems((list) => list.filter((i) => i.id !== id));
+    const n = new Set(selected);
+    n.delete(id);
+    setSelected(n);
+    if (keeper === id) setKeeper(null);
+  }
+
+  function clearList() {
+    setItems([]);
+    setTotal(0);
+    setSearchedQ("");
+    setListMode("title");
+    setNotFound([]);
+    setSelected(new Set());
+    setKeeper(null);
+  }
 
   function applySelection(next: Set<number>) {
     setSelected(next);
@@ -593,7 +665,7 @@ export default function PartsCleanupPage() {
     setStep("search");
     setPreview(null);
     setResult(null);
-    if (searchedQ) await runSearch(searchedQ);
+    await reloadList();
   }
 
   const selectedItems = items.filter((i) => selected.has(i.id));
@@ -616,26 +688,53 @@ export default function PartsCleanupPage() {
             duplicate to an existing master, tick that duplicate and the master (marked MASTER).
           </Notice>
 
-          <form
-            className="flex flex-wrap items-end gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (qInput.trim().length >= 2) runSearch(qInput.trim());
-            }}
-          >
-            <Field label="Search title or SKU" className="w-full max-w-md">
-              <input className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder='e.g. "Tusk 1.8 bar"' autoFocus />
-            </Field>
-            <button className={btnCls} disabled={searching || qInput.trim().length < 2}>
-              {searching ? "Searching…" : "Search"}
-            </button>
-          </form>
+          <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+            <form
+              className="flex flex-wrap items-end gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (qInput.trim().length >= 2) runSearch(qInput.trim());
+              }}
+            >
+              <Field label="Search title or SKU" className="w-full max-w-md">
+                <input className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder='e.g. "Tusk 1.8 bar"' autoFocus />
+              </Field>
+              <button className={btnCls} disabled={searching || qInput.trim().length < 2}>
+                {searching ? "Searching…" : "Search"}
+              </button>
+            </form>
+
+            <form
+              className="flex flex-wrap items-end gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (itemInput.trim()) addByItemNumbers(itemInput.trim());
+              }}
+            >
+              <Field label="Search Item Number" className="w-full max-w-md">
+                <input
+                  className={inputCls}
+                  value={itemInput}
+                  onChange={(e) => setItemInput(e.target.value)}
+                  placeholder="e.g. EBAY-178554199250, EBAY-178554199250"
+                />
+              </Field>
+              <button className={btnCls} disabled={itemSearching || !itemInput.trim()}>
+                {itemSearching ? "Searching…" : "Search"}
+              </button>
+            </form>
+          </div>
 
           {searchErr && <Notice kind="error">{searchErr}</Notice>}
+          {notFound.length > 0 && (
+            <Notice kind="error">
+              Not found: {notFound.join(", ")}. Check the number and try again.
+            </Notice>
+          )}
 
           {searchedQ && !searching && (
             <>
-              {total > items.length && (
+              {listMode === "title" && total > items.length && (
                 <Notice>
                   Showing the first {items.length} of {total} matches. Add more words to the search so every duplicate
                   is in the list before you tick them.
@@ -643,7 +742,9 @@ export default function PartsCleanupPage() {
               )}
               <div className="flex flex-wrap items-center gap-3 text-sm">
                 <span className="text-gray-600">
-                  {items.length} result{items.length === 1 ? "" : "s"} for “{searchedQ}”
+                  {listMode === "items"
+                    ? `${items.length} part${items.length === 1 ? "" : "s"} added by item number`
+                    : `${items.length} result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
                 </span>
                 <button type="button" className={btn2Cls} onClick={() => applySelection(new Set(items.map((i) => i.id)))} disabled={items.length === 0}>
                   Tick all {items.length}
@@ -651,6 +752,11 @@ export default function PartsCleanupPage() {
                 <button type="button" className={btn2Cls} onClick={() => applySelection(new Set())} disabled={selected.size === 0}>
                   Clear ticks
                 </button>
+                {listMode === "items" && (
+                  <button type="button" className={btn2Cls} onClick={clearList}>
+                    Clear list
+                  </button>
+                )}
               </div>
 
               <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
@@ -694,13 +800,18 @@ export default function PartsCleanupPage() {
                         <td className="px-3 py-2">{p.fitment_count}</td>
                         <td className="px-3 py-2">
                           <ProductBadges p={p} />
+                          {listMode === "items" && (
+                            <button type="button" className="mt-1 text-xs text-red-700 underline" onClick={() => removeFromList(p.id)}>
+                              remove from list
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))}
                     {items.length === 0 && (
                       <tr>
                         <td colSpan={9} className="px-3 py-6 text-center text-gray-500">
-                          Nothing matches. Try fewer words.
+                          {listMode === "items" ? "Nothing in the list." : "Nothing matches. Try fewer words."}
                         </td>
                       </tr>
                     )}
@@ -931,7 +1042,7 @@ export default function PartsCleanupPage() {
               <div className="space-y-2">
                 <Notice kind="error">{mergeErr.text}</Notice>
                 {mergeErr.stale && (
-                  <button className={btn2Cls} onClick={() => { cancel(); if (searchedQ) runSearch(searchedQ); }}>
+                  <button className={btn2Cls} onClick={() => { cancel(); reloadList(); }}>
                     Start again
                   </button>
                 )}

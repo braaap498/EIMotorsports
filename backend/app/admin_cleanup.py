@@ -226,6 +226,61 @@ def search(
     return {"total": total, "shown": len(rows), "items": [dict(r._mapping) for r in rows]}
 
 
+@router.get("/by-items")
+def by_items(
+    ids: str = Query(..., min_length=1, description="comma / space separated eBay item numbers, e.g. EBAY-178554199250"),
+    db: Session = Depends(get_db),
+):
+    """Look up specific products by item number (SKU such as EBAY-178554199250, or the bare number,
+    or an eBay item number stored on a channel listing). Returns the products found plus the
+    entries that matched nothing, so the page can tell the person exactly which one was not found."""
+    tokens: list[str] = []
+    for t in re.split(r"[,\s;]+", ids.strip()):
+        t = t.strip().upper()
+        if t and t not in tokens:
+            tokens.append(t)
+    if not tokens:
+        raise HTTPException(400, "Type at least one item number")
+    if len(tokens) > 100:
+        raise HTTPException(400, "Look up at most 100 item numbers at a time")
+
+    def bare(t: str) -> str:
+        return t[5:] if t.startswith("EBAY-") else t
+
+    skus = sorted({t for t in tokens} | {f"EBAY-{bare(t)}" for t in tokens})
+    exts = sorted({bare(t) for t in tokens})
+    rows = db.execute(
+        text(
+            f"""
+            select p.id, p.sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+                   (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
+                   (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
+                   (select coalesce(sum(l.merged_count), 0) from part_merge_log l
+                     where l.survivor_product_id = p.id) as prior_merges,
+                   (select array_agg(cl.external_id) from channel_listings cl
+                     where cl.product_id = p.id) as ebay_item_ids,
+                   {_PN_SUBQUERY} as part_number
+            from products p
+            where upper(p.sku) = any(cast(:skus as text[]))
+               or exists (select 1 from channel_listings cl
+                          where cl.product_id = p.id and cl.external_id = any(cast(:exts as text[])))
+            order by p.title, p.id
+            """
+        ),
+        {"skus": skus, "exts": exts},
+    ).all()
+
+    items = []
+    seen_keys: set[str] = set()
+    for r in rows:
+        d = dict(r._mapping)
+        seen_keys.add(str(d["sku"]).upper())
+        seen_keys.update(f"EBAY-{e}" for e in (d.pop("ebay_item_ids", None) or []))
+        items.append(d)
+    not_found = [t for t in tokens if t not in seen_keys and f"EBAY-{bare(t)}" not in seen_keys]
+    return {"items": items, "not_found": not_found}
+
+
 # --------------------------------------------------------------------------
 # 2. preview (read-only)
 # --------------------------------------------------------------------------
