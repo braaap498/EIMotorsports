@@ -8,6 +8,7 @@ import ScanBox from "./ScanBox";
 import { beep, type Prod } from "./shared";
 import {
   SIZES,
+  metrics,
   buildPrintHtml,
   buildZpl,
   download,
@@ -35,7 +36,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
   const [flash, setFlash] = useState<Flash | null>(null);
   const [bin, setBin] = useState("");
   const [kind, setKind] = useState("box");
-  const [sizeId, setSizeId] = useState("4x2");
+  const [sizeId, setSizeId] = useState("2x1");
   const [sym, setSym] = useState<Symbology>("datamatrix");
   const [copies, setCopies] = useState(1);
   const [paper, setPaper] = useState<Paper>("label");
@@ -132,6 +133,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
   }
 
   const size = SIZES.find((s) => s.id === sizeId) ?? SIZES[0];
+  const M = metrics(size);
 
   function printLabel() {
     if (!label) return;
@@ -327,17 +329,17 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
                       style={
                         sym === "code128"
                           ? { width: "100%", height: `${size.hIn * 96 * 0.34}px`, objectFit: "fill", flex: "none" }
-                          : { height: `${size.hIn * 96 * 0.72}px`, width: `${size.hIn * 96 * 0.72}px`, imageRendering: "pixelated", flex: "none" }
+                          : { height: `${size.hIn * 96 * M.img}px`, width: `${size.hIn * 96 * M.img}px`, imageRendering: "pixelated", flex: "none" }
                       }
                     />
                     <div className="min-w-0 text-black">
-                      <div className="font-extrabold leading-none" style={{ fontSize: `${size.hIn * 96 * 0.2}px` }}>
+                      <div className="font-extrabold leading-none" style={{ fontSize: `${size.hIn * 96 * M.bin}px` }}>
                         {label.spec.bin ?? ""}
                       </div>
-                      <div className="mt-1 leading-tight" style={{ fontSize: `${size.hIn * 96 * 0.085}px` }}>
+                      <div className="mt-1 leading-tight" style={{ fontSize: `${size.hIn * 96 * M.title}px` }}>
                         {label.spec.title}
                       </div>
-                      <div style={{ fontSize: `${size.hIn * 96 * 0.07}px` }}>
+                      <div style={{ fontSize: `${size.hIn * 96 * M.small}px` }}>
                         {label.spec.sku} · {label.spec.code}
                       </div>
                     </div>
