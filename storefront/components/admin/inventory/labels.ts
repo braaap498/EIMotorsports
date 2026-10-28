@@ -200,7 +200,7 @@ export function buildZpl(spec: LabelSpec, size: LabelSize, sym: Symbology, copie
     y += Math.round(fBin * 1.15);
   }
   // SKU sits at the bottom of the text column; the title gets whatever room is left above it.
-  const skuY = H - m - Math.round(fSmall * 2 * 1.1);
+  const skuY = H - m - Math.round(fSmall * 2 * 1.1) - Math.round(0.125 * DPI); // 1/8 in extra clearance at the bottom edge
   const lineH = fTitle + 2;
   const titleLines = Math.max(1, Math.floor((skuY - 4 - y) / lineH));
   const title = fitTitle(clean(spec.title), Math.floor(textW / (fTitle * 0.6)), titleLines);
