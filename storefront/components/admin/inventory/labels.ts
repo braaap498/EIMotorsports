@@ -53,6 +53,9 @@ export async function renderBarcodePng(code: string, sym: Symbology): Promise<st
 /** The HTML of the print window: one label per page, exact label size, no margins. */
 export type Paper = "label" | "letter";
 
+/** Turns the whole label on the page: 0 = as designed, 90 = clockwise, 270 = counter-clockwise. For printers whose driver feeds the label the other way. */
+export type Rotate = 0 | 90 | 270;
+
 /** What the print window is laid out for: one label per page (label printer) or a grid of labels on a regular 8.5 × 11 in sheet. */
 export function buildPrintHtml(
   img: string,
@@ -61,6 +64,7 @@ export function buildPrintHtml(
   sym: Symbology,
   copies: number,
   paper: Paper = "label",
+  rotate: Rotate = 0,
 ): string {
   const oneD = sym === "code128";
   const M = metrics(size);
@@ -73,21 +77,35 @@ export function buildPrintHtml(
         <div class="sku">${esc(spec.sku)} &nbsp;·&nbsp; ${esc(spec.code)}</div>
       </div>
     </div>`;
+  // A rotated label sits on a page of swapped size; the label is turned inside it.
+  const pgW = rotate === 0 ? size.wIn : size.hIn;
+  const pgH = rotate === 0 ? size.hIn : size.wIn;
+  const page = `<div class="pg">${label}</div>`;
   const imgH = oneD ? size.hIn * 0.34 : size.hIn * M.img;
   return `<!doctype html><html><head><meta charset="utf-8"><title>Shelf labels</title>
 <style>
   ${
     paper === "letter"
       ? "@page { size: 8.5in 11in; margin: 0.25in; }\n  body { display: flex; flex-wrap: wrap; align-content: flex-start; }"
-      : `@page { size: ${size.wIn}in ${size.hIn}in; margin: 0; }`
+      : `@page { size: ${pgW}in ${pgH}in; margin: 0; }`
   }
   html, body { margin: 0; padding: 0; }
+  .pg { width: ${pgW}in; height: ${pgH}in; position: relative; overflow: hidden;
+        ${
+          paper === "letter"
+            ? "flex: none; break-inside: avoid; outline: 1px dashed #999; outline-offset: -1px;"
+            : "page-break-after: always;"
+        } }
   .lbl { width: ${size.wIn}in; height: ${size.hIn}in; box-sizing: border-box; padding: ${M.margin}in; overflow: hidden;
+         position: absolute; left: 0; top: 0; transform-origin: 0 0;
          ${
-           paper === "letter"
-             ? "flex: none; break-inside: avoid; outline: 1px dashed #999; outline-offset: -1px;"
-             : "page-break-after: always;"
-         } display: flex; gap: 0.1in; font-family: Arial, Helvetica, sans-serif; color: #000; }
+           rotate === 90
+             ? `transform: translateX(${size.hIn}in) rotate(90deg);`
+             : rotate === 270
+             ? `transform: translateY(${size.wIn}in) rotate(-90deg);`
+             : ""
+         }
+         display: flex; gap: 0.1in; font-family: Arial, Helvetica, sans-serif; color: #000; }
   .row { flex-direction: row; align-items: center; }
   .col { flex-direction: column; align-items: stretch; }
   img { image-rendering: pixelated; flex: none; }
@@ -97,7 +115,7 @@ export function buildPrintHtml(
   .bin { font-weight: 800; font-size: ${size.hIn * M.bin}in; line-height: 1.05; word-break: break-all; }
   .title { font-size: ${size.hIn * M.title}in; line-height: 1.12; max-height: ${size.hIn * M.title * 1.12 * M.titleLines}in; overflow: hidden; margin-top: 0.03in; }
   .sku { font-size: ${size.hIn * M.small}in; margin-top: 0.04in; }
-</style></head><body>${Array.from({ length: copies }, () => label).join("")}
+</style></head><body>${Array.from({ length: copies }, () => page).join("")}
 <script>window.onload=function(){setTimeout(function(){window.focus();window.print();},300);};</script>
 </body></html>`;
 }

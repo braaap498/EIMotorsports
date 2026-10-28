@@ -15,6 +15,7 @@ import {
   renderBarcodePng,
   type LabelSpec,
   type Paper,
+  type Rotate,
   type Symbology,
 } from "./labels";
 
@@ -40,6 +41,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
   const [sym, setSym] = useState<Symbology>("datamatrix");
   const [copies, setCopies] = useState(1);
   const [paper, setPaper] = useState<Paper>("label");
+  const [rotate, setRotate] = useState<Rotate>(0);
   const [label, setLabel] = useState<{ spec: LabelSpec; png: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const scanRef = useRef<HTMLInputElement>(null);
@@ -143,7 +145,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
       return;
     }
     w.document.open();
-    w.document.write(buildPrintHtml(label.png, label.spec, size, sym, copies, paper));
+    w.document.write(buildPrintHtml(label.png, label.spec, size, sym, copies, paper, rotate));
     w.document.close();
   }
 
@@ -307,6 +309,13 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
                   <select className={inputCls} value={paper} onChange={(e) => setPaper(e.target.value as Paper)}>
                     <option value="label">Label printer (one label per page)</option>
                     <option value="letter">Regular paper, 8.5 × 11 in (labels at actual size)</option>
+                  </select>
+                </Field>
+                <Field label="Rotate label">
+                  <select className={inputCls} value={rotate} onChange={(e) => setRotate(parseInt(e.target.value, 10) as Rotate)}>
+                    <option value={0}>None</option>
+                    <option value={90}>90° clockwise</option>
+                    <option value={270}>90° counter-clockwise</option>
                   </select>
                 </Field>
                 <button className={btnCls} disabled={busy} onClick={makeLabel}>
