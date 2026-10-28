@@ -122,6 +122,39 @@ export function buildPrintHtml(
 </body></html>`;
 }
 
+/**
+ * Wraps and shortens a title so it never needs more than maxLines lines. A Zebra field block prints any
+ * overflow on top of its last line, so we cut the text ourselves (with "...") using a deliberately wide
+ * per-character estimate: the printer then never needs more lines than we counted.
+ */
+function fitTitle(text: string, charsPerLine: number, maxLines: number): string {
+  const cpl = Math.max(4, charsPerLine);
+  const lines: string[] = [];
+  let cur = "";
+  for (let w of text.split(/\s+/).filter(Boolean)) {
+    while (w.length > cpl) {
+      if (cur) {
+        lines.push(cur);
+        cur = "";
+      }
+      lines.push(w.slice(0, cpl));
+      w = w.slice(cpl);
+    }
+    if (!w) continue;
+    if (!cur) cur = w;
+    else if ((cur + " " + w).length <= cpl) cur += " " + w;
+    else {
+      lines.push(cur);
+      cur = w;
+    }
+  }
+  if (cur) lines.push(cur);
+  if (lines.length <= maxLines) return lines.join(" ");
+  const kept = lines.slice(0, maxLines);
+  kept[maxLines - 1] = kept[maxLines - 1].slice(0, cpl - 3).trimEnd() + "...";
+  return kept.join(" ");
+}
+
 /** ZPL for the same label. Data Matrix, QR and Code 128 are built into the printer. */
 export function buildZpl(spec: LabelSpec, size: LabelSize, sym: Symbology, copies: number): string {
   const W = Math.min(Math.round(size.wIn * DPI), MAX_PRINT_DOTS);
@@ -166,9 +199,13 @@ export function buildZpl(spec: LabelSpec, size: LabelSize, sym: Symbology, copie
     out.push(`^FO${textX},${y}^A0N,${fBin},${fBin}^FB${textW},1,0,L^FD${bin}^FS`);
     y += Math.round(fBin * 1.15);
   }
-  out.push(`^FO${textX},${y}^A0N,${fTitle},${fTitle}^FB${textW},${M.titleLines},0,L^FD${clean(spec.title)}^FS`);
-  y += Math.round(fTitle * 1.13 * M.titleLines) + 4;
-  out.push(`^FO${textX},${y}^A0N,${fSmall},${fSmall}^FB${textW},2,0,L^FD${clean(spec.sku)}  ${code}^FS`);
+  // SKU sits at the bottom of the text column; the title gets whatever room is left above it.
+  const skuY = H - m - Math.round(fSmall * 2 * 1.1);
+  const lineH = fTitle + 2;
+  const titleLines = Math.max(1, Math.floor((skuY - 4 - y) / lineH));
+  const title = fitTitle(clean(spec.title), Math.floor(textW / (fTitle * 0.6)), titleLines);
+  out.push(`^FO${textX},${y}^A0N,${fTitle},${fTitle}^FB${textW},${titleLines},2,L^FD${title}^FS`);
+  out.push(`^FO${textX},${skuY}^A0N,${fSmall},${fSmall}^FB${textW},2,0,L^FD${clean(spec.sku)}  ${code}^FS`);
   out.push(`^PQ${copies}`, "^XZ");
   return out.join("\n") + "\n";
 }
