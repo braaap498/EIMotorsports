@@ -21,7 +21,7 @@ export function metrics(size: LabelSize) {
   return {
     margin: c ? 0.05 : 0.07, // inches
     img: c ? 0.82 : 0.72, // barcode height as a share of label height (preview and print page)
-    fill: c ? 0.95 : 0.85, // barcode height share in ZPL
+    fill: c ? 0.8 : 0.85, // barcode height share in ZPL
     bin: c ? 0.24 : 0.2,
     title: c ? 0.1 : 0.085,
     small: c ? 0.08 : 0.07,
