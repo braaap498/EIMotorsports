@@ -171,7 +171,9 @@ export function buildZpl(spec: LabelSpec, size: LabelSize, sym: Symbology, copie
   const fTitle = Math.round(H * M.title);
   const fSmall = Math.round(H * M.small);
 
-  const out: string[] = ["^XA", "^CI28", `^PW${W}`, `^LL${H}`, "^LH0,0"];
+  // No ^LL: label length comes from the printer's own gap calibration (~JC), so repeated prints stay aligned.
+  // ^MNY makes sure it tracks the gaps between labels rather than treating the roll as continuous.
+  const out: string[] = ["^XA", "^CI28", "^MNY", `^PW${W}`, "^LH0,0"];
   let textX: number;
   let textY: number;
   let textW: number;
