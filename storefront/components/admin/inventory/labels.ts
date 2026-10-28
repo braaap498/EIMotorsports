@@ -30,6 +30,8 @@ export function metrics(size: LabelSize) {
 }
 
 const DPI = 203; // standard Zebra desktop printers; a 300 dpi printer just prints the same label a bit smaller
+/** The ZD410 (203 dpi) prints at most 448 dots (2.2 in) across the head; a 2.25 in label is a hair wider. */
+const MAX_PRINT_DOTS = 448;
 
 const esc = (s: string) =>
   s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
@@ -122,7 +124,7 @@ export function buildPrintHtml(
 
 /** ZPL for the same label. Data Matrix, QR and Code 128 are built into the printer. */
 export function buildZpl(spec: LabelSpec, size: LabelSize, sym: Symbology, copies: number): string {
-  const W = Math.round(size.wIn * DPI);
+  const W = Math.min(Math.round(size.wIn * DPI), MAX_PRINT_DOTS);
   const H = Math.round(size.hIn * DPI);
   const M = metrics(size);
   const m = Math.round(M.margin * DPI); // margin

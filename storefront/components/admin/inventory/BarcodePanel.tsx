@@ -37,7 +37,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
   const [flash, setFlash] = useState<Flash | null>(null);
   const [bin, setBin] = useState("");
   const [kind, setKind] = useState("box");
-  const [sizeId, setSizeId] = useState("2x1");
+  const [sizeId, setSizeId] = useState("225x125");
   const [sym, setSym] = useState<Symbology>("datamatrix");
   const [copies, setCopies] = useState(1);
   const [paper, setPaper] = useState<Paper>("label");
