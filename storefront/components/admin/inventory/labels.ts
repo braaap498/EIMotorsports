@@ -22,7 +22,7 @@ export function metrics(size: LabelSize) {
     margin: c ? 0.05 : 0.07, // inches
     img: c ? 0.82 : 0.72, // barcode height as a share of label height (preview and print page)
     fill: c ? 0.8 : 0.85, // barcode height share in ZPL
-    bin: c ? 0.24 : 0.2,
+    bin: c ? 0.2 : 0.2,
     title: c ? 0.1 : 0.085,
     small: c ? 0.08 : 0.07,
     titleLines: 3,
@@ -127,7 +127,7 @@ export function buildPrintHtml(
  * overflow on top of its last line, so we cut the text ourselves (with "...") using a deliberately wide
  * per-character estimate: the printer then never needs more lines than we counted.
  */
-function fitTitle(text: string, charsPerLine: number, maxLines: number): string {
+function fitTitle(text: string, charsPerLine: number, maxLines: number): { text: string; cut: boolean } {
   const cpl = Math.max(4, charsPerLine);
   const lines: string[] = [];
   let cur = "";
@@ -149,10 +149,10 @@ function fitTitle(text: string, charsPerLine: number, maxLines: number): string 
     }
   }
   if (cur) lines.push(cur);
-  if (lines.length <= maxLines) return lines.join(" ");
+  if (lines.length <= maxLines) return { text: lines.join(" "), cut: false };
   const kept = lines.slice(0, maxLines);
   kept[maxLines - 1] = kept[maxLines - 1].slice(0, cpl - 3).trimEnd() + "...";
-  return kept.join(" ");
+  return { text: kept.join(" "), cut: true };
 }
 
 /** ZPL for the same label. Data Matrix, QR and Code 128 are built into the printer. */
@@ -200,11 +200,23 @@ export function buildZpl(spec: LabelSpec, size: LabelSize, sym: Symbology, copie
     y += Math.round(fBin * 1.15);
   }
   // SKU sits at the bottom of the text column; the title gets whatever room is left above it.
-  const skuY = H - m - Math.round(fSmall * 2 * 1.1) - Math.round(0.125 * DPI); // 1/8 in extra clearance at the bottom edge
-  const lineH = fTitle + 2;
-  const titleLines = Math.max(1, Math.floor((skuY - 4 - y) / lineH));
-  const title = fitTitle(clean(spec.title), Math.floor(textW / (fTitle * 0.6)), titleLines);
-  out.push(`^FO${textX},${y}^A0N,${fTitle},${fTitle}^FB${textW},${titleLines},2,L^FD${title}^FS`);
+  const skuY = H - m - Math.round(fSmall * 2 * 1.1) - Math.round(0.125 * DPI) - fSmall; // extra clearance at the bottom edge: 1/8 in plus one line of SKU text
+  // Auto-fit: use the largest title size (down to a readable minimum) that shows the whole title in the
+  // room above the SKU; only if even the smallest size is too long is the end cut off with "...".
+  const room = skuY - 4 - y;
+  const minTitle = Math.round(0.085 * DPI);
+  const cleanTitle = clean(spec.title);
+  let fT = fTitle;
+  let titleLines = 1;
+  let title = cleanTitle;
+  for (; fT >= minTitle; fT--) {
+    titleLines = Math.max(1, Math.floor(room / (fT + 2)));
+    const r = fitTitle(cleanTitle, Math.floor(textW / (fT * 0.6)), titleLines);
+    title = r.text;
+    if (!r.cut) break;
+  }
+  if (fT < minTitle) fT = minTitle; // loop ran out: keep the last (cut) result at the minimum size
+  out.push(`^FO${textX},${y}^A0N,${fT},${fT}^FB${textW},${titleLines},2,L^FD${title}^FS`);
   out.push(`^FO${textX},${skuY}^A0N,${fSmall},${fSmall}^FB${textW},2,0,L^FD${clean(spec.sku)}  ${code}^FS`);
   out.push(`^PQ${copies}`, "^XZ");
   return out.join("\n") + "\n";
