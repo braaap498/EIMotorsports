@@ -11,6 +11,7 @@ import { Badge, Field, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../.
 type Item = {
   id: number;
   ebay_item_id: string | null; // e.g. EBAY-178554199250
+  custom_label_sku: string | null;
   title: string;
   list_price: number | string | null;
   quantity_on_hand: number;
@@ -767,6 +768,7 @@ export default function PartsCleanupPage() {
                       <th className="px-3 py-2">Merge</th>
                       <th className="px-3 py-2">Keep</th>
                       <th className="px-3 py-2">eBay item #</th>
+                      <th className="px-3 py-2">Custom label SKU</th>
                       <th className="px-3 py-2">Title</th>
                       <th className="px-3 py-2">Part #</th>
                       <th className="px-3 py-2">Price</th>
@@ -792,6 +794,7 @@ export default function PartsCleanupPage() {
                           />
                         </td>
                         <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.ebay_item_id ?? "—"}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.custom_label_sku ?? "—"}</td>
                         <td className="max-w-md px-3 py-2">
                           <div className="font-medium">{p.title}</div>
                         </td>
@@ -811,7 +814,7 @@ export default function PartsCleanupPage() {
                     ))}
                     {items.length === 0 && (
                       <tr>
-                        <td colSpan={9} className="px-3 py-6 text-center text-gray-500">
+                        <td colSpan={10} className="px-3 py-6 text-center text-gray-500">
                           {listMode === "items" ? "Nothing in the list." : "Nothing matches. Try fewer words."}
                         </td>
                       </tr>
@@ -872,7 +875,7 @@ export default function PartsCleanupPage() {
             </div>
             <div className="font-semibold">{preview.survivor.title}</div>
             <div className="text-sm text-gray-600">
-              eBay item {preview.survivor.ebay_item_id ?? "—"} · Part # {preview.survivor.part_number ?? "—"} · {preview.survivor.listing_count} eBay listing
+              eBay item {preview.survivor.ebay_item_id ?? "—"} · Custom label SKU {preview.survivor.custom_label_sku ?? "—"} · Part # {preview.survivor.part_number ?? "—"} · {preview.survivor.listing_count} eBay listing
               {preview.survivor.listing_count === 1 ? "" : "s"} · qty {preview.survivor.quantity_on_hand}
             </div>
             <p className="mt-2 text-xs text-gray-500">
@@ -912,6 +915,7 @@ export default function PartsCleanupPage() {
                 <thead className="sticky top-0 bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
                     <th className="px-2 py-2">eBay item #</th>
+                    <th className="px-2 py-2">Custom label SKU</th>
                     <th className="px-2 py-2">Title</th>
                     <th className="px-2 py-2">Part #</th>
                     <th className="px-2 py-2">Qty</th>
@@ -922,6 +926,7 @@ export default function PartsCleanupPage() {
                   {preview.merging_away.map((r) => (
                     <tr key={r.id}>
                       <td className="whitespace-nowrap px-2 py-1 text-gray-600">{r.ebay_item_id ?? "—"}</td>
+                      <td className="whitespace-nowrap px-2 py-1 text-gray-600">{r.custom_label_sku ?? "—"}</td>
                       <td className="px-2 py-1">{r.title}</td>
                       <td className="whitespace-nowrap px-2 py-1 text-gray-600">{r.part_number ?? "—"}</td>
                       <td className="px-2 py-1">{r.quantity_on_hand}</td>

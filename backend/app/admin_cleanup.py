@@ -74,7 +74,7 @@ _PN_SUBQUERY = f"""
 """
 
 _STATE_SQL = f"""
-select p.id, p.ebay_item_id, p.title, p.list_price, p.quantity_on_hand, p.is_published, p.is_active,
+select p.id, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price, p.quantity_on_hand, p.is_published, p.is_active,
        p.is_universal, p.category_id, p.part_manufacturer_id, p.updated_at,
        (select count(*) from channel_listings cl where cl.product_id = p.id)       as listing_count,
        (select count(*) from product_fitment pf where pf.product_id = p.id)        as fitment_count,
@@ -211,7 +211,7 @@ def search(
     rows = db.execute(
         text(
             f"""
-            select p.id, p.ebay_item_id, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+            select p.id, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
                    (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
                    (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
                    (select coalesce(sum(l.merged_count), 0) from part_merge_log l
@@ -254,7 +254,7 @@ def by_items(
     rows = db.execute(
         text(
             f"""
-            select p.id, p.ebay_item_id, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+            select p.id, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
                    p.sku as in_house_sku,
                    (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
                    (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
