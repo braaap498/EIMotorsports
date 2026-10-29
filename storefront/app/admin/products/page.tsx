@@ -85,7 +85,19 @@ export default function ProductsPage() {
       <div className="flex flex-wrap items-end gap-3">
         <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); filterChange(() => setQ(qInput.trim())); }}>
           <Field label="Search">
-            <input className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Title, SKU or part #" />
+            <div className="relative">
+              <input className={inputCls + " pr-8"} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Title, SKU or part #" />
+              {qInput && (
+                <button
+                  type="button"
+                  aria-label="Clear search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-lg leading-none text-gray-400 hover:text-black"
+                  onClick={() => { setQInput(""); filterChange(() => setQ("")); }}
+                >
+                  ×
+                </button>
+              )}
+            </div>
           </Field>
           <button className={btn2Cls}>Search</button>
         </form>
