@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "../ClearableInput";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Notice, btn2Cls, inputCls } from "../ui";
@@ -66,7 +67,7 @@ export default function ProductPicker({ onPick, browse = false }: { onPick: (p: 
   return (
     <div className="space-y-2">
       <form onSubmit={search} className="flex gap-2">
-        <input
+        <ClearableInput
           className={inputCls}
           value={q}
           onChange={(e) => setQ(e.target.value)}

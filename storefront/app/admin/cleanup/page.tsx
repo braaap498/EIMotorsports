@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "../../../components/admin/ClearableInput";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -263,7 +264,7 @@ function AddVehicles({
           </select>
         </Field>
         <Field label="Narrow models (optional)">
-          <input className={inputCls} value={modelQ} onChange={(e) => setModelQ(e.target.value)} placeholder="e.g. Rubicon" disabled={!makeId} />
+          <ClearableInput className={inputCls} value={modelQ} onChange={(e) => setModelQ(e.target.value)} placeholder="e.g. Rubicon" disabled={!makeId} />
         </Field>
         <Field label="Model">
           <select className={inputCls} value={modelId} onChange={(e) => setModelId(e.target.value)} disabled={!makeId}>
@@ -400,7 +401,7 @@ function FitmentStep({
 
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <div className="mb-3 max-w-sm">
-          <input className={inputCls} placeholder="Filter the list (make or model)…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <ClearableInput className={inputCls} placeholder="Filter the list (make or model)…" value={filter} onChange={(e) => setFilter(e.target.value)} />
         </div>
         {models.length === 0 && <p className="text-sm text-gray-500">None of these products had any fitment. Add vehicles above.</p>}
         <div className="space-y-4">
@@ -697,7 +698,7 @@ export default function PartsCleanupPage() {
               }}
             >
               <Field label="Search title or SKU" className="w-full max-w-md">
-                <input className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder='e.g. "Tusk 1.8 bar"' autoFocus />
+                <ClearableInput className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder='e.g. "Tusk 1.8 bar"' autoFocus />
               </Field>
               <button className={btnCls} disabled={searching || qInput.trim().length < 2}>
                 {searching ? "Searching…" : "Search"}
@@ -712,7 +713,7 @@ export default function PartsCleanupPage() {
               }}
             >
               <Field label="Search Item Number" className="w-full max-w-md">
-                <input
+                <ClearableInput
                   className={inputCls}
                   value={itemInput}
                   onChange={(e) => setItemInput(e.target.value)}

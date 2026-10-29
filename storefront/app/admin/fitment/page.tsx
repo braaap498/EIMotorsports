@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "../../../components/admin/ClearableInput";
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
@@ -68,7 +69,7 @@ function NameList({
       </form>
 
       {items.length > 8 && (
-        <input className={`${inputCls} mb-3`} placeholder="Filter…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <ClearableInput className={`${inputCls} mb-3`} placeholder="Filter…" value={filter} onChange={(e) => setFilter(e.target.value)} />
       )}
 
       <ul className="divide-y divide-gray-100">

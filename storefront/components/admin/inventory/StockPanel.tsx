@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "../ClearableInput";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -113,7 +114,7 @@ export default function StockPanel({ active }: { active: boolean }) {
           {tabBtn("low", `Low stock (${data.low_count})`)}
           {tabBtn("out", `Out of stock (${data.out_count})`)}
         </div>
-        <input
+        <ClearableInput
           className={`${inputCls} max-w-xs`}
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}

@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "./ClearableInput";
 import { useCallback, useEffect, useState } from "react";
 import { api, apiDownload, errMsg } from "../../lib/adminApi";
 import { Badge, Modal, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "./ui";
@@ -257,7 +258,7 @@ function Reorder({
       </p>
 
       <div className="flex flex-wrap items-center gap-3">
-        <input
+        <ClearableInput
           className={`${inp} w-full max-w-md`}
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}
@@ -648,7 +649,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
 
   return (
     <div className="space-y-4">
-      <input
+      <ClearableInput
         className={`${inp} w-full max-w-3xl`}
         value={qInput}
         onChange={(e) => setQInput(e.target.value)}
@@ -876,7 +877,7 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
         rest is still expected stays on its open PO and isn’t listed here. Each one shows who acknowledged it and when.
       </p>
       <div className="flex flex-wrap items-center gap-3">
-        <input
+        <ClearableInput
           className={`${inp} w-full max-w-3xl`}
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}
@@ -1327,7 +1328,7 @@ function EditPo({
 
         <div className="space-y-2">
           <div className="font-medium">Add a part</div>
-          <input className={`${inp} max-w-md`} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Search title, SKU or part number" />
+          <ClearableInput className={`${inp} max-w-md`} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Search title, SKU or part number" />
           {found.length > 0 && (
             <ul className="divide-y divide-gray-100 rounded border border-gray-200">
               {found.map((p) => (

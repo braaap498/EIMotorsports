@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "./ClearableInput";
 import { useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Modal, Notice, btn2Cls, inputCls } from "./ui";
@@ -77,7 +78,7 @@ export default function PhotoPicker({
       <div className="space-y-4">
         <label className="block text-sm font-medium text-gray-700">
           <span className="mb-1 block">Find a product that already has the picture</span>
-          <input
+          <ClearableInput
             className={inputCls}
             autoFocus
             value={q}

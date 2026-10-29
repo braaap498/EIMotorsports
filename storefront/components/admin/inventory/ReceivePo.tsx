@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "../ClearableInput";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../ui";
@@ -128,7 +129,7 @@ export default function ReceivePo({ active }: { active: boolean }) {
         A PO only shows here once it is marked <strong>sent</strong> on the Purchase orders screen.
       </p>
       <div className="flex flex-wrap items-center gap-3">
-        <input
+        <ClearableInput
           className={`${inputCls} w-full max-w-xl`}
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}

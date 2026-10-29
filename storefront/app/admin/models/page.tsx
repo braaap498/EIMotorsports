@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "../../../components/admin/ClearableInput";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, errMsg } from "../../../lib/adminApi";
 import ArrowBar from "../../../components/admin/ArrowBar";
@@ -287,7 +288,7 @@ function EditModal({
                 .catch((err) => setMsg({ kind: "error", text: errMsg(err) }));
             }}
           >
-            <input className={inputCls} placeholder="Search target model name" value={mergeQ} onChange={(e) => setMergeQ(e.target.value)} />
+            <ClearableInput className={inputCls} placeholder="Search target model name" value={mergeQ} onChange={(e) => setMergeQ(e.target.value)} onClear={() => { setMergeQ(""); setMergeResults([]); }} />
             <button className={btn2Cls}>Search</button>
           </form>
           <ul className="divide-y divide-gray-100 text-sm">
@@ -441,7 +442,7 @@ export default function ModelsPage() {
           </select>
         </Field>
         <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); filterChange(() => setQ(qInput.trim())); }}>
-          <Field label="Search"><input className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Model name" /></Field>
+          <Field label="Search"><ClearableInput className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Model name" onClear={() => { setQInput(""); filterChange(() => setQ("")); }} /></Field>
           <button className={btn2Cls}>Search</button>
         </form>
         <label className="flex items-center gap-2 pb-2 text-sm">

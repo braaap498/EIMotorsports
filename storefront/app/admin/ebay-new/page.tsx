@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "../../../components/admin/ClearableInput";
 import Link from "next/link";
 import { useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -105,13 +106,12 @@ function LinkModal({
             void search();
           }}
         >
-          <input
+          <ClearableInput
             className={inputCls}
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search products by title or SKU"
-            autoFocus
-          />
+            autoFocus onClear={() => { setQ(""); setResults(null); }} />
           <button type="submit" className={btnCls} disabled={searching || q.trim().length < 2}>
             {searching ? "Searching…" : "Search"}
           </button>

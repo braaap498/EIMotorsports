@@ -1,5 +1,6 @@
 "use client";
 
+import ClearableInput from "../../../components/admin/ClearableInput";
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Modal, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
@@ -566,7 +567,7 @@ export default function QuickBooksPage() {
                   </option>
                 ))}
               </select>
-              <input
+              <ClearableInput
                 className={`${inputCls} max-w-xs`}
                 placeholder="Search name, customer or number"
                 value={q}
