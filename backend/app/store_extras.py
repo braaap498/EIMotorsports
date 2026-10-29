@@ -85,9 +85,8 @@ def search(
     for i, w in enumerate(words):
         params[f"w{i}"] = f"%{w}%"
         word_sql += (
-            f" and (p.title ilike :w{i} or p.sku ilike :w{i}"
-            f" or p.manufacturer_part_number ilike :w{i}"
-            f" or p.internal_part_number ilike :w{i})"
+            f" and (p.title ilike :w{i} or p.sku ilike :w{i} or p.ebay_item_id ilike :w{i}"
+            f" or p.manufacturer_part_number ilike :w{i})"
         )
 
     cte = (
@@ -180,7 +179,7 @@ def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
     rows = db.execute(
         text(
             f"""
-            select p.id, p.slug, p.sku, p.title, p.list_price, p.on_order, p.expected_date,
+            select p.id, p.slug, p.sku_display as sku, p.title, p.list_price, p.on_order, p.expected_date,
               (p.expected_date - current_date) as days_until,
               {available_sql("p")} as available_qty,
               (select ph.source_url from product_photos ph

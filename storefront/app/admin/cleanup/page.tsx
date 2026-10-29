@@ -9,7 +9,7 @@ import { Badge, Field, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../.
 
 type Item = {
   id: number;
-  sku: string;
+  ebay_item_id: string | null; // e.g. EBAY-178554199250
   title: string;
   list_price: number | string | null;
   quantity_on_hand: number;
@@ -554,7 +554,7 @@ export default function PartsCleanupPage() {
     if (listMode === "items") {
       if (items.length === 0) return;
       try {
-        const r = await api<ItemsResp>(`/cleanup/by-items?ids=${encodeURIComponent(items.map((i) => i.sku).join(","))}`);
+        const r = await api<ItemsResp>(`/cleanup/by-items?ids=${encodeURIComponent(items.map((i) => i.ebay_item_id).filter(Boolean).join(","))}`);
         setItems(r.items); // parts that were merged away simply drop out of the list
         setTotal(r.items.length);
         setNotFound([]);
@@ -765,7 +765,7 @@ export default function PartsCleanupPage() {
                     <tr>
                       <th className="px-3 py-2">Merge</th>
                       <th className="px-3 py-2">Keep</th>
-                      <th className="px-3 py-2">SKU</th>
+                      <th className="px-3 py-2">eBay item #</th>
                       <th className="px-3 py-2">Title</th>
                       <th className="px-3 py-2">Part #</th>
                       <th className="px-3 py-2">Price</th>
@@ -778,7 +778,7 @@ export default function PartsCleanupPage() {
                     {items.map((p) => (
                       <tr key={p.id} className={selected.has(p.id) ? "bg-blue-50" : ""}>
                         <td className="px-3 py-2">
-                          <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} aria-label={`Merge ${p.sku}`} />
+                          <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} aria-label={`Merge ${p.ebay_item_id ?? p.title}`} />
                         </td>
                         <td className="px-3 py-2">
                           <input
@@ -787,10 +787,10 @@ export default function PartsCleanupPage() {
                             checked={keeper === p.id}
                             disabled={!selected.has(p.id)}
                             onChange={() => setKeeper(p.id)}
-                            aria-label={`Keep ${p.sku}`}
+                            aria-label={`Keep ${p.ebay_item_id ?? p.title}`}
                           />
                         </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.sku}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.ebay_item_id ?? "—"}</td>
                         <td className="max-w-md px-3 py-2">
                           <div className="font-medium">{p.title}</div>
                         </td>
@@ -826,7 +826,7 @@ export default function PartsCleanupPage() {
                     {keeper != null && (
                       <>
                         {" "}
-                        · keeping <strong>{items.find((i) => i.id === keeper)?.sku}</strong>
+                        · keeping <strong>{items.find((i) => i.id === keeper)?.ebay_item_id ?? "this part"}</strong>
                       </>
                     )}
                   </span>
@@ -871,7 +871,7 @@ export default function PartsCleanupPage() {
             </div>
             <div className="font-semibold">{preview.survivor.title}</div>
             <div className="text-sm text-gray-600">
-              SKU {preview.survivor.sku} · Part # {preview.survivor.part_number ?? "—"} · {preview.survivor.listing_count} eBay listing
+              eBay item {preview.survivor.ebay_item_id ?? "—"} · Part # {preview.survivor.part_number ?? "—"} · {preview.survivor.listing_count} eBay listing
               {preview.survivor.listing_count === 1 ? "" : "s"} · qty {preview.survivor.quantity_on_hand}
             </div>
             <p className="mt-2 text-xs text-gray-500">
@@ -910,7 +910,7 @@ export default function PartsCleanupPage() {
               <table className="w-full text-left text-sm">
                 <thead className="sticky top-0 bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
-                    <th className="px-2 py-2">SKU</th>
+                    <th className="px-2 py-2">eBay item #</th>
                     <th className="px-2 py-2">Title</th>
                     <th className="px-2 py-2">Part #</th>
                     <th className="px-2 py-2">Qty</th>
@@ -920,7 +920,7 @@ export default function PartsCleanupPage() {
                 <tbody className="divide-y divide-gray-100">
                   {preview.merging_away.map((r) => (
                     <tr key={r.id}>
-                      <td className="whitespace-nowrap px-2 py-1 text-gray-600">{r.sku}</td>
+                      <td className="whitespace-nowrap px-2 py-1 text-gray-600">{r.ebay_item_id ?? "—"}</td>
                       <td className="px-2 py-1">{r.title}</td>
                       <td className="whitespace-nowrap px-2 py-1 text-gray-600">{r.part_number ?? "—"}</td>
                       <td className="px-2 py-1">{r.quantity_on_hand}</td>
@@ -979,7 +979,7 @@ export default function PartsCleanupPage() {
             <h2 className="text-lg font-semibold">What will happen</h2>
             <ul className="list-disc space-y-1 pl-5 text-sm">
               <li>
-                Keep <strong>{preview.survivor.sku}</strong> — {preview.survivor.title}
+                Keep <strong>{preview.survivor.ebay_item_id ?? preview.survivor.title}</strong> — {preview.survivor.title}
               </li>
               <li>
                 <strong>Delete {preview.totals.products_deleted} products</strong> (a full copy is saved in the merge history)

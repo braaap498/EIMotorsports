@@ -159,9 +159,8 @@ def parts(
     for i, w in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:6]):
         params[f"w{i}"] = f"%{w}%"
         conds.append(
-            f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text) "
+            f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) "
             f"or p.manufacturer_part_number ilike cast(:w{i} as text) "
-            f"or p.internal_part_number ilike cast(:w{i} as text) "
             f"or {_MPN} ilike cast(:w{i} as text))"
         )
     where = ("where " + " and ".join(conds)) if conds else ""
@@ -169,7 +168,7 @@ def parts(
     rows = db.execute(
         text(
             f"""
-            select p.id, p.sku, p.title, {_MPN} as part_number, p.cost,
+            select p.id, p.sku_display as sku, p.title, {_MPN} as part_number, p.cost,
                    coalesce(p.quantity_on_hand, 0) as on_hand, {set_aside_sql('p')} as reserved,
                    {avail} as available, p.reorder_point, coalesce(p.on_order, false) as on_order,
                    (select array_agg(h.po_number order by h.po_number)
@@ -297,7 +296,7 @@ def _po_detail(db: Session, po_id: int) -> dict:
         raise HTTPException(404, "That purchase order doesn't exist")
     lines = db.execute(
         text(
-            "select l.id, l.product_id, p.sku, l.item, l.description, l.quantity, l.rate, l.received_at, l.received_qty "
+            "select l.id, l.product_id, p.sku_display as sku, l.item, l.description, l.quantity, l.rate, l.received_at, l.received_qty "
             "from po_lines l left join products p on p.id = l.product_id where l.po_id = :id order by l.id"
         ),
         {"id": po_id},
@@ -427,7 +426,7 @@ def list_pos(
             f"(cast(h.po_number as text) ilike cast(:w{i} as text) or h.vendor_name ilike cast(:w{i} as text) "
             f"or exists (select 1 from po_lines l left join products p on p.id = l.product_id "
             f"  where l.po_id = h.id and (l.item ilike cast(:w{i} as text) or l.description ilike cast(:w{i} as text) "
-            f"  or p.sku ilike cast(:w{i} as text))))"
+            f"  or p.sku ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text))))"
         )
     where = ("where " + " and ".join(conds)) if conds else ""
     total = db.execute(text(f"select count(*) from po_headers h {where}"), params).scalar()

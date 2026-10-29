@@ -15,7 +15,7 @@ import { loadNav, saveNav, type NavState } from "../../lib/listNav";
 type Cat = { id: number; parent_id: number | null; name: string; sort_order: number };
 type SimilarMatch = {
   id: number;
-  sku: string;
+  ebay_item_id: string | null;
   title: string;
   quantity_on_hand: number;
   listing_count: number;
@@ -34,9 +34,9 @@ type FieldDef = {
 
 const BASIC: FieldDef[] = [
   { key: "title", label: "Title", kind: "text", wide: true },
-  { key: "sku", label: "SKU", kind: "text" },
+  { key: "ebay_item_id", label: "eBay item ID (optional)", kind: "text" },
   { key: "manufacturer_part_number", label: "Manufacturer part #", kind: "text" },
-  { key: "internal_part_number", label: "Internal part #", kind: "text" },
+  { key: "custom_label_sku", label: "eBay custom label (optional)", kind: "text" },
   { key: "part_type", label: "Part type", kind: "text" },
   { key: "condition", label: "Condition", kind: "text" },
 ];
@@ -129,6 +129,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [photosDirty, setPhotosDirty] = useState(false); // unsaved main-photo / order changes in the photos panel
   const [similar, setSimilar] = useState<SimilarMatch[]>([]);
+  const [inHouseSku, setInHouseSku] = useState(""); // our EI- number; set by the database, never typed in
   const [loading, setLoading] = useState(!!productId);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -144,9 +145,9 @@ export default function ProductForm({ productId }: { productId?: number }) {
   useEffect(() => {
     if (productId) return;
     const title = (vals.title ?? "").trim();
-    const sku = (vals.sku ?? "").trim();
+    const ebayId = (vals.ebay_item_id ?? "").trim();
     const pn = (vals.manufacturer_part_number ?? "").trim();
-    if (title.length < 8 && !sku && !pn) {
+    if (title.length < 8 && !ebayId && !pn) {
       setSimilar([]);
       return;
     }
@@ -154,7 +155,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
     const timer = setTimeout(() => {
       const p = new URLSearchParams();
       if (title) p.set("title", title);
-      if (sku) p.set("sku", sku);
+      if (ebayId) p.set("ebay_item_id", ebayId);
       if (pn) p.set("part_number", pn);
       api<{ matches: SimilarMatch[] }>(`/cleanup/similar?${p}`)
         .then((r) => {
@@ -168,7 +169,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [productId, vals.title, vals.sku, vals.manufacturer_part_number]);
+  }, [productId, vals.title, vals.ebay_item_id, vals.manufacturer_part_number]);
 
   useEffect(() => {
     if (!productId) return;
@@ -186,6 +187,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
           show_part_number: !!p.show_part_number,
         };
         setVals(next);
+        setInHouseSku(p.sku == null ? "" : String(p.sku));
         setFlags(loadedFlags);
         const base = buildPayload(next, loadedFlags);
         setBaseline("payload" in base ? base.payload : null);
@@ -198,8 +200,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
   async function save(e: React.FormEvent) {
     e.preventDefault();
     setMsg(null);
-    if (!(vals.title ?? "").trim() || !(vals.sku ?? "").trim()) {
-      return setMsg({ kind: "error", text: "Title and SKU are required" });
+    if (!(vals.title ?? "").trim()) {
+      return setMsg({ kind: "error", text: "A title is required" });
     }
     const built = buildPayload(vals, flags);
     if ("error" in built) return setMsg({ kind: "error", text: built.error });
@@ -337,6 +339,16 @@ export default function ProductForm({ productId }: { productId?: number }) {
           <h2 className="text-lg font-semibold">Basics</h2>
           <div className={grid}>
             {renderFields(BASIC)}
+            <Field label="SKU (assigned automatically)">
+              <input
+                className={`${inputCls} cursor-not-allowed bg-gray-100 text-gray-500`}
+                readOnly
+                value={productId ? inHouseSku : "Assigned when you save"}
+              />
+              <span className="mt-1 block text-xs font-normal text-gray-500">
+                Our own number (EI-0000001…). EI-0000000 means no number has been given yet.
+              </span>
+            </Field>
             <Field label="Category">
               <select className={inputCls} disabled={!mayDetails} value={vals.category_id ?? ""} onChange={(e) => set("category_id", e.target.value)}>
                 <option value="">(none)</option>
@@ -368,7 +380,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
                       {m.title}
                     </Link>
                     <span className="text-xs text-amber-800">
-                      SKU {m.sku} · {m.listing_count} eBay · qty {m.quantity_on_hand}
+                      {m.ebay_item_id ?? "no eBay item ID"} · {m.listing_count} eBay · qty {m.quantity_on_hand}
                       {Number(m.prior_merges) > 0 ? " · MASTER" : ""}
                     </span>
                     <span className="text-xs italic">({m.reason})</span>

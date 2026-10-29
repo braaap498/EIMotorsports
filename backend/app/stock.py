@@ -58,7 +58,7 @@ def lock_products(db: Session, ids) -> dict:
         return {}
     rows = db.execute(
         text(
-            "select id, sku, quantity_on_hand from products "
+            "select id, sku_display as sku, quantity_on_hand from products "
             "where id = any(cast(:ids as bigint[])) order by id for update"
         ),
         {"ids": ids},

@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from app.admin_catalog import finish
 from app.auth import AuthUser, require_admin
 from app.database import get_db
+from app.skus import PLACEHOLDER_SKU, clean_ebay_item_id
 
 router = APIRouter(prefix="/cleanup", tags=["admin-cleanup"], dependencies=[Depends(require_admin)])
 
@@ -73,7 +74,7 @@ _PN_SUBQUERY = f"""
 """
 
 _STATE_SQL = f"""
-select p.id, p.sku, p.title, p.list_price, p.quantity_on_hand, p.is_published, p.is_active,
+select p.id, p.ebay_item_id, p.title, p.list_price, p.quantity_on_hand, p.is_published, p.is_active,
        p.is_universal, p.category_id, p.part_manufacturer_id, p.updated_at,
        (select count(*) from channel_listings cl where cl.product_id = p.id)       as listing_count,
        (select count(*) from product_fitment pf where pf.product_id = p.id)        as fitment_count,
@@ -203,13 +204,14 @@ def search(
         raise HTTPException(400, "Type something to search for")
     params: dict = {f"w{i}": f"%{w}%" for i, w in enumerate(words)}
     where = " and ".join(
-        f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text))" for i in range(len(words))
+        f"(p.title ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text))"
+        for i in range(len(words))
     )
     total = db.execute(text(f"select count(*) from products p where {where}"), params).scalar()
     rows = db.execute(
         text(
             f"""
-            select p.id, p.sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+            select p.id, p.ebay_item_id, p.title, p.list_price, p.quantity_on_hand, p.is_published,
                    (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
                    (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
                    (select coalesce(sum(l.merged_count), 0) from part_merge_log l
@@ -231,9 +233,9 @@ def by_items(
     ids: str = Query(..., min_length=1, description="comma / space separated eBay item numbers, e.g. EBAY-178554199250"),
     db: Session = Depends(get_db),
 ):
-    """Look up specific products by item number (SKU such as EBAY-178554199250, or the bare number,
-    or an eBay item number stored on a channel listing). Returns the products found plus the
-    entries that matched nothing, so the page can tell the person exactly which one was not found."""
+    """Look up specific products by eBay item number (EBAY-178554199250 or just the number), matching the
+    product's own eBay item ID or ANY eBay listing linked to it. An in-house SKU (EI-0000123) also works.
+    Returns the products found plus the entries that matched nothing, so the page can say which one."""
     tokens: list[str] = []
     for t in re.split(r"[,\s;]+", ids.strip()):
         t = t.strip().upper()
@@ -244,40 +246,49 @@ def by_items(
     if len(tokens) > 100:
         raise HTTPException(400, "Look up at most 100 item numbers at a time")
 
-    def bare(t: str) -> str:
-        return t[5:] if t.startswith("EBAY-") else t
+    def digits(t: str) -> str:
+        return re.sub(r"[^0-9]", "", t)
 
-    skus = sorted({t for t in tokens} | {f"EBAY-{bare(t)}" for t in tokens})
-    exts = sorted({bare(t) for t in tokens})
+    skus = [t for t in tokens if t.startswith("EI-") and t != PLACEHOLDER_SKU]
+    nums = sorted({digits(t) for t in tokens if not t.startswith("EI-") and digits(t)})
     rows = db.execute(
         text(
             f"""
-            select p.id, p.sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+            select p.id, p.ebay_item_id, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+                   p.sku as in_house_sku,
                    (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
                    (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
                    (select coalesce(sum(l.merged_count), 0) from part_merge_log l
                      where l.survivor_product_id = p.id) as prior_merges,
-                   (select array_agg(cl.external_id) from channel_listings cl
-                     where cl.product_id = p.id) as ebay_item_ids,
+                   (select array_agg(cast(cl.external_id as text)) from channel_listings cl
+                     where cl.product_id = p.id) as listing_ids,
                    {_PN_SUBQUERY} as part_number
             from products p
             where upper(p.sku) = any(cast(:skus as text[]))
+               or regexp_replace(coalesce(p.ebay_item_id, ''), '[^0-9]', '', 'g') = any(cast(:nums as text[]))
                or exists (select 1 from channel_listings cl
-                          where cl.product_id = p.id and cl.external_id = any(cast(:exts as text[])))
+                          where cl.product_id = p.id
+                            and regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = any(cast(:nums as text[])))
             order by p.title, p.id
             """
         ),
-        {"skus": skus, "exts": exts},
+        {"skus": skus, "nums": nums},
     ).all()
 
     items = []
-    seen_keys: set[str] = set()
+    seen_nums: set[str] = set()
+    seen_skus: set[str] = set()
     for r in rows:
         d = dict(r._mapping)
-        seen_keys.add(str(d["sku"]).upper())
-        seen_keys.update(f"EBAY-{e}" for e in (d.pop("ebay_item_ids", None) or []))
+        seen_nums.add(digits(d["ebay_item_id"] or ""))
+        seen_nums.update(digits(str(e)) for e in (d.pop("listing_ids", None) or []))
+        seen_skus.add(str(d.pop("in_house_sku", "")).upper())
         items.append(d)
-    not_found = [t for t in tokens if t not in seen_keys and f"EBAY-{bare(t)}" not in seen_keys]
+    not_found = [
+        t
+        for t in tokens
+        if (t.startswith("EI-") and t not in seen_skus) or (not t.startswith("EI-") and digits(t) not in seen_nums)
+    ]
     return {"items": items, "not_found": not_found}
 
 
@@ -636,12 +647,12 @@ def _title_tokens(title: str) -> list[str]:
 @router.get("/similar")
 def similar(
     title: str = Query("", max_length=300),
-    sku: Optional[str] = Query(None, max_length=100),
+    ebay_item_id: Optional[str] = Query(None, max_length=100),
     part_number: Optional[str] = Query(None, max_length=100),
     exclude_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
-    sku = (sku or "").strip() or None
+    sku = clean_ebay_item_id(ebay_item_id)
     pn = (part_number or "").strip() or None
     tokens = _title_tokens(title)
     use_title = len(tokens) >= 2
@@ -661,12 +672,12 @@ def similar(
         text(
             f"""
             select * from (
-              select p.id, p.sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+              select p.id, p.ebay_item_id, p.title, p.list_price, p.quantity_on_hand, p.is_published,
                      (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
                      (select coalesce(sum(l.merged_count), 0) from part_merge_log l
                        where l.survivor_product_id = p.id) as prior_merges,
                      ({score}) as score,
-                     (cast(:sku as text) is not null and lower(p.sku) = lower(cast(:sku as text))) as same_sku,
+                     (cast(:sku as text) is not null and lower(p.ebay_item_id) = lower(cast(:sku as text))) as same_sku,
                      (cast(:pn as text) is not null and (
                         lower(p.manufacturer_part_number) = lower(cast(:pn as text))
                         or exists (select 1 from product_item_specifics s
@@ -690,13 +701,13 @@ def similar(
         if d["same_pn"]:
             reason = "same part number"
         elif d["same_sku"]:
-            reason = "same SKU"
+            reason = "same eBay item ID"
         else:
             reason = f"title shares {d['score']} of {len(tokens)} key words"
         matches.append(
             {
                 "id": d["id"],
-                "sku": d["sku"],
+                "ebay_item_id": d["ebay_item_id"],
                 "title": d["title"],
                 "list_price": d["list_price"],
                 "quantity_on_hand": d["quantity_on_hand"],

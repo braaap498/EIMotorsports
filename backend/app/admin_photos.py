@@ -294,8 +294,8 @@ def delete_preview(product_id: int, body: DeletePreview, db: Session = Depends(g
         if r.image_key:
             others = db.execute(
                 text(
-                    "select distinct p.sku from product_photos pp join products p on p.id = pp.product_id "
-                    "where pp.image_key = :k and pp.id not in :ids order by p.sku limit 4"
+                    "select distinct p.sku_display as sku from product_photos pp join products p on p.id = pp.product_id "
+                    "where pp.image_key = :k and pp.id not in :ids order by p.sku_display limit 4"
                 ).bindparams(bindparam("ids", expanding=True)),
                 {"k": r.image_key, "ids": ids},
             ).all()
@@ -321,12 +321,12 @@ def photo_library(
     for i, t in enumerate(tokens):
         params[f"t{i}"] = f"%{_like_escape(t)}%"
         conds.append(
-            f"(p.sku ilike :t{i} or p.title ilike :t{i} or exists (select 1 from product_photos x "
+            f"(p.sku ilike :t{i} or p.ebay_item_id ilike :t{i} or p.title ilike :t{i} or exists (select 1 from product_photos x "
             f"where x.product_id = p.id and x.image_key ilike :t{i}))"
         )
     prods = db.execute(
         text(
-            "select p.id, p.sku, p.title from products p "
+            "select p.id, p.sku_display as sku, p.title from products p "
             "where p.id <> :ex and exists (select 1 from product_photos y where y.product_id = p.id and y.image_key is not null) "
             f"and {' and '.join(conds)} order by p.id desc limit 12"
         ),

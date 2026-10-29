@@ -67,6 +67,7 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, current_user, needs, require_route_access
 from app.database import get_db
 from app.images import thumb_url
+from app.skus import PLACEHOLDER_SKU, shelf_code_for
 from app.stock import available_sql, lock_products, reserved_paid_sql, set_aside_sql
 
 # No prefix for "/admin": main.py mounts this inside admin_router. require_route_access makes
@@ -92,7 +93,7 @@ def _clean_code(raw: str) -> str:
 
 def _product_row(db: Session, product_id: int):
     row = db.execute(
-        text("select id, sku, title, quantity_on_hand, bin_location from products where id = :id"),
+        text("select id, sku_display as sku, title, quantity_on_hand, bin_location from products where id = :id"),
         {"id": product_id},
     ).first()
     if not row:
@@ -127,7 +128,7 @@ def _prod(db: Session, row) -> dict:
 def _barcode_owner(db: Session, code: str):
     return db.execute(
         text(
-            "select b.id, b.code, b.kind, b.label, b.product_id, p.sku, p.title "
+            "select b.id, b.code, b.kind, b.label, b.product_id, p.sku_display as sku, p.title "
             "from product_barcodes b join products p on p.id = b.product_id where b.code = :c"
         ),
         {"c": code},
@@ -217,8 +218,14 @@ def lookup(code: str = Query(..., min_length=1, max_length=200), db: Session = D
             "product": _prod(db, row),
             "barcode": {"id": hit.barcode_id, "code": hit.code, "kind": hit.kind},
         }
-    # A label that just says the SKU also works, as long as it is unambiguous.
-    by_sku = db.execute(text("select id from products where lower(sku) = lower(:c) limit 2"), {"c": c}).all()
+    # A label that just says the SKU (or the eBay item number) also works, as long as it is unambiguous.
+    by_sku = db.execute(
+        text(
+            "select id from products where (lower(sku) = lower(:c) and sku <> :ph) "
+            "or lower(ebay_item_id) = lower(:c) limit 2"
+        ),
+        {"c": c, "ph": PLACEHOLDER_SKU},
+    ).all()
     if len(by_sku) == 1:
         row = _product_row(db, by_sku[0].id)
         return {"found": True, "matched_by": "sku", "product": _prod(db, row), "barcode": None}
@@ -242,16 +249,15 @@ def search_products(
     for i, w in enumerate(words):
         params[f"w{i}"] = f"%{w}%"
         conds.append(
-            f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text) "
+            f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) "
             f"or p.manufacturer_part_number ilike cast(:w{i} as text) "
-            f"or p.internal_part_number ilike cast(:w{i} as text) "
             f"or p.bin_location ilike cast(:w{i} as text) "
             f"or exists (select 1 from product_barcodes b where b.product_id = p.id "
             f"           and b.code ilike cast(:w{i} as text)))"
         )
     rows = db.execute(
         text(
-            "select p.id, p.sku, p.title, p.quantity_on_hand, p.bin_location, "
+            "select p.id, p.sku_display as sku, p.title, p.quantity_on_hand, p.bin_location, "
             "       (select count(*) from product_barcodes b where b.product_id = p.id) as barcode_count "
             f"from products p where {' and '.join(conds) or 'true'} order by p.title, p.id limit :limit offset :offset"
         ),
@@ -332,12 +338,14 @@ def ensure_shelf_barcode(
     db: Session = Depends(get_db),
     user: AuthUser = Depends(current_user),
 ):
-    """The code printed on the shelf label. Made once per product, then reused forever."""
+    """The code printed on the shelf label: EIB- plus the same 7 digits as the part's EI- SKU
+    (EI-0000123 -> EIB-0000123). Made once per product, then reused forever. A part that still has
+    the placeholder SKU (EI-0000000) can't have one yet, because the number would not be unique."""
     p = _product_row(db, product_id)
     row = db.execute(
         text(
             "select code from product_barcodes where product_id = :id and kind = 'shelf' and is_auto "
-            "order by id limit 1"
+            "and code like 'EIB-%' order by id limit 1"
         ),
         {"id": product_id},
     ).first()
@@ -345,10 +353,17 @@ def ensure_shelf_barcode(
     if row:
         code = row.code
     else:
-        code = f"EI-{product_id:06d}"
+        real_sku = db.execute(text("select sku from products where id = :id"), {"id": product_id}).scalar()
+        code = shelf_code_for(real_sku)
+        if not code:
+            raise HTTPException(
+                409,
+                "This part doesn't have its EI- SKU yet, so a shelf label can't be made for it. "
+                "SKUs are assigned once the parts clean-up is finished.",
+            )
         owner = _barcode_owner(db, code)
         if owner and owner.product_id != product_id:
-            code = f"EI-{product_id:06d}-{uuid.uuid4().hex[:4].upper()}"  # never expected; stays unique anyway
+            code = f"{code}-{uuid.uuid4().hex[:4].upper()}"  # never expected; stays unique anyway
             owner = None
         if not owner:
             try:
@@ -460,7 +475,7 @@ def _po_search_conds(q: Optional[str], params: dict) -> list[str]:
             f"(cast(h.po_number as text) ilike cast(:w{i} as text) or h.vendor_name ilike cast(:w{i} as text) "
             f"or exists (select 1 from po_lines l left join products p on p.id = l.product_id "
             f"  where l.po_id = h.id and (l.item ilike cast(:w{i} as text) or l.description ilike cast(:w{i} as text) "
-            f"  or p.sku ilike cast(:w{i} as text))))"
+            f"  or p.sku ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text))))"
         )
     return conds
 
@@ -503,7 +518,7 @@ def _receiving_detail(db: Session, po_id: int) -> dict:
     rows = db.execute(
         text(
             "select l.id, l.product_id, l.item, l.description, l.quantity, l.received_at, l.received_qty, "
-            "       p.id as pid, p.sku, p.title, p.quantity_on_hand, p.bin_location "
+            "       p.id as pid, p.sku_display as sku, p.title, p.quantity_on_hand, p.bin_location "
             "from po_lines l left join products p on p.id = l.product_id where l.po_id = :id order by l.id"
         ),
         {"id": po_id},
@@ -573,7 +588,7 @@ def _record_issue(db: Session, po_id: int, line_id, product_id, kind: str, item,
         text(
             "insert into po_receiving_issues (po_id, po_line_id, product_id, kind, sku, item, description, "
             "  expected_qty, received_qty, note, acknowledged_by, acknowledged_at) "
-            "values (:po, :line, :p, :kind, (select sku from products where id = :p), :item, :desc, :e, :g, :note, :by, now())"
+            "values (:po, :line, :p, :kind, (select sku_display from products where id = :p), :item, :desc, :e, :g, :note, :by, now())"
         ),
         {
             "po": po_id, "line": line_id, "p": product_id, "kind": kind, "item": item,
@@ -774,7 +789,7 @@ def receive_po_extras(
         prods = {
             r.id: r
             for r in db.execute(
-                text("select id, sku, title from products where id = any(cast(:ids as bigint[])) order by id for update"),
+                text("select id, sku_display as sku, title from products where id = any(cast(:ids as bigint[])) order by id for update"),
                 {"ids": ids},
             ).all()
         }
@@ -856,9 +871,8 @@ def stock_list(
     for i, w in enumerate(words):
         params[f"w{i}"] = f"%{w}%"
         conds.append(
-            f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text) "
+            f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) "
             f"or p.manufacturer_part_number ilike cast(:w{i} as text) "
-            f"or p.internal_part_number ilike cast(:w{i} as text) "
             f"or p.bin_location ilike cast(:w{i} as text) "
             f"or exists (select 1 from product_barcodes b where b.product_id = p.id "
             f"           and b.code ilike cast(:w{i} as text)))"
@@ -877,7 +891,7 @@ def stock_list(
     total = db.execute(text(f"select count(*) from products p {where}"), params).scalar()
     rows = db.execute(
         text(
-            "select p.id, p.sku, p.title, coalesce(p.quantity_on_hand, 0) as quantity_on_hand, "
+            "select p.id, p.sku_display as sku, p.title, coalesce(p.quantity_on_hand, 0) as quantity_on_hand, "
             "       p.reorder_point, p.bin_location, coalesce(p.is_active, true) as is_active, "
             f"       {set_aside_sql('p')} as reserved, {_AVAIL_SQL} as available, "
             f"       coalesce(p.on_order, false) as on_order, p.expected_date, "
@@ -1098,11 +1112,11 @@ def _attention(db: Session, order_ids: list[int]) -> dict[int, list[str]]:
     rows = db.execute(
         text(
             """
-            select oi.order_id, p.sku, 'short' as kind
+            select oi.order_id, p.sku_display as sku, 'short' as kind
             from order_items oi join products p on p.id = oi.product_id
             where oi.order_id = any(cast(:ids as bigint[])) and oi.short_qty > 0
             union
-            select r.order_id, p.sku, 'oversold' as kind
+            select r.order_id, p.sku_display as sku, 'oversold' as kind
             from stock_reservations r join products p on p.id = r.product_id
             where r.order_id = any(cast(:ids as bigint[])) and r.status = 'reserved'
               and coalesce(p.quantity_on_hand, 0) <
@@ -1159,7 +1173,7 @@ def get_order(order_number: str, db: Session = Depends(get_db)):
     items = db.execute(
         text(
             "select oi.id as item_id, oi.product_id, oi.title, oi.quantity, oi.short_qty, "
-            "       p.sku, p.bin_location, p.quantity_on_hand "
+            "       p.sku_display as sku, p.bin_location, p.quantity_on_hand "
             "from order_items oi left join products p on p.id = oi.product_id "
             "where oi.order_id = :o order by oi.id"
         ),
@@ -1650,7 +1664,7 @@ def history(
             """
             select b.id, b.kind, b.reference, b.note, b.created_by_email, b.created_at, o.order_number,
                    coalesce(jsonb_agg(jsonb_build_object(
-                       'product_id', l.product_id, 'sku', p.sku, 'title', p.title, 'quantity', l.quantity)
+                       'product_id', l.product_id, 'sku', p.sku_display, 'title', p.title, 'quantity', l.quantity)
                        order by l.id) filter (where l.id is not null), '[]'::jsonb) as lines
             from inventory_batches b
             left join orders o on o.id = b.order_id

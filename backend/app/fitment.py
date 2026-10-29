@@ -155,7 +155,7 @@ def products(
 def product_detail(slug: str, db: Session = Depends(get_db)):
     p = db.execute(
         text(
-            "select id, sku, title, slug, list_price, condition, description, "
+            "select id, sku_display as sku, title, slug, list_price, condition, description, "
             "manufacturer_part_number, show_part_number, on_order, expected_date, "
             f"(expected_date - current_date) as days_until, "
             f"{available_sql('p')} as available_qty from products p "

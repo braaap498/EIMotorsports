@@ -31,6 +31,7 @@ from app.auth import AuthUser, current_user, has_perm, needs, require_route_acce
 from app.database import get_db
 from app.images import thumb_url
 from app.permissions import FIELD_PERMS, label_for
+from app.skus import clean_ebay_item_id
 from app.sanitize import clean_description
 
 # No prefix here: main.py mounts this inside admin_router, which supplies
@@ -464,10 +465,10 @@ def delete_model_year(
 # products
 # --------------------------------------------------------------------------
 class ProductFields(BaseModel):
-    sku: Optional[str] = None
+    ebay_item_id: Optional[str] = None        # e.g. EBAY-178554199250; optional
     slug: Optional[str] = None
     title: Optional[str] = None
-    internal_part_number: Optional[str] = None
+    custom_label_sku: Optional[str] = None    # the eBay custom label, e.g. 9144PSxx120558xx120216; optional
     manufacturer_part_number: Optional[str] = None
     show_part_number: Optional[bool] = None   # customers can only see the manufacturer part number when true
     category_id: Optional[int] = None
@@ -495,7 +496,8 @@ class ProductFields(BaseModel):
     is_universal: Optional[bool] = None
 
 
-PRODUCT_COLUMNS = ", ".join(f"p.{name}" for name in ProductFields.model_fields) + ", p.id, p.updated_at"
+# sku (our EI-0000001 number) is never typed in: the database hands out the next number to a new product.
+PRODUCT_COLUMNS = ", ".join(f"p.{name}" for name in ProductFields.model_fields) + ", p.sku, p.id, p.updated_at"
 
 
 def _unique_slug(db: Session, base: str, exclude_id: Optional[int] = None) -> str:
@@ -592,9 +594,10 @@ def list_products(
     where = """
         where (cast(:like as text) is null
                or p.title ilike cast(:like as text)
+               or p.ebay_item_id ilike cast(:like as text)
                or p.sku ilike cast(:like as text)
                or p.manufacturer_part_number ilike cast(:like as text)
-               or p.internal_part_number ilike cast(:like as text))
+               or p.custom_label_sku ilike cast(:like as text))
           and (cast(:category_id as bigint) is null or p.category_id = cast(:category_id as bigint))
           and (cast(:published as boolean) is null or p.is_published = cast(:published as boolean))
           and (cast(:universal as boolean) is null or p.is_universal = cast(:universal as boolean))
@@ -605,7 +608,7 @@ def list_products(
     rows = db.execute(
         text(
             f"""
-            select p.id, p.sku, p.title, p.slug, p.list_price, p.quantity_on_hand,
+            select p.id, p.sku_display as sku, p.ebay_item_id, p.title, p.slug, p.list_price, p.quantity_on_hand,
                    p.category_id, p.is_published, p.is_active, p.is_universal,
                    (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count
             from products p {where}
@@ -643,8 +646,10 @@ def get_product(product_id: int, db: Session = Depends(get_db), user: AuthUser =
 @needs("products.create")
 def create_product(body: ProductFields, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     fields = body.model_dump(exclude_unset=True)
-    if not fields.get("sku") or not fields.get("title"):
-        raise HTTPException(400, "sku and title are required")
+    if not fields.get("title"):
+        raise HTTPException(400, "A title is required")
+    if "ebay_item_id" in fields:
+        fields["ebay_item_id"] = clean_ebay_item_id(fields["ebay_item_id"])
     _require_field_perms(user, fields, _NEW_PRODUCT_DEFAULTS, covered=("products.edit_details",))
     if "description" in fields:
         fields["description"] = clean_description(fields["description"])
@@ -656,7 +661,7 @@ def create_product(body: ProductFields, db: Session = Depends(get_db), user: Aut
             text(f"insert into products ({cols}) values ({vals}) returning id"), fields
         ).scalar()
     except IntegrityError:
-        conflict(db, "A product with that SKU already exists")
+        conflict(db, "A product with that eBay item ID already exists")
     finish(db, refresh=True)
     return {"id": new_id, "slug": fields["slug"]}
 
@@ -679,9 +684,10 @@ def update_product(
     # the form with the description untouched.
     if "description" in fields and not _same(current._mapping.get("description"), fields["description"]):
         fields["description"] = clean_description(fields["description"])
-    for required in ("sku", "title"):
-        if required in fields and not fields[required]:
-            raise HTTPException(400, f"{required} cannot be empty")
+    if "title" in fields and not fields["title"]:
+        raise HTTPException(400, "title cannot be empty")
+    if "ebay_item_id" in fields:
+        fields["ebay_item_id"] = clean_ebay_item_id(fields["ebay_item_id"])
     if "slug" in fields:
         fields["slug"] = _unique_slug(db, slugify(fields["slug"] or ""), exclude_id=product_id)
     sets = ", ".join(f"{k} = :{k}" for k in fields)
@@ -691,7 +697,7 @@ def update_product(
             {**fields, "id": product_id},
         )
     except IntegrityError:
-        conflict(db, "That SKU or slug is already used by another product")
+        conflict(db, "That eBay item ID or slug is already used by another product")
     finish(db, refresh=True)
     return {"id": product_id, "updated": list(fields)}
 
