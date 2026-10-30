@@ -204,7 +204,7 @@ def search(
         raise HTTPException(400, "Type something to search for")
     params: dict = {f"w{i}": f"%{w}%" for i, w in enumerate(words)}
     where = " and ".join(
-        f"(p.title ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text))"
+        f"(p.title ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) or p.custom_label_sku ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text))"
         for i in range(len(words))
     )
     total = db.execute(text(f"select count(*) from products p where {where}"), params).scalar()

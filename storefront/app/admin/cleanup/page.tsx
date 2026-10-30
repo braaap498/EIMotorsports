@@ -698,8 +698,8 @@ export default function PartsCleanupPage() {
                 if (qInput.trim().length >= 2) runSearch(qInput.trim());
               }}
             >
-              <Field label="Search title or SKU" className="w-full max-w-md">
-                <ClearableInput className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder='e.g. "Tusk 1.8 bar"' autoFocus />
+              <Field label="Search Title, Item Number or Custom Label" className="w-full max-w-md">
+                <ClearableInput className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder={'e.g. "Tusk 1.8 bar" or 536M07200xx1032020111'} autoFocus />
               </Field>
               <button className={btnCls} disabled={searching || qInput.trim().length < 2}>
                 {searching ? "Searching…" : "Search"}
