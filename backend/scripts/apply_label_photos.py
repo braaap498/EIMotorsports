@@ -119,9 +119,13 @@ def main() -> int:
     print(f"Reuse rows added: {added}")
 
     bad = []
+    skipped_labels = []
     for i, k in enumerate(labels, 1):
-        if k not in cache:
+        if cache.get(k):  # only trust a cached result that actually has photos
+            keys = cache[k]
+        else:
             keys = []
+            bad_before = len(bad)
             for url in lab[k]:
                 try:
                     p = photo_store.process_image(download(url))
@@ -129,14 +133,17 @@ def main() -> int:
                     if p.key not in keys:
                         keys.append(p.key)
                 except Exception as e:
-                    bad.append((k, url, str(e)[:120]))
+                    bad.append((k, url, str(e)[:300]))
+            if not keys or len(bad) > bad_before:
+                # any failed photo: add no rows for this label, so a listing never gets a partial photo set
+                skipped_labels.append(k)
+                print(f"  label {k}: {len(bad) - bad_before} photo(s) failed, no rows added for it")
+                continue
             cache[k] = keys
             json.dump(cache, open(CACHE, "w"))
-        if not cache[k]:
-            continue
         with engine.begin() as conn:  # one transaction per label
             for item in label_items[k]:
-                for n, key in enumerate(cache[k], 1):
+                for n, key in enumerate(keys, 1):
                     conn.execute(text(
                         "insert into product_photos (product_id, image_key, storage_path, is_primary, sort_order) "
                         "values (null, :k, :sp, :pr, :o)"),
@@ -149,6 +156,8 @@ def main() -> int:
             w = csv.writer(f); w.writerow(["label", "url", "error"]); w.writerows(bad)
     print(f"\nTotal rows added: {added}. Photos that failed: {len(bad)}"
           + (" (see apply_failures.csv)" if bad else ""))
+    if skipped_labels:
+        print(f"Labels skipped because a photo failed: {len(skipped_labels)}. Fix the cause and re-run; finished listings are skipped.")
     return 0
 
 
