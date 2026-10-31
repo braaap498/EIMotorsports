@@ -396,6 +396,7 @@ export default function EbayLiveListingsPage() {
       {/* ---- results */}
       {data && (
         <div className="space-y-3">
+          <Pager total={data.total} limit={data.limit} offset={data.offset} onChange={(o) => void load(o)} />
           <p className="text-sm text-gray-700">
             Reading <span className="font-medium">{data.seller}</span> on eBay
             {data.ebay_total > data.total ? ` (eBay has ${data.ebay_total} but shows at most ${data.total} per search)` : ""}.
