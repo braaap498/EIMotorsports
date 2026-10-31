@@ -10,3 +10,12 @@ product_images/
 backend/product_images/
 backend/product_images_unique/
 backend/duplicate_report.csv
+
+backend/ebay_photo_check_state.json
+backend/label_keys.json
+backend/label_lookup.csv
+backend/label_photo_state.json
+backend/label_photos.csv
+backend/reuse_plan.csv
+backend/product_images/
+backend/product_images_unique/
