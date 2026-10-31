@@ -16,8 +16,10 @@ What a job does (the same steps you ran by hand for the 102 genuine-oem-parts li
      custom label (skipped if already there).
   3. Photos are looked up on eBay, downloaded, stored with photo_store, and saved as UNLINKED
      product_photos rows (product_id empty, storage_path EBAY-<item>/EBAY-<item>_<n>.jpg), exactly
-     like apply_label_photos.py. Listings that share a custom label share one download. A listing
-     whose photos fail gets no rows, so nobody ever gets a partial set.
+     like apply_label_photos.py. Listings that share a custom label share one download, and a
+     listing whose label already has stored photos (on a product, or on another imported listing)
+     copies those photos without asking eBay at all. A listing whose photos fail gets no rows, so
+     nobody ever gets a partial set.
   mode "new_only"     does steps 1-3 only.
   mode "all_missing"  also checks listings that ARE linked to a product and adds any photo eBay has
                       that the product does not. A photo counts as already there if (1) eBay's image id
@@ -229,6 +231,7 @@ class _Job:
         self.c = {k: 0 for k in self.FIELDS}
         self.failures: list[str] = []
         self.message = ""
+        self.reused = 0  # listings that copied photos from a matching custom label
 
     def fail(self, label: str, why: str):
         self.c["failed"] += 1
@@ -362,14 +365,14 @@ def _work(job: _Job, calls: _Calls, seller: str, include_products: bool):
                 if lab:
                     labels[item] = lab
 
-    groups: list[list[str]] = []
+    groups: list[tuple[Optional[str], list[str]]] = []
     by_label: dict[str, list[str]] = defaultdict(list)
     for item in todo:
         if item in labels:
             by_label[labels[item]].append(item)
         else:
-            groups.append([item])
-    groups = list(by_label.values()) + groups
+            groups.append((None, [item]))
+    groups = list(by_label.items()) + groups
 
     product_items: list[str] = []
     if include_products:
@@ -396,11 +399,11 @@ def _work(job: _Job, calls: _Calls, seller: str, include_products: bool):
     job.save(calls)
 
     stopped = False
-    for group in groups:
+    for label, group in groups:
         if job.stop_requested():
             stopped = True
             break
-        _photos_for_group(job, calls, group)
+        _photos_for_group(job, calls, group, label)
         job.c["items_done"] += 1
         job.save(calls)
     if not stopped:
@@ -416,8 +419,9 @@ def _work(job: _Job, calls: _Calls, seller: str, include_products: bool):
     job.message = (
         ("Stopped. " if stopped else "Finished. ")
         + f"{c['listings_found']} active listings read, {c['listings_added']} added to the import table, "
-        f"{c['photos_added']} photo rows added, {c['no_photos']} listings eBay would not give photos for, "
-        f"{c['failed']} failed."
+        f"{c['photos_added']} photo rows added"
+        + (f" ({job.reused} listings copied photos from a matching custom label)" if job.reused else "")
+        + f", {c['no_photos']} listings eBay would not give photos for, {c['failed']} failed."
     )
     job.save(calls, "stopped" if stopped else "done")
 
@@ -437,8 +441,72 @@ def _fatal_storage(e: Exception) -> bool:
     return isinstance(e, photo_store.StorageError) and "not set up" in str(e)
 
 
-def _photos_for_group(job: _Job, calls: _Calls, group: list[str]):
-    """One download per group (listings sharing a custom label), shared by every listing in it."""
+def _sibling_keys(label: str) -> list[str]:
+    """Stored photos of another listing or product with the same custom label (same label = same part).
+
+    A product with that label comes first (it is the finished copy), then another imported listing."""
+    with get_engine().connect() as c:
+        pid = c.execute(
+            text(
+                "select x.product_id from product_photos x join products p on p.id = x.product_id "
+                "where trim(cast(p.custom_label_sku as text)) = :lab and x.image_key is not null "
+                "group by x.product_id order by count(*) desc, x.product_id limit 1"
+            ),
+            {"lab": label},
+        ).scalar()
+        if pid is not None:
+            rows = c.execute(
+                text(
+                    "select image_key from product_photos where product_id = :p and image_key is not null "
+                    "order by sort_order, id"
+                ),
+                {"p": pid},
+            ).all()
+        else:
+            rows = c.execute(
+                text(
+                    "select pp.image_key from product_photos pp "
+                    "where pp.product_id is null and pp.image_key is not null and split_part(pp.storage_path, '/', 1) = ("
+                    " select 'EBAY-' || cast(i.item_number as text) from ebay_label_import i"
+                    "  where trim(cast(i.custom_label_sku as text)) = :lab"
+                    "    and exists (select 1 from product_photos y where y.product_id is null"
+                    "                and split_part(y.storage_path, '/', 1) = 'EBAY-' || cast(i.item_number as text))"
+                    "  order by i.item_number limit 1) "
+                    "order by pp.sort_order, pp.id"
+                ),
+                {"lab": label},
+            ).all()
+    keys: list[str] = []
+    for (k,) in rows:
+        if k not in keys:
+            keys.append(k)
+    return keys
+
+
+def _save_rows(job: _Job, group: list[str], keys: list[str]):
+    """Unlinked photo rows for every listing in the group, in one transaction."""
+    with get_engine().begin() as c:
+        for item in group:
+            for n, key in enumerate(keys, 1):
+                c.execute(
+                    text(
+                        "insert into product_photos (product_id, image_key, storage_path, is_primary, sort_order) "
+                        "values (null, :k, :sp, :pr, :o)"
+                    ),
+                    {"k": key, "sp": _path_for(item, n), "pr": n == 1, "o": n - 1},
+                )
+                job.c["photos_added"] += 1
+
+
+def _photos_for_group(job: _Job, calls: _Calls, group: list[str], label: Optional[str] = None):
+    """Photos for listings that share a custom label: copied from a matching label if one has photos,
+    otherwise one eBay lookup and download shared by every listing in the group."""
+    if label:
+        keys = _sibling_keys(label)
+        if keys:
+            _save_rows(job, group, keys)
+            job.reused += len(group)
+            return
     urls = None
     for item in group:  # try listings one at a time until eBay will show one
         urls = _ebay_photos(item, calls)
@@ -457,17 +525,7 @@ def _photos_for_group(job: _Job, calls: _Calls, group: list[str]):
     if not keys:
         job.fail(group[0], "no photo could be stored")
         return
-    with get_engine().begin() as c:
-        for item in group:
-            for n, key in enumerate(keys, 1):
-                c.execute(
-                    text(
-                        "insert into product_photos (product_id, image_key, storage_path, is_primary, sort_order) "
-                        "values (null, :k, :sp, :pr, :o)"
-                    ),
-                    {"k": key, "sp": _path_for(item, n), "pr": n == 1, "o": n - 1},
-                )
-                job.c["photos_added"] += 1
+    _save_rows(job, group, keys)
 
 
 def _dhash(data: bytes) -> int:
