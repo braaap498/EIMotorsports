@@ -191,6 +191,23 @@ export default function EbayLiveListingsPage() {
     }
   }
 
+  async function setPushes(s: string, enabled: boolean) {
+    const q = enabled
+      ? `Turn live pushes ON for ${s}? After this, "Send to eBay" on the edit page changes real listings on that store.`
+      : `Turn live pushes OFF for ${s}? Previews still work; nothing can be sent.`;
+    if (!window.confirm(q)) return;
+    setBusy(s);
+    setConnMsg(null);
+    try {
+      await api("/ebay-edit/live-pushes", { method: "PUT", body: { store: s, enabled } });
+      await loadStores();
+    } catch (e) {
+      setConnMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function checkAccess(s: string) {
     setBusy(s);
     setConnMsg(null);
@@ -291,6 +308,9 @@ export default function EbayLiveListingsPage() {
                   <>
                     <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void testConn(s.store)}>
                       Test
+                    </button>
+                    <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void setPushes(s.store, !s.live_pushes_enabled)}>
+                      {s.live_pushes_enabled ? "Turn pushes OFF" : "Turn pushes ON"}
                     </button>
                     <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void checkAccess(s.store)}>
                       Check access
@@ -416,6 +436,14 @@ export default function EbayLiveListingsPage() {
                         <a href={it.url} target="_blank" rel="noreferrer" className="text-xs text-blue-700 hover:underline">
                           {it.item_id}
                         </a>
+                        {stores.find((x) => x.store === data.store)?.authorized && (
+                          <Link
+                            href={`/admin/ebay-edit?store=${encodeURIComponent(data.store)}&item=${it.item_id}`}
+                            className="ml-3 text-xs font-medium text-blue-700 hover:underline"
+                          >
+                            Edit
+                          </Link>
+                        )}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">{money(it.price, it.currency)}</td>
                       <td className="px-3 py-2">
