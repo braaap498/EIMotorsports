@@ -128,6 +128,8 @@ export default function ProductsPage() {
         </label>
       </div>
 
+      <Pager total={data.total} limit={LIMIT} offset={offset} onChange={setOffset} />
+
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
         <table className="w-full text-left text-sm">
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
