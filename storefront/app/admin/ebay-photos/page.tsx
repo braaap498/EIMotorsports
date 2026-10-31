@@ -240,17 +240,23 @@ export default function EbayPhotoImportPage() {
             ref={fileRef}
             type="file"
             accept=".csv,text/csv"
-            className="text-sm"
+            className="hidden"
             onChange={(e) => {
               setFile(e.target.files?.[0] ?? null);
               setLabels(null);
               setLabelsErr("");
             }}
           />
+          <button type="button" className={btn2Cls} disabled={uploading} onClick={() => fileRef.current?.click()}>
+            Choose report (CSV)
+          </button>
           <button type="button" className={btnCls} disabled={!file || uploading} onClick={() => void uploadReport()}>
             {uploading ? "Reading…" : "Upload report"}
           </button>
         </div>
+        <p className="text-xs text-gray-500">
+          {uploading ? "Reading the report…" : file ? `Selected: ${file.name}` : "No file chosen yet."}
+        </p>
         {labelsErr && <Notice kind="error">{labelsErr}</Notice>}
         {labels && (
           <div className="space-y-2 text-sm">
