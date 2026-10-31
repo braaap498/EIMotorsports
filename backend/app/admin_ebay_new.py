@@ -46,6 +46,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, require_admin
+from app.admin_cleanup import _PN_SUBQUERY
 from app.admin_ebay_listings import _resolve
 from app.database import get_db
 from app.ebay_feedback import SEARCH_URL, FeedbackError, _open, _token, configured, seller_username
@@ -223,9 +224,7 @@ def check(
     labels = _custom_labels(db, [i["item_id"] for i in items])
     for i in items:
         label = labels.get(i["item_id"])
-        i["custom_label"] = label  # None when we do not have one yet
-        if label:
-            i["sku"] = label
+        i["custom_label"] = label  # None when we do not have one yet; "sku" stays EBAY- plus the item number
     return {
         "store": store_key,
         "seller": seller,
@@ -237,6 +236,32 @@ def check(
         "new_count": len(items),
         "items": items,
     }
+
+
+# --------------------------------------------------------------------------
+# 1b. likely products for a custom label (read-only)
+# --------------------------------------------------------------------------
+@router.get("/suggest")
+def suggest(label: str = Query(..., min_length=1, max_length=100), db: Session = Depends(get_db)):
+    """Products whose custom label SKU (or website SKU) is exactly this label, ignoring case.
+    Shown first in the link window so the right product is one click away."""
+    rows = db.execute(
+        text(
+            f"""
+            select p.id, p.sku, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price,
+                   p.quantity_on_hand, p.is_published,
+                   (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
+                   {_PN_SUBQUERY} as part_number
+            from products p
+            where lower(trim(cast(p.custom_label_sku as text))) = lower(trim(:l))
+               or lower(trim(cast(p.sku as text))) = lower(trim(:l))
+            order by p.title, p.id
+            limit 20
+            """
+        ),
+        {"l": label},
+    ).all()
+    return {"items": [dict(r._mapping) for r in rows]}
 
 
 # --------------------------------------------------------------------------

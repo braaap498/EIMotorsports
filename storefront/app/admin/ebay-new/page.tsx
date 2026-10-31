@@ -33,7 +33,9 @@ type CheckResp = {
 };
 type Product = {
   id: number;
-  sku: string;
+  sku?: string;
+  ebay_item_id?: string | null;
+  custom_label_sku?: string | null;
   title: string;
   list_price: number | string | null;
   quantity_on_hand: number;
@@ -51,6 +53,32 @@ const startingSearch = (title: string) => title.split(/\s+/).slice(0, 4).join(" 
 
 /* ------------------------------------------------------ link-to-product box */
 
+function ProductList({ items, linking, onLink }: { items: Product[]; linking: number | null; onLink: (p: Product) => void }) {
+  return (
+    <ul className="max-h-72 divide-y divide-gray-100 overflow-y-auto rounded border border-gray-200">
+      {items.map((p) => (
+        <li key={p.id} className="flex items-center justify-between gap-3 p-3">
+          <div className="min-w-0 text-sm">
+            <div className="font-medium">{p.title}</div>
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
+              <span>eBay item # {p.ebay_item_id ?? "—"}</span>
+              <span>Custom label SKU {p.custom_label_sku ?? p.sku ?? "—"}</span>
+              {p.part_number && <span>PN {p.part_number}</span>}
+              <span>${money(p.list_price)}</span>
+              <span>{p.quantity_on_hand} on hand</span>
+              <Badge tone={p.listing_count > 0 ? "green" : "gray"}>{p.listing_count} eBay</Badge>
+              {!p.is_published && <Badge tone="amber">Draft</Badge>}
+            </div>
+          </div>
+          <button type="button" className={btnCls} disabled={linking !== null} onClick={() => onLink(p)}>
+            {linking === p.id ? "Linking…" : "Link"}
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function LinkModal({
   listing,
   store,
@@ -67,6 +95,19 @@ function LinkModal({
   const [searching, setSearching] = useState(false);
   const [linking, setLinking] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const [likely, setLikely] = useState<Product[] | null>(null); // products with this exact custom label SKU
+
+  // With a custom label on file, show the products that already carry it before anything is typed.
+  useEffect(() => {
+    if (!listing.custom_label) return;
+    let live = true;
+    api<{ items: Product[] }>(`/ebay-new/suggest?${new URLSearchParams({ label: listing.custom_label })}`)
+      .then((r) => live && setLikely(r.items))
+      .catch((e) => live && setError(errMsg(e)));
+    return () => {
+      live = false;
+    };
+  }, [listing.custom_label]);
 
   async function search() {
     if (q.trim().length < 2) return;
@@ -101,8 +142,22 @@ function LinkModal({
       <div className="space-y-3">
         <div className="rounded border border-gray-200 bg-gray-50 p-3 text-sm">
           <div className="font-medium">{listing.title}</div>
-          <div className="text-xs text-gray-500">{listing.sku}</div>
+          <div className="mt-1 flex flex-wrap gap-x-4 text-xs text-gray-500">
+            <span>eBay item # {listing.sku}</span>
+            <span>Custom label SKU {listing.custom_label ?? "—"}</span>
+          </div>
         </div>
+
+        {listing.custom_label && likely === null && !error && <p className="text-sm text-gray-500">Looking for products with this custom label…</p>}
+        {likely && likely.length > 0 && (
+          <div className="space-y-1">
+            <p className="text-sm font-medium">Likely match{likely.length === 1 ? "" : "es"}: same custom label SKU</p>
+            <ProductList items={likely} linking={linking} onLink={(p) => void linkTo(p)} />
+          </div>
+        )}
+        {likely && likely.length === 0 && (
+          <p className="text-sm text-gray-500">No product has the custom label SKU {listing.custom_label} yet. Search below.</p>
+        )}
 
         <form
           className="flex gap-2"
@@ -115,7 +170,7 @@ function LinkModal({
             className={inputCls}
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search products by title or SKU"
+            placeholder="Title, custom label SKU, eBay item # or part #"
             autoFocus onClear={() => { setQ(""); setResults(null); }} />
           <button type="submit" className={btnCls} disabled={searching || q.trim().length < 2}>
             {searching ? "Searching…" : "Search"}
@@ -133,26 +188,7 @@ function LinkModal({
                 Showing {results.shown} of {results.total}. Add a word to narrow it down.
               </p>
             )}
-            <ul className="max-h-96 divide-y divide-gray-100 overflow-y-auto rounded border border-gray-200">
-              {results.items.map((p) => (
-                <li key={p.id} className="flex items-center justify-between gap-3 p-3">
-                  <div className="min-w-0 text-sm">
-                    <div className="font-medium">{p.title}</div>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                      <span>{p.sku}</span>
-                      {p.part_number && <span>PN {p.part_number}</span>}
-                      <span>${money(p.list_price)}</span>
-                      <span>{p.quantity_on_hand} on hand</span>
-                      <Badge tone={p.listing_count > 0 ? "green" : "gray"}>{p.listing_count} eBay</Badge>
-                      {!p.is_published && <Badge tone="amber">Draft</Badge>}
-                    </div>
-                  </div>
-                  <button type="button" className={btnCls} disabled={linking !== null} onClick={() => void linkTo(p)}>
-                    {linking === p.id ? "Linking…" : "Link"}
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <ProductList items={results.items} linking={linking} onLink={(p) => void linkTo(p)} />
           </>
         )}
       </div>
@@ -276,6 +312,8 @@ export default function NewEbayListingsPage() {
                 <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
                     <th className="px-3 py-2"></th>
+                    <th className="px-3 py-2">eBay item #</th>
+                    <th className="px-3 py-2">Custom label SKU</th>
                     <th className="px-3 py-2">Listing</th>
                     <th className="px-3 py-2">Price</th>
                     <th className="px-3 py-2">Listed</th>
@@ -291,11 +329,12 @@ export default function NewEbayListingsPage() {
                           <img src={i.image_url} alt="" className="h-12 w-12 rounded border border-gray-200 object-cover" />
                         )}
                       </td>
+                      <td className="whitespace-nowrap px-3 py-2 text-gray-600">{i.sku}</td>
+                      <td className="whitespace-nowrap px-3 py-2 text-gray-600">{i.custom_label ?? "—"}</td>
                       <td className="max-w-md px-3 py-2">
                         <a href={i.url} target="_blank" rel="noopener noreferrer" className="font-medium hover:underline">
                           {i.title}
                         </a>
-                        <div className="text-xs text-gray-500">{i.sku}</div>
                       </td>
                       <td className="whitespace-nowrap px-3 py-2">{i.price ? `$${money(i.price)}` : "—"}</td>
                       <td className="whitespace-nowrap px-3 py-2">
