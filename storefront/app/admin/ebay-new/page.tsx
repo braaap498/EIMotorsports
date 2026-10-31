@@ -158,6 +158,7 @@ function LinkModal({
 /* ------------------------------------------------------------------- page */
 
 export default function NewEbayListingsPage() {
+  const [store, setStore] = useState("");
   const [deep, setDeep] = useState(false);
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<CheckResp | null>(null);
@@ -171,7 +172,9 @@ export default function NewEbayListingsPage() {
     setError("");
     setLinkedMsg(null);
     try {
-      const r = await api<CheckResp>(`/ebay-new/check?deep=${deep}`);
+      const r = await api<CheckResp>(
+        `/ebay-new/check?${new URLSearchParams({ deep: String(deep), ...(store.trim() ? { seller: store.trim() } : {}) })}`,
+      );
       setResult(r);
       setItems(r.items);
     } catch (e) {
@@ -201,6 +204,16 @@ export default function NewEbayListingsPage() {
         <button type="button" className={btnCls} onClick={() => void check()} disabled={checking}>
           {checking ? "Checking eBay…" : "Check eBay for new listings"}
         </button>
+        <label className="flex items-center gap-2 text-sm text-gray-700">
+          Store
+          <input
+            className={inputCls + " w-56"}
+            value={store}
+            onChange={(e) => setStore(e.target.value)}
+            placeholder="blank = your main store"
+            disabled={checking}
+          />
+        </label>
         <label className="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" checked={deep} onChange={(e) => setDeep(e.target.checked)} disabled={checking} />
           Scan everything (slower)

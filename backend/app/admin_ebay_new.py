@@ -74,10 +74,23 @@ def _item_number(summary: dict) -> Optional[str]:
     return None
 
 
-def _fetch_page(token: str, offset: int) -> dict:
+SELLER_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")  # characters eBay allows in a user name
+
+
+def _resolve_seller(seller: Optional[str]) -> str:
+    """The store to read: the one typed on the screen, or the API's own store when left empty."""
+    name = (seller or "").strip()
+    if not name:
+        return seller_username()
+    if not SELLER_RE.fullmatch(name):
+        raise HTTPException(400, "That does not look like an eBay store name.")
+    return name
+
+
+def _fetch_page(token: str, offset: int, seller: str) -> dict:
     q = urllib.parse.urlencode(
         {
-            "filter": f"sellers:{{{seller_username()}}}",
+            "filter": f"sellers:{{{seller}}}",
             "category_ids": _category_ids(),
             "sort": "newlyListed",
             "limit": PAGE,
@@ -122,10 +135,15 @@ def _already_linked(db: Session, item_numbers: list[str]) -> set[str]:
 # 1. check (read-only)
 # --------------------------------------------------------------------------
 @router.get("/check")
-def check(deep: bool = Query(False), db: Session = Depends(get_db)):
+def check(
+    deep: bool = Query(False),
+    seller: Optional[str] = Query(None, description="eBay store name; empty means this site's own store"),
+    db: Session = Depends(get_db),
+):
     if not configured():
         raise HTTPException(503, "EBAY_CLIENT_ID and EBAY_CLIENT_SECRET are not set on the API.")
 
+    seller = _resolve_seller(seller)
     max_pages = DEEP_MAX_PAGES if deep else QUICK_MAX_PAGES
     try:
         token = _token()
@@ -136,7 +154,7 @@ def check(deep: bool = Query(False), db: Session = Depends(get_db)):
         caught_up = False
 
         for page in range(max_pages):
-            data = _fetch_page(token, page * PAGE)
+            data = _fetch_page(token, page * PAGE, seller)
             pages += 1
             if ebay_total is None and isinstance(data.get("total"), int):
                 ebay_total = data["total"]
@@ -184,7 +202,7 @@ def check(deep: bool = Query(False), db: Session = Depends(get_db)):
 
     items = list(new.values())[:MAX_NEW_SHOWN]
     return {
-        "seller": seller_username(),
+        "seller": seller,
         "deep": deep,
         "pages_read": pages,
         "listings_read": read,
