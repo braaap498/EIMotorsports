@@ -10,13 +10,14 @@ Mounted at /admin/ebay-edit/* (owner/admin only).
   PUT  /live-pushes               the per-store on/off switch (off by default)
   GET  /log?store=                the last pushes and previews
 
-What can be changed in this first version: title, price, available quantity, custom label (SKU).
-Descriptions, photos and item specifics are shown as read only for now.
+What can be changed: title, description (whole HTML replaced), price, available quantity and custom label (SKU)
+on single listings; price and available quantity per variation on listings with variations.
+Photos and item specifics are shown as read only for now.
 
 Safety rules built in:
   * the listing must belong to the connected account of the store (checked on every read)
-  * only fixed-price listings without variations can be edited
-  * a quantity of 0 is refused (it can end the listing; out-of-stock handling comes later)
+  * only fixed-price listings can be edited; on variation listings only price/quantity per variation
+  * a quantity of 0 is refused (it can end the listing or drop a variation; out-of-stock handling comes later)
   * a push must carry the fingerprint of its preview; if the listing or the changes differ, it is refused
   * every preview and push is written to ebay_push_log
 """
@@ -139,16 +140,49 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
     total = int(t("Quantity") or 0)
     sold = int(t("SellingStatus/QuantitySold") or 0)
     listing_type = t("ListingType")
-    has_var = item.find(f"{NS}Variations") is not None
+    var_root = item.find(f"{NS}Variations")
+    has_var = var_root is not None
     status = t("SellingStatus/ListingStatus")
+
+    variations = []
+    if has_var:
+        for v in var_root.findall(f"{NS}Variation"):
+            v_total = int(v.findtext(f"{NS}Quantity") or 0)
+            v_sold = int(v.findtext(f"{NS}SellingStatus/{NS}QuantitySold") or 0)
+            v_price = v.findtext(f"{NS}StartPrice")
+            specifics = ", ".join(
+                f"{(n.findtext(NS + 'Name') or '').strip()}: {(n.findtext(NS + 'Value') or '').strip()}"
+                for n in v.findall(f"{NS}VariationSpecifics/{NS}NameValueList")
+            )
+            variations.append(
+                {
+                    "sku": (v.findtext(f"{NS}SKU") or "").strip(),
+                    "price": v_price.strip() if v_price else None,
+                    "quantity_available": max(v_total - v_sold, 0),
+                    "quantity_sold": v_sold,
+                    "specifics": specifics,
+                }
+            )
+        # the listing-level numbers on eBay are not meaningful for variation listings; sum the variations
+        total = sum(v["quantity_available"] + v["quantity_sold"] for v in variations)
+        sold = sum(v["quantity_sold"] for v in variations)
+
+    specifics_list = []
+    for n in item.findall(f"{NS}ItemSpecifics/{NS}NameValueList"):
+        name = (n.findtext(f"{NS}Name") or "").strip()
+        vals = [(x.text or "").strip() for x in n.findall(f"{NS}Value")]
+        if name:
+            specifics_list.append({"name": name, "value": ", ".join(v for v in vals if v)})
 
     reason = None
     if status and status != "Active":
         reason = f"This listing is {status}, not Active."
     elif listing_type not in ("FixedPriceItem", "StoresFixedPrice"):
         reason = f"This is a {listing_type or 'non fixed-price'} listing; only fixed-price listings can be edited here."
-    elif has_var:
-        reason = "This listing has variations (several options in one listing). Those are not editable here yet."
+    elif has_var and any(not v["sku"] for v in variations):
+        reason = "A variation on this listing has no SKU, so it cannot be addressed safely. Give each variation a SKU on eBay first."
+    elif has_var and len({v["sku"] for v in variations}) != len(variations):
+        reason = "Two variations on this listing share a SKU, so they cannot be told apart. Fix that on eBay first."
 
     return {
         "store": row.store,
@@ -164,7 +198,10 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
         "status": status,
         "url": t("ListingDetails/ViewItemURL"),
         "image_url": t("PictureDetails/GalleryURL") or t("PictureDetails/PictureURL"),
-        "description_chars": len(t("Description")),
+        "description": item.findtext(f"{NS}Description") or "",
+        "has_variations": has_var,
+        "variations": variations,
+        "item_specifics": specifics_list,
         "editable": reason is None,
         "not_editable_reason": reason,
     }
@@ -178,11 +215,19 @@ def get_item(store: str = Query(...), item_id: str = Query(...), db: Session = D
 # --------------------------------------------------------------------------
 # building the request
 # --------------------------------------------------------------------------
+class VarChange(BaseModel):
+    sku: str
+    price: Optional[str] = None
+    quantity: Optional[int] = None  # AVAILABLE quantity of that variation
+
+
 class Changes(BaseModel):
     title: Optional[str] = None
+    description: Optional[str] = None
     price: Optional[str] = None
     quantity: Optional[int] = None  # the AVAILABLE quantity, as shown on the listing
     sku: Optional[str] = None
+    variations: Optional[list[VarChange]] = None
 
 
 class EditIn(BaseModel):
@@ -195,56 +240,122 @@ class PushIn(EditIn):
     fingerprint: str
 
 
-def _build(current: dict, ch: Changes) -> tuple[str, list[dict]]:
-    """The exact request, plus the before/after rows. Raises 400 with a readable reason."""
+def _norm(s: str) -> str:
+    return (s or "").replace("\r\n", "\n").strip()
+
+
+def _money(raw: str) -> Decimal:
+    try:
+        v = Decimal(raw.strip().replace(",", "").lstrip("$")).quantize(Decimal("0.01"))
+    except InvalidOperation:
+        raise HTTPException(400, "That price is not a number.")
+    if v <= 0 or v > Decimal("99999.99"):
+        raise HTTPException(400, "The price must be above 0 and below 100,000.")
+    return v
+
+
+def _cdata(html: str) -> str:
+    return "<![CDATA[" + html.replace("]]>", "]]]]><![CDATA[>") + "]]>"
+
+
+def _build(current: dict, ch: Changes) -> tuple[list[dict], list[dict]]:
+    """The exact request(s), plus the before/after rows. Raises 400/409 with a readable reason."""
     if not current["editable"]:
         raise HTTPException(409, current["not_editable_reason"])
     parts: list[str] = []
     diff: list[dict] = []
+    has_var = current["has_variations"]
 
-    if ch.title is not None and ch.title.strip() != current["title"]:
+    if ch.title is not None and " ".join(ch.title.split()) != current["title"]:
         title = " ".join(ch.title.split())
         if not title or len(title) > 80:
             raise HTTPException(400, "A title must be 1 to 80 characters.")
+        if current["quantity_sold"] > 0:
+            raise HTTPException(400, "Something on this listing has already sold, so eBay will not allow the title to be changed.")
         parts.append(f"<Title>{escape(title)}</Title>")
         diff.append({"field": "Title", "before": current["title"], "after": title})
 
-    if ch.price is not None and ch.price.strip():
-        try:
-            new_price = Decimal(ch.price.strip().replace(",", "").lstrip("$")).quantize(Decimal("0.01"))
-        except InvalidOperation:
-            raise HTTPException(400, "That price is not a number.")
-        if new_price <= 0 or new_price > Decimal("99999.99"):
-            raise HTTPException(400, "The price must be above 0 and below 100,000.")
-        if current["price"] is None or Decimal(current["price"]).quantize(Decimal("0.01")) != new_price:
-            parts.append(f'<StartPrice currencyID="{escape(current["currency"])}">{new_price}</StartPrice>')
-            diff.append({"field": "Price", "before": current["price"], "after": str(new_price)})
-
-    if ch.quantity is not None and ch.quantity != current["quantity_available"]:
-        if ch.quantity < 1:
-            raise HTTPException(
-                400,
-                "A quantity of 0 is not allowed yet: it can end the listing. Out-of-stock handling comes in a later step.",
-            )
-        if ch.quantity > 9999:
-            raise HTTPException(400, "That quantity is too large.")
-        # eBay's Quantity counts what was already sold, so send available + sold.
-        parts.append(f"<Quantity>{ch.quantity + current['quantity_sold']}</Quantity>")
+    if ch.description is not None and _norm(ch.description) != _norm(current["description"]):
+        desc = ch.description.strip()
+        if not desc:
+            raise HTTPException(400, "The description cannot be empty.")
+        if len(desc) > 500_000:
+            raise HTTPException(400, "The description is too long (500,000 characters is eBay's limit).")
+        parts.append(f"<Description>{_cdata(desc)}</Description>")
         diff.append(
             {
-                "field": "Available quantity",
-                "before": str(current["quantity_available"]),
-                "after": str(ch.quantity),
-                "note": f"eBay is sent {ch.quantity + current['quantity_sold']} because {current['quantity_sold']} already sold",
+                "field": "Description",
+                "before": f"{len(current['description']):,} characters",
+                "after": f"{len(desc):,} characters",
+                "note": "the whole description is replaced",
             }
         )
 
-    if ch.sku is not None and ch.sku.strip() != current["sku"]:
-        sku = ch.sku.strip()
-        if not sku or len(sku) > 50:
-            raise HTTPException(400, "A custom label must be 1 to 50 characters.")
-        parts.append(f"<SKU>{escape(sku)}</SKU>")
-        diff.append({"field": "Custom label (SKU)", "before": current["sku"], "after": sku})
+    if not has_var:
+        if ch.price is not None and ch.price.strip():
+            new_price = _money(ch.price)
+            if current["price"] is None or Decimal(current["price"]).quantize(Decimal("0.01")) != new_price:
+                parts.append(f'<StartPrice currencyID="{escape(current["currency"])}">{new_price}</StartPrice>')
+                diff.append({"field": "Price", "before": current["price"], "after": str(new_price)})
+
+        if ch.quantity is not None and ch.quantity != current["quantity_available"]:
+            if ch.quantity < 1:
+                raise HTTPException(400, "A quantity of 0 is not allowed yet: it can end the listing. Out-of-stock handling comes in a later step.")
+            if ch.quantity > 9999:
+                raise HTTPException(400, "That quantity is too large.")
+            # eBay's Quantity counts what was already sold, so send available + sold.
+            parts.append(f"<Quantity>{ch.quantity + current['quantity_sold']}</Quantity>")
+            diff.append(
+                {
+                    "field": "Available quantity",
+                    "before": str(current["quantity_available"]),
+                    "after": str(ch.quantity),
+                    "note": f"eBay is sent {ch.quantity + current['quantity_sold']} because {current['quantity_sold']} already sold",
+                }
+            )
+
+        if ch.sku is not None and ch.sku.strip() != current["sku"]:
+            sku = ch.sku.strip()
+            if not sku or len(sku) > 50:
+                raise HTTPException(400, "A custom label must be 1 to 50 characters.")
+            parts.append(f"<SKU>{escape(sku)}</SKU>")
+            diff.append({"field": "Custom label (SKU)", "before": current["sku"], "after": sku})
+    else:
+        by_sku = {v["sku"]: v for v in current["variations"]}
+        seen: set[str] = set()
+        var_xml = ""
+        for vc in ch.variations or []:
+            cur = by_sku.get(vc.sku)
+            if cur is None:
+                raise HTTPException(400, f"Variation '{vc.sku}' is not on this listing any more. Reload the listing.")
+            if vc.sku in seen:
+                raise HTTPException(400, f"Variation '{vc.sku}' appears twice in the request.")
+            seen.add(vc.sku)
+            inner = ""
+            label = cur["specifics"] or vc.sku
+            if vc.price is not None and vc.price.strip():
+                new_price = _money(vc.price)
+                if cur["price"] is None or Decimal(cur["price"]).quantize(Decimal("0.01")) != new_price:
+                    inner += f'<StartPrice currencyID="{escape(current["currency"])}">{new_price}</StartPrice>'
+                    diff.append({"field": f"Price, {label}", "before": cur["price"], "after": str(new_price)})
+            if vc.quantity is not None and vc.quantity != cur["quantity_available"]:
+                if vc.quantity < 1:
+                    raise HTTPException(400, f"Variation '{label}': a quantity of 0 is not allowed yet; eBay may drop the variation from the listing.")
+                if vc.quantity > 9999:
+                    raise HTTPException(400, "That quantity is too large.")
+                inner += f"<Quantity>{vc.quantity + cur['quantity_sold']}</Quantity>"
+                diff.append(
+                    {
+                        "field": f"Available, {label}",
+                        "before": str(cur["quantity_available"]),
+                        "after": str(vc.quantity),
+                        "note": f"eBay is sent {vc.quantity + cur['quantity_sold']} because {cur['quantity_sold']} already sold",
+                    }
+                )
+            if inner:
+                var_xml += f"<Variation><SKU>{escape(vc.sku)}</SKU>{inner}</Variation>"
+        if var_xml:
+            parts.append(f"<Variations>{var_xml}</Variations>")
 
     if not parts:
         raise HTTPException(400, "Nothing is different from what is on eBay, so there is nothing to send.")
@@ -252,11 +363,47 @@ def _build(current: dict, ch: Changes) -> tuple[str, list[dict]]:
         '<ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents"><Item>'
         f"<ItemID>{current['item_id']}</ItemID>" + "".join(parts) + "</Item></ReviseFixedPriceItemRequest>"
     )
-    return xml, diff
+    return [{"call": "ReviseFixedPriceItem", "xml": xml}], diff
 
 
-def _fingerprint(store: str, xml: str) -> str:
-    return hashlib.sha256(f"{store}|{xml}".encode()).hexdigest()[:24]
+def _differences(fresh: dict, ch: Changes) -> list[str]:
+    """After a push: what eBay now shows versus what was asked for. Empty list = exactly as sent."""
+    out: list[str] = []
+    if ch.title is not None and " ".join(ch.title.split()) != fresh["title"]:
+        out.append(f"Title is now '{fresh['title']}'")
+    if ch.description is not None and _norm(ch.description) != _norm(fresh["description"]):
+        out.append("The description on eBay is not identical to what was sent (eBay may clean up HTML)")
+    if not fresh["has_variations"]:
+        if ch.price and ch.price.strip():
+            try:
+                if Decimal(fresh["price"] or "0") != _money(ch.price):
+                    out.append(f"Price is now {fresh['price']}")
+            except HTTPException:
+                pass
+        if ch.quantity is not None and ch.quantity != fresh["quantity_available"]:
+            out.append(f"Available quantity is now {fresh['quantity_available']}")
+        if ch.sku is not None and ch.sku.strip() != fresh["sku"]:
+            out.append(f"Custom label is now '{fresh['sku']}'")
+    else:
+        by = {v["sku"]: v for v in fresh["variations"]}
+        for vc in ch.variations or []:
+            v = by.get(vc.sku)
+            if v is None:
+                out.append(f"Variation '{vc.sku}' is no longer on the listing")
+                continue
+            if vc.price and vc.price.strip():
+                try:
+                    if Decimal(v["price"] or "0") != _money(vc.price):
+                        out.append(f"Variation '{vc.sku}' price is now {v['price']}")
+                except HTTPException:
+                    pass
+            if vc.quantity is not None and vc.quantity != v["quantity_available"]:
+                out.append(f"Variation '{vc.sku}' available is now {v['quantity_available']}")
+    return out
+
+
+def _fingerprint(store: str, calls: list[dict]) -> str:
+    return hashlib.sha256((store + "|" + "|".join(c["call"] + c["xml"] for c in calls)).encode()).hexdigest()[:24]
 
 
 def _log(db: Session, user: AuthUser, store: str, item_id: str, action: str, dry: bool, request: dict, response: dict, ok: bool, error: Optional[str]):
@@ -297,18 +444,17 @@ def _log(db: Session, user: AuthUser, store: str, item_id: str, action: str, dry
 def preview(body: EditIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     row = _store_row(db, body.store)
     current = _read_item(db, row.store, body.item_id.strip())
-    xml, diff = _build(current, body.changes)
-    fp = _fingerprint(row.store, xml)
-    _log(db, user, row.store, current["item_id"], "revise_fixed_price_item", True, {"xml": xml, "diff": diff}, {}, True, None)
+    calls, diff = _build(current, body.changes)
+    fp = _fingerprint(row.store, calls)
+    _log(db, user, row.store, current["item_id"], "revise_fixed_price_item", True, {"calls": calls, "diff": diff}, {}, True, None)
     enabled = bool(
         db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
     )
     return {
         "store": row.store,
         "item_id": current["item_id"],
-        "call": "ReviseFixedPriceItem (Trading API)",
+        "calls": calls,
         "diff": diff,
-        "xml": xml,
         "fingerprint": fp,
         "live_pushes_enabled": enabled,
         "sent": False,
@@ -322,18 +468,21 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     if not enabled:
         raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
     current = _read_item(db, row.store, body.item_id.strip())
-    xml, diff = _build(current, body.changes)
-    if _fingerprint(row.store, xml) != body.fingerprint:
+    calls, diff = _build(current, body.changes)
+    if _fingerprint(row.store, calls) != body.fingerprint:
         raise HTTPException(409, "The listing or the changes are not the same as in the preview. Nothing was sent. Preview again.")
 
-    inner = xml.split("<Item>", 1)[1].rsplit("</Item>", 1)[0]
-    root = _trading(db, row.store, "ReviseFixedPriceItem", f"<Item>{inner}</Item>")
-    errs = _errors(root)
-    ok = not _failed(root)
-    resp = {"ack": root.findtext(f"{NS}Ack"), "errors": errs}
-    _log(db, user, row.store, current["item_id"], "revise_fixed_price_item", False, {"xml": xml, "diff": diff}, resp, ok, None if ok else _first_message(root))
-    if not ok:
-        raise HTTPException(502, "eBay did not accept the change: " + _first_message(root))
+    warnings: list[dict] = []
+    for c in calls:
+        inner = c["xml"].split("<Item>", 1)[1].rsplit("</Item>", 1)[0]
+        root = _trading(db, row.store, c["call"], f"<Item>{inner}</Item>")
+        errs = _errors(root)
+        ok = not _failed(root)
+        resp = {"ack": root.findtext(f"{NS}Ack"), "errors": errs}
+        _log(db, user, row.store, current["item_id"], "revise_fixed_price_item", False, {"calls": calls, "diff": diff}, resp, ok, None if ok else _first_message(root))
+        if not ok:
+            raise HTTPException(502, "eBay did not accept the change: " + _first_message(root))
+        warnings += [e for e in errs if e["severity"] == "Warning"]
     db.execute(
         text(
             "update channel_listings set last_pushed_at = now() "
@@ -343,7 +492,7 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     )
     db.commit()
     fresh = _read_item(db, row.store, current["item_id"])
-    return {"ok": True, "warnings": [e for e in errs if e["severity"] == "Warning"], "item": fresh}
+    return {"ok": True, "warnings": warnings, "item": fresh, "differences": _differences(fresh, body.changes)}
 
 
 # --------------------------------------------------------------------------
