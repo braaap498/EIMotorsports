@@ -200,20 +200,22 @@ export default function NewEbayListingsPage() {
         </p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-4 rounded-lg border border-gray-200 bg-white p-4">
+      <div className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
+        <label className="block max-w-sm text-sm">
+          <span className="mb-1 block font-medium">eBay store name</span>
+          <input
+            className={inputCls}
+            value={store}
+            onChange={(e) => setStore(e.target.value)}
+            placeholder="genuine-oem-parts"
+            disabled={checking}
+          />
+          <span className="mt-1 block text-xs text-gray-500">Leave blank to check your main store.</span>
+        </label>
+        <div className="flex flex-wrap items-center gap-4">
         <button type="button" className={btnCls} onClick={() => void check()} disabled={checking}>
           {checking ? "Checking eBay…" : "Check eBay for new listings"}
         </button>
-        <label className="flex items-center gap-2 text-sm text-gray-700">
-          Store
-          <input
-            className={inputCls + " w-56"}
-            value={store}
-            onChange={(e) => setStore(e.target.value)}
-            placeholder="blank = your main store"
-            disabled={checking}
-          />
-        </label>
         <label className="flex items-center gap-2 text-sm text-gray-700">
           <input type="checkbox" checked={deep} onChange={(e) => setDeep(e.target.checked)} disabled={checking} />
           Scan everything (slower)
@@ -221,6 +223,7 @@ export default function NewEbayListingsPage() {
         <span className="text-xs text-gray-500">
           A normal check reads the newest listings and stops once it reaches ones that are already linked.
         </span>
+        </div>
       </div>
 
       {error && <Notice kind="error">{error}</Notice>}
