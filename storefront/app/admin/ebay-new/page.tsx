@@ -2,15 +2,17 @@
 
 import ClearableInput from "../../../components/admin/ClearableInput";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
+import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Modal, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 
 /* ------------------------------------------------------------------ types */
 
 type NewListing = {
   item_id: string;
-  sku: string; // shown the same way as product SKUs, e.g. EBAY-168810301004
+  sku: string; // the custom label when we have one, otherwise EBAY- plus the item number
+  custom_label: string | null; // the real custom label SKU, when we have it on file
   title: string;
   price: string | null;
   currency: string | null;
@@ -19,6 +21,7 @@ type NewListing = {
   listed_at: string | null;
 };
 type CheckResp = {
+  store: string; // the store key the listings were found in (saved on the link)
   seller: string;
   deep: boolean;
   pages_read: number;
@@ -39,7 +42,7 @@ type Product = {
   part_number: string | null;
 };
 type SearchResp = { total: number; shown: number; items: Product[] };
-type LinkResp = { ok: boolean; item_id: string; sku: string; product_id: number; product_title: string; listing_count: number };
+type LinkResp = { ok: boolean; item_id: string; sku: string; store: string; product_id: number; product_title: string; listing_count: number };
 
 const money = (v: number | string | null) => (v == null ? "—" : Number(v).toFixed(2));
 
@@ -50,10 +53,12 @@ const startingSearch = (title: string) => title.split(/\s+/).slice(0, 4).join(" 
 
 function LinkModal({
   listing,
+  store,
   onClose,
   onLinked,
 }: {
   listing: NewListing;
+  store: string;
   onClose: () => void;
   onLinked: (r: LinkResp) => void;
 }) {
@@ -82,7 +87,7 @@ function LinkModal({
     try {
       const r = await api<LinkResp>("/ebay-new/link", {
         method: "POST",
-        body: { item_id: listing.item_id, product_id: p.id },
+        body: { item_id: listing.item_id, product_id: p.id, store },
       });
       onLinked(r);
     } catch (e) {
@@ -96,7 +101,9 @@ function LinkModal({
       <div className="space-y-3">
         <div className="rounded border border-gray-200 bg-gray-50 p-3 text-sm">
           <div className="font-medium">{listing.title}</div>
-          <div className="text-xs text-gray-500">{listing.sku}</div>
+          <div className="text-xs text-gray-500">
+            {listing.custom_label ? `Custom label ${listing.custom_label}` : "No custom label on file"} · {listing.item_id}
+          </div>
         </div>
 
         <form
@@ -166,6 +173,23 @@ export default function NewEbayListingsPage() {
   const [error, setError] = useState("");
   const [linkedMsg, setLinkedMsg] = useState<LinkResp | null>(null);
   const [linking, setLinking] = useState<NewListing | null>(null);
+  const [restored, setRestored] = useState(false);
+
+  // Coming back from another admin page: show the same results instead of an empty screen.
+  useEffect(() => {
+    const saved = loadSaved<{ store: string; deep: boolean; result: CheckResp | null; items: NewListing[] }>("ebay-new");
+    if (saved) {
+      setStore(saved.store);
+      setDeep(saved.deep);
+      setResult(saved.result);
+      setItems(saved.items);
+    }
+    setRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (restored) saveSaved("ebay-new", { store, deep, result, items });
+  }, [restored, store, deep, result, items]);
 
   async function check() {
     setChecking(true);
@@ -228,7 +252,7 @@ export default function NewEbayListingsPage() {
       {error && <Notice kind="error">{error}</Notice>}
       {linkedMsg && (
         <Notice kind="success">
-          Linked {linkedMsg.sku} to{" "}
+          Linked eBay item {linkedMsg.item_id} to{" "}
           <Link href={`/admin/products/${linkedMsg.product_id}`} className="font-medium underline">
             {linkedMsg.product_title}
           </Link>
@@ -273,7 +297,16 @@ export default function NewEbayListingsPage() {
                         <a href={i.url} target="_blank" rel="noopener noreferrer" className="font-medium hover:underline">
                           {i.title}
                         </a>
-                        <div className="text-xs text-gray-500">{i.sku}</div>
+                        <div className="text-xs text-gray-500">
+                          {i.custom_label ? (
+                            <>
+                              Custom label <span className="font-medium text-gray-700">{i.custom_label}</span>
+                            </>
+                          ) : (
+                            "No custom label on file"
+                          )}{" "}
+                          · {i.item_id}
+                        </div>
                       </td>
                       <td className="whitespace-nowrap px-3 py-2">{i.price ? `$${money(i.price)}` : "—"}</td>
                       <td className="whitespace-nowrap px-3 py-2">
@@ -293,7 +326,7 @@ export default function NewEbayListingsPage() {
         </div>
       )}
 
-      {linking && <LinkModal listing={linking} onClose={() => setLinking(null)} onLinked={linked} />}
+      {linking && result && <LinkModal listing={linking} store={result.store} onClose={() => setLinking(null)} onLinked={linked} />}
     </div>
   );
 }

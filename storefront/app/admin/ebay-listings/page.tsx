@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
+import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 
 /* ------------------------------------------------------------------ types */
@@ -85,12 +87,31 @@ export default function EbayLiveListingsPage() {
     void loadStores();
   }, []);
 
-  async function load(offset: number) {
+  // Coming back from another admin page: put the search and page back and show the same listings.
+  const restored = useRef(false);
+  useEffect(() => {
+    if (restored.current) return;
+    restored.current = true;
+    const saved = loadSaved<{ store: string; q: string; sort: string; offset: number }>("ebay-listings");
+    if (saved) {
+      setStore(saved.store);
+      setQ(saved.q);
+      setSort(saved.sort);
+      void load(saved.offset, saved);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function load(offset: number, from?: { store: string; q: string; sort: string }) {
+    const useStore = from ? from.store : store;
+    const useQ = from ? from.q : q;
+    const useSort = from ? from.sort : sort;
     setLoading(true);
     setError("");
     try {
-      const params = new URLSearchParams({ q: q.trim(), sort, offset: String(offset), limit: String(PAGE_SIZE) });
-      if (store.trim()) params.set("store", store.trim());
+      const params = new URLSearchParams({ q: useQ.trim(), sort: useSort, offset: String(offset), limit: String(PAGE_SIZE) });
+      if (useStore.trim()) params.set("store", useStore.trim());
+      saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset });
       setData(await api<ListResp>(`/ebay-listings/list?${params.toString()}`));
     } catch (e) {
       setData(null);
@@ -273,9 +294,9 @@ export default function EbayLiveListingsPage() {
                       <td className="px-3 py-2">
                         {it.linked ? (
                           <div className="space-y-1">
-                            <a href={`/admin/products/${it.linked.product_id}`} className="text-blue-700 hover:underline">
+                            <Link href={`/admin/products/${it.linked.product_id}`} className="text-blue-700 hover:underline">
                               Product {it.linked.product_id}
-                            </a>
+                            </Link>
                             <div>
                               <Badge tone={it.linked.api_type === "inventory" ? "blue" : "gray"}>
                                 {it.linked.api_type === "inventory" ? "Newer API" : "Older API"}

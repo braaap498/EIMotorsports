@@ -3,7 +3,7 @@
 import ClearableInput from "../../../components/admin/ClearableInput";
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
-import { Badge, Modal, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
+import { Badge, Modal, Notice, PageInput, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 
 /* ------------------------------------------------------------------ types */
 
@@ -628,8 +628,8 @@ export default function QuickBooksPage() {
 
             {list && list.total > PAGE && (
               <div className="flex items-center justify-between text-sm text-gray-600">
-                <span>
-                  Page {page + 1} of {pages} ({list.total.toLocaleString()} records)
+                <span className="flex items-center gap-2">
+                  Page <PageInput page={page + 1} pages={pages} onGo={(p) => setPage(p - 1)} /> of {pages} ({list.total.toLocaleString()} records)
                 </span>
                 <span className="flex gap-2">
                   <button type="button" className={btn2Cls} disabled={page === 0} onClick={() => setPage((p) => p - 1)}>

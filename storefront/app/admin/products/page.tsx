@@ -7,6 +7,7 @@ import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Field, Notice, Pager, btn2Cls, inputCls } from "../../../components/admin/ui";
 import { useAccess } from "../../../components/admin/AdminAccess";
 import { saveNav } from "../../../lib/listNav";
+import { loadSaved, saveSaved } from "../../../lib/savedState";
 
 type Row = {
   id: number;
@@ -37,11 +38,28 @@ export default function ProductsPage() {
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
 
-  // ?no_fitment=1 (from the dashboard) pre-ticks the filter.
+  // Come back to the same search, filters and page after visiting a product.
+  // ?no_fitment=1 (from the dashboard) pre-ticks the filter instead.
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("no_fitment") === "1") setNoFitment(true);
+    const saved = loadSaved<{ q: string; published: string; universal: string; noFitment: boolean; offset: number }>("products");
+    if (saved) {
+      setQInput(saved.q);
+      setQ(saved.q);
+      setPublished(saved.published);
+      setUniversal(saved.universal);
+      setNoFitment(saved.noFitment);
+      setOffset(saved.offset);
+    }
+    if (new URLSearchParams(window.location.search).get("no_fitment") === "1") {
+      setNoFitment(true);
+      setOffset(0);
+    }
     setReady(true);
   }, []);
+
+  useEffect(() => {
+    if (ready) saveSaved("products", { q, published, universal, noFitment, offset });
+  }, [ready, q, published, universal, noFitment, offset]);
 
   const load = useCallback(() => {
     if (!ready) return;

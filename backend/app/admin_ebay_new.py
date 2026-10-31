@@ -8,7 +8,8 @@ Mounted at /admin/ebay-new/* (owner/admin only).
                                            the ones whose item number is NOT in channel_listings.
                                            NOTHING is imported or written.
   2. POST /admin/ebay-new/link             adds one eBay item number to an existing product
-                                           (one new row in channel_listings). That is all it does.
+                                           (one new row in channel_listings, with the store it
+                                           came from). That is all it does.
 
 Why this exists: after parts are merged, one product carries many eBay item numbers (the
 channel_listings rows). When a new eBay listing is made for a part we already sell, its item
@@ -45,6 +46,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, require_admin
+from app.admin_ebay_listings import _resolve
 from app.database import get_db
 from app.ebay_feedback import SEARCH_URL, FeedbackError, _open, _token, configured, seller_username
 
@@ -131,6 +133,21 @@ def _already_linked(db: Session, item_numbers: list[str]) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _custom_labels(db: Session, item_numbers: list[str]) -> dict[str, str]:
+    """Custom label SKUs we already have for these item numbers (from the label import table,
+    filled by the photo import and the report upload). Listings with no label on file are left out."""
+    if not item_numbers:
+        return {}
+    rows = db.execute(
+        text(
+            "select cast(item_number as text), nullif(trim(cast(custom_label_sku as text)), '') "
+            "from ebay_label_import where cast(item_number as text) = any(cast(:ids as text[]))"
+        ),
+        {"ids": item_numbers},
+    ).all()
+    return {r[0]: r[1] for r in rows if r[1]}
+
+
 # --------------------------------------------------------------------------
 # 1. check (read-only)
 # --------------------------------------------------------------------------
@@ -143,7 +160,9 @@ def check(
     if not configured():
         raise HTTPException(503, "EBAY_CLIENT_ID and EBAY_CLIENT_SECRET are not set on the API.")
 
-    seller = _resolve_seller(seller)
+    who = _resolve(db, seller)  # same store rules as the Live listings tab
+    store_key = who["store"]
+    seller = who["seller"]
     max_pages = DEEP_MAX_PAGES if deep else QUICK_MAX_PAGES
     try:
         token = _token()
@@ -201,7 +220,14 @@ def check(
         raise HTTPException(502, "Something unexpected went wrong reading eBay.")
 
     items = list(new.values())[:MAX_NEW_SHOWN]
+    labels = _custom_labels(db, [i["item_id"] for i in items])
+    for i in items:
+        label = labels.get(i["item_id"])
+        i["custom_label"] = label  # None when we do not have one yet
+        if label:
+            i["sku"] = label
     return {
+        "store": store_key,
         "seller": seller,
         "deep": deep,
         "pages_read": pages,
@@ -219,6 +245,7 @@ def check(
 class LinkIn(BaseModel):
     item_id: str
     product_id: int
+    store: Optional[str] = None  # the store the listing was found in; empty means the main store
 
 
 @router.post("/link")
@@ -232,6 +259,8 @@ def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     ).first()
     if not product:
         raise HTTPException(404, "That product no longer exists.")
+
+    store_key = _resolve(db, body.store)["store"]
 
     existing = db.execute(
         text(f"select product_id from channel_listings where {_DIGITS} = :e limit 1"),
@@ -288,10 +317,10 @@ def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     try:
         db.execute(
             text(
-                f"insert into channel_listings (product_id, channel_id, external_id) "
-                f"values (:p, :c, {value_sql})"
+                f"insert into channel_listings (product_id, channel_id, external_id, store) "
+                f"values (:p, :c, {value_sql}, :st)"
             ),
-            {"p": product.id, "c": channel[0], "e": stored},
+            {"p": product.id, "c": channel[0], "e": stored, "st": store_key},
         )
         count = db.execute(
             text("select count(*) from channel_listings where product_id = :p"), {"p": product.id}
@@ -301,5 +330,5 @@ def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
         db.rollback()
         raise HTTPException(409, f"eBay item {item_id} was just linked by someone else.")
 
-    log.info("eBay item %s linked to product %s by %s", item_id, product.id, user.email or user.user_id)
-    return {"ok": True, "item_id": item_id, "sku": f"{SKU_PREFIX}{item_id}", "stored_as": stored, "product_id": product.id, "product_title": product.title, "listing_count": count}
+    log.info("eBay item %s (store %s) linked to product %s by %s", item_id, store_key, product.id, user.email or user.user_id)
+    return {"ok": True, "item_id": item_id, "sku": f"{SKU_PREFIX}{item_id}", "stored_as": stored, "store": store_key, "product_id": product.id, "product_title": product.title, "listing_count": count}

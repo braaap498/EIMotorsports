@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 export const inputCls =
   "w-full min-w-0 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:bg-gray-100 disabled:text-gray-400";
@@ -78,6 +78,43 @@ export function Modal({
   );
 }
 
+/** A page-number box: type a number and press Enter (or leave the box) to jump to that page. */
+export function PageInput({ page, pages, onGo }: { page: number; pages: number; onGo: (page: number) => void }) {
+  const [draft, setDraft] = useState(String(page));
+  useEffect(() => setDraft(String(page)), [page]);
+
+  function go() {
+    const n = parseInt(draft, 10);
+    if (!Number.isFinite(n)) {
+      setDraft(String(page));
+      return;
+    }
+    const target = Math.min(Math.max(1, n), pages);
+    setDraft(String(target));
+    if (target !== page) onGo(target);
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      aria-label="Page number"
+      title="Type a page number and press Enter"
+      className="w-16 rounded border border-gray-300 bg-white px-2 py-1 text-center text-sm text-gray-900"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ""))}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          go();
+        }
+      }}
+      onBlur={go}
+      onFocus={(e) => e.target.select()}
+    />
+  );
+}
+
 export function Pager({
   total,
   limit,
@@ -92,14 +129,19 @@ export function Pager({
   if (total <= limit) return <p className="text-sm text-gray-500">{total} total</p>;
   const from = offset + 1;
   const to = Math.min(offset + limit, total);
+  const page = Math.floor(offset / limit) + 1;
+  const pages = Math.ceil(total / limit);
   return (
-    <div className="flex items-center gap-3 text-sm text-gray-600">
+    <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600">
       <span>
         {from}–{to} of {total}
       </span>
       <button type="button" className={btn2Cls} disabled={offset === 0} onClick={() => onChange(Math.max(0, offset - limit))}>
         Previous
       </button>
+      <span className="flex items-center gap-2">
+        Page <PageInput page={page} pages={pages} onGo={(p) => onChange((p - 1) * limit)} /> of {pages}
+      </span>
       <button type="button" className={btn2Cls} disabled={offset + limit >= total} onClick={() => onChange(offset + limit)}>
         Next
       </button>

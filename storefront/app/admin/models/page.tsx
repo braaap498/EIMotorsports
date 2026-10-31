@@ -4,6 +4,7 @@ import ClearableInput from "../../../components/admin/ClearableInput";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, errMsg } from "../../../lib/adminApi";
 import ArrowBar from "../../../components/admin/ArrowBar";
+import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Field, Modal, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
 
 type Opt = { id: number; name: string };
@@ -350,11 +351,27 @@ export default function ModelsPage() {
 
   // ?untyped=1 (from the dashboard) pre-ticks "Needs a type".
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("untyped") === "1") setUntyped(true);
+    const saved = loadSaved<{ makeId: string; typeId: string; untyped: boolean; q: string; offset: number }>("models");
+    if (saved) {
+      setMakeId(saved.makeId);
+      setTypeId(saved.typeId);
+      setUntyped(saved.untyped);
+      setQInput(saved.q);
+      setQ(saved.q);
+      setOffset(saved.offset);
+    }
+    if (new URLSearchParams(window.location.search).get("untyped") === "1") {
+      setUntyped(true);
+      setOffset(0);
+    }
     setReady(true);
     api<Opt[]>("/makes").then(setMakes).catch((e) => setError(errMsg(e)));
     api<Opt[]>("/vehicle-types").then(setTypes).catch((e) => setError(errMsg(e)));
   }, []);
+
+  useEffect(() => {
+    if (ready) saveSaved("models", { makeId, typeId, untyped, q, offset });
+  }, [ready, makeId, typeId, untyped, q, offset]);
 
   const load = useCallback(() => {
     if (!ready) return;

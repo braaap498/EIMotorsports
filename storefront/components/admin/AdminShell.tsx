@@ -44,6 +44,40 @@ const EBAY_TABS = [
   { href: "/admin/ebay-listings", label: "Live listings" },
 ];
 
+// ---- "Back" link: remembers the admin pages visited in this tab, so a page you opened from a list
+// (a product, say) can take you straight back to that list. Clicking the menu starts a fresh trail.
+const TRAIL_KEY = "adminTrail";
+const MENU_KEY = "adminFromMenu";
+
+function pageName(full: string): string {
+  const path = full.split("?")[0].replace(/\/+$/, "");
+  const exact = [...NAV, ...EBAY_TABS, ...FITMENT_TABS].find((n) => n.href === path);
+  if (exact) return exact.label;
+  if (/^\/admin\/products\/new$/.test(path)) return "New product";
+  if (/^\/admin\/products\/[^/]+$/.test(path)) return "Product";
+  const parent = [...NAV, ...EBAY_TABS, ...FITMENT_TABS]
+    .filter((n) => n.href !== "/admin" && path.startsWith(n.href + "/"))
+    .sort((a, b) => b.href.length - a.href.length)[0];
+  return parent ? parent.label : "the previous page";
+}
+
+function readTrail(): string[] {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(TRAIL_KEY) || "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function markMenuClick() {
+  try {
+    sessionStorage.setItem(MENU_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+}
+
 function isActive(n: (typeof NAV)[number], pathname: string) {
   if (n.match) return n.match.some((m) => pathname.startsWith(m));
   return n.exact ? pathname === n.href : pathname.startsWith(n.href);
@@ -117,6 +151,30 @@ export default function AdminShell({ children }: { children: ReactNode }) {
   const [permissions, setPermissions] = useState<string[]>([]);
   const [problem, setProblem] = useState("");
   const [attempt, setAttempt] = useState(0);
+  const router = useRouter();
+  const [backTo, setBackTo] = useState<string | null>(null);
+
+  // Keep the trail of pages visited, and work out where "Back" goes.
+  useEffect(() => {
+    if (status !== "ok") return;
+    try {
+      const here = pathname + window.location.search;
+      let trail = readTrail();
+      if (sessionStorage.getItem(MENU_KEY)) {
+        sessionStorage.removeItem(MENU_KEY);
+        trail = [here];
+      } else if (trail.length >= 2 && trail[trail.length - 2] === here) {
+        trail.pop(); // went back (this link or the browser's back button)
+      } else if (trail[trail.length - 1] !== here) {
+        trail.push(here);
+      }
+      trail = trail.slice(-30);
+      sessionStorage.setItem(TRAIL_KEY, JSON.stringify(trail));
+      setBackTo(trail.length >= 2 ? trail[trail.length - 2] : null);
+    } catch {
+      setBackTo(null);
+    }
+  }, [pathname, status]);
 
   useEffect(() => {
     let active = true;
@@ -216,6 +274,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
               <Link
                 key={n.href}
                 href={n.href}
+                onClick={markMenuClick}
                 className={`whitespace-nowrap rounded px-3 py-2 text-sm font-medium ${
                   active ? "bg-black text-white" : "text-gray-700 hover:bg-gray-100"
                 }`}
@@ -243,6 +302,15 @@ export default function AdminShell({ children }: { children: ReactNode }) {
             </Notice>
           ) : (
             <>
+              {backTo && (
+                <button
+                  type="button"
+                  onClick={() => router.back()}
+                  className="mb-3 text-sm font-medium text-gray-600 hover:text-black hover:underline"
+                >
+                  ← Back to {pageName(backTo)}
+                </button>
+              )}
               {[
                 { title: "Fitment", tabs: FITMENT_TABS },
                 { title: "eBay", tabs: EBAY_TABS },
@@ -258,6 +326,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
                             <Link
                               key={t.href}
                               href={t.href}
+                              onClick={markMenuClick}
                               className={`-mb-px whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium ${
                                 on ? "border-black text-black" : "border-transparent text-gray-500 hover:text-gray-800"
                               }`}
