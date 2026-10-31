@@ -163,7 +163,15 @@ export default function EbayLiveListingsPage() {
         selling_limit: { quantity?: number; amount?: { value?: string } } | null;
         selling_limit_error: string | null;
       }>("/ebay-connect/test", { method: "POST", body: { store: s } });
-      const lim = r.selling_limit ? ` Selling limit: ${r.selling_limit.quantity ?? "?"} items / $${r.selling_limit.amount?.value ?? "?"}.` : "";
+      const fmt = (v: unknown) => {
+        const n = Number(v);
+        return v === undefined || v === null || v === "" || Number.isNaN(n)
+         ? "?"
+         : n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+      };
+      const lim = r.selling_limit
+        ? ` Selling limit: ${fmt(r.selling_limit.quantity)} items / $${fmt(r.selling_limit.amount?.value)}.`
+        : " eBay reported no selling limit.";
       setConnMsg({
         kind: r.ok ? "success" : "error",
         text: r.ok
