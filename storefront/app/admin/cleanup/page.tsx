@@ -677,7 +677,7 @@ export default function PartsCleanupPage() {
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold">Parts clean-up</h1>
+        <h1 className="text-2xl font-semibold">Merge existing products</h1>
         <Stepper step={step} />
       </div>
 

@@ -23,8 +23,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   },
   { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
-  { href: "/admin/cleanup", label: "Parts clean-up" },
-  { href: "/admin/ebay-new", label: "New eBay listings" },
+  { href: "/admin/cleanup", label: "eBay", match: ["/admin/cleanup", "/admin/ebay-new", "/admin/ebay-photos"] },
   { href: "/admin/quickbooks", label: "QuickBooks" },
   { href: "/admin/users", label: "Team" },
   { href: "/admin/about", label: "About page" },
@@ -35,6 +34,13 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
 const FITMENT_TABS = [
   { href: "/admin/models", label: "Models & years" },
   { href: "/admin/fitment", label: "Types & makes" },
+];
+
+// Sub-pages shown as tabs under the eBay button.
+const EBAY_TABS = [
+  { href: "/admin/cleanup", label: "Merge existing products" },
+  { href: "/admin/ebay-new", label: "Link new eBay listings to a product" },
+  { href: "/admin/ebay-photos", label: "eBay photo import" },
 ];
 
 function isActive(n: (typeof NAV)[number], pathname: string) {
@@ -236,26 +242,32 @@ export default function AdminShell({ children }: { children: ReactNode }) {
             </Notice>
           ) : (
             <>
-              {FITMENT_TABS.some((t) => pathname.startsWith(t.href)) && (
-                <h1 className="mb-3 text-2xl font-semibold">Fitment</h1>
-              )}
-              {FITMENT_TABS.some((t) => pathname.startsWith(t.href)) && (
-                <div className="mb-4 flex gap-1 border-b border-gray-200">
-                  {FITMENT_TABS.map((t) => {
-                    const on = pathname.startsWith(t.href);
-                    return (
-                      <Link
-                        key={t.href}
-                        href={t.href}
-                        className={`-mb-px whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium ${
-                          on ? "border-black text-black" : "border-transparent text-gray-500 hover:text-gray-800"
-                        }`}
-                      >
-                        {t.label}
-                      </Link>
-                    );
-                  })}
-                </div>
+              {[
+                { title: "Fitment", tabs: FITMENT_TABS },
+                { title: "eBay", tabs: EBAY_TABS },
+              ].map(
+                (g) =>
+                  g.tabs.some((t) => pathname.startsWith(t.href)) && (
+                    <div key={g.title}>
+                      <h1 className="mb-3 text-2xl font-semibold">{g.title}</h1>
+                      <div className="mb-4 flex gap-1 overflow-x-auto border-b border-gray-200">
+                        {g.tabs.map((t) => {
+                          const on = pathname.startsWith(t.href);
+                          return (
+                            <Link
+                              key={t.href}
+                              href={t.href}
+                              className={`-mb-px whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium ${
+                                on ? "border-black text-black" : "border-transparent text-gray-500 hover:text-gray-800"
+                              }`}
+                            >
+                              {t.label}
+                            </Link>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )
               )}
               {children}
             </>

@@ -371,7 +371,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
               <p className="font-semibold">A product like this may already exist</p>
               <p className="mb-2 text-xs">
                 If it is the same part, open the existing one instead of creating a new one. You can also create this one
-                and merge them later in Parts clean-up.
+                and merge them later under eBay → Merge existing products.
               </p>
               <ul className="space-y-1">
                 {similar.map((m) => (
