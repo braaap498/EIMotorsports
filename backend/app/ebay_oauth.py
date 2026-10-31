@@ -385,9 +385,11 @@ def _probe_rest(name: str, url: str, token: str) -> dict:
             err = (json.loads(body).get("errors") or [{}])[0]
             extra = " ".join(f"{p.get('name', '')}={p.get('value', '')}" for p in (err.get("parameters") or []))
             note = f"{err.get('errorId', '')} {err.get('message', '')} {extra}".strip()
+            if not extra:  # eBay sent no extra detail: show its raw answer so nothing is hidden
+                note = f"{note} | raw: {' '.join(body.split())[:400]}"
         except Exception:
             note = body[:150]
-        return {"name": name, "ok": False, "status": e.code, "note": note[:200]}
+        return {"name": name, "ok": False, "status": e.code, "note": note[:600]}
     except (urllib.error.URLError, TimeoutError) as e:
         return {"name": name, "ok": False, "status": None, "note": f"could not reach eBay ({e})"}
 
