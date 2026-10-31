@@ -4,6 +4,7 @@ Editing existing eBay listings (older "Trading" API) from the Live listings tab.
 Mounted at /admin/ebay-edit/* (owner/admin only).
 
   GET  /item?store=&item_id=      the listing as it is on eBay right now
+  POST /photo-upload              put a picture from the computer into the website's photo storage (nothing goes to eBay)
   POST /preview                   exactly what would be sent. NOTHING is sent. Logged as a dry run.
   POST /push                      sends it, but only if (a) the store's live-push switch is ON and
                                   (b) it is the very same request that was previewed
@@ -12,7 +13,8 @@ Mounted at /admin/ebay-edit/* (owner/admin only).
 
 What can be changed: title, description (whole HTML replaced), price, available quantity and custom label (SKU)
 on single listings; price and available quantity per variation on listings with variations.
-Photos and item specifics are shown as read only for now.
+Photos (single listings): remove, reorder, make main, add from the website's photo storage or by upload.
+Item specifics are shown as read only for now.
 
 Safety rules built in:
   * the listing must belong to the connected account of the store (checked on every read)
@@ -21,6 +23,8 @@ Safety rules built in:
   * a push must carry the fingerprint of its preview; if the listing or the changes differ, it is refused
   * every preview and push is written to ebay_push_log
 """
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -33,10 +37,11 @@ from typing import Optional
 from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app import images, photo_store
 from app.auth import AuthUser, require_admin
 from app.database import get_db
 from app.ebay_oauth import TRADING_URL, _access, _expected_username, _store_row, get_user_token
@@ -47,6 +52,9 @@ router = APIRouter(prefix="/ebay-edit", tags=["admin-ebay-edit"], dependencies=[
 
 ITEM_RE = re.compile(r"\d{9,15}")
 NS = "{urn:ebay:apis:eBLBaseComponents}"
+KEY_RE = re.compile(r"[0-9a-f]{2}/[0-9a-f]{8,64}\.jpg")  # a stored photo's key, see app/photo_store.py
+MEDIA_URL = "https://apim.ebay.com/commerce/media/v1_beta/image"
+MAX_PHOTOS = 24
 BAD_TOKEN_CODES = {"931", "932", "16110"}  # eBay: the token was not accepted -> get a fresh one once
 
 
@@ -167,6 +175,12 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
         total = sum(v["quantity_available"] + v["quantity_sold"] for v in variations)
         sold = sum(v["quantity_sold"] for v in variations)
 
+    photos = [
+        {"url": (p.text or "").strip()}
+        for p in item.findall(f"{NS}PictureDetails/{NS}PictureURL")
+        if (p.text or "").strip()
+    ]
+
     specifics_list = []
     for n in item.findall(f"{NS}ItemSpecifics/{NS}NameValueList"):
         name = (n.findtext(f"{NS}Name") or "").strip()
@@ -202,6 +216,8 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
         "has_variations": has_var,
         "variations": variations,
         "item_specifics": specifics_list,
+        "photos": photos,
+        "photos_editable": reason is None and not has_var,
         "editable": reason is None,
         "not_editable_reason": reason,
     }
@@ -221,6 +237,11 @@ class VarChange(BaseModel):
     quantity: Optional[int] = None  # AVAILABLE quantity of that variation
 
 
+class PhotoRef(BaseModel):
+    url: Optional[str] = None  # a picture already on the listing (its eBay address, as read from eBay)
+    key: Optional[str] = None  # a picture in the website's storage, to be sent to eBay
+
+
 class Changes(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -228,6 +249,7 @@ class Changes(BaseModel):
     quantity: Optional[int] = None  # the AVAILABLE quantity, as shown on the listing
     sku: Optional[str] = None
     variations: Optional[list[VarChange]] = None
+    photos: Optional[list[PhotoRef]] = Field(default=None, max_length=60)  # the complete list, main photo first
 
 
 class EditIn(BaseModel):
@@ -256,6 +278,54 @@ def _money(raw: str) -> Decimal:
 
 def _cdata(html: str) -> str:
     return "<![CDATA[" + html.replace("]]>", "]]]]><![CDATA[>") + "]]>"
+
+
+def _photos_part(current: dict, refs: list[PhotoRef]) -> tuple[str, dict]:
+    """<PictureDetails> for the new list of photos, or ("", {}) when it is the list eBay already has.
+    A picture from the website is written as a {{NEW:key}} marker; at send time it is first copied to
+    eBay's picture service and the marker is replaced by the address eBay gives back."""
+    if not current["photos_editable"]:
+        raise HTTPException(409, "Photos cannot be changed on a listing with variations here yet.")
+    have = [p["url"] for p in current["photos"]]
+    if not refs:
+        raise HTTPException(400, "A listing needs at least one photo.")
+    if len(refs) > MAX_PHOTOS:
+        raise HTTPException(400, f"A listing can have at most {MAX_PHOTOS} photos.")
+    out: list[str] = []
+    seen: set[str] = set()
+    for r in refs:
+        if bool(r.url) == bool(r.key):
+            raise HTTPException(400, "Each photo needs either an eBay address or a stored key.")
+        if r.url:
+            if r.url not in have:
+                raise HTTPException(400, "A photo in the request is not on the listing any more. Reload the listing.")
+            ident = r.url
+            token = escape(r.url)
+        else:
+            if not KEY_RE.fullmatch(r.key or ""):
+                raise HTTPException(400, "That stored photo key is not valid.")
+            ident = "key:" + r.key
+            token = "{{NEW:" + r.key + "}}"
+        if ident in seen:
+            raise HTTPException(400, "The same photo is in the list twice.")
+        seen.add(ident)
+        out.append(token)
+    new = [r for r in refs if r.key]
+    kept = [r.url for r in refs if r.url]
+    if not new and kept == have:
+        return "", {}
+    removed = len([u for u in have if u not in kept])
+    bits = []
+    if new:
+        bits.append(f"{len(new)} new (copied to eBay's picture service when sent)")
+    if removed:
+        bits.append(f"{removed} removed")
+    if kept != [u for u in have if u in kept]:
+        bits.append("order changed")
+    if not bits:
+        bits.append("a new photo is now first")
+    xml = "<PictureDetails>" + "".join(f"<PictureURL>{t}</PictureURL>" for t in out) + "</PictureDetails>"
+    return xml, {"field": "Photos", "before": f"{len(have)} photos", "after": f"{len(refs)} photos", "note": ", ".join(bits)}
 
 
 def _build(current: dict, ch: Changes) -> tuple[list[dict], list[dict]]:
@@ -290,6 +360,12 @@ def _build(current: dict, ch: Changes) -> tuple[list[dict], list[dict]]:
                 "note": "the whole description is replaced",
             }
         )
+
+    if ch.photos is not None:
+        pic_xml, pic_diff = _photos_part(current, ch.photos)
+        if pic_xml:
+            parts.append(pic_xml)
+            diff.append(pic_diff)
 
     if not has_var:
         if ch.price is not None and ch.price.strip():
@@ -366,6 +442,12 @@ def _build(current: dict, ch: Changes) -> tuple[list[dict], list[dict]]:
     return [{"call": "ReviseFixedPriceItem", "xml": xml}], diff
 
 
+def _pic_id(url: str) -> str:
+    """eBay's id for a picture, so the same picture at another size compares equal."""
+    m = re.search(r"/images/g/([^/]+)/", url) or re.search(r"/z/([^/]+)/", url)
+    return m.group(1) if m else url.split("?")[0]
+
+
 def _differences(fresh: dict, ch: Changes) -> list[str]:
     """After a push: what eBay now shows versus what was asked for. Empty list = exactly as sent."""
     out: list[str] = []
@@ -373,6 +455,15 @@ def _differences(fresh: dict, ch: Changes) -> list[str]:
         out.append(f"Title is now '{fresh['title']}'")
     if ch.description is not None and _norm(ch.description) != _norm(fresh["description"]):
         out.append("The description on eBay is not identical to what was sent (eBay may clean up HTML)")
+    if ch.photos is not None and not fresh["has_variations"]:
+        now = [p["url"] for p in fresh["photos"]]
+        if len(now) != len(ch.photos):
+            out.append(f"eBay now shows {len(now)} photos, {len(ch.photos)} were sent")
+        else:
+            for i, r in enumerate(ch.photos):
+                if r.url and _pic_id(now[i]) != _pic_id(r.url):
+                    out.append(f"Photo {i + 1} is not the one that was sent in that position")
+                    break
     if not fresh["has_variations"]:
         if ch.price and ch.price.strip():
             try:
@@ -438,6 +529,107 @@ def _log(db: Session, user: AuthUser, store: str, item_id: str, action: str, dry
 
 
 # --------------------------------------------------------------------------
+# photos: website storage -> eBay's picture service (Media API)
+# --------------------------------------------------------------------------
+def _media_upload(db: Session, store: str, key: str) -> str:
+    """Has eBay fetch one stored photo from its public address and returns the eBay picture address.
+    eBay does not accept a mix of its own and self-hosted pictures on one listing, so every new photo
+    goes through here first. (The older UploadSiteHostedPictures call is gone since 30 Sep 2026.)"""
+    src = images.full_url(key)
+    if not src or not src.startswith("https://"):
+        raise HTTPException(502, "The photo storage address is not an https address, which eBay requires.")
+    payload = json.dumps({"imageUrl": src}).encode()
+    for attempt in (1, 2):
+        token = get_user_token(db, store)
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"}
+        req = urllib.request.Request(MEDIA_URL + "/create_image_from_url", data=payload, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                body = r.read().decode("utf-8", "replace")
+                location = r.headers.get("Location") or ""
+        except urllib.error.HTTPError as e:
+            if e.code == 401 and attempt == 1:
+                _access.pop(store, None)
+                continue
+            detail = e.read().decode("utf-8", "replace")[:300]
+            raise HTTPException(502, f"eBay would not take a photo ({e.code}): {detail}")
+        except (urllib.error.URLError, TimeoutError):
+            raise HTTPException(502, "Could not reach eBay to upload a photo.")
+        try:
+            url = (json.loads(body or "{}").get("imageUrl") or "").strip()
+        except ValueError:
+            url = ""
+        if not url and location.startswith(MEDIA_URL + "/"):
+            try:
+                greq = urllib.request.Request(location, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+                with urllib.request.urlopen(greq, timeout=30) as r:
+                    url = (json.loads(r.read().decode("utf-8", "replace")).get("imageUrl") or "").strip()
+            except (urllib.error.URLError, TimeoutError, ValueError):
+                url = ""
+        if not url.startswith("https://"):
+            raise HTTPException(502, "eBay accepted a photo but did not return its address.")
+        return url
+    raise HTTPException(502, "eBay did not accept the photo upload.")  # unreachable
+
+
+def _record_photo_urls(db: Session, store: str, item_id: str, refs: list[PhotoRef], fresh: dict) -> list[str]:
+    """After a push: remember eBay's address for each photo we sent, in sent order, on the product linked to
+    this listing, so the photo check in the import tab recognises them instead of importing them again."""
+    notes: list[str] = []
+    pid = db.execute(
+        text(
+            "select product_id from channel_listings "
+            "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i and store = :s limit 1"
+        ),
+        {"i": item_id, "s": store},
+    ).scalar()
+    now = [p["url"] for p in fresh["photos"]]
+    sent = [(i, r.key) for i, r in enumerate(refs) if r.key]
+    if not sent:
+        return notes
+    if not pid:
+        return [f"{len(sent)} new photo(s) were sent, but this listing is not linked to a website product, so nothing was recorded."]
+    missing = 0
+    for i, key in sent:
+        if i >= len(now):
+            continue
+        n = db.execute(
+            text("update product_photos set source_url = :u where product_id = :p and image_key = :k"),
+            {"u": now[i], "p": pid, "k": key},
+        ).rowcount
+        if not n:
+            missing += 1
+    db.commit()
+    if missing:
+        notes.append(f"{missing} new photo(s) are on the eBay listing but not on the website product.")
+    return notes
+
+
+class UploadIn(BaseModel):
+    data: str = Field(..., max_length=21 * 1024 * 1024, description="the picture, base64 encoded")
+
+
+@router.post("/photo-upload")
+def photo_upload(body: UploadIn):
+    """Stores a picture in the website's photo storage only. Nothing is sent to eBay here."""
+    data = body.data
+    if "," in data[:100]:
+        data = data.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(400, "The picture could not be read. Try a different file.")
+    try:
+        p = photo_store.process_image(raw)
+        photo_store.upload(p)
+    except photo_store.PhotoError as e:
+        raise HTTPException(400, str(e))
+    except photo_store.StorageError as e:
+        raise HTTPException(502, str(e))
+    return {"key": p.key, "url": images.full_url(p.key), "thumb": images.thumb_url(p.key)}
+
+
+# --------------------------------------------------------------------------
 # preview and push
 # --------------------------------------------------------------------------
 @router.post("/preview")
@@ -472,13 +664,25 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     if _fingerprint(row.store, calls) != body.fingerprint:
         raise HTTPException(409, "The listing or the changes are not the same as in the preview. Nothing was sent. Preview again.")
 
+    uploaded: dict[str, str] = {}
+    try:
+        for r in body.changes.photos or []:
+            if r.key and r.key not in uploaded:
+                uploaded[r.key] = _media_upload(db, row.store, r.key)
+    except HTTPException as e:
+        _log(db, user, row.store, current["item_id"], "revise_fixed_price_item", False, {"calls": calls, "diff": diff}, {"stage": "photo upload"}, False, str(e.detail)[:500])
+        raise HTTPException(e.status_code, f"{e.detail} Nothing on the listing was changed.")
+
     warnings: list[dict] = []
     for c in calls:
-        inner = c["xml"].split("<Item>", 1)[1].rsplit("</Item>", 1)[0]
+        xml = c["xml"]
+        for k, u in uploaded.items():
+            xml = xml.replace("{{NEW:" + k + "}}", escape(u))
+        inner = xml.split("<Item>", 1)[1].rsplit("</Item>", 1)[0]
         root = _trading(db, row.store, c["call"], f"<Item>{inner}</Item>")
         errs = _errors(root)
         ok = not _failed(root)
-        resp = {"ack": root.findtext(f"{NS}Ack"), "errors": errs}
+        resp = {"ack": root.findtext(f"{NS}Ack"), "errors": errs, "uploaded_photos": uploaded}
         _log(db, user, row.store, current["item_id"], "revise_fixed_price_item", False, {"calls": calls, "diff": diff}, resp, ok, None if ok else _first_message(root))
         if not ok:
             raise HTTPException(502, "eBay did not accept the change: " + _first_message(root))
@@ -492,7 +696,15 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     )
     db.commit()
     fresh = _read_item(db, row.store, current["item_id"])
-    return {"ok": True, "warnings": warnings, "item": fresh, "differences": _differences(fresh, body.changes)}
+    notes: list[str] = []
+    if body.changes.photos is not None:
+        try:
+            notes = _record_photo_urls(db, row.store, current["item_id"], body.changes.photos, fresh)
+        except Exception:  # eBay already has the change; a bookkeeping problem must not look like a failed push
+            log.exception("could not record photo addresses for %s", current["item_id"])
+            db.rollback()
+            notes = ["The change is on eBay, but the photo addresses could not be recorded on the website."]
+    return {"ok": True, "warnings": warnings, "item": fresh, "differences": _differences(fresh, body.changes), "notes": notes}
 
 
 # --------------------------------------------------------------------------
