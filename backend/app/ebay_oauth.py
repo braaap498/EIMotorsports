@@ -383,7 +383,8 @@ def _probe_rest(name: str, url: str, token: str) -> dict:
         body = e.read().decode("utf-8", "replace")
         try:
             err = (json.loads(body).get("errors") or [{}])[0]
-            note = f"{err.get('errorId', '')} {err.get('message', '')}".strip()
+            extra = " ".join(f"{p.get('name', '')}={p.get('value', '')}" for p in (err.get("parameters") or []))
+            note = f"{err.get('errorId', '')} {err.get('message', '')} {extra}".strip()
         except Exception:
             note = body[:150]
         return {"name": name, "ok": False, "status": e.code, "note": note[:200]}
@@ -412,7 +413,7 @@ def _probe_trading(token: str) -> dict:
             "Content-Type": "text/xml",
         },
     )
-    name = "Older listing API (Trading), read of active listings"
+    name = "Listing API (Trading), read of active listings"
     try:
         with urllib.request.urlopen(req, timeout=25) as r:
             body = r.read().decode("utf-8", "replace")
@@ -441,8 +442,8 @@ def check(body: StoreBody, db: Session = Depends(get_db)):
         "scopes_granted": granted,
         "scopes_missing": [s for s in wanted if s not in granted],
         "checks": [
-            _probe_rest("Newer inventory API, read of items", INVENTORY_URL, tok),
-            _probe_rest("Account policies, read of shipping policies", POLICY_URL, tok),
+            _probe_rest("Listing API (Inventory), read of items", INVENTORY_URL, tok),
+            _probe_rest("Account API (Policies), read of shipping policies", POLICY_URL, tok),
             _probe_trading(tok),
         ],
     }
