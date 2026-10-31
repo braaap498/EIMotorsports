@@ -14,7 +14,8 @@ Mounted at /admin/ebay-edit/* (owner/admin only).
 What can be changed: title, description (whole HTML replaced), price, available quantity and custom label (SKU)
 on single listings; price and available quantity per variation on listings with variations.
 Photos (single listings): remove, reorder, make main, add from the website's photo storage or by upload.
-Item specifics are shown as read only for now.
+Item specifics (the whole list is replaced when sent) on single listings.
+Condition and the parts compatibility list are shown as read only for now.
 
 Safety rules built in:
   * the listing must belong to the connected account of the store (checked on every read)
@@ -127,6 +128,7 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
     row = _store_row(db, store)
     root = _trading(
         db, row.store, "GetItem", f"<ItemID>{item_id}</ItemID><DetailLevel>ReturnAll</DetailLevel>"
+        "<IncludeItemSpecifics>true</IncludeItemSpecifics><IncludeItemCompatibilityList>true</IncludeItemCompatibilityList>"
     )
     if _failed(root):
         raise HTTPException(502, _first_message(root))
@@ -185,8 +187,23 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
     for n in item.findall(f"{NS}ItemSpecifics/{NS}NameValueList"):
         name = (n.findtext(f"{NS}Name") or "").strip()
         vals = [(x.text or "").strip() for x in n.findall(f"{NS}Value")]
+        vals = [v for v in vals if v]
         if name:
-            specifics_list.append({"name": name, "value": ", ".join(v for v in vals if v)})
+            specifics_list.append({"name": name, "values": vals})
+
+    compat_rows: list[dict] = []
+    for c in item.findall(f"{NS}ItemCompatibilityList/{NS}Compatibility"):
+        crow = {}
+        for n in c.findall(f"{NS}NameValueList"):
+            nm = (n.findtext(f"{NS}Name") or "").strip()
+            if nm:
+                crow[nm] = (n.findtext(f"{NS}Value") or "").strip()
+        crow["Notes"] = (c.findtext(f"{NS}CompatibilityNotes") or "").strip()
+        compat_rows.append(crow)
+    try:
+        compat_count = int(t("ItemCompatibilityCount") or len(compat_rows))
+    except ValueError:
+        compat_count = len(compat_rows)
 
     reason = None
     if status and status != "Active":
@@ -216,6 +233,13 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
         "has_variations": has_var,
         "variations": variations,
         "item_specifics": specifics_list,
+        "specifics_editable": reason is None and not has_var,
+        "condition": {
+            "id": t("ConditionID"),
+            "name": t("ConditionDisplayName"),
+            "note": t("ConditionDescription"),
+        },
+        "compatibility": {"count": compat_count, "rows": compat_rows[:300], "truncated": len(compat_rows) > 300},
         "photos": photos,
         "photos_editable": reason is None and not has_var,
         "editable": reason is None,
@@ -242,6 +266,11 @@ class PhotoRef(BaseModel):
     key: Optional[str] = None  # a picture in the website's storage, to be sent to eBay
 
 
+class SpecIn(BaseModel):
+    name: str
+    values: list[str]
+
+
 class Changes(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -250,6 +279,7 @@ class Changes(BaseModel):
     sku: Optional[str] = None
     variations: Optional[list[VarChange]] = None
     photos: Optional[list[PhotoRef]] = Field(default=None, max_length=60)  # the complete list, main photo first
+    item_specifics: Optional[list[SpecIn]] = Field(default=None, max_length=100)  # the complete list
 
 
 class EditIn(BaseModel):
@@ -328,6 +358,57 @@ def _photos_part(current: dict, refs: list[PhotoRef]) -> tuple[str, dict]:
     return xml, {"field": "Photos", "before": f"{len(have)} photos", "after": f"{len(refs)} photos", "note": ", ".join(bits)}
 
 
+def _specifics_part(current: dict, specs: list[SpecIn]) -> tuple[str, list[dict]]:
+    """<ItemSpecifics> for the new list, or ("", []) when it is the list eBay already has.
+    eBay replaces the whole set, so everything that stays is sent again."""
+    if not current["specifics_editable"]:
+        raise HTTPException(409, "Item specifics cannot be changed on a listing with variations here yet.")
+    clean: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+    for sp in specs:
+        name = " ".join(sp.name.split())
+        vals = []
+        for v in sp.values:
+            v = " ".join(v.split())
+            if v and v not in vals:
+                vals.append(v)
+        if not name and not vals:
+            continue  # an empty row the person never filled in
+        if not name:
+            raise HTTPException(400, "An item specific has a value but no name.")
+        if len(name) > 65:
+            raise HTTPException(400, f"The item specific name '{name[:30]}…' is longer than 65 characters.")
+        if not vals:
+            raise HTTPException(400, f"'{name}' has no value. Give it one or remove it.")
+        if any(len(v) > 65 for v in vals):
+            raise HTTPException(400, f"A value of '{name}' is longer than 65 characters (eBay's limit).")
+        if len(vals) > 30:
+            raise HTTPException(400, f"'{name}' has too many values.")
+        if name.lower() in seen:
+            raise HTTPException(400, f"'{name}' appears twice.")
+        seen.add(name.lower())
+        clean.append((name, vals))
+    before = {sp["name"].lower(): sp for sp in current["item_specifics"]}
+    after = {n.lower(): (n, v) for n, v in clean}
+    diff: list[dict] = []
+    for key, (n, v) in after.items():
+        old = before.get(key)
+        if old is None:
+            diff.append({"field": f"Item specific: {n}", "before": None, "after": "; ".join(v), "note": "added"})
+        elif old["values"] != v or old["name"] != n:
+            diff.append({"field": f"Item specific: {n}", "before": "; ".join(old["values"]), "after": "; ".join(v)})
+    for key, old in before.items():
+        if key not in after:
+            diff.append({"field": f"Item specific: {old['name']}", "before": "; ".join(old["values"]), "after": "(removed)"})
+    if not diff:
+        return "", []
+    xml = "<ItemSpecifics>" + "".join(
+        "<NameValueList><Name>" + escape(n) + "</Name>" + "".join(f"<Value>{escape(x)}</Value>" for x in v) + "</NameValueList>"
+        for n, v in clean
+    ) + "</ItemSpecifics>"
+    return xml, diff
+
+
 def _build(current: dict, ch: Changes) -> tuple[list[dict], list[dict]]:
     """The exact request(s), plus the before/after rows. Raises 400/409 with a readable reason."""
     if not current["editable"]:
@@ -366,6 +447,12 @@ def _build(current: dict, ch: Changes) -> tuple[list[dict], list[dict]]:
         if pic_xml:
             parts.append(pic_xml)
             diff.append(pic_diff)
+
+    if ch.item_specifics is not None:
+        sp_xml, sp_diff = _specifics_part(current, ch.item_specifics)
+        if sp_xml:
+            parts.append(sp_xml)
+            diff += sp_diff
 
     if not has_var:
         if ch.price is not None and ch.price.strip():
@@ -455,6 +542,15 @@ def _differences(fresh: dict, ch: Changes) -> list[str]:
         out.append(f"Title is now '{fresh['title']}'")
     if ch.description is not None and _norm(ch.description) != _norm(fresh["description"]):
         out.append("The description on eBay is not identical to what was sent (eBay may clean up HTML)")
+    if ch.item_specifics is not None and not fresh["has_variations"]:
+        want = {" ".join(sp.name.split()).lower(): [" ".join(v.split()) for v in sp.values if v.strip()] for sp in ch.item_specifics if sp.name.strip()}
+        got = {sp["name"].lower(): sp["values"] for sp in fresh["item_specifics"]}
+        for name, vals in want.items():
+            if got.get(name) != vals:
+                out.append(f"Item specific '{name}' is now: {'; '.join(got.get(name, [])) or '(missing)'}")
+        for name in got:
+            if name not in want:
+                out.append(f"Item specific '{name}' is still on the listing")
     if ch.photos is not None and not fresh["has_variations"]:
         now = [p["url"] for p in fresh["photos"]]
         if len(now) != len(ch.photos):

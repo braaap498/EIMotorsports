@@ -25,7 +25,10 @@ type Item = {
   description: string;
   has_variations: boolean;
   variations: Variation[];
-  item_specifics: { name: string; value: string }[];
+  item_specifics: { name: string; values: string[] }[];
+  specifics_editable: boolean;
+  condition: { id: string; name: string; note: string };
+  compatibility: { count: number; rows: Record<string, string>[]; truncated: boolean };
   photos: { url: string }[];
   photos_editable: boolean;
   editable: boolean;
@@ -53,6 +56,10 @@ type VarEdit = { price: string; qty: string };
 type PhotoEdit = { id: string; thumb: string; url?: string; key?: string };
 type Found = { id: number; sku: string; title: string; photos: { image_key: string; thumb: string | null }[] };
 const MAX_PHOTOS = 24;
+type SpecEdit = { id: string; name: string; value: string }; // several values are separated by semicolons
+const splitValues = (v: string) => v.split(";").map((x) => x.trim()).filter(Boolean);
+const specSig = (list: { name: string; value: string }[]) =>
+  JSON.stringify(list.filter((x) => x.name.trim() || x.value.trim()).map((x) => [x.name.trim(), splitValues(x.value)]));
 
 const norm = (s: string) => s.replace(/\r\n/g, "\n").trim();
 const photoId = (p: PhotoEdit) => (p.url ? p.url : "key:" + p.key);
@@ -62,6 +69,38 @@ const photoId = (p: PhotoEdit) => (p.url ? p.url : "key:" + p.key);
 // so nothing in the description can load or run while we compare.
 const inert = (h: string) => new DOMParser().parseFromString(h, "text/html").body.innerHTML.replace(/\s+/g, "");
 const losesFormatting = (h: string) => h.trim() !== "" && inert(h) !== inert(sanitizeHtml(h));
+
+// What exactly the visual editor would drop, so the warning is not a guess. Tags are counted in the
+// description and in its cleaned version; attributes are counted in the description (the editor keeps
+// only link addresses and table spans).
+function lossDetail(h: string): string[] {
+  const a = new DOMParser().parseFromString(h, "text/html").body;
+  const b = new DOMParser().parseFromString(sanitizeHtml(h), "text/html").body;
+  const tally = (root: HTMLElement) => {
+    const m: Record<string, number> = {};
+    root.querySelectorAll("*").forEach((e) => {
+      const t = e.tagName.toLowerCase();
+      m[t] = (m[t] ?? 0) + 1;
+    });
+    return m;
+  };
+  const ca = tally(a);
+  const cb = tally(b);
+  const out: string[] = [];
+  const tags = Object.keys(ca)
+    .filter((t) => ca[t] - (cb[t] ?? 0) > 0)
+    .map((t) => `<${t}> x${ca[t] - (cb[t] ?? 0)}`);
+  if (tags.length) out.push("Tags removed (their text stays): " + tags.join(", "));
+  const attrs: Record<string, number> = {};
+  a.querySelectorAll("*").forEach((e) =>
+    Array.from(e.attributes).forEach((at) => {
+      if (!["href", "colspan", "rowspan"].includes(at.name)) attrs[at.name] = (attrs[at.name] ?? 0) + 1;
+    }),
+  );
+  const attrList = Object.entries(attrs).map(([k, n]) => `${k} x${n}`);
+  if (attrList.length) out.push("Settings removed: " + attrList.join(", "));
+  return out;
+}
 
 export default function EbayEditPage() {
   const [store, setStore] = useState("");
@@ -75,6 +114,8 @@ export default function EbayEditPage() {
   const [photos, setPhotos] = useState<PhotoEdit[]>([]);
   const [htmlMode, setHtmlMode] = useState(false);
   const [lossy, setLossy] = useState(false);
+  const [lossInfo, setLossInfo] = useState<string[]>([]);
+  const [specs, setSpecs] = useState<SpecEdit[]>([]);
   const [showLib, setShowLib] = useState(false);
   const [libQ, setLibQ] = useState("");
   const [libResults, setLibResults] = useState<Found[] | null>(null);
@@ -98,6 +139,8 @@ export default function EbayEditPage() {
     setPhotos(i.photos.map((p, n) => ({ id: `e${n}`, thumb: p.url, url: p.url })));
     const l = losesFormatting(i.description);
     setLossy(l);
+    setLossInfo(l ? lossDetail(i.description) : []);
+    setSpecs(i.item_specifics.map((x, n) => ({ id: `s${n}`, name: x.name, value: x.values.join("; ") })));
     setHtmlMode(l); // a description with styling opens as HTML so nothing is lost by accident
     setPhotoMsg("");
     setPreview(null);
@@ -138,6 +181,13 @@ export default function EbayEditPage() {
   }, []);
 
   // Only what differs from eBay goes into the request; the server checks again.
+  const specsChanged =
+    !!item &&
+    specSig(specs) !== specSig(item.item_specifics.map((x) => ({ name: x.name, value: x.values.join("; ") })));
+  const specsPart = () =>
+    item && item.specifics_editable && specsChanged
+      ? { item_specifics: specs.filter((x) => x.name.trim() || x.value.trim()).map((x) => ({ name: x.name, values: splitValues(x.value) })) }
+      : {};
   const photosChanged = !!item && photos.map(photoId).join("|") !== item.photos.map((p) => p.url).join("|");
   const photoPart = () =>
     item && item.photos_editable && photosChanged ? { photos: photos.map((p) => (p.url ? { url: p.url } : { key: p.key })) } : {};
@@ -152,15 +202,17 @@ export default function EbayEditPage() {
           .map((v) => ({ sku: v.sku, price: vars[v.sku]?.price ?? "", quantity: Number(vars[v.sku]?.qty ?? v.quantity_available) }))
           .filter((v, i) => v.price !== (item.variations[i].price ?? "") || v.quantity !== item.variations[i].quantity_available),
         ...photoPart(),
+        ...specsPart(),
       };
     }
-    return { title, description, price, quantity: qty.trim() === "" ? null : Number(qty), sku, ...photoPart() };
+    return { title, description, price, quantity: qty.trim() === "" ? null : Number(qty), sku, ...photoPart(), ...specsPart() };
   }
 
   const dirty =
     !!item &&
     (title !== item.title ||
       (item.photos_editable && photosChanged) ||
+      (item.specifics_editable && specsChanged) ||
       norm(description) !== norm(item.description) ||
       (item.has_variations
         ? item.variations.some((v) => (vars[v.sku]?.price ?? "") !== (v.price ?? "") || vars[v.sku]?.qty !== String(v.quantity_available))
@@ -500,7 +552,14 @@ export default function EbayEditPage() {
               </div>
               {lossy && htmlMode && (
                 <Notice>
-                  This description has styling (such as colours, fonts or images) that the visual editor cannot keep, so it opened as HTML. Edit it here to keep everything as it is.
+                  This description has formatting the visual editor cannot keep, so it opened as HTML. Edit it here to keep everything as it is.
+                  {lossInfo.length > 0 && (
+                    <ul className="mt-1 list-disc pl-5 text-xs">
+                      {lossInfo.map((x) => (
+                        <li key={x}>{x}</li>
+                      ))}
+                    </ul>
+                  )}
                 </Notice>
               )}
               {htmlMode ? (
@@ -538,19 +597,111 @@ export default function EbayEditPage() {
             </div>
           </div>
 
-          {item.item_specifics.length > 0 && (
-            <details className="rounded border border-gray-200 bg-white p-4 text-sm">
-              <summary className="cursor-pointer font-semibold">Item specifics ({item.item_specifics.length}, read only for now)</summary>
-              <dl className="mt-2 grid gap-x-6 gap-y-1 sm:grid-cols-2">
-                {item.item_specifics.map((s) => (
-                  <div key={s.name} className="flex gap-2">
-                    <dt className="text-gray-500">{s.name}:</dt>
-                    <dd>{s.value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </details>
-          )}
+          <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="font-semibold">Item specifics</h2>
+              <button
+                type="button"
+                className={btn2Cls}
+                disabled={off || !item.specifics_editable}
+                onClick={() => {
+                  setSpecs([...specs, { id: `n${Date.now()}`, name: "", value: "" }]);
+                  touch();
+                }}
+              >
+                Add item specific
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">
+              The whole list is replaced when sent. Separate several values with a semicolon (for example: Cast; Single Ring). Condition and compatibility are below and cannot be changed here yet.
+              {!item.specifics_editable && item.editable && " Item specifics on a listing with variations cannot be changed here yet."}
+            </p>
+            <div className="space-y-2">
+              {specs.map((sp, n) => (
+                <div key={sp.id} className="flex flex-wrap items-center gap-2">
+                  <input
+                    className={`${inputCls} w-48`}
+                    placeholder="Name"
+                    value={sp.name}
+                    maxLength={65}
+                    disabled={off || !item.specifics_editable}
+                    onChange={(e) => {
+                      setSpecs(specs.map((x, i) => (i === n ? { ...x, name: e.target.value } : x)));
+                      touch();
+                    }}
+                  />
+                  <input
+                    className={`${inputCls} min-w-0 flex-1`}
+                    placeholder="Value"
+                    value={sp.value}
+                    disabled={off || !item.specifics_editable}
+                    onChange={(e) => {
+                      setSpecs(specs.map((x, i) => (i === n ? { ...x, value: e.target.value } : x)));
+                      touch();
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="rounded border border-gray-300 px-2 py-1 text-xs text-red-700 hover:bg-red-50 disabled:opacity-40"
+                    disabled={off || !item.specifics_editable}
+                    onClick={() => {
+                      setSpecs(specs.filter((_, i) => i !== n));
+                      touch();
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              {specs.length === 0 && <p className="text-xs text-gray-500">This listing has no item specifics.</p>}
+            </div>
+            <div className="border-t border-gray-100 pt-2 text-xs text-gray-700">
+              <span className="font-medium">Condition:</span> {item.condition.name || item.condition.id || "not shown by eBay"}
+              {item.condition.note && <span className="text-gray-500"> ({item.condition.note})</span>} <span className="text-gray-500">(read only for now)</span>
+            </div>
+          </div>
+
+          <details className="rounded border border-gray-200 bg-white p-4 text-sm">
+            <summary className="cursor-pointer font-semibold">
+              Compatibility ({item.compatibility.count} vehicle{item.compatibility.count === 1 ? "" : "s"}, read only for now)
+            </summary>
+            {item.compatibility.rows.length === 0 ? (
+              <p className="mt-2 text-xs text-gray-500">
+                {item.compatibility.count > 0 ? "eBay reports a compatibility list but did not return its rows." : "This listing has no compatibility list."}
+              </p>
+            ) : (
+              <div className="mt-2 overflow-x-auto">
+                {(() => {
+                  const cols: string[] = Array.from(new Set<string>(item.compatibility.rows.flatMap((r) => Object.keys(r)))).sort((x, y) =>
+                    x === "Notes" ? 1 : y === "Notes" ? -1 : 0,
+                  );
+                  return (
+                    <table className="w-full text-left text-xs">
+                      <thead className="uppercase text-gray-500">
+                        <tr>
+                          {cols.map((c) => (
+                            <th key={c} className="py-1 pr-3">{c}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {item.compatibility.rows.map((r, i) => (
+                          <tr key={i}>
+                            {cols.map((c) => (
+                              <td key={c} className="py-1 pr-3">{r[c] ?? ""}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  );
+                })()}
+                {item.compatibility.truncated && (
+                  <p className="mt-2 text-xs text-gray-500">Showing the first {item.compatibility.rows.length} of {item.compatibility.count}.</p>
+                )}
+              </div>
+            )}
+          </details>
 
           {preview && (
             <div className="space-y-3 rounded border border-amber-300 bg-amber-50 p-4">
