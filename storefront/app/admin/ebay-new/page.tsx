@@ -11,7 +11,7 @@ import { Badge, Modal, Notice, btnCls, btn2Cls, inputCls } from "../../../compon
 
 type NewListing = {
   item_id: string;
-  sku: string; // the custom label when we have one, otherwise EBAY- plus the item number
+  sku: string; // the custom label when we have one on file, otherwise EBAY- plus the item number, e.g. EBAY-168810301004
   custom_label: string | null; // the real custom label SKU, when we have it on file
   title: string;
   price: string | null;
@@ -101,9 +101,7 @@ function LinkModal({
       <div className="space-y-3">
         <div className="rounded border border-gray-200 bg-gray-50 p-3 text-sm">
           <div className="font-medium">{listing.title}</div>
-          <div className="text-xs text-gray-500">
-            {listing.custom_label ? `Custom label ${listing.custom_label}` : "No custom label on file"} · {listing.item_id}
-          </div>
+          <div className="text-xs text-gray-500">{listing.sku}</div>
         </div>
 
         <form
@@ -252,7 +250,7 @@ export default function NewEbayListingsPage() {
       {error && <Notice kind="error">{error}</Notice>}
       {linkedMsg && (
         <Notice kind="success">
-          Linked eBay item {linkedMsg.item_id} to{" "}
+          Linked {linkedMsg.sku} to{" "}
           <Link href={`/admin/products/${linkedMsg.product_id}`} className="font-medium underline">
             {linkedMsg.product_title}
           </Link>
@@ -297,16 +295,7 @@ export default function NewEbayListingsPage() {
                         <a href={i.url} target="_blank" rel="noopener noreferrer" className="font-medium hover:underline">
                           {i.title}
                         </a>
-                        <div className="text-xs text-gray-500">
-                          {i.custom_label ? (
-                            <>
-                              Custom label <span className="font-medium text-gray-700">{i.custom_label}</span>
-                            </>
-                          ) : (
-                            "No custom label on file"
-                          )}{" "}
-                          · {i.item_id}
-                        </div>
+                        <div className="text-xs text-gray-500">{i.sku}</div>
                       </td>
                       <td className="whitespace-nowrap px-3 py-2">{i.price ? `$${money(i.price)}` : "—"}</td>
                       <td className="whitespace-nowrap px-3 py-2">
