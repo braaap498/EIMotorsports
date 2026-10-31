@@ -20,8 +20,12 @@ What a job does (the same steps you ran by hand for the 102 genuine-oem-parts li
      whose photos fail gets no rows, so nobody ever gets a partial set.
   mode "new_only"     does steps 1-3 only.
   mode "all_missing"  also checks listings that ARE linked to a product and adds any photo eBay has
-                      that the product does not (matched by eBay's image id against the product's
-                      saved source link, the same way check_ebay_photos_new_listings_only.py does).
+                      that the product does not. A photo counts as already there if (1) eBay's image id
+                      matches a saved source link on the product, (2) the stored picture has the same
+                      content key, or (3) it LOOKS the same as a photo the product already has (a small
+                      fingerprint of the picture, so a photo that came in through the old scripts, was
+                      merged in from another listing, or was re-encoded by eBay is not added twice).
+                      A product's main listing is checked before the listings merged into it.
 
 Progress lives in the database (ebay_photo_jobs), because the server's disk is not kept. A job
 that stops at eBay's lookup limit is "paused"; start it again later and it carries on, because
@@ -50,8 +54,11 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from PIL import Image
+
 from app import photo_store
 from app.auth import AuthUser, require_admin
+from app.config import get_settings
 from app.database import get_db, get_engine
 from app.ebay_feedback import SEARCH_URL, FeedbackError, _token, configured, seller_username
 
@@ -292,24 +299,27 @@ def _work(job: _Job, calls: _Calls, seller: str, include_products: bool):
     job.message = f"eBay returned {len(ids)} active listings. Comparing with what you already have…"
     job.save(calls)
 
-    # which of them are already linked to a product
+    # which of them are already linked to a product ("mains" = the product's own listing, not a merged one)
     linked: dict[str, int] = {}
+    mains: set[str] = set()
     with eng.connect() as c:
         for chunk in _chunks(ids, 2000):
             rows = c.execute(
                 text(
-                    "select digits, product_id from ("
-                    " select regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') as digits, product_id"
+                    "select digits, product_id, is_main from ("
+                    " select regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') as digits, product_id, false as is_main"
                     "   from channel_listings where external_id is not null"
                     " union all"
-                    " select regexp_replace(cast(ebay_item_id as text), '[^0-9]', '', 'g'), id"
+                    " select regexp_replace(cast(ebay_item_id as text), '[^0-9]', '', 'g'), id, true"
                     "   from products where ebay_item_id is not null"
                     ") t where digits = any(cast(:ids as text[]))"
                 ),
                 {"ids": chunk},
             ).all()
-            for d, pid in rows:
+            for d, pid, is_main in rows:
                 linked[d] = pid
+                if is_main:
+                    mains.add(d)
     unlinked = [i for i in ids if i not in linked]
 
     # add the unlinked ones to the import table (empty label), skipping any already there
@@ -372,7 +382,7 @@ def _work(job: _Job, calls: _Calls, seller: str, include_products: bool):
                     {"ids": chunk},
                 ):
                     checked[item] = when
-        never = [i for i in mine if i not in checked]
+        never = sorted((i for i in mine if i not in checked), key=lambda i: 0 if i in mains else 1)
         old = sorted((i for i in mine if i in checked), key=lambda i: checked[i])
         product_items = never + old
 
@@ -460,6 +470,33 @@ def _photos_for_group(job: _Job, calls: _Calls, group: list[str]):
                 job.c["photos_added"] += 1
 
 
+def _dhash(data: bytes) -> int:
+    """A 64-bit fingerprint of how a picture looks (not its bytes), so re-saved copies still match."""
+    im = Image.open(io.BytesIO(data)).convert("L").resize((9, 8), Image.LANCZOS)
+    px = im.tobytes()
+    bits = 0
+    for row in range(8):
+        for col in range(8):
+            bits = (bits << 1) | (1 if px[row * 9 + col] > px[row * 9 + col + 1] else 0)
+    return bits
+
+
+def _looks_same(a: int, b: int) -> bool:
+    return bin(a ^ b).count("1") <= 6
+
+
+def _stored_fingerprints(keys: set) -> list[int]:
+    """Fingerprints of a product's stored photos, read from their thumbnails in the bucket."""
+    base = get_settings().image_base_url.rstrip("/")
+    out: list[int] = []
+    for k in keys:
+        try:
+            out.append(_dhash(_download(f"{base}/{photo_store.thumb_path(k)}")))
+        except Exception:
+            continue  # unreadable thumbnail: it just cannot be compared
+    return out
+
+
 def _missing_for_product(job: _Job, calls: _Calls, item: str, product_id: int):
     urls = _ebay_photos(item, calls)
     with get_engine().begin() as c:
@@ -480,10 +517,16 @@ def _missing_for_product(job: _Job, calls: _Calls, item: str, product_id: int):
     have_ids = {photo_key(r[0]) for r in rows if r[0]}
     have_keys = {r[1] for r in rows if r[1]}
     new_urls = [u for u in urls if photo_key(u) not in have_ids]
+    prints: Optional[list[int]] = None  # loaded only if something needs comparing
     for url in new_urls:
         try:
             p = photo_store.process_image(_download(url))
             if p.key in have_keys:  # same picture already on the product
+                continue
+            if prints is None:
+                prints = _stored_fingerprints(have_keys)
+            mine_print = _dhash(p.thumb)
+            if any(_looks_same(mine_print, q) for q in prints):  # same picture, saved a different way
                 continue
             photo_store.upload(p)
         except Exception as e:
@@ -504,6 +547,7 @@ def _missing_for_product(job: _Job, calls: _Calls, item: str, product_id: int):
                 {"p": product_id, "k": p.key, "u": url, "sp": photo_store.full_path(p.key), "pr": not rows and not have_keys, "o": nxt},
             )
         have_keys.add(p.key)
+        prints.append(mine_print)
         job.c["photos_added"] += 1
 
 
