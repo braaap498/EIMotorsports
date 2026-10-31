@@ -356,3 +356,93 @@ def test(body: StoreBody, db: Session = Depends(get_db)):
     except HTTPException as e:
         out["selling_limit_error"] = e.detail  # the identity check passed; only this extra read failed
     return out
+
+
+# --------------------------------------------------------------------------
+# access check (read-only): which permissions were granted, and which eBay APIs accept the key
+# --------------------------------------------------------------------------
+TRADING_URL = "https://api.ebay.com/ws/api.dll"
+INVENTORY_URL = "https://api.ebay.com/sell/inventory/v1/inventory_item?limit=1"
+POLICY_URL = "https://api.ebay.com/sell/account/v1/fulfillment_policy?marketplace_id=EBAY_US"
+
+
+def _probe_rest(name: str, url: str, token: str) -> dict:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Language": "en-US",
+            "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return {"name": name, "ok": True, "status": r.status, "note": "answered"}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        try:
+            err = (json.loads(body).get("errors") or [{}])[0]
+            note = f"{err.get('errorId', '')} {err.get('message', '')}".strip()
+        except Exception:
+            note = body[:150]
+        return {"name": name, "ok": False, "status": e.code, "note": note[:200]}
+    except (urllib.error.URLError, TimeoutError) as e:
+        return {"name": name, "ok": False, "status": None, "note": f"could not reach eBay ({e})"}
+
+
+def _probe_trading(token: str) -> dict:
+    """The older API, called the OAuth way: only the token header, no developer/app/cert IDs."""
+    xml = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+        "<ActiveList><Include>true</Include><Pagination><EntriesPerPage>1</EntriesPerPage>"
+        "<PageNumber>1</PageNumber></Pagination></ActiveList>"
+        "</GetMyeBaySellingRequest>"
+    )
+    req = urllib.request.Request(
+        TRADING_URL,
+        data=xml.encode(),
+        method="POST",
+        headers={
+            "X-EBAY-API-IAF-TOKEN": token,
+            "X-EBAY-API-CALL-NAME": "GetMyeBaySelling",
+            "X-EBAY-API-SITEID": "0",
+            "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
+            "Content-Type": "text/xml",
+        },
+    )
+    name = "Older listing API (Trading), read of active listings"
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            body = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return {"name": name, "ok": False, "status": e.code, "note": e.read().decode("utf-8", "replace")[:200]}
+    except (urllib.error.URLError, TimeoutError) as e:
+        return {"name": name, "ok": False, "status": None, "note": f"could not reach eBay ({e})"}
+    import re
+
+    ack = (re.search(r"<Ack>(\w+)</Ack>", body) or [None, ""])[1]
+    msg = (re.search(r"<LongMessage>(.*?)</LongMessage>", body, re.S) or re.search(r"<ShortMessage>(.*?)</ShortMessage>", body, re.S) or [None, ""])[1]
+    code = (re.search(r"<ErrorCode>(\d+)</ErrorCode>", body) or [None, ""])[1]
+    ok = ack in ("Success", "Warning")
+    return {"name": name, "ok": ok, "status": 200, "note": "answered" if ok and not msg else f"{ack} {code} {msg}".strip()[:200]}
+
+
+@router.post("/check")
+def check(body: StoreBody, db: Session = Depends(get_db)):
+    """Read-only. Changes nothing on eBay; nothing is saved."""
+    row = _store_row(db, body.store)
+    tok = get_user_token(db, row.store)
+    wanted = _scopes().split()
+    granted = (row.scopes or "").split()
+    return {
+        "store": row.store,
+        "scopes_granted": granted,
+        "scopes_missing": [s for s in wanted if s not in granted],
+        "checks": [
+            _probe_rest("Newer inventory API, read of items", INVENTORY_URL, tok),
+            _probe_rest("Account policies, read of shipping policies", POLICY_URL, tok),
+            _probe_trading(tok),
+        ],
+    }

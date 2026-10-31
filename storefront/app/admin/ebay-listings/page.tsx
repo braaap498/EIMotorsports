@@ -76,6 +76,12 @@ export default function EbayLiveListingsPage() {
   const [addMsg, setAddMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState("");
+  const [diag, setDiag] = useState<{
+    store: string;
+    scopes_granted: string[];
+    scopes_missing: string[];
+    checks: { name: string; ok: boolean; status: number | null; note: string }[];
+  } | null>(null);
   const [connMsg, setConnMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   async function loadStores() {
@@ -166,8 +172,8 @@ export default function EbayLiveListingsPage() {
       const fmt = (v: unknown) => {
         const n = Number(v);
         return v === undefined || v === null || v === "" || Number.isNaN(n)
-         ? "?"
-         : n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+          ? "?"
+          : n.toLocaleString("en-US", { maximumFractionDigits: 2 });
       };
       const lim = r.selling_limit
         ? ` Selling limit: ${fmt(r.selling_limit.quantity)} items / $${fmt(r.selling_limit.amount?.value)}.`
@@ -178,6 +184,19 @@ export default function EbayLiveListingsPage() {
           ? `${s}: connection works, signed in as ${r.ebay_username}.${lim}${r.selling_limit_error ? ` (Limit check failed: ${r.selling_limit_error})` : ""}`
           : `${s}: the key belongs to ${r.ebay_username}, but ${r.expected_username} was expected.`,
       });
+    } catch (e) {
+      setConnMsg({ kind: "error", text: `${s}: ${errMsg(e)}` });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function checkAccess(s: string) {
+    setBusy(s);
+    setConnMsg(null);
+    setDiag(null);
+    try {
+      setDiag(await api("/ebay-connect/check", { method: "POST", body: { store: s } }));
     } catch (e) {
       setConnMsg({ kind: "error", text: `${s}: ${errMsg(e)}` });
     } finally {
@@ -231,6 +250,22 @@ export default function EbayLiveListingsPage() {
             <Notice kind={connMsg.kind}>{connMsg.text}</Notice>
           </div>
         )}
+        {diag && (
+          <div className="mt-3 space-y-1 rounded border border-gray-200 bg-gray-50 p-3 text-sm">
+            <div className="font-medium">Access check for {diag.store} (read only)</div>
+            {diag.checks.map((c) => (
+              <div key={c.name} className={c.ok ? "text-green-700" : "text-red-700"}>
+                {c.ok ? "✓" : "✗"} {c.name}: {c.note}
+                {c.status && !c.ok ? ` (HTTP ${c.status})` : ""}
+              </div>
+            ))}
+            <div className="text-gray-600">
+              {diag.scopes_missing.length === 0
+                ? "All requested permissions were granted."
+                : `Not granted: ${diag.scopes_missing.map((x) => x.split("/").pop()).join(", ")}`}
+            </div>
+          </div>
+        )}
         <ul className="mt-3 divide-y divide-gray-100 text-sm">
           {stores.map((s) => (
             <li key={s.store} className="flex flex-wrap items-center gap-2 py-2">
@@ -256,6 +291,9 @@ export default function EbayLiveListingsPage() {
                   <>
                     <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void testConn(s.store)}>
                       Test
+                    </button>
+                    <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void checkAccess(s.store)}>
+                      Check access
                     </button>
                     <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void disconnect(s.store)}>
                       Disconnect
