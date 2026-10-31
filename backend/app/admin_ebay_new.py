@@ -46,10 +46,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, require_admin
+from app.admin_catalog import _unique_slug, finish, slugify
 from app.admin_cleanup import _PN_SUBQUERY
 from app.admin_ebay_listings import _resolve
 from app.database import get_db
 from app.ebay_feedback import SEARCH_URL, FeedbackError, _open, _token, configured, seller_username
+from app.skus import clean_ebay_item_id
 
 log = logging.getLogger(__name__)
 
@@ -239,67 +241,105 @@ def check(
 
 
 # --------------------------------------------------------------------------
-# 1b. likely products for a custom label (read-only)
+# 1b. likely products for a listing (read-only)
 # --------------------------------------------------------------------------
+_STOP = {"the", "and", "for", "with", "new", "free", "fits", "fit", "kit", "set", "oem", "genuine", "from"}
+
+
+def _esc(w: str) -> str:
+    return w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @router.get("/suggest")
-def suggest(label: str = Query(..., min_length=1, max_length=100), db: Session = Depends(get_db)):
-    """Products whose custom label SKU (or website SKU) is exactly this label, ignoring case.
-    Shown first in the link window so the right product is one click away."""
+def suggest(
+    label: str = Query("", max_length=100),
+    title: str = Query("", max_length=300),
+    q: str = Query("", max_length=100),
+    db: Session = Depends(get_db),
+):
+    """Products that are probably the one this eBay listing belongs to.
+
+    With nothing typed (q empty): products with exactly this custom label SKU first, then products whose
+    manufacturer part number appears in the listing title, then products sharing several words with the
+    title. With q typed: every product matching ALL the typed words (title, custom label SKU, eBay item #,
+    part number), the likely ones still first. At most 30 are returned."""
+    lab = label.strip()
+    words: list[str] = []
+    for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-]{2,}", title.lower()):
+        if w not in _STOP and w not in words:
+            words.append(w)
+    words = words[:8]
+    qwords = [w for w in re.split(r"\s+", q.strip()) if w][:8]
+
+    params: dict = {"lab": lab, "title": title.strip()}
+    for n, w in enumerate(words):
+        params[f"tw{n}"] = f"%{_esc(w)}%"
+    score = " + ".join(f"(case when p.title ilike cast(:tw{n} as text) then 1 else 0 end)" for n in range(len(words))) or "0"
+
+    if qwords:
+        for n, w in enumerate(qwords):
+            params[f"qw{n}"] = f"%{_esc(w)}%"
+        cond = " and ".join(
+            f"(p.title ilike cast(:qw{n} as text) or p.ebay_item_id ilike cast(:qw{n} as text) "
+            f"or p.custom_label_sku ilike cast(:qw{n} as text) or p.manufacturer_part_number ilike cast(:qw{n} as text))"
+            for n in range(len(qwords))
+        )
+        outer = "true"
+    else:
+        cond = "true"
+        params["minscore"] = max(2, min(4, -(-len(words) * 2 // 5))) if words else 99
+        outer = "t.label_match = 1 or t.mpn_match = 1 or t.score >= cast(:minscore as int)"
+
     rows = db.execute(
         text(
             f"""
-            select p.id, p.sku, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price,
-                   p.quantity_on_hand, p.is_published,
-                   (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
-                   {_PN_SUBQUERY} as part_number
-            from products p
-            where lower(trim(cast(p.custom_label_sku as text))) = lower(trim(:l))
-               or lower(trim(cast(p.sku as text))) = lower(trim(:l))
-            order by p.title, p.id
-            limit 20
+            select * from (
+              select p.id, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price,
+                     p.quantity_on_hand, p.is_published,
+                     (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
+                     {_PN_SUBQUERY} as part_number,
+                     case when cast(:lab as text) <> '' and lower(trim(cast(p.custom_label_sku as text))) = lower(cast(:lab as text)) then 1 else 0 end as label_match,
+                     case when cast(:title as text) <> '' and p.manufacturer_part_number is not null
+                               and length(trim(p.manufacturer_part_number)) >= 4
+                               and position(lower(trim(p.manufacturer_part_number)) in lower(cast(:title as text))) > 0
+                          then 1 else 0 end as mpn_match,
+                     {score} as score
+              from products p
+              where {cond}
+            ) t
+            where {outer}
+            order by t.label_match desc, t.mpn_match desc, t.score desc, t.title, t.id
+            limit 30
             """
         ),
-        {"l": label},
+        params,
     ).all()
-    return {"items": [dict(r._mapping) for r in rows]}
+    return {"searching": bool(qwords), "items": [dict(r._mapping) for r in rows]}
 
 
 # --------------------------------------------------------------------------
-# 2. link one eBay item number to a product
+# 2. link one eBay item number to a product (and 3. create a product and link it)
 # --------------------------------------------------------------------------
-class LinkIn(BaseModel):
-    item_id: str
-    product_id: int
-    store: Optional[str] = None  # the store the listing was found in; empty means the main store
-
-
-@router.post("/link")
-def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
-    item_id = body.item_id.strip()
+def _check_item(item_id: str) -> str:
+    item_id = item_id.strip()
     if not re.fullmatch(r"\d{9,15}", item_id):
         raise HTTPException(400, "That does not look like an eBay item number.")
+    return item_id
 
-    product = db.execute(
-        text("select id, title from products where id = :id"), {"id": body.product_id}
-    ).first()
-    if not product:
-        raise HTTPException(404, "That product no longer exists.")
 
-    store_key = _resolve(db, body.store)["store"]
-
+def _not_linked_yet(db: Session, item_id: str) -> None:
     existing = db.execute(
-        text(f"select product_id from channel_listings where {_DIGITS} = :e limit 1"),
-        {"e": item_id},
+        text(f"select product_id from channel_listings where {_DIGITS} = :e limit 1"), {"e": item_id}
     ).first()
     if existing:
         raise HTTPException(409, f"eBay item {item_id} is already linked to product {existing[0]}.")
 
+
+def _insert_link(db: Session, item_id: str, product_id: int, store_key: str) -> int:
+    """Adds the channel_listings row (no commit). Returns how many eBay item numbers the product now has."""
     # Which channel the new row belongs to: the one every existing eBay link already uses.
     channel = db.execute(
-        text(
-            "select channel_id from channel_listings group by channel_id "
-            "order by count(*) desc limit 1"
-        )
+        text("select channel_id from channel_listings group by channel_id order by count(*) desc limit 1")
     ).first()
     if not channel:
         raise HTTPException(409, "No existing eBay links to copy the channel from, so nothing was added.")
@@ -325,7 +365,7 @@ def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
         and c.column_default is None
         and c.is_identity != "YES"
         and c.is_generated == "NEVER"
-        and c.column_name not in {"product_id", "channel_id", "external_id"}
+        and c.column_name not in {"product_id", "channel_id", "external_id", "store"}
     ]
     if must_fill:
         raise HTTPException(
@@ -339,21 +379,104 @@ def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     value_sql = "cast(:e as bigint)" if numeric else "cast(:e as text)"
     # Store it the way the existing links are stored (same prefix, if they have one).
     stored = item_id if numeric else _stored_prefix(db) + item_id
+    db.execute(
+        text(
+            f"insert into channel_listings (product_id, channel_id, external_id, store) "
+            f"values (:p, :c, {value_sql}, :st)"
+        ),
+        {"p": product_id, "c": channel[0], "e": stored, "st": store_key},
+    )
+    return db.execute(
+        text("select count(*) from channel_listings where product_id = :p"), {"p": product_id}
+    ).scalar()
+
+
+class LinkIn(BaseModel):
+    item_id: str
+    product_id: int
+    store: Optional[str] = None  # the store the listing was found in; empty means the main store
+
+
+@router.post("/link")
+def link(body: LinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    item_id = _check_item(body.item_id)
+    product = db.execute(
+        text("select id, title from products where id = :id"), {"id": body.product_id}
+    ).first()
+    if not product:
+        raise HTTPException(404, "That product no longer exists.")
+    store_key = _resolve(db, body.store)["store"]
+    _not_linked_yet(db, item_id)
     try:
-        db.execute(
-            text(
-                f"insert into channel_listings (product_id, channel_id, external_id, store) "
-                f"values (:p, :c, {value_sql}, :st)"
-            ),
-            {"p": product.id, "c": channel[0], "e": stored, "st": store_key},
-        )
-        count = db.execute(
-            text("select count(*) from channel_listings where product_id = :p"), {"p": product.id}
-        ).scalar()
+        count = _insert_link(db, item_id, product.id, store_key)
         db.commit()
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, f"eBay item {item_id} was just linked by someone else.")
+    except HTTPException:
+        db.rollback()
+        raise
 
     log.info("eBay item %s (store %s) linked to product %s by %s", item_id, store_key, product.id, user.email or user.user_id)
-    return {"ok": True, "item_id": item_id, "sku": f"{SKU_PREFIX}{item_id}", "stored_as": stored, "store": store_key, "product_id": product.id, "product_title": product.title, "listing_count": count}
+    return {
+        "ok": True, "created": False, "item_id": item_id, "sku": f"{SKU_PREFIX}{item_id}", "store": store_key,
+        "product_id": product.id, "product_title": product.title, "listing_count": count,
+    }
+
+
+class CreateIn(BaseModel):
+    item_id: str
+    store: Optional[str] = None
+    title: str
+    custom_label_sku: Optional[str] = None  # may be empty
+    list_price: Optional[float] = None
+    quantity_on_hand: int = 0
+
+
+@router.post("/create-product")
+def create_and_link(body: CreateIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Makes a new (unpublished) product from an eBay listing and links the listing to it, in one step."""
+    item_id = _check_item(body.item_id)
+    title = " ".join(body.title.split())
+    if not title:
+        raise HTTPException(400, "A title is required.")
+    if len(title) > 255:
+        raise HTTPException(400, "That title is too long.")
+    label = (body.custom_label_sku or "").strip() or None
+    if label and re.sub(r"[^0-9]", "", label) == item_id and re.fullmatch(r"(?i)(ebay-)?\d+", label):
+        raise HTTPException(400, "The custom label SKU cannot be the same as the eBay item number. Leave it empty if there is none.")
+    if body.quantity_on_hand < 0:
+        raise HTTPException(400, "Quantity cannot be negative.")
+    if body.list_price is not None and body.list_price < 0:
+        raise HTTPException(400, "Price cannot be negative.")
+    store_key = _resolve(db, body.store)["store"]
+    _not_linked_yet(db, item_id)
+
+    fields = {
+        "title": title,
+        "slug": _unique_slug(db, slugify(title)),
+        "ebay_item_id": clean_ebay_item_id(item_id),
+        "custom_label_sku": label,
+        "list_price": body.list_price,
+        "quantity_on_hand": body.quantity_on_hand,
+        "is_published": False,
+        "is_active": True,
+    }
+    try:
+        cols = ", ".join(fields)  # keys are fixed above, not from the client
+        vals = ", ".join(f":{k}" for k in fields)
+        new_id = db.execute(text(f"insert into products ({cols}) values ({vals}) returning id"), fields).scalar()
+        count = _insert_link(db, item_id, new_id, store_key)
+        finish(db, refresh=True)  # commits both rows together
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "A product with that eBay item number already exists, or the listing was just linked. Nothing was created.")
+    except HTTPException:
+        db.rollback()
+        raise
+
+    log.info("eBay item %s (store %s): new product %s created and linked by %s", item_id, store_key, new_id, user.email or user.user_id)
+    return {
+        "ok": True, "created": True, "item_id": item_id, "sku": f"{SKU_PREFIX}{item_id}", "store": store_key,
+        "product_id": new_id, "product_title": title, "listing_count": count,
+    }
