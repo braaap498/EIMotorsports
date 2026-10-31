@@ -23,7 +23,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   },
   { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
-  { href: "/admin/cleanup", label: "eBay", match: ["/admin/cleanup", "/admin/ebay-new", "/admin/ebay-photos"] },
+  { href: "/admin/cleanup", label: "eBay", match: ["/admin/cleanup", "/admin/ebay-new", "/admin/ebay-photos", "/admin/ebay-listings"] },
   { href: "/admin/quickbooks", label: "QuickBooks" },
   { href: "/admin/users", label: "Team" },
   { href: "/admin/about", label: "About page" },
@@ -41,6 +41,7 @@ const EBAY_TABS = [
   { href: "/admin/cleanup", label: "Merge existing products" },
   { href: "/admin/ebay-new", label: "Link new eBay listings to a product" },
   { href: "/admin/ebay-photos", label: "eBay photo import" },
+  { href: "/admin/ebay-listings", label: "Live listings" },
 ];
 
 function isActive(n: (typeof NAV)[number], pathname: string) {
