@@ -103,7 +103,7 @@ def stores(db: Session = Depends(get_db)):
             """
             select a.store, a.display_name, a.seller_username, a.is_active,
                    (a.refresh_token_enc is not null) as authorized,
-                   a.authorized_at, a.live_pushes_enabled,
+                   a.authorized_at, a.authorized_by, a.refresh_token_expires_at, a.live_pushes_enabled,
                    (select count(*) from channel_listings cl where cl.store = a.store) as linked_count
             from ebay_accounts a
             order by a.store
@@ -111,6 +111,26 @@ def stores(db: Session = Depends(get_db)):
         )
     ).all()
     return {"main_store": MAIN_STORE, "stores": [dict(r._mapping) for r in rows]}
+
+
+class UserNameIn(BaseModel):
+    seller_username: str
+
+
+@router.put("/stores/{store}/seller-username")
+def set_seller_username(store: str, body: UserNameIn, db: Session = Depends(get_db)):
+    """Fix the eBay user name a store is expected to sign in as (used by the approval check)."""
+    name = body.seller_username.strip()
+    if not SELLER_RE.fullmatch(name):
+        raise HTTPException(400, "That does not look like an eBay user name.")
+    res = db.execute(
+        text("update ebay_accounts set seller_username = :u, updated_at = now() where lower(store) = lower(:s)"),
+        {"u": name, "s": store.strip()},
+    )
+    db.commit()
+    if not res.rowcount:
+        raise HTTPException(404, "That store is not in the list.")
+    return {"ok": True}
 
 
 class StoreIn(BaseModel):

@@ -8,3 +8,4 @@ pillow>=10.4
 stripe>=10.0
 openpyxl
 reportlab
+cryptography>=42

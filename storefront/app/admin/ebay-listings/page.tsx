@@ -15,6 +15,8 @@ type Store = {
   is_active: boolean;
   authorized: boolean;
   authorized_at: string | null;
+  authorized_by: string | null;
+  refresh_token_expires_at: string | null;
   live_pushes_enabled: boolean;
   linked_count: number;
 };
@@ -73,6 +75,8 @@ export default function EbayLiveListingsPage() {
   const [newSeller, setNewSeller] = useState("");
   const [addMsg, setAddMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [adding, setAdding] = useState(false);
+  const [busy, setBusy] = useState("");
+  const [connMsg, setConnMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   async function loadStores() {
     try {
@@ -121,6 +125,58 @@ export default function EbayLiveListingsPage() {
     }
   }
 
+  async function connect(s: string) {
+    setBusy(s);
+    setConnMsg(null);
+    try {
+      const r = await api<{ url: string }>("/ebay-connect/start", { method: "POST", body: { store: s } });
+      window.location.href = r.url; // eBay's approval page; it sends the person back to /admin/ebay-connect
+    } catch (e) {
+      setConnMsg({ kind: "error", text: errMsg(e) });
+      setBusy("");
+    }
+  }
+
+  async function disconnect(s: string) {
+    if (!window.confirm(`Disconnect ${s}? Its saved eBay key is deleted and it must be approved again to edit.`)) return;
+    setBusy(s);
+    setConnMsg(null);
+    try {
+      await api("/ebay-connect/disconnect", { method: "POST", body: { store: s } });
+      setConnMsg({ kind: "success", text: `${s} was disconnected.` });
+      await loadStores();
+    } catch (e) {
+      setConnMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function testConn(s: string) {
+    setBusy(s);
+    setConnMsg(null);
+    try {
+      const r = await api<{
+        ok: boolean;
+        ebay_username: string;
+        expected_username: string;
+        selling_limit: { quantity?: number; amount?: { value?: string } } | null;
+        selling_limit_error: string | null;
+      }>("/ebay-connect/test", { method: "POST", body: { store: s } });
+      const lim = r.selling_limit ? ` Selling limit: ${r.selling_limit.quantity ?? "?"} items / $${r.selling_limit.amount?.value ?? "?"}.` : "";
+      setConnMsg({
+        kind: r.ok ? "success" : "error",
+        text: r.ok
+          ? `${s}: connection works, signed in as ${r.ebay_username}.${lim}${r.selling_limit_error ? ` (Limit check failed: ${r.selling_limit_error})` : ""}`
+          : `${s}: the key belongs to ${r.ebay_username}, but ${r.expected_username} was expected.`,
+      });
+    } catch (e) {
+      setConnMsg({ kind: "error", text: `${s}: ${errMsg(e)}` });
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function addStore() {
     setAdding(true);
     setAddMsg(null);
@@ -162,6 +218,11 @@ export default function EbayLiveListingsPage() {
             {showAdd ? "Close" : "Add store"}
           </button>
         </div>
+        {connMsg && (
+          <div className="mt-3">
+            <Notice kind={connMsg.kind}>{connMsg.text}</Notice>
+          </div>
+        )}
         <ul className="mt-3 divide-y divide-gray-100 text-sm">
           {stores.map((s) => (
             <li key={s.store} className="flex flex-wrap items-center gap-2 py-2">
@@ -174,6 +235,26 @@ export default function EbayLiveListingsPage() {
               <Badge tone={s.live_pushes_enabled ? "amber" : "gray"}>
                 {s.live_pushes_enabled ? "Live pushes ON" : "Preview only"}
               </Badge>
+              {s.authorized && s.refresh_token_expires_at && (
+                <span className="text-xs text-gray-500">
+                  approval ends {new Date(s.refresh_token_expires_at).toLocaleDateString()}
+                </span>
+              )}
+              <span className="ml-auto flex gap-2">
+                <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void connect(s.store)}>
+                  {s.authorized ? "Reconnect" : "Connect"}
+                </button>
+                {s.authorized && (
+                  <>
+                    <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void testConn(s.store)}>
+                      Test
+                    </button>
+                    <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void disconnect(s.store)}>
+                      Disconnect
+                    </button>
+                  </>
+                )}
+              </span>
             </li>
           ))}
           {stores.length === 0 && <li className="py-2 text-gray-500">No stores yet.</li>}
