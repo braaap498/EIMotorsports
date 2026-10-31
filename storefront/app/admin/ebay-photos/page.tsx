@@ -28,7 +28,7 @@ export default function EbayPhotoImportPage() {
             className={inputCls}
             value={store}
             onChange={(e) => setStore(e.target.value)}
-            placeholder="eandi"
+            placeholder="eandimotorsports"
           />
         </label>
         <div className="flex flex-wrap gap-3">

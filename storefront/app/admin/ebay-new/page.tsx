@@ -207,10 +207,10 @@ export default function NewEbayListingsPage() {
             className={inputCls}
             value={store}
             onChange={(e) => setStore(e.target.value)}
-            placeholder="eandi"
+            placeholder="eandimotorsports"
             disabled={checking}
           />
-          <span className="mt-1 block text-xs text-gray-500">Leave blank to check eandi.</span>
+          <span className="mt-1 block text-xs text-gray-500">Leave blank to check eandimotorsports.</span>
         </label>
         <div className="flex flex-wrap items-center gap-4">
         <button type="button" className={btnCls} onClick={() => void check()} disabled={checking}>
