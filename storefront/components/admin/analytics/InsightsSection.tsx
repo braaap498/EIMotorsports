@@ -51,7 +51,7 @@ export type Insights =
           buyers_with_repeat: number; share: number; median_gap_days: number | null; gap_hist: { label: string; count: number }[]; pairs_total: number;
           same_make_share: number | null; same_type_share: number | null; transitions: { from: string; to: string; count: number }[];
         };
-        power: { buyers: number; share_of_buyers: number; share_of_revenue: number; top: { who: string; orders: number; revenue: number }[] };
+        power: { buyers: number; share_of_buyers: number; share_of_revenue: number; top: { who: string; orders: number; revenue: number; avg_order: number; state: string | null; first: string; last: string; stores: string[]; buys: string[]; make: string | null }[] };
         day_of_month: { day: number; index: number | null }[]; weekend_share: number;
       };
     };
@@ -493,16 +493,37 @@ function Buyers({ d }: { d: Ok }) {
       )}
 
       {b.power.top.length > 0 && (
-        <Card title="Heaviest buyers" sub="Many repeat orders can mean a shop or a reseller.">
-          <table className="w-full text-left text-sm">
-            <tbody>
-              {b.power.top.map((t, i) => (
-                <tr key={i} className="border-t border-gray-100 first:border-t-0">
-                  <td className="py-1 pr-3 font-mono text-xs">{t.who}</td><td className="pr-3 text-right tabular-nums">{num0(t.orders)} orders</td><td className="text-right tabular-nums">{money0(t.revenue)}</td>
+        <Card title="Heaviest buyers" sub="Top 10 by revenue among buyers with 5+ orders. Many repeat orders can mean a shop or a reseller.">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-left text-sm">
+              <thead>
+                <tr className="text-xs text-gray-500">
+                  <th className="py-1 pr-3 font-medium">Buyer</th>
+                  <th className="pr-3 text-right font-medium">Orders</th>
+                  <th className="pr-3 text-right font-medium">Revenue</th>
+                  <th className="pr-3 text-right font-medium">Avg order</th>
+                  <th className="pr-3 font-medium">State</th>
+                  <th className="pr-3 font-medium">First – last order</th>
+                  <th className="pr-3 font-medium">Mostly buys</th>
+                  <th className="font-medium">Store</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {b.power.top.map((t, i) => (
+                  <tr key={i} className="border-t border-gray-100 align-top">
+                    <td className="py-1 pr-3 font-mono text-xs">{t.who}</td>
+                    <td className="pr-3 text-right tabular-nums">{num0(t.orders)}</td>
+                    <td className="pr-3 text-right tabular-nums">{money0(t.revenue)}</td>
+                    <td className="pr-3 text-right tabular-nums">{money0(t.avg_order)}</td>
+                    <td className="pr-3">{t.state ?? "—"}</td>
+                    <td className="whitespace-nowrap pr-3 text-xs text-gray-600">{t.first} – {t.last}</td>
+                    <td className="pr-3 text-xs text-gray-700">{[...t.buys, ...(t.make ? [t.make] : [])].join(", ") || "—"}</td>
+                    <td className="text-xs text-gray-600">{t.stores.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Card>
       )}
     </>

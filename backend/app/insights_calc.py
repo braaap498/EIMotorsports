@@ -588,6 +588,33 @@ def _spikes(recs) -> list[dict]:
     return out[:8]
 
 
+def _power_row(buyer: str, lst, n_orders: int, revenue: float) -> dict:
+    """One heavy buyer: who, how much, where, how long they have been buying and what they mostly buy."""
+    recs = [r for _, _, rs in lst for r in rs]
+    dates = [d for d, _, _ in lst]
+    states = Counter(r["state"] for r in recs if r.get("state"))
+    stores = sorted({r["store"] for r in recs})
+    parts: Counter = Counter()
+    makes: Counter = Counter()
+    for r in recs:
+        if not r["part"].startswith("Other"):
+            parts[r["part"]] += r["rev"]
+        if r["make"] != "Unknown":
+            makes[r["make"]] += r["rev"]
+    return {
+        "who": buyer or "(unknown)",
+        "orders": n_orders,
+        "revenue": _r(revenue, 0),
+        "avg_order": _r(revenue / n_orders, 0) if n_orders else 0,
+        "state": states.most_common(1)[0][0] if states else None,
+        "first": min(dates).isoformat(),
+        "last": max(dates).isoformat(),
+        "stores": stores,
+        "buys": [k for k, _ in parts.most_common(3)],
+        "make": makes.most_common(1)[0][0] if makes else None,
+    }
+
+
 def _buyers(recs, complete, first_date, last_date) -> dict:
     orders: dict[tuple, list[dict]] = defaultdict(list)
     for r in recs:
@@ -651,7 +678,7 @@ def _buyers(recs, complete, first_date, last_date) -> dict:
     repeat_buyers = sum(1 for v in buyer_orders.values() if v >= 2)
     power = [b for b, n in buyer_orders.items() if n >= 5]
     tot_rev = sum(buyer_rev.values()) or 1
-    top_power = sorted(power, key=lambda b: -buyer_rev[b])[:5]
+    top_power = sorted(power, key=lambda b: -buyer_rev[b])[:10]
 
     # --- day of month (spending rhythm): orders per calendar day-of-month, corrected for how many of each day exist
     dom_orders: Counter = Counter()
@@ -686,7 +713,7 @@ def _buyers(recs, complete, first_date, last_date) -> dict:
         "power": {
             "buyers": len(power), "share_of_buyers": _r(len(power) / n_buyers, 4) if n_buyers else 0,
             "share_of_revenue": _r(sum(buyer_rev[b] for b in power) / tot_rev, 3),
-            "top": [{"who": (b or "(unknown)"), "orders": buyer_orders[b], "revenue": _r(buyer_rev[b], 0)} for b in top_power],
+            "top": [_power_row(b, per[b], buyer_orders[b], buyer_rev[b]) for b in top_power],
         },
         "day_of_month": dom,
         "weekend_share": _r(wk["weekend"] / max(wk["weekend"] + wk["weekday"], 1), 3),
