@@ -1,6 +1,7 @@
 "use client";
 
 import ClearableInput from "../../../components/admin/ClearableInput";
+import ClickRow from "../../../components/admin/ClickRow";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -164,7 +165,7 @@ function HistoryPanel({ refreshKey }: { refreshKey: number }) {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {rows.map((r) => (
-                    <tr key={r.id}>
+                    <ClickRow key={r.id} href={`/admin/products/${r.survivor_product_id}`}>
                       <td className="px-2 py-2 text-gray-500">{r.id}</td>
                       <td className="whitespace-nowrap px-2 py-2">{new Date(r.created_at).toLocaleString()}</td>
                       <td className="px-2 py-2">{r.merged_by_email ?? "—"}</td>
@@ -178,7 +179,7 @@ function HistoryPanel({ refreshKey }: { refreshKey: number }) {
                       <td className="whitespace-nowrap px-2 py-2">
                         {r.qty_before} → {r.qty_after}
                       </td>
-                    </tr>
+                    </ClickRow>
                   ))}
                 </tbody>
               </table>

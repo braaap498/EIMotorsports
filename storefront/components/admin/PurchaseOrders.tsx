@@ -1,6 +1,7 @@
 "use client";
 
 import ClearableInput from "./ClearableInput";
+import ClickRow from "./ClickRow";
 import { useCallback, useEffect, useState } from "react";
 import { api, apiDownload, errMsg } from "../../lib/adminApi";
 import { Badge, Modal, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "./ui";
@@ -671,7 +672,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
           </thead>
           <tbody className="divide-y divide-gray-100">
             {data.items.map((r) => (
-              <tr key={r.id}>
+              <ClickRow key={r.id} onOpen={() => view(r.id)}>
                 <td className="px-3 py-2 font-semibold">{r.po_number}</td>
                 <td className="whitespace-nowrap px-3 py-2">{new Date(r.created_at).toLocaleDateString()}</td>
                 <td className="px-3 py-2">{r.vendor_name}</td>
@@ -700,7 +701,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                     {r.status === "open" && <button className={dangerCls} onClick={() => cancelPo(r)}>Cancel PO</button>}
                   </div>
                 </td>
-              </tr>
+              </ClickRow>
             ))}
             {loaded && data.items.length === 0 && (
               <tr>

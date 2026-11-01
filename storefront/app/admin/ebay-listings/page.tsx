@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import ClickRow from "../../../components/admin/ClickRow";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
@@ -423,7 +424,11 @@ export default function EbayLiveListingsPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {data.items.map((it) => (
-                    <tr key={it.item_id} className="align-top">
+                    <ClickRow
+                      key={it.item_id}
+                      className="align-top"
+                      href={stores.find((x) => x.store === data.store)?.authorized ? `/admin/ebay-edit?store=${encodeURIComponent(data.store)}&item=${it.item_id}` : undefined}
+                    >
                       <td className="px-3 py-2">
                         {it.image_url ? (
                           // eslint-disable-next-line @next/next/no-img-element
@@ -466,7 +471,7 @@ export default function EbayLiveListingsPage() {
                       <td className="px-3 py-2 whitespace-nowrap">
                         {it.linked ? `${money(it.linked.site_price)} / ${it.linked.site_stock ?? "—"}` : "—"}
                       </td>
-                    </tr>
+                    </ClickRow>
                   ))}
                 </tbody>
               </table>

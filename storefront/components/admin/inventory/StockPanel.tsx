@@ -1,6 +1,7 @@
 "use client";
 
 import ClearableInput from "../ClearableInput";
+import ClickRow from "../ClickRow";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -394,7 +395,7 @@ function StockRow({
   }
 
   return (
-    <tr>
+    <ClickRow href={`/admin/products/${row.id}`}>
       <td className="px-3 py-2">
         <Link href={`/admin/products/${row.id}`} className="font-medium hover:underline">
           {row.title}
@@ -483,6 +484,6 @@ function StockRow({
           <div className="mt-1 text-xs text-gray-600">Expected {row.expected_date}</div>
         )}
       </td>
-    </tr>
+    </ClickRow>
   );
 }

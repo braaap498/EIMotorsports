@@ -608,7 +608,7 @@ def list_products(
     rows = db.execute(
         text(
             f"""
-            select p.id, p.sku_display as sku, p.ebay_item_id, p.title, p.slug, p.list_price, p.quantity_on_hand,
+            select p.id, p.sku_display as sku, p.custom_label_sku, p.ebay_item_id, p.title, p.slug, p.list_price, p.quantity_on_hand,
                    p.category_id, p.is_published, p.is_active, p.is_universal,
                    (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count
             from products p {where}

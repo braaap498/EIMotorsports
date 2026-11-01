@@ -1,6 +1,7 @@
 "use client";
 
 import ClearableInput from "../../../components/admin/ClearableInput";
+import ClickRow from "../../../components/admin/ClickRow";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -12,6 +13,7 @@ import { loadSaved, saveSaved } from "../../../lib/savedState";
 type Row = {
   id: number;
   sku: string;
+  custom_label_sku: string | null;
   title: string;
   slug: string;
   list_price: number | string | null;
@@ -135,6 +137,7 @@ export default function ProductsPage() {
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
               <th className="px-3 py-2">SKU</th>
+              <th className="px-3 py-2">Custom label SKU</th>
               <th className="px-3 py-2">Title</th>
               <th className="px-3 py-2">Price</th>
               <th className="px-3 py-2">Qty</th>
@@ -145,8 +148,9 @@ export default function ProductsPage() {
           </thead>
           <tbody className="divide-y divide-gray-100">
             {data.items.map((p) => (
-              <tr key={p.id}>
+              <ClickRow key={p.id} href={`/admin/products/${p.id}`}>
                 <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.sku}</td>
+                <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.custom_label_sku ?? "—"}</td>
                 <td className="max-w-md px-3 py-2 font-medium">
                   <Link href={`/admin/products/${p.id}`} className="hover:underline">{p.title}</Link>
                 </td>
@@ -164,10 +168,10 @@ export default function ProductsPage() {
                 <td className="px-3 py-2 text-right">
                   <Link href={`/admin/products/${p.id}`} className={btn2Cls}>{mayEdit ? "Edit" : "View"}</Link>
                 </td>
-              </tr>
+              </ClickRow>
             ))}
             {data.items.length === 0 && (
-              <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-500">No products match.</td></tr>
+              <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-500">No products match.</td></tr>
             )}
           </tbody>
         </table>
