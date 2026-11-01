@@ -220,6 +220,8 @@ export default function EbayCompatImportPage() {
         </div>
       )}
 
+      <FitmentCard importRunning={running} />
+
       {stores.length > 0 && (
         <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
           <h3 className="text-base font-semibold">Saved so far</h3>
@@ -242,6 +244,355 @@ export default function EbayCompatImportPage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/* ------------------------------------------------- convert compat to fitment */
+
+type SuggestionT = { model_id: number; name: string; make: string; score: number };
+type OpenRow = {
+  make_key: string;
+  model_key: string;
+  make: string;
+  model: string;
+  products: number;
+  rows: number;
+  make_exists: boolean;
+  ambiguous: boolean;
+  suggestion: SuggestionT | null;
+};
+type Added = Record<string, { rows: number; parts: number }>;
+type Plan = {
+  include_existing: boolean;
+  raw_copied: number;
+  raw_updated: number;
+  parts_in_scope: number;
+  parts_ebay: number;
+  parts_title: number;
+  parts_nothing: number;
+  open_total: number;
+  open_parts: number;
+  skipped_rows: number;
+  open: OpenRow[];
+  years_created: number;
+  years_created_sample: { model: string; years: number[]; count: number }[];
+  links_total: number;
+  added: Added;
+  added_rows: number;
+  added_parts: number;
+  already_there: number;
+};
+type VType = { id: number; name: string };
+type ModelHit = { id: number; name: string; make: string };
+
+const SRC_NAME: Record<string, string> = {
+  ebay: "From eBay compatibility",
+  title: "From the listing title",
+  title_inferred: "Title with no year (possible fit)",
+};
+
+function FitmentCard({ importRunning }: { importRunning: boolean }) {
+  const [includeExisting, setIncludeExisting] = useState(false);
+  const [plan, setPlan] = useState<Plan | null>(null);
+  const [done, setDone] = useState<Plan | null>(null);
+  const [busy, setBusy] = useState<"" | "preview" | "merge" | "decide">("");
+  const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
+  const [stale, setStale] = useState(false);
+  const [types, setTypes] = useState<VType[]>([]);
+  const [newType, setNewType] = useState("");
+  const [pick, setPick] = useState<string | null>(null);
+  const [pickQ, setPickQ] = useState("");
+  const [hits, setHits] = useState<ModelHit[]>([]);
+
+  useEffect(() => {
+    api<VType[]>("/vehicle-types")
+      .then((t) => setTypes(Array.isArray(t) ? t : []))
+      .catch(() => {});
+  }, []);
+
+  const rowKey = (r: OpenRow) => `${r.make_key}|${r.model_key}`;
+
+  async function preview() {
+    setBusy("preview");
+    setErr("");
+    setNote("");
+    setDone(null);
+    try {
+      setPlan(await api<Plan>(`/ebay-compat/fitment/preview?include_existing=${includeExisting}`));
+      setStale(false);
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function merge() {
+    if (!plan) return;
+    const ok = window.confirm(
+      `Add ${plan.added_rows.toLocaleString()} fitment rows to ${plan.added_parts.toLocaleString()} parts` +
+        (plan.years_created ? ` and ${plan.years_created.toLocaleString()} new model-years` : "") +
+        `?\n\nNothing is deleted. Machines that are not in the system yet are left out until you settle them.`
+    );
+    if (!ok) return;
+    setBusy("merge");
+    setErr("");
+    setNote("");
+    try {
+      setDone(await api<Plan>("/ebay-compat/fitment/merge", { method: "POST", body: { include_existing: includeExisting } }));
+      setPlan(null);
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function decision(r: OpenRow, action: "map" | "create" | "skip", modelId?: number) {
+    return {
+      make_key: r.make_key,
+      model_key: r.model_key,
+      make: r.make,
+      model: r.model,
+      action,
+      model_id: modelId ?? null,
+      type_id: action === "create" && newType ? Number(newType) : null,
+    };
+  }
+
+  async function decide(r: OpenRow, action: "map" | "create" | "skip", modelId?: number) {
+    setBusy("decide");
+    setErr("");
+    try {
+      await api("/ebay-compat/fitment/decide", { method: "POST", body: { decisions: [decision(r, action, modelId)] } });
+      setPlan((p) => (p ? { ...p, open: p.open.filter((x) => rowKey(x) !== rowKey(r)), open_total: Math.max(0, p.open_total - 1) } : p));
+      setPick(null);
+      setStale(true);
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function bulk(mode: "accept_suggestions" | "create_all") {
+    const text =
+      mode === "accept_suggestions"
+        ? "Use the suggested model for every machine whose suggestion scores 0.95 or more (eBay's own submodel equals your model)?"
+        : `Create EVERY machine still in the list as a new model, using eBay's spelling${
+            newType ? " and the chosen type" : " (no vehicle type)"
+          }? Check the list first: a misspelling would become its own model.`;
+    if (!window.confirm(text)) return;
+    setBusy("decide");
+    setErr("");
+    try {
+      const r = await api<{ mapped: number; created: number; skipped: number; left: number }>("/ebay-compat/fitment/decide-bulk", {
+        method: "POST",
+        body: { mode, include_existing: includeExisting, min_score: 0.95 },
+      });
+      setNote(`Saved: ${r.mapped} mapped, ${r.created} created. ${r.left} left for you. Press Preview again for the new counts.`);
+      setPlan(null);
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function search(q: string) {
+    setPickQ(q);
+    if (q.trim().length < 2) {
+      setHits([]);
+      return;
+    }
+    try {
+      const r = await api<{ items: ModelHit[] }>(`/models?q=${encodeURIComponent(q.trim())}&limit=12`);
+      setHits(r.items ?? []);
+    } catch {
+      setHits([]);
+    }
+  }
+
+  const off = importRunning || busy !== "";
+
+  return (
+    <div className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
+      <div>
+        <h3 className="text-base font-semibold">Convert compatibility to fitment</h3>
+        <p className="mt-1 max-w-3xl text-sm text-gray-600">
+          Links each part that is tied to an eBay listing to its machines in the year-make-model system, using what is
+          saved above: the eBay compatibility table first, and for parts eBay gave no table for, the make, model and years
+          read from the listing title. Machines that are not in the system yet are listed below so you can map or add
+          them; nothing is guessed. Years a known model does not have yet are added. It only adds, never deletes. Preview
+          shows the real result first and changes nothing.
+        </p>
+      </div>
+
+      <label className="flex max-w-3xl items-start gap-2 text-sm">
+        <input type="checkbox" className="mt-1" checked={includeExisting} onChange={(e) => setIncludeExisting(e.target.checked)} disabled={off} />
+        <span>
+          Also top up parts that already have fitment
+          <span className="block text-xs text-gray-500">
+            Off (recommended): only parts with no fitment yet, so a link you removed by hand is not put back. On: every
+            linked part is checked and anything missing is added.
+          </span>
+        </span>
+      </label>
+
+      <div className="flex flex-wrap gap-3">
+        <button type="button" className={btn2Cls} disabled={off} onClick={() => void preview()}>
+          {busy === "preview" ? "Working it out…" : "Preview"}
+        </button>
+        <button type="button" className={btnCls} disabled={off || !plan || stale || plan.added_rows === 0} onClick={() => void merge()}>
+          {busy === "merge" ? "Converting…" : "Convert to fitment"}
+        </button>
+      </div>
+      {importRunning && <p className="text-xs text-amber-700">A compatibility import is running. Wait for it to finish first.</p>}
+      {err && <Notice kind="error">{err}</Notice>}
+      {note && <Notice kind="info">{note}</Notice>}
+      {stale && plan && <Notice kind="info">Decisions saved. Press Preview again to refresh the counts, then convert.</Notice>}
+
+      {done && (
+        <Notice kind="success">
+          Done. Added {done.added_rows.toLocaleString()} fitment rows to {done.added_parts.toLocaleString()} parts
+          {Object.entries(done.added).map(([k, v]) => ` · ${SRC_NAME[k] ?? k}: ${v.rows.toLocaleString()}`).join("")}.{" "}
+          {done.years_created > 0 && `${done.years_created.toLocaleString()} new model-years added. `}
+          {done.open_total > 0 ? `${done.open_total.toLocaleString()} machine names still need adding or mapping (press Preview to see them).` : ""}
+        </Notice>
+      )}
+
+      {plan && (
+        <div className="space-y-4">
+          <dl className="grid max-w-3xl grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
+            <div><dt className="text-xs text-gray-500">Parts checked</dt><dd>{plan.parts_in_scope.toLocaleString()}</dd></div>
+            <div><dt className="text-xs text-gray-500">Using eBay compatibility</dt><dd>{plan.parts_ebay.toLocaleString()}</dd></div>
+            <div><dt className="text-xs text-gray-500">Using the title instead</dt><dd>{plan.parts_title.toLocaleString()}</dd></div>
+            <div><dt className="text-xs text-gray-500">Fitment rows to add</dt><dd className="font-semibold">{plan.added_rows.toLocaleString()}</dd></div>
+            <div><dt className="text-xs text-gray-500">Parts that gain fitment</dt><dd className="font-semibold">{plan.added_parts.toLocaleString()}</dd></div>
+            <div><dt className="text-xs text-gray-500">Already linked</dt><dd>{plan.already_there.toLocaleString()}</dd></div>
+            <div><dt className="text-xs text-gray-500">New model-years to add</dt><dd>{plan.years_created.toLocaleString()}</dd></div>
+            <div><dt className="text-xs text-gray-500">Machines not in the system</dt><dd>{plan.open_total.toLocaleString()} ({plan.open_parts.toLocaleString()} parts)</dd></div>
+            <div><dt className="text-xs text-gray-500">Nothing usable (no compat, no title)</dt><dd>{plan.parts_nothing.toLocaleString()}</dd></div>
+          </dl>
+          {Object.keys(plan.added).length > 0 && (
+            <p className="text-xs text-gray-600">
+              {Object.entries(plan.added).map(([k, v]) => `${SRC_NAME[k] ?? k}: ${v.rows.toLocaleString()} rows on ${v.parts.toLocaleString()} parts`).join(" · ")}
+            </p>
+          )}
+          {plan.raw_copied + plan.raw_updated > 0 && (
+            <p className="text-xs text-gray-500">
+              The raw compatibility table will also be brought up to date ({plan.raw_copied.toLocaleString()} added,{" "}
+              {plan.raw_updated.toLocaleString()} refreshed) so the SQL stages see these parts.
+            </p>
+          )}
+          {plan.years_created_sample.length > 0 && (
+            <details className="text-sm">
+              <summary className="cursor-pointer text-gray-700">New years that would be added to existing models</summary>
+              <ul className="mt-2 max-h-48 list-disc space-y-1 overflow-y-auto pl-5 text-xs text-gray-600">
+                {plan.years_created_sample.map((y, i) => (
+                  <li key={i}>
+                    {y.model}: {y.years.join(", ")}
+                    {y.count > y.years.length ? ` … (${y.count} in all)` : ""}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+
+          {plan.open_total > 0 && (
+            <div className="space-y-3">
+              <div>
+                <h4 className="text-sm font-semibold">Machines not in the system yet ({plan.open_total.toLocaleString()})</h4>
+                <p className="max-w-3xl text-xs text-gray-500">
+                  For each one: use the suggested model, pick the right existing model, create it as a new model, or skip it
+                  (parts keep no link for it). Your choice is saved in the same model map the SQL stages use, so it also holds
+                  next time. Parts using these machines are left out of the conversion until you settle them.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 text-sm">
+                <label className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500">Type for new models</span>
+                  <select className={inputCls} value={newType} onChange={(e) => setNewType(e.target.value)} disabled={off}>
+                    <option value="">none</option>
+                    {types.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" className={btn2Cls} disabled={off} onClick={() => void bulk("accept_suggestions")}>
+                  Use all suggestions scoring 0.95+
+                </button>
+                <button type="button" className={btn2Cls} disabled={off} onClick={() => void bulk("create_all")}>
+                  Create all remaining as new models
+                </button>
+              </div>
+              <div className="max-h-[32rem] overflow-auto rounded border border-gray-100">
+                <table className="w-full text-left text-xs">
+                  <thead className="sticky top-0 bg-gray-50 text-gray-500">
+                    <tr>
+                      <th className="px-2 py-1">eBay / title says</th>
+                      <th className="px-2 py-1 text-right">Parts</th>
+                      <th className="px-2 py-1">Best guess</th>
+                      <th className="px-2 py-1">Do this</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {plan.open.map((r) => (
+                      <tr key={rowKey(r)} className="align-top">
+                        <td className="px-2 py-1">
+                          <div className="font-medium">{r.make} {r.model}</div>
+                          {!r.make_exists && <div className="text-amber-700">make not in the system either</div>}
+                          {r.ambiguous && <div className="text-amber-700">two models have this name; pick one</div>}
+                        </td>
+                        <td className="px-2 py-1 text-right">{r.products.toLocaleString()}</td>
+                        <td className="px-2 py-1 text-gray-600">
+                          {r.suggestion ? `${r.suggestion.name} (${r.suggestion.score.toFixed(2)})` : "none"}
+                        </td>
+                        <td className="px-2 py-1">
+                          <div className="flex flex-wrap gap-1">
+                            {r.suggestion && (
+                              <button type="button" className={btn2Cls} disabled={off} onClick={() => void decide(r, "map", r.suggestion!.model_id)}>
+                                Use guess
+                              </button>
+                            )}
+                            <button type="button" className={btn2Cls} disabled={off} onClick={() => { setPick(pick === rowKey(r) ? null : rowKey(r)); setPickQ(""); setHits([]); }}>
+                              Pick model
+                            </button>
+                            {!r.ambiguous && (
+                              <button type="button" className={btn2Cls} disabled={off} onClick={() => void decide(r, "create")}>
+                                Create new
+                              </button>
+                            )}
+                            <button type="button" className={btn2Cls} disabled={off} onClick={() => void decide(r, "skip")}>
+                              Skip
+                            </button>
+                          </div>
+                          {pick === rowKey(r) && (
+                            <div className="mt-2 space-y-1">
+                              <input className={inputCls} placeholder="Search your models, e.g. TRX400EX" value={pickQ} onChange={(e) => void search(e.target.value)} />
+                              {hits.map((h) => (
+                                <button key={h.id} type="button" className="block w-full rounded border border-gray-200 px-2 py-1 text-left hover:bg-gray-50" disabled={off} onClick={() => void decide(r, "map", h.id)}>
+                                  {h.make} {h.name}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {plan.open_total > plan.open.length && (
+                <p className="text-xs text-gray-500">Showing the {plan.open.length} with the most parts. Settle these, then Preview again for the rest.</p>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
