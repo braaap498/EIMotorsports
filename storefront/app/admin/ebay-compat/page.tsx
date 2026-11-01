@@ -118,11 +118,11 @@ export default function EbayCompatImportPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="text-xl font-semibold">eBay compat import</h2>
+        <h2 className="text-xl font-semibold">eBay compatibility import</h2>
         <p className="mt-1 max-w-3xl text-sm text-gray-600">
           Reads each active listing&rsquo;s &ldquo;compatible vehicles&rdquo; table from eBay and saves it by eBay item
           number, together with the make, model and years read from the listing title. It works for listings that are
-          not products yet. Any item number that already has compat data saved is skipped, so only new listings (and
+          not products yet. Any item number that already has compatibility data saved is skipped, so only new listings (and
           ones that failed last time) are looked up. The store must be approved on the Live listings tab first.
         </p>
       </div>
@@ -143,14 +143,14 @@ export default function EbayCompatImportPage() {
         </label>
         <div className="flex flex-wrap gap-3">
           <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start(false)}>
-            Pull compat data for listings not saved yet
+            Pull compatibility data for listings not saved yet
           </button>
           <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start(true)}>
-            Also re-check saved listings for new compat data
+            Also re-check saved listings for new compatibility data
           </button>
         </div>
         <p className="max-w-3xl text-xs text-gray-500">
-          The second button does the first, then re-reads listings that already have compat data and adds any vehicle
+          The second button does the first, then re-reads listings that already have compatibility data and adds any vehicle
           eBay lists now that we did not have before (old rows are kept). It uses one eBay lookup per saved listing, so
           a big store takes a few days of the daily limit; listings checked in the last 7 days are skipped, so you can
           press it again each day until it reports nothing left.
@@ -191,9 +191,9 @@ export default function EbayCompatImportPage() {
           <dl className="grid max-w-3xl grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
             <div><dt className="text-xs text-gray-500">Active listings on eBay</dt><dd>{job.listings_found.toLocaleString()}</dd></div>
             <div><dt className="text-xs text-gray-500">Skipped (already saved)</dt><dd>{job.already_saved.toLocaleString()}</dd></div>
-            <div><dt className="text-xs text-gray-500">With a compat list</dt><dd>{job.with_compat.toLocaleString()}</dd></div>
+            <div><dt className="text-xs text-gray-500">With a compatibility list</dt><dd>{job.with_compat.toLocaleString()}</dd></div>
             <div><dt className="text-xs text-gray-500">Vehicles received</dt><dd>{job.compat_rows.toLocaleString()}</dd></div>
-            <div><dt className="text-xs text-gray-500">No compat on listing</dt><dd>{job.no_list.toLocaleString()}</dd></div>
+            <div><dt className="text-xs text-gray-500">No compatibility on listing</dt><dd>{job.no_list.toLocaleString()}</dd></div>
             <div><dt className="text-xs text-gray-500">Count only / not accessible</dt><dd>{job.count_only.toLocaleString()} / {job.not_found.toLocaleString()}</dd></div>
             {job.mode === "recheck" && (
               <>

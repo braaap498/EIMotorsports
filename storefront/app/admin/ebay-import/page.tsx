@@ -123,9 +123,9 @@ export default function EbayListingImportPage() {
       <div>
         <h2 className="text-xl font-semibold">eBay listing import</h2>
         <p className="mt-1 max-w-3xl text-sm text-gray-600">
-          Imports every eBay listing that is not on the website yet, the same way the Link tab does when you create one, and also attaches the photos the photo import saved and copies the compat data from the compat import.
+          Imports every eBay listing that is not on the website yet, the same way the Link tab does when you create one, and also attaches the photos the photo import saved and copies the compatibility data from the compatibility import.
           Title, price and store come from a Seller Hub &ldquo;all active listings&rdquo; report (upload one per store) or, when a
-          listing is not in a report, from the compat import. New listings are unpublished, with stock 0.
+          listing is not in a report, from the compatibility import. New listings are unpublished, with stock 0.
         </p>
       </div>
 
@@ -159,7 +159,7 @@ export default function EbayListingImportPage() {
             {report.unreadable_rows > 0 && `, ${n(report.unreadable_rows)} unreadable rows`}.
             {report.store_mismatch > 0 && (
               <Notice kind="error">
-                {n(report.store_mismatch)} of these listings were saved by the compat import under a different store. Check you chose the right store for this file.
+                {n(report.store_mismatch)} of these listings were saved by the compatibility import under a different store. Check you chose the right store for this file.
               </Notice>
             )}
           </div>
@@ -181,7 +181,7 @@ export default function EbayListingImportPage() {
               <div><dt className="text-xs text-gray-500">Missing store / missing title</dt><dd>{n(preview.no_store)} / {n(preview.no_title)}</dd></div>
               <div><dt className="text-xs text-gray-500">With a custom label</dt><dd>{n(preview.with_label)}</dd></div>
               <div><dt className="text-xs text-gray-500">No photos saved</dt><dd>{n(preview.no_photos)}</dd></div>
-              <div><dt className="text-xs text-gray-500">No compat list</dt><dd>{n(preview.no_compat)}</dd></div>
+              <div><dt className="text-xs text-gray-500">No compatibility list</dt><dd>{n(preview.no_compat)}</dd></div>
               <div><dt className="text-xs text-gray-500">No price</dt><dd>{n(preview.no_price)}</dd></div>
               {Object.entries(preview.by_store).map(([s, c]) => (
                 <div key={s}><dt className="text-xs text-gray-500">Ready in {s}</dt><dd>{n(c)}</dd></div>
@@ -198,7 +198,7 @@ export default function EbayListingImportPage() {
                     <li key={s.item}>{s.item}: {s.store ? "" : "no store"}{!s.store && !s.title ? ", " : ""}{s.title ? "" : "no title"}</li>
                   ))}
                 </ul>
-                <p className="mt-2 text-xs text-gray-500">Upload that store&rsquo;s report, or finish its compat import, and check again.</p>
+                <p className="mt-2 text-xs text-gray-500">Upload that store&rsquo;s report, or finish its compatibility import, and check again.</p>
               </details>
             )}
             {preview.sample.length > 0 && (
@@ -207,7 +207,7 @@ export default function EbayListingImportPage() {
                 <div className="mt-2 overflow-x-auto">
                   <table className="w-full text-left text-xs">
                     <thead className="text-gray-500">
-                      <tr><th className="pr-3">Item</th><th className="pr-3">Store</th><th className="pr-3">Title</th><th className="pr-3">Label</th><th className="pr-3">Price</th><th className="pr-3">Photos</th><th>Compat</th></tr>
+                      <tr><th className="pr-3">Item</th><th className="pr-3">Store</th><th className="pr-3">Title</th><th className="pr-3">Label</th><th className="pr-3">Price</th><th className="pr-3">Photos</th><th>Compatibility</th></tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {preview.sample.map((s) => (
@@ -247,10 +247,10 @@ export default function EbayListingImportPage() {
         {(totals.created > 0 || totals.problems.length > 0) && (
           <div className="space-y-1 text-sm text-gray-700">
             <div>
-              Created {n(totals.created)} listings; attached {n(totals.photos)} photos; copied compat for {n(totals.compat)} listings
+              Created {n(totals.created)} listings; attached {n(totals.photos)} photos; copied compatibility data for {n(totals.compat)} listings
               {totals.labels > 0 && `; ${n(totals.labels)} labels left empty because they matched the item number`}.
             </div>
-            {totals.compatError && <Notice kind="error">Compat copy problem (the listings were still created): {totals.compatError}</Notice>}
+            {totals.compatError && <Notice kind="error">Compatibility copy problem (the listings were still created): {totals.compatError}</Notice>}
             {totals.problems.length > 0 && (
               <details>
                 <summary className="cursor-pointer">Problems ({totals.problems.length})</summary>

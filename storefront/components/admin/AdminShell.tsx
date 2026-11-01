@@ -42,7 +42,7 @@ const EBAY_TABS = [
   { href: "/admin/cleanup", label: "Merge existing products" },
   { href: "/admin/ebay-new", label: "Link new eBay listings to a product" },
   { href: "/admin/ebay-photos", label: "eBay photo import" },
-  { href: "/admin/ebay-compat", label: "eBay compat import" },
+  { href: "/admin/ebay-compat", label: "eBay compatibility import" },
   { href: "/admin/ebay-import", label: "eBay listing import" },
   { href: "/admin/ebay-listings", label: "Live listings" },
 ];
