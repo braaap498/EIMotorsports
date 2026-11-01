@@ -182,9 +182,14 @@ export default function ProductsPage() {
             <tr>
               {COLUMNS.map((c) => (
                 <th key={c.key} className="px-3 py-2" aria-sort={sort === c.key ? (dir === "asc" ? "ascending" : "descending") : "none"}>
-                  <button type="button" className="flex w-full items-center gap-1 text-left uppercase hover:text-gray-900" onClick={() => clickSort(c.key)}>
+                  <button
+                    type="button"
+                    className={`inline-flex max-w-full items-center gap-1 text-left uppercase hover:text-gray-900 ${sort === c.key ? "text-gray-900" : ""}`}
+                    onClick={() => clickSort(c.key)}
+                    title={`Sort by ${c.label.toLowerCase()}`}
+                  >
                     <span className="truncate">{c.label}</span>
-                    <span className="w-3 shrink-0 text-gray-700">{sort === c.key ? (dir === "asc" ? "▲" : "▼") : ""}</span>
+                    <span className={`shrink-0 text-[10px] ${sort === c.key ? "" : "text-gray-300"}`}>{sort === c.key ? (dir === "asc" ? "▲" : "▼") : "▲▼"}</span>
                   </button>
                 </th>
               ))}
