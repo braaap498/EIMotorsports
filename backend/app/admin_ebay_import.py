@@ -84,7 +84,7 @@ open_ids as (
 select o.item,
        coalesce(nullif(trim(r.custom_label_sku), ''), nullif(trim(a.custom_label_sku), ''),
                 nullif(trim(cast(l.custom_label_sku as text)), '')) as label,
-       coalesce(r.store, a.store, c.store) as store,
+       coalesce(r.store, a.store, c.store, nullif(trim(cast(l.store as text)), '')) as store,
        coalesce(nullif(trim(r.title), ''), nullif(trim(a.title), ''), nullif(trim(c.title), '')) as title,
        coalesce(r.price, a.price) as price,
        (r.item_id is not null) as in_report,

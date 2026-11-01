@@ -27,6 +27,7 @@ type Job = {
 };
 type StatusResp = { job: Job | null };
 type LabelsResp = {
+  store?: string | null;
   listings_in_report: number;
   with_label: number;
   labels_filled: number;
@@ -63,6 +64,7 @@ const STATUS_TONE: Record<Job["status"], "green" | "gray" | "amber"> = {
 
 export default function EbayPhotoImportPage() {
   const [store, setStore] = useState("");
+  const [labelsStore, setLabelsStore] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState("");
   const [starting, setStarting] = useState(false);
@@ -124,7 +126,7 @@ export default function EbayPhotoImportPage() {
     setLabels(null);
     try {
       const csv = await file.text();
-      setLabels(await api<LabelsResp>("/ebay-photos/labels", { method: "POST", body: { csv } }));
+      setLabels(await api<LabelsResp>("/ebay-photos/labels", { method: "POST", body: { csv, store: labelsStore.trim() } }));
       setFile(null);
       if (fileRef.current) fileRef.current.value = "";
     } catch (e) {
@@ -235,6 +237,19 @@ export default function EbayPhotoImportPage() {
             changed; if the report disagrees, it is listed below for you to look at.
           </p>
         </div>
+        <label className="block max-w-sm text-sm">
+          <span className="mb-1 block font-medium">eBay store name (optional)</span>
+          <input
+            className={inputCls}
+            value={labelsStore}
+            onChange={(e) => setLabelsStore(e.target.value)}
+            placeholder="eandimotorsports or genuine-oem-parts"
+            disabled={uploading}
+          />
+          <span className="mt-1 block text-xs text-gray-500">
+            The store this report is from. Left blank, no store is recorded for these listings (it is not assumed).
+          </span>
+        </label>
         <div className="flex flex-wrap items-center gap-3">
           <input
             ref={fileRef}

@@ -63,6 +63,7 @@ from app.auth import AuthUser, require_admin
 from app.config import get_settings
 from app.database import get_db, get_engine
 from app.ebay_feedback import SEARCH_URL, FeedbackError, _token, configured, seller_username
+from app.admin_ebay_listings import _resolve
 
 log = logging.getLogger(__name__)
 
@@ -274,11 +275,11 @@ def _chunks(seq, n):
         yield seq[i : i + n]
 
 
-def _run(job_id: int, seller: str, include_products: bool):
+def _run(job_id: int, seller: str, include_products: bool, store_key: Optional[str] = None):
     job = _Job(job_id)
     calls = _Calls(_max_calls())
     try:
-        _work(job, calls, seller, include_products)
+        _work(job, calls, seller, include_products, store_key)
     except RateLimited as e:
         job.message = f"Paused: {e} Start the import again later and it carries on where it stopped."
         job.save(calls, "paused")
@@ -291,7 +292,7 @@ def _run(job_id: int, seller: str, include_products: bool):
         job.save(calls, "failed")
 
 
-def _work(job: _Job, calls: _Calls, seller: str, include_products: bool):
+def _work(job: _Job, calls: _Calls, seller: str, include_products: bool, store_key: Optional[str] = None):
     eng = get_engine()
     ids, total = _seller_listings(seller, calls)
     job.c["listings_found"] = len(ids)
@@ -331,13 +332,22 @@ def _work(job: _Job, calls: _Calls, seller: str, include_products: bool):
         for chunk in _chunks(unlinked, 1000):
             res = c.execute(
                 text(
-                    "insert into ebay_label_import (item_number, custom_label_sku) "
-                    "select x, null from unnest(cast(:ids as text[])) as x "
+                    "insert into ebay_label_import (item_number, custom_label_sku, store) "
+                    "select x, null, :st from unnest(cast(:ids as text[])) as x "
                     "where not exists (select 1 from ebay_label_import i where cast(i.item_number as text) = x)"
                 ),
-                {"ids": chunk},
+                {"ids": chunk, "st": store_key},
             )
             added += res.rowcount or 0
+            # rows that were already there with no store get this store; a store already set is never changed
+            if store_key:
+                c.execute(
+                    text(
+                        "update ebay_label_import set store = :st "
+                        "where store is null and cast(item_number as text) = any(cast(:ids as text[]))"
+                    ),
+                    {"ids": chunk, "st": store_key},
+                )
     job.c["listings_added"] = added
 
     # unlinked listings that still need photos
@@ -630,6 +640,7 @@ def start_import(body: ImportIn, db: Session = Depends(get_db), user: AuthUser =
     store = body.store.strip() or seller_username()
     if not SELLER_RE.fullmatch(store):
         raise HTTPException(400, "That does not look like an eBay store name.")
+    store_key = _resolve(db, body.store)["store"]  # the store name the other imports file things under
     _expire_stale(db.execute)
     running = db.execute(text("select id from ebay_photo_jobs where status in ('running','stopping') limit 1")).first()
     if running:
@@ -644,7 +655,7 @@ def start_import(body: ImportIn, db: Session = Depends(get_db), user: AuthUser =
     ).scalar()
     db.commit()
     threading.Thread(
-        target=_run, args=(job_id, store, body.mode == "all_missing"), daemon=True, name=f"ebay-photos-{job_id}"
+        target=_run, args=(job_id, store, body.mode == "all_missing", store_key), daemon=True, name=f"ebay-photos-{job_id}"
     ).start()
     log.info("eBay photo import %s started for %s (%s) by %s", job_id, store, body.mode, user.email)
     row = db.execute(text("select * from ebay_photo_jobs where id = :i"), {"i": job_id}).first()
@@ -669,6 +680,7 @@ def stop(db: Session = Depends(get_db)):
 # ------------------------------------------------------- custom labels (CSV)
 class LabelsIn(BaseModel):
     csv: str
+    store: str = ""  # blank = do not record a store for these listings
 
 
 def _norm(h: str) -> str:
@@ -690,6 +702,9 @@ def _clean_item(v: str) -> str:
 def fill_labels(body: LabelsIn, db: Session = Depends(get_db)):
     if len(body.csv) > 20_000_000:
         raise HTTPException(413, "That file is too large.")
+    # Unlike the report upload, a blank store here means "unknown", not the main store, so a forgotten box
+    # can never stamp the wrong store on a file.
+    store_key = _resolve(db, body.store)["store"] if body.store.strip() else None
     rows = list(csv.reader(io.StringIO(body.csv.lstrip("\ufeff"))))
     head_at = next(
         (
@@ -769,11 +784,22 @@ def fill_labels(body: LabelsIn, db: Session = Depends(get_db)):
         )
     for i in to_add:
         db.execute(
-            text("insert into ebay_label_import (item_number, custom_label_sku) values (:i, :l)"),
-            {"i": i, "l": report[i] or None},
+            text("insert into ebay_label_import (item_number, custom_label_sku, store) values (:i, :l, :st)"),
+            {"i": i, "l": report[i] or None, "st": store_key},
         )
+    if store_key:
+        # listings already in the table with no store get this one; a store already set is never changed
+        for chunk in _chunks([i for i in ids if i in existing], 3000):
+            db.execute(
+                text(
+                    "update ebay_label_import set store = :st "
+                    "where store is null and cast(item_number as text) = any(cast(:ids as text[]))"
+                ),
+                {"st": store_key, "ids": chunk},
+            )
     db.commit()
     return {
+        "store": store_key,
         "listings_in_report": len(report),
         "with_label": sum(1 for v in report.values() if v),
         "labels_filled": len(fill),
