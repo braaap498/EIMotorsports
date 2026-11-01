@@ -169,7 +169,11 @@ def upload_report(body: ReportIn, db: Session = Depends(get_db)):
             "p": _money(cell(cp)), "q": int(qty) if qty.isdigit() else None, "c": cell(cc) or None,
         }
     if not parsed:
-        raise HTTPException(400, "No listings were found in that file.")
+        # A report with only the header row (e.g. no scheduled listings right now) is valid: nothing to save.
+        return {
+            "store": store, "listings_in_report": 0, "unreadable_rows": bad,
+            "with_label": 0, "without_price": 0, "store_mismatch": 0,
+        }
 
     ids = list(parsed)
     mismatch = 0
