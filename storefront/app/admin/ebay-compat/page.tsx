@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 
@@ -290,6 +290,7 @@ type Plan = {
 };
 type VType = { id: number; name: string };
 type ModelHit = { id: number; name: string; make: string };
+type MakeHit = { id: number; name: string };
 
 const SRC_NAME: Record<string, string> = {
   ebay: "From eBay compatibility",
@@ -317,6 +318,11 @@ function FitmentCard() {
   const [pick, setPick] = useState<string | null>(null);
   const [pickQ, setPickQ] = useState("");
   const [hits, setHits] = useState<ModelHit[]>([]);
+  const [makes, setMakes] = useState<MakeHit[]>([]);
+  const [pickMake, setPickMake] = useState("");
+  const [makeModels, setMakeModels] = useState<ModelHit[]>([]);
+  const [chosen, setChosen] = useState<ModelHit | null>(null);
+  const searchSeq = useRef(0);
 
   useEffect(() => {
     api<VType[]>("/vehicle-types")
@@ -443,17 +449,48 @@ function FitmentCard() {
     }
   }
 
+  // Instant search: every keystroke asks for the models whose make or name matches, newest answer wins.
   async function search(q: string) {
     setPickQ(q);
-    if (q.trim().length < 2) {
+    const seq = ++searchSeq.current;
+    if (q.trim().length < 1) {
       setHits([]);
       return;
     }
     try {
-      const r = await api<{ items: ModelHit[] }>(`/models?q=${encodeURIComponent(q.trim())}&limit=12`);
-      setHits(r.items ?? []);
+      const r = await api<{ items: ModelHit[] }>(`/ebay-compat/fitment/models?q=${encodeURIComponent(q.trim())}&limit=25`);
+      if (seq === searchSeq.current) setHits(r.items ?? []);
     } catch {
-      setHits([]);
+      if (seq === searchSeq.current) setHits([]);
+    }
+  }
+
+  function openPick(key: string) {
+    const closing = pick === key;
+    setPick(closing ? null : key);
+    setPickQ("");
+    setHits([]);
+    setChosen(null);
+    setPickMake("");
+    setMakeModels([]);
+    setCreateRow(null);
+    if (!closing && makes.length === 0) {
+      api<{ items: MakeHit[] }>("/ebay-compat/fitment/makes")
+        .then((r) => setMakes(r.items ?? []))
+        .catch(() => {});
+    }
+  }
+
+  async function chooseMake(id: string) {
+    setPickMake(id);
+    setMakeModels([]);
+    setChosen(null);
+    if (!id) return;
+    try {
+      const r = await api<{ items: ModelHit[] }>(`/ebay-compat/fitment/models?make_id=${id}&limit=500`);
+      setMakeModels(r.items ?? []);
+    } catch {
+      setMakeModels([]);
     }
   }
 
@@ -658,7 +695,7 @@ function FitmentCard() {
                                 Use guess
                               </button>
                             )}
-                            <button type="button" className={btn2Cls} disabled={off} onClick={() => { setPick(pick === rowKey(r) ? null : rowKey(r)); setPickQ(""); setHits([]); setCreateRow(null); }}>
+                            <button type="button" className={btn2Cls} disabled={off} onClick={() => openPick(rowKey(r))}>
                               Pick model
                             </button>
                             {!r.ambiguous && (
@@ -690,13 +727,57 @@ function FitmentCard() {
                             </div>
                           )}
                           {pick === rowKey(r) && (
-                            <div className="mt-2 space-y-1">
-                              <input className={inputCls} placeholder="Search your models, e.g. TRX400EX" value={pickQ} onChange={(e) => void search(e.target.value)} />
-                              {hits.map((h) => (
-                                <button key={h.id} type="button" className="block w-full rounded border border-gray-200 px-2 py-1 text-left hover:bg-gray-50" disabled={off} onClick={() => void decide(r, "map", h.id)}>
-                                  {h.make} {h.name}
-                                </button>
-                              ))}
+                            <div className="mt-2 w-80 space-y-2 rounded border border-gray-200 bg-white p-2">
+                              <div className="relative">
+                                <input
+                                  className={inputCls}
+                                  autoFocus
+                                  placeholder="Type to search, e.g. yamaha raptor"
+                                  value={pickQ}
+                                  onChange={(e) => void search(e.target.value)}
+                                />
+                                {pickQ.trim() !== "" && (
+                                  <div className="absolute left-0 right-0 z-10 mt-1 max-h-56 overflow-y-auto rounded border border-gray-200 bg-white shadow">
+                                    {hits.length === 0 && <div className="px-2 py-1 text-gray-500">No model matches.</div>}
+                                    {hits.map((h) => (
+                                      <button
+                                        key={h.id}
+                                        type="button"
+                                        className="block w-full px-2 py-1 text-left hover:bg-gray-50"
+                                        onClick={() => { setChosen(h); setPickQ(""); setHits([]); }}
+                                      >
+                                        {h.make} {h.name}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <div className="text-gray-500">or choose:</div>
+                              <select className={inputCls} value={pickMake} onChange={(e) => void chooseMake(e.target.value)}>
+                                <option value="">Make…</option>
+                                {makes.map((m) => (
+                                  <option key={m.id} value={m.id}>{m.name}</option>
+                                ))}
+                              </select>
+                              <select
+                                className={inputCls}
+                                value={chosen && makeModels.some((m) => m.id === chosen.id) ? chosen.id : ""}
+                                disabled={!pickMake}
+                                onChange={(e) => setChosen(makeModels.find((m) => String(m.id) === e.target.value) ?? null)}
+                              >
+                                <option value="">{pickMake ? "Model…" : "Pick a make first"}</option>
+                                {makeModels.map((m) => (
+                                  <option key={m.id} value={m.id}>{m.name}</option>
+                                ))}
+                              </select>
+                              {chosen && (
+                                <div className="flex items-center justify-between gap-2 rounded bg-gray-50 px-2 py-1">
+                                  <span>{chosen.make} {chosen.name}</span>
+                                  <button type="button" className={btnCls} disabled={off} onClick={() => void decide(r, "map", chosen.id)}>
+                                    Use this model
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           )}
                         </td>

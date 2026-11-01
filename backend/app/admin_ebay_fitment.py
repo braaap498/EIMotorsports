@@ -434,6 +434,34 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
     return out
 
 
+# ------------------------------------------------------------------ pickers for "Pick model"
+@router.get("/makes")
+def list_makes(db: Session = Depends(get_db)):
+    rows = db.execute(text("select id, name from vehicle_makes order by name")).all()
+    return {"items": [{"id": r.id, "name": r.name} for r in rows]}
+
+
+@router.get("/models")
+def list_models(q: str = "", make_id: Optional[int] = None, limit: int = 25, db: Session = Depends(get_db)):
+    """Models for the picker: by make (browse) and/or a typed search that matches make or model name,
+    ignoring spaces and punctuation (so 'raptor700' finds 'RAPTOR 700R')."""
+    limit = max(1, min(limit, 500))
+    q = q.strip()
+    where, params = [], {"lim": limit}
+    if make_id:
+        where.append("vmo.make_id = :mid")
+        params["mid"] = make_id
+    if q:
+        params["like"] = "%" + q.replace("%", "").replace("_", "") + "%"
+        params["q"] = q
+        where.append("(vmo.name ilike :like or vm.name || ' ' || vmo.name ilike :like "
+                     "or (fitment_key(:q) <> '' and fitment_key(vm.name || vmo.name) like '%' || fitment_key(:q) || '%'))")
+    sql = ("select vmo.id, vmo.name, vm.name as make from vehicle_models vmo join vehicle_makes vm on vm.id = vmo.make_id "
+           + ("where " + " and ".join(where) + " " if where else "") + "order by vm.name, vmo.name limit :lim")
+    rows = db.execute(text(sql), params).all()
+    return {"items": [{"id": r.id, "name": r.name, "make": r.make} for r in rows]}
+
+
 # ------------------------------------------------------------------ settle the machines that are not in the system
 class Decision(BaseModel):
     make_key: str
