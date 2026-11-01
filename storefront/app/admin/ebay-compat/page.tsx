@@ -458,14 +458,19 @@ function FitmentCard() {
       return;
     }
     try {
-      const r = await api<{ items: ModelHit[] }>(`/ebay-compat/fitment/models?q=${encodeURIComponent(q.trim())}&limit=25`);
+      const mk = pickMake ? `&make_id=${pickMake}` : "";
+      const r = await api<{ items: ModelHit[] }>(`/ebay-compat/fitment/models?q=${encodeURIComponent(q.trim())}${mk}&limit=25`);
       if (seq === searchSeq.current) setHits(r.items ?? []);
     } catch {
       if (seq === searchSeq.current) setHits([]);
     }
   }
 
-  function openPick(key: string) {
+  const norm = (v: string) => v.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  // Opens the picker for a row; the make is chosen for you when the eBay make is already in the system.
+  async function openPick(r: OpenRow) {
+    const key = rowKey(r);
     const closing = pick === key;
     setPick(closing ? null : key);
     setPickQ("");
@@ -474,17 +479,28 @@ function FitmentCard() {
     setPickMake("");
     setMakeModels([]);
     setCreateRow(null);
-    if (!closing && makes.length === 0) {
-      api<{ items: MakeHit[] }>("/ebay-compat/fitment/makes")
-        .then((r) => setMakes(r.items ?? []))
-        .catch(() => {});
+    if (closing) return;
+    let list = makes;
+    if (list.length === 0) {
+      try {
+        const res = await api<{ items: MakeHit[] }>("/ebay-compat/fitment/makes");
+        list = res.items ?? [];
+        setMakes(list);
+      } catch {
+        return;
+      }
     }
+    const m = list.find((x) => norm(x.name) === norm(r.make));
+    if (m) void chooseMake(String(m.id));
   }
 
   async function chooseMake(id: string) {
     setPickMake(id);
     setMakeModels([]);
     setChosen(null);
+    setPickQ("");
+    setHits([]);
+    searchSeq.current++;
     if (!id) return;
     try {
       const r = await api<{ items: ModelHit[] }>(`/ebay-compat/fitment/models?make_id=${id}&limit=500`);
@@ -695,7 +711,7 @@ function FitmentCard() {
                                 Use guess
                               </button>
                             )}
-                            <button type="button" className={btn2Cls} disabled={off} onClick={() => openPick(rowKey(r))}>
+                            <button type="button" className={btn2Cls} disabled={off} onClick={() => void openPick(r)}>
                               Pick model
                             </button>
                             {!r.ambiguous && (
@@ -703,7 +719,14 @@ function FitmentCard() {
                                 Create new
                               </button>
                             )}
-                            <button type="button" className={btn2Cls} disabled={off} onClick={() => void decide(r, "skip")}>
+                            <button type="button" className={btn2Cls} disabled={off} onClick={() => {
+                                if (
+                                  window.confirm(
+                                    `Skip ${r.make} ${r.model}?\n\nThe ${r.products.toLocaleString()} part${r.products === 1 ? "" : "s"} that use it will NOT be linked to this machine in the fitment tool, now or on any later run. This is saved immediately and cannot be undone from this page.\n\nIf you are not sure, press Cancel and leave it in the list.`
+                                  )
+                                )
+                                  void decide(r, "skip");
+                              }}>
                               Skip
                             </button>
                           </div>
@@ -732,7 +755,7 @@ function FitmentCard() {
                                 <input
                                   className={inputCls}
                                   autoFocus
-                                  placeholder="Type to search, e.g. yamaha raptor"
+                                  placeholder={pickMake ? `Search ${makes.find((m) => String(m.id) === pickMake)?.name ?? "this make"} models` : "Type to search, e.g. yamaha raptor"}
                                   value={pickQ}
                                   onChange={(e) => void search(e.target.value)}
                                 />
@@ -752,9 +775,9 @@ function FitmentCard() {
                                   </div>
                                 )}
                               </div>
-                              <div className="text-gray-500">or choose:</div>
+                              <div className="text-gray-500">{pickMake ? "Searching only this make. Change it here:" : "or choose:"}</div>
                               <select className={inputCls} value={pickMake} onChange={(e) => void chooseMake(e.target.value)}>
-                                <option value="">Make…</option>
+                                <option value="">All makes…</option>
                                 {makes.map((m) => (
                                   <option key={m.id} value={m.id}>{m.name}</option>
                                 ))}
