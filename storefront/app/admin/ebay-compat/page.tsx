@@ -314,6 +314,8 @@ function FitmentCard() {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [sel, setSel] = useState<string[]>([]); // ticked rows for the multi-create panel
   const [selFilter, setSelFilter] = useState("");
+  const [tickMake, setTickMake] = useState("");
+  const [tickMsg, setTickMsg] = useState("");
   const [bulkType, setBulkType] = useState("");
   const [pick, setPick] = useState<string | null>(null);
   const [pickQ, setPickQ] = useState("");
@@ -638,26 +640,30 @@ function FitmentCard() {
                     <button type="button" className={btn2Cls} disabled={off} onClick={() => setSel(Array.from(new Set([...sel, ...shownRows.filter((r) => !r.ambiguous).map(rowKey)])))}>
                       Tick all shown ({shownRows.filter((r) => !r.ambiguous).length})
                     </button>
-                    <select
-                      className={inputCls}
-                      value=""
-                      disabled={off}
-                      onChange={(e) => {
-                        const k = e.target.value;
-                        if (k) setSel(Array.from(new Set([...sel, ...(plan?.open ?? []).filter((r) => r.make_key === k && !r.ambiguous).map(rowKey)])));
-                      }}
-                    >
-                      <option value="">Tick a whole make…</option>
+                    <select className={inputCls} value={tickMake} disabled={off} onChange={(e) => { setTickMake(e.target.value); setTickMsg(""); }}>
+                      <option value="">Choose a make…</option>
                       {bulkMakes.map((m) => (
                         <option key={m.make_key} value={m.make_key}>{m.make} ({m.n})</option>
                       ))}
                     </select>
+                    <button
+                      type="button"
+                      className={btn2Cls}
+                      disabled={off || !tickMake}
+                      onClick={() => {
+                        const keys = (plan?.open ?? []).filter((r) => r.make_key === tickMake && !r.ambiguous).map(rowKey);
+                        setSel((cur) => Array.from(new Set([...cur, ...keys])));
+                        setTickMsg(`Ticked ${keys.length} ${bulkMakes.find((m) => m.make_key === tickMake)?.make ?? ""} machine${keys.length === 1 ? "" : "s"}.`);
+                      }}
+                    >
+                      Tick this make
+                    </button>
                     <button type="button" className={btn2Cls} disabled={off || sel.length === 0} onClick={() => setSel([])}>
                       Clear ticks
                     </button>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs text-gray-600">{sel.length} ticked. Type for these:</span>
+                    <span className="text-xs text-gray-600">{tickMsg ? `${tickMsg} ` : ""}{sel.length} ticked in all. Type for these:</span>
                     <select className={inputCls} value={bulkType} onChange={(e) => setBulkType(e.target.value)} disabled={off}>
                       <option value="">Choose a type…</option>
                       {types.map((t) => (
