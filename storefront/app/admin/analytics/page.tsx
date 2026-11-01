@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Notice, btn2Cls, inputCls } from "../../../components/admin/ui";
 import ImportPanel, { type StoreInfo } from "../../../components/admin/analytics/ImportPanel";
+import QuickBooksSection from "../../../components/admin/analytics/QuickBooksSection";
 import {
   Card, Columns, Donut, Empty, HBars, Kpi, Legend, LineChart, PALETTE, StackedBars, TileMap,
   compactMoney, money0, money2, num0, pct, type BarRow, type Series,
@@ -85,6 +86,7 @@ export default function AnalyticsPage() {
   const [error, setError] = useState("");
   const [showImport, setShowImport] = useState(false);
   const [itemBy, setItemBy] = useState<"revenue" | "units">("revenue");
+  const range = useMemo(() => rangeFor(preset, from, to), [preset, from, to]);
 
   const loadStores = useCallback(async () => {
     try {
@@ -162,7 +164,7 @@ export default function AnalyticsPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold">Analytics</h1>
-          <p className="text-sm text-gray-500">eBay sales across your stores. More sources (QuickBooks and others) will plug in here.</p>
+          <p className="text-sm text-gray-500">eBay sales across your stores, then what you spent and kept from QuickBooks below.</p>
         </div>
         <button type="button" className={btn2Cls} onClick={() => setShowImport((v) => !v)}>{showImport ? "Hide data import" : "Add / update data"}</button>
       </div>
@@ -382,12 +384,14 @@ export default function AnalyticsPage() {
 
               <p className="pb-4 text-xs text-gray-500">
                 Notes: eBay’s order report has no fee or refund columns. Refunds here are estimated from an order’s Total Price falling short of items + shipping + tax
-                (a $0.00 order is counted as fully refunded or cancelled). Sales tax collected by eBay is left out of every sales figure. Costs and profit will come from QuickBooks.
+                (a $0.00 order is counted as fully refunded or cancelled). Sales tax collected by eBay is left out of every sales figure. Costs, fees and profit are in the QuickBooks section below.
               </p>
             </div>
           )}
         </>
       )}
+
+      <QuickBooksSection start={range.start} end={range.end} />
     </div>
   );
 }
