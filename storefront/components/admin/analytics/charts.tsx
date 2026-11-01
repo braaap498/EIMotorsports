@@ -343,3 +343,48 @@ export function TileMap({ data, fmt = money0 }: { data: { state: string; value: 
     </div>
   );
 }
+
+/* ------------------------------------------------------------------ heat grid (rows x 12 calendar months) */
+// Values are seasonal indexes: 1.0 = a normal month, above 1 = busier (indigo), below 1 = quieter (amber).
+export function Heatmap({
+  rows, labels = MONTHS, note,
+}: {
+  rows: { label: string; values: (number | null)[]; right?: string }[]; labels?: string[]; note?: string;
+}) {
+  if (!rows.length) return <Empty />;
+  const cell = (v: number | null): { bg: string; fg: string } => {
+    if (v === null || v === undefined) return { bg: "#f3f4f6", fg: "#9ca3af" };
+    if (v >= 1) {
+      const t = Math.min((v - 1) / 1.5, 1);
+      return { bg: `rgba(79,70,229,${0.08 + t * 0.85})`, fg: t > 0.5 ? "#fff" : "#1f2937" };
+    }
+    const t = Math.min((1 - v) / 0.8, 1);
+    return { bg: `rgba(245,158,11,${0.08 + t * 0.55})`, fg: "#1f2937" };
+  };
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[40rem] border-separate border-spacing-0.5 text-center text-[11px]">
+        <thead>
+          <tr>
+            <th className="w-44 text-left font-medium text-gray-500" />
+            {labels.map((m) => <th key={m} className="font-medium text-gray-500">{m}</th>)}
+            <th className="pl-2 text-left font-medium text-gray-500" />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <td className="truncate pr-2 text-left text-xs text-gray-700" title={r.label}>{r.label}</td>
+              {r.values.map((v, i) => {
+                const c = cell(v);
+                return <td key={i} className="h-7 rounded tabular-nums" style={{ background: c.bg, color: c.fg }} title={v === null ? "no data" : `${v.toFixed(2)}x a normal month`}>{v === null ? "" : v.toFixed(1)}</td>;
+              })}
+              <td className="whitespace-nowrap pl-2 text-left text-[11px] text-gray-500">{r.right}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {note && <p className="mt-1 text-[11px] text-gray-400">{note}</p>}
+    </div>
+  );
+}

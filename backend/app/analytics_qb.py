@@ -4,6 +4,8 @@ Mounted at /admin/analytics/quickbooks/*.
 
   GET  /analytics/quickbooks/summary    everything the QuickBooks section of the Analytics page needs
                                         (?start=2022-01-01&end=2022-12-31; no dates = everything)
+  GET  /analytics/quickbooks/month      what is inside ONE month: biggest cost transactions, categories against a normal
+                                        month, and how many sales receipts were entered each day (?month=2021-12)
 
 It only READS qb_records (the mirror the QuickBooks sync fills) and, for the cross-check, analytics_ebay_orders.
 Nothing is written anywhere.
@@ -26,10 +28,11 @@ How the numbers are worked out (all from the line items saved with each record):
   Vendors    the same purchase costs, grouped by who was paid.
 """
 import logging
-from datetime import date
+import re
+from datetime import date, timedelta
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -188,13 +191,13 @@ raw as (
 priced as (
   select w.entity, w.qb_id, w.txn_date, w.party, w.src, w.sign * {_num("w.line->>'Amount'")} as amt,
          case when w.src = 'item' then i.buy_acct else w.line->'AccountRef'->>'FullName' end as acct,
-         a.atype
+         a.atype, coalesce(w.line->>'Memo', w.line->>'Desc') as memo
   from raw w
   left join items i on w.src = 'item' and i.name = w.line->'ItemRef'->>'FullName'
   left join accts a on a.name = (case when w.src = 'item' then i.buy_acct else w.line->'AccountRef'->>'FullName' end)
 ),
 costs as (
-  select entity, qb_id, txn_date, party, amt,
+  select entity, qb_id, txn_date, party, amt, memo,
          case when src = 'item' and (atype is null or atype not in ('Expense', 'OtherExpense')) then 'inventory'
               when atype = 'CostOfGoodsSold' then 'cogs'
               when atype in ('Expense', 'OtherExpense') then 'opex'
@@ -301,4 +304,73 @@ def summary(start: Optional[date] = None, end: Optional[date] = None, db: Sessio
             "purchase_non_costs": not_costs["amount"],
             "purchase_non_cost_lines": not_costs["lines"],
         },
+    }
+
+
+# --------------------------------------------------------------------------
+# One month, opened up: "what made December 2021 lose $500k?"
+# --------------------------------------------------------------------------
+_MONTH_TXNS_SQL = f"""
+with {_LISTS},
+{_BUY_LINES}
+select entity, qb_id, to_char(txn_date, 'YYYY-MM-DD') as date, party,
+       coalesce(sum(amt), 0) as amount, coalesce(max(abs(amt)), 0) as biggest_line, count(*) as lines,
+       string_agg(distinct category, ', ') as categories,
+       string_agg(distinct kind, ', ') as kinds, max(memo) as memo
+from costs where kind is not null and amt is not null
+group by entity, qb_id, txn_date, party
+order by amount desc limit 12
+"""
+
+_SALES_DAYS_SQL = """
+select to_char(r.txn_date, 'YYYY-MM-DD') as date, count(*) as receipts
+from qb_records r
+where r.entity in ('SalesReceipt', 'Invoice') and r.deleted_at is null and r.txn_date is not null
+  and r.txn_date >= cast(:start as date) and r.txn_date <= cast(:end as date)
+group by 1 order by 1
+"""
+
+
+@router.get("/month")
+def month_detail(month: str = Query(...), db: Session = Depends(get_db)):
+    if not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", month or ""):
+        raise HTTPException(status_code=422, detail="month must look like 2021-12")
+    if not _tables_ready(db):
+        return {"ready": False}
+    y, m = int(month[:4]), int(month[5:])
+    first = date(y, m, 1)
+    last = date(y + (m == 12), (m % 12) + 1, 1) - timedelta(days=1)  # last day of the month
+    p: dict[str, Any] = {"start": first, "end": last}
+
+    txns = _rows(db, _MONTH_TXNS_SQL, p)
+    sales_days = _rows(db, _SALES_DAYS_SQL, p)
+    month_costs = [r for r in _rows(db, _COSTS_SQL, p) if r["kind"] is not None]
+
+    # A normal month = every OTHER month that has any cost, so one huge month cannot hide itself.
+    all_costs = _rows(db, _COSTS_SQL, {"start": None, "end": None})
+    months_with_cost = {r["month"] for r in all_costs if r["amount"]}
+    n_other = max(len(months_with_cost - {month}), 1)
+    other_total: dict[str, float] = {}
+    for r in all_costs:
+        if r["month"] != month:
+            other_total[r["category"]] = other_total.get(r["category"], 0.0) + r["amount"]
+    cats: dict[str, dict[str, Any]] = {}
+    for r in month_costs:
+        c = cats.setdefault(r["category"], {"category": r["category"], "kind": r["kind"], "amount": 0.0})
+        c["amount"] += r["amount"]
+    for k, v in cats.items():
+        v["typical"] = other_total.get(k, 0.0) / n_other
+    categories = sorted(cats.values(), key=lambda c: -c["amount"])[:10]
+
+    sales_rows = [r for r in _rows(db, _SALES_SQL, p) if r["bucket"] in ("product", "shipping", "refunds")]
+    return {
+        "ready": True,
+        "month": month,
+        "transactions": txns,
+        "categories": categories,
+        "total_cost": sum(c["amount"] for c in cats.values()),
+        "sales_total": sum(r["amount"] for r in sales_rows),
+        "receipts": sum(r["receipts"] for r in sales_rows if r["bucket"] == "product"),
+        "sales_days": sales_days,
+        "days_with_sales": len(sales_days),
     }
