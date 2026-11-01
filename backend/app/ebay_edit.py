@@ -824,6 +824,32 @@ def live_pushes(body: SwitchIn, db: Session = Depends(get_db)):
     return {"ok": True, "store": row.store, "live_pushes_enabled": body.enabled}
 
 
+def _names_for(db: Session, emails: set[str]) -> dict[str, str]:
+    """Display names for the people in the log, keyed by lower-cased email. Anyone not found simply keeps
+    showing their email; a lookup problem must never break the log."""
+    wanted = sorted({e.lower() for e in emails if e and "@" in e})
+    if not wanted:
+        return {}
+    try:
+        with db.begin_nested():  # a failed lookup must not poison the surrounding transaction
+            rows = db.execute(
+                text(
+                    """
+                    select lower(email) as e,
+                           coalesce(nullif(trim(raw_user_meta_data->>'full_name'), ''),
+                                    nullif(trim(raw_user_meta_data->>'name'), '')) as n
+                    from auth.users
+                    where lower(email) = any(cast(:e as text[]))
+                    """
+                ),
+                {"e": wanted},
+            ).all()
+    except Exception:
+        log.warning("could not look up display names for the push log", exc_info=True)
+        return {}
+    return {r.e: r.n for r in rows if r.n}
+
+
 @router.get("/log")
 def push_log(store: str = Query(...), item_id: Optional[str] = None, limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)):
     row = _store_row(db, store)
@@ -838,4 +864,8 @@ def push_log(store: str = Query(...), item_id: Optional[str] = None, limit: int 
         ),
         {"s": row.store, "i": (item_id or "").strip() or None, "n": limit},
     ).all()
-    return {"store": row.store, "rows": [dict(r._mapping) for r in rows]}
+    out = [dict(r._mapping) for r in rows]
+    names = _names_for(db, {(r["user_email"] or "") for r in out})
+    for r in out:
+        r["user_name"] = names.get((r["user_email"] or "").lower())
+    return {"store": row.store, "rows": out}

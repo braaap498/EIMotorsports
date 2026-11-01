@@ -45,6 +45,7 @@ type LogRow = {
   id: number;
   created_at: string;
   user_email: string | null;
+  user_name: string | null;
   item_id: string;
   action: string;
   dry_run: boolean;
@@ -69,6 +70,11 @@ const photoId = (p: PhotoEdit) => (p.url ? p.url : "key:" + p.key);
 // so nothing in the description can load or run while we compare.
 const inert = (h: string) => new DOMParser().parseFromString(h, "text/html").body.innerHTML.replace(/\s+/g, "");
 const losesFormatting = (h: string) => h.trim() !== "" && inert(h) !== inert(sanitizeHtml(h));
+
+// The visual editor can hand back its own tidied-up version of the HTML it was given (on load, on blur,
+// after a re-render) without the person having typed anything. That must not count as an edit: an edit
+// clears the preview, which made the preview vanish the moment it appeared.
+const sameHtml = (a: string, b: string) => inert(a) === inert(b) || inert(a) === inert(sanitizeHtml(b));
 
 // What exactly the visual editor would drop, so the warning is not a guess. Tags are counted in the
 // description and in its cleaned version; attributes are counted in the description (the editor keeps
@@ -579,6 +585,7 @@ export default function EbayEditPage() {
                   value={description}
                   disabled={off}
                   onChange={(h) => {
+                    if (sameHtml(h, description)) return; // the editor re-saying what we already have, not an edit
                     setDescription(h);
                     touch();
                   }}
@@ -620,7 +627,7 @@ export default function EbayEditPage() {
               {specs.map((sp, n) => (
                 <div key={sp.id} className="flex flex-wrap items-center gap-2">
                   <input
-                    className={`${inputCls} w-48`}
+                    className={`${inputCls} w-48 font-bold`}
                     placeholder="Name"
                     value={sp.name}
                     maxLength={65}
@@ -755,7 +762,7 @@ export default function EbayEditPage() {
                 <li key={l.id} className="flex flex-wrap items-center gap-2 py-1.5">
                   <span className="text-gray-500">{new Date(l.created_at).toLocaleString()}</span>
                   <Badge tone={l.dry_run ? "gray" : l.ok ? "green" : "amber"}>{l.dry_run ? "Preview" : l.ok ? "Sent" : "Failed"}</Badge>
-                  <span className="text-gray-600">{l.user_email ?? ""}</span>
+                  <span className="text-gray-600">{l.user_name ?? l.user_email ?? ""}</span>
                   {l.error && <span className="text-red-700">{l.error}</span>}
                 </li>
               ))}
