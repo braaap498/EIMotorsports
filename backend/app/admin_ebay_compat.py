@@ -337,7 +337,7 @@ def _work(job: _Job, calls: dict, store: str, seller: str, recheck: bool):
     stale_set = set(stale_items)
     job.c["items_total"] = len(todo)
     if not todo:
-        job.message = (f"eBay shows {len(ids):,} active listings and all of them already have compat data saved"
+        job.message = (f"eBay shows {len(ids):,} active listings and all of them already have compatibility data saved"
                        + (f" and were re-checked in the last {RECHECK_DAYS} days" if recheck else "")
                        + ". Nothing to look up.")
         job.save(0, "done")
@@ -440,7 +440,7 @@ def start(body: StartIn, db: Session = Depends(get_db), user: AuthUser = Depends
     running = db.execute(text("select id from ebay_compat_jobs where status in ('running','stopping') limit 1")).first()
     if running:
         db.commit()
-        raise HTTPException(409, "A compat import is already running. Wait for it to finish or stop it first.")
+        raise HTTPException(409, "A compatibility import is already running. Wait for it to finish or stop it first.")
     job_id = db.execute(
         text("insert into ebay_compat_jobs (store, mode, started_by, message) values (:s, :m, :u, 'Starting…') returning id"),
         {"s": info["store"], "m": "recheck" if body.recheck else "new_only", "u": user.email or str(user.user_id)},
