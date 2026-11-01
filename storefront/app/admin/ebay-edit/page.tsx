@@ -757,17 +757,27 @@ export default function EbayEditPage() {
 
           <div className="rounded border border-gray-200 bg-white p-4">
             <h2 className="text-sm font-semibold">Recent activity on this listing</h2>
-            <ul className="mt-2 divide-y divide-gray-100 text-sm">
-              {log.map((l) => (
-                <li key={l.id} className="flex flex-wrap items-center gap-2 py-1.5">
-                  <span className="text-gray-500">{new Date(l.created_at).toLocaleString()}</span>
-                  <Badge tone={l.dry_run ? "gray" : l.ok ? "green" : "amber"}>{l.dry_run ? "Preview" : l.ok ? "Sent" : "Failed"}</Badge>
-                  <span className="text-gray-600">{l.user_name ?? l.user_email ?? ""}</span>
-                  {l.error && <span className="text-red-700">{l.error}</span>}
-                </li>
-              ))}
-              {log.length === 0 && <li className="py-1.5 text-gray-500">Nothing yet.</li>}
-            </ul>
+            {log.length === 0 ? (
+              <p className="mt-2 py-1.5 text-sm text-gray-500">Nothing yet.</p>
+            ) : (
+              <div className="mt-2 overflow-x-auto">
+                {/* A table sizes each column to its widest entry, so the columns stay left aligned whatever the name or date length. */}
+                <table className="w-full text-left text-sm">
+                  <tbody className="divide-y divide-gray-100">
+                    {log.map((l) => (
+                      <tr key={l.id} className="align-top">
+                        <td className="whitespace-nowrap py-1.5 pr-4 text-gray-500">{new Date(l.created_at).toLocaleString()}</td>
+                        <td className="whitespace-nowrap py-1.5 pr-4">
+                          <Badge tone={l.dry_run ? "gray" : l.ok ? "green" : "amber"}>{l.dry_run ? "Preview" : l.ok ? "Sent" : "Failed"}</Badge>
+                        </td>
+                        <td className="whitespace-nowrap py-1.5 pr-4 text-gray-600">{l.user_name ?? l.user_email ?? ""}</td>
+                        <td className="py-1.5 text-red-700">{l.error ?? ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </>
       )}
