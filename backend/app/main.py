@@ -18,6 +18,7 @@ from app.about import store_router as store_about_router
 from app.admin_catalog import router as admin_catalog_router
 from app.admin_cleanup import router as admin_cleanup_router
 from app.admin_ebay_compat import router as admin_ebay_compat_router
+from app.admin_ebay_import import router as admin_ebay_import_router
 from app.admin_ebay_new import router as admin_ebay_new_router
 from app.admin_ebay_listings import router as admin_ebay_listings_router
 from app.ebay_oauth import router as ebay_oauth_router
@@ -89,6 +90,7 @@ admin_router.include_router(ebay_oauth_router)
 admin_router.include_router(ebay_edit_router)
 admin_router.include_router(admin_ebay_photos_router)
 admin_router.include_router(admin_ebay_compat_router)
+admin_router.include_router(admin_ebay_import_router)
 admin_router.include_router(admin_quickbooks_router)
 admin_router.include_router(admin_inventory_router)
 admin_router.include_router(admin_purchase_orders_router)
