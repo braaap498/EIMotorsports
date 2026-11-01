@@ -82,11 +82,13 @@ export default function EbayCompatImportPage() {
 
   // While a run is going, ask for its progress every few seconds.
   const running = !!job?.running;
+  // "stopping" still counts as busy: the conversion is hidden until the import has fully stopped
+  const importBusy = running || job?.status === "running" || job?.status === "stopping";
   useEffect(() => {
-    if (!running) return;
+    if (!importBusy) return;
     const t = setInterval(() => void refresh(), 3000);
     return () => clearInterval(t);
-  }, [running]);
+  }, [importBusy]);
 
   async function start(recheck: boolean) {
     setStarting(true);
@@ -220,7 +222,7 @@ export default function EbayCompatImportPage() {
         </div>
       )}
 
-      <FitmentCard importRunning={running} />
+      {!importBusy && <FitmentCard />}
 
       {stores.length > 0 && (
         <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
@@ -295,7 +297,7 @@ const SRC_NAME: Record<string, string> = {
   title_inferred: "Title with no year (possible fit)",
 };
 
-function FitmentCard({ importRunning }: { importRunning: boolean }) {
+function FitmentCard() {
   const [includeExisting, setIncludeExisting] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [done, setDone] = useState<Plan | null>(null);
@@ -418,7 +420,7 @@ function FitmentCard({ importRunning }: { importRunning: boolean }) {
     }
   }
 
-  const off = importRunning || busy !== "";
+  const off = busy !== "";
 
   return (
     <div className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
@@ -452,7 +454,6 @@ function FitmentCard({ importRunning }: { importRunning: boolean }) {
           {busy === "merge" ? "Converting…" : "Convert to fitment"}
         </button>
       </div>
-      {importRunning && <p className="text-xs text-amber-700">A compatibility import is running. Wait for it to finish first.</p>}
       {err && <Notice kind="error">{err}</Notice>}
       {note && <Notice kind="info">{note}</Notice>}
       {stale && plan && <Notice kind="info">Decisions saved. Press Preview again to refresh the counts, then convert.</Notice>}
