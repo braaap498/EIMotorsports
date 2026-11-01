@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 
@@ -41,6 +41,17 @@ type RunResult = {
   not_ready: number;
 };
 
+type EbayState = { reports: { store: string; n: number }[]; api_todo: number; api_ready: number; api_skipped: number };
+type ApiRunResult = RunResult & {
+  asked_ebay: number;
+  skipped: number;
+  errors: number;
+  error_sample: string[];
+  rate_limited: string | null;
+  remaining_to_ask: number;
+  remaining_to_create: number;
+};
+
 const n = (v: number) => v.toLocaleString();
 
 /* ------------------------------------------------------------------- page */
@@ -53,10 +64,26 @@ export default function EbayListingImportPage() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [running, setRunning] = useState(false);
-  const [totals, setTotals] = useState({ created: 0, photos: 0, compat: 0, labels: 0, problems: [] as string[], compatError: "" });
+  const [totals, setTotals] = useState({ created: 0, photos: 0, compat: 0, labels: 0, problems: [] as string[], compatError: "", asked: 0, skipped: 0, notes: [] as string[] });
+  const [ebayState, setEbayState] = useState<EbayState | null>(null);
   const [error, setError] = useState("");
   const stopRef = useRef(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  async function loadState() {
+    try {
+      setEbayState(await api<EbayState>("/ebay-import/state"));
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }
+
+  useEffect(() => {
+    void loadState();
+  }, []);
+
+  // The report buttons (and Check now) belong to a loaded report; the straight-from-eBay buttons to no report.
+  const hasReport = (ebayState?.reports.length ?? 0) > 0;
 
   async function loadPreview() {
     setLoadingPreview(true);
@@ -79,6 +106,7 @@ export default function EbayListingImportPage() {
     setUploading(true);
     setError("");
     setReports([]);
+    let failed = false;
     try {
       // One file at a time, in the order chosen. A listing in more than one file keeps the data from the last file.
       for (const file of files) {
@@ -88,9 +116,15 @@ export default function EbayListingImportPage() {
           setReports((list) => [...list, { ...r, file: file.name }]);
         } catch (e) {
           setError(`${file.name}: ${errMsg(e)}${files.length > 1 ? " The files before it were saved; the ones after it were not uploaded." : ""}`);
+          failed = true;
           break;
         }
       }
+      if (!failed) {
+        setFileName("");
+        if (fileRef.current) fileRef.current.value = "";
+      }
+      await loadState();
       await loadPreview();
     } finally {
       setUploading(false);
@@ -101,11 +135,12 @@ export default function EbayListingImportPage() {
     setRunning(true);
     stopRef.current = false;
     setError("");
-    setTotals({ created: 0, photos: 0, compat: 0, labels: 0, problems: [], compatError: "" });
+    setTotals({ created: 0, photos: 0, compat: 0, labels: 0, problems: [], compatError: "", asked: 0, skipped: 0, notes: [] });
     try {
       for (;;) {
         const r = await api<RunResult>("/ebay-import/run", { method: "POST", body: { limit } });
         setTotals((t) => ({
+          ...t,
           created: t.created + r.created,
           photos: t.photos + r.photos_attached,
           compat: t.compat + r.compat_copied,
@@ -124,14 +159,45 @@ export default function EbayListingImportPage() {
     }
   }
 
+  async function runFromEbay(limit: number, all: boolean) {
+    setRunning(true);
+    stopRef.current = false;
+    setError("");
+    setTotals({ created: 0, photos: 0, compat: 0, labels: 0, problems: [], compatError: "", asked: 0, skipped: 0, notes: [] });
+    try {
+      for (;;) {
+        const r = await api<ApiRunResult>("/ebay-import/run-api", { method: "POST", body: { limit } });
+        setTotals((t) => ({
+          created: t.created + r.created,
+          photos: t.photos + r.photos_attached,
+          compat: t.compat + r.compat_copied,
+          labels: t.labels + r.label_dropped,
+          problems: [...t.problems, ...r.problems].slice(0, 60),
+          compatError: t.compatError || r.compat_copy_error || "",
+          asked: t.asked + r.asked_ebay,
+          skipped: t.skipped + r.skipped,
+          notes: [...t.notes, ...(r.rate_limited ? [r.rate_limited + " Start it again later; what was done is saved."] : []), ...r.error_sample].slice(0, 20),
+        }));
+        const done = r.remaining_to_ask === 0 && r.remaining_to_create === 0;
+        // Stop when asked, at eBay's limit, when nothing moved (everything left is failing), or when it is all done.
+        if (!all || stopRef.current || r.rate_limited || done || (r.asked_ebay === 0 && r.created === 0)) break;
+      }
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setRunning(false);
+      await loadState();
+    }
+  }
+
   return (
     <div className="space-y-5">
       <div>
         <h2 className="text-xl font-semibold">eBay listing import</h2>
         <p className="mt-1 max-w-3xl text-sm text-gray-600">
           Imports every eBay listing that is not on the website yet, the same way the Link tab does when you create one, and also attaches the photos the photo import saved and copies the compatibility data from the compatibility import.
-          Title, price and store come from a Seller Hub &ldquo;all active listings&rdquo; report (upload one per store) or, when a
-          listing is not in a report, from the compatibility import. New listings are unpublished, with stock 0.
+          Title, price and store come from a Seller Hub &ldquo;all active listings&rdquo; report (upload one per store), or, if you
+          have no report, straight from eBay. New listings are unpublished, with stock 0.
         </p>
       </div>
 
@@ -144,21 +210,28 @@ export default function EbayListingImportPage() {
             <span className="mb-1 block font-medium">eBay store name</span>
             <input className={inputCls} value={store} onChange={(e) => setStore(e.target.value)} placeholder="eandimotorsports" />
           </label>
-          <label className="block text-sm">
-            <span className="mb-1 block font-medium">Report file(s) (.csv)</span>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".csv,text/csv"
-              multiple
-              onChange={(e) => setFileName(Array.from(e.target.files ?? []).map((f) => f.name).join(", "))}
-              className="block text-sm"
-            />
-          </label>
-          <button type="button" className={btnCls} disabled={uploading || running || !fileName} onClick={() => void upload()}>
-            {uploading ? "Uploading…" : "Upload report(s)"}
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,text/csv"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              setFileName(Array.from(e.target.files ?? []).map((f) => f.name).join(", "));
+              setReports([]);
+              setError("");
+            }}
+          />
+          <button type="button" className={btn2Cls} disabled={uploading || running} onClick={() => fileRef.current?.click()}>
+            Choose report(s) (CSV)
+          </button>
+          <button type="button" className={btnCls} disabled={!fileName || uploading || running} onClick={() => void upload()}>
+            {uploading ? "Reading…" : "Upload report(s)"}
           </button>
         </div>
+        <p className="text-xs text-gray-500">
+          {uploading ? "Reading the report(s)…" : fileName ? `Selected: ${fileName}` : "No file chosen yet."}
+        </p>
         <p className="text-xs text-gray-500">Leave the store blank for eandimotorsports; type genuine-oem-parts for the other store. Choose several files at once if they are all for the same store; do the other store in a second upload. Uploading again replaces the earlier rows for the same listings. Every listing in a file that has no product yet will be imported, including ended ones, so only upload ended-listing reports if you want those imported too.</p>
         {reports.map((report) => (
           <div key={report.file} className="text-sm text-gray-700">
@@ -173,6 +246,8 @@ export default function EbayListingImportPage() {
         ))}
       </div>
 
+      {hasReport && (
+        <>
       <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
         <div className="flex flex-wrap items-center gap-3">
           <h3 className="text-base font-semibold">2. Check what will be imported</h3>
@@ -236,11 +311,11 @@ export default function EbayListingImportPage() {
       <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="text-base font-semibold">3. Import</h3>
         <div className="flex flex-wrap gap-3">
-          <button type="button" className={btn2Cls} disabled={running || !preview || preview.ready === 0} onClick={() => void runImport(5, false)}>
+          <button type="button" className={btn2Cls} disabled={running} onClick={() => void runImport(5, false)}>
             Import 5 as a test
           </button>
-          <button type="button" className={btnCls} disabled={running || !preview || preview.ready === 0} onClick={() => void runImport(200, true)}>
-            {running ? "Importing…" : `Import all ${preview ? n(preview.ready) : ""} ready listings`}
+          <button type="button" className={btnCls} disabled={running} onClick={() => void runImport(200, true)}>
+            {running ? "Importing…" : preview ? `Import all ${n(preview.ready)} ready listings` : "Import all ready listings"}
           </button>
           {running && (
             <button type="button" className={btn2Cls} onClick={() => { stopRef.current = true; }}>
@@ -251,8 +326,53 @@ export default function EbayListingImportPage() {
         <p className="text-xs text-gray-500">
           Safe to repeat: listings that are already on the website are skipped. Run the 5-listing test first and open one of the new listings to check it.
         </p>
-        {(totals.created > 0 || totals.problems.length > 0) && (
+      </div>
+        </>
+      )}
+
+      {ebayState && !hasReport && (
+        <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+          <h3 className="text-base font-semibold">2. No report loaded: import straight from eBay</h3>
+          <p className="max-w-3xl text-sm text-gray-600">
+            Asks eBay about each listing that has no website listing yet (title, price, custom label and store), then imports it. That is
+            one eBay lookup per listing, so it uses the same daily allowance as the photo and compatibility imports. If eBay&rsquo;s daily limit
+            is reached it stops and keeps what it has; start it again later. Ended or deleted listings are skipped.
+          </p>
+          <dl className="grid max-w-3xl grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
+            <div><dt className="text-xs text-gray-500">Still to ask eBay about</dt><dd>{n(ebayState.api_todo)}</dd></div>
+            <div><dt className="text-xs text-gray-500">Answered, ready to import</dt><dd>{n(ebayState.api_ready)}</dd></div>
+            <div><dt className="text-xs text-gray-500">Cannot be imported</dt><dd>{n(ebayState.api_skipped)}</dd></div>
+          </dl>
+          <div className="flex flex-wrap gap-3">
+            <button type="button" className={btn2Cls} disabled={running || (ebayState.api_todo === 0 && ebayState.api_ready === 0)} onClick={() => void runFromEbay(5, false)}>
+              Import 5 from eBay as a test
+            </button>
+            <button type="button" className={btnCls} disabled={running || (ebayState.api_todo === 0 && ebayState.api_ready === 0)} onClick={() => void runFromEbay(40, true)}>
+              {running ? "Importing…" : `Import all ${n(ebayState.api_todo + ebayState.api_ready)} from eBay`}
+            </button>
+            {running && (
+              <button type="button" className={btn2Cls} onClick={() => { stopRef.current = true; }}>
+                Stop after this batch
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-gray-500">Safe to repeat. Run the 5-listing test first and open one of the new listings to check it. Avoid running the compatibility or photo import at the same time.</p>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {(totals.created > 0 || totals.asked > 0 || totals.problems.length > 0) && (
           <div className="space-y-1 text-sm text-gray-700">
+            {totals.asked > 0 && (
+              <div>
+                Asked eBay about {n(totals.asked)} listings{totals.skipped > 0 && `; ${n(totals.skipped)} could not be imported (ended, not found or not on a connected store)`}.
+              </div>
+            )}
+            {totals.notes.length > 0 && (
+              <Notice kind="error">
+                <ul className="list-disc pl-5 text-xs">{totals.notes.map((x, i) => <li key={i}>{x}</li>)}</ul>
+              </Notice>
+            )}
             <div>
               Created {n(totals.created)} listings; attached {n(totals.photos)} photos; copied compatibility data for {n(totals.compat)} listings
               {totals.labels > 0 && `; ${n(totals.labels)} labels left empty because they matched the item number`}.
