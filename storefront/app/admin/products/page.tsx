@@ -27,6 +27,18 @@ type Resp = { total: number; items: Row[] };
 
 const LIMIT = 50;
 
+// Column heading -> the field the server sorts by.
+type SortKey = "sku" | "custom_label_sku" | "title" | "list_price" | "quantity_on_hand" | "fitment_count" | "is_published";
+const COLUMNS: { key: SortKey; label: string; width: string }[] = [
+  { key: "sku", label: "SKU", width: "w-40" },
+  { key: "custom_label_sku", label: "Custom label SKU", width: "w-48" },
+  { key: "title", label: "Title", width: "" }, // takes the rest of the width
+  { key: "list_price", label: "Price", width: "w-24" },
+  { key: "quantity_on_hand", label: "Qty", width: "w-20" },
+  { key: "fitment_count", label: "Fitment", width: "w-28" },
+  { key: "is_published", label: "Status", width: "w-44" },
+];
+
 export default function ProductsPage() {
   const { can } = useAccess();
   const mayEdit = can("products.edit_details", "products.edit_price", "inventory.adjust", "products.publish", "fitment.add");
@@ -35,6 +47,8 @@ export default function ProductsPage() {
   const [published, setPublished] = useState("");
   const [universal, setUniversal] = useState("");
   const [noFitment, setNoFitment] = useState(false);
+  const [sort, setSort] = useState<SortKey | "">("");
+  const [dir, setDir] = useState<"asc" | "desc">("asc");
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<Resp>({ total: 0, items: [] });
   const [error, setError] = useState("");
@@ -43,7 +57,7 @@ export default function ProductsPage() {
   // Come back to the same search, filters and page after visiting a product.
   // ?no_fitment=1 (from the dashboard) pre-ticks the filter instead.
   useEffect(() => {
-    const saved = loadSaved<{ q: string; published: string; universal: string; noFitment: boolean; offset: number }>("products");
+    const saved = loadSaved<{ q: string; published: string; universal: string; noFitment: boolean; offset: number; sort?: SortKey | ""; dir?: "asc" | "desc" }>("products");
     if (saved) {
       setQInput(saved.q);
       setQ(saved.q);
@@ -51,6 +65,8 @@ export default function ProductsPage() {
       setUniversal(saved.universal);
       setNoFitment(saved.noFitment);
       setOffset(saved.offset);
+      setSort(saved.sort ?? "");
+      setDir(saved.dir ?? "asc");
     }
     if (new URLSearchParams(window.location.search).get("no_fitment") === "1") {
       setNoFitment(true);
@@ -60,8 +76,8 @@ export default function ProductsPage() {
   }, []);
 
   useEffect(() => {
-    if (ready) saveSaved("products", { q, published, universal, noFitment, offset });
-  }, [ready, q, published, universal, noFitment, offset]);
+    if (ready) saveSaved("products", { q, published, universal, noFitment, offset, sort, dir });
+  }, [ready, q, published, universal, noFitment, offset, sort, dir]);
 
   const load = useCallback(() => {
     if (!ready) return;
@@ -70,6 +86,10 @@ export default function ProductsPage() {
     if (published) p.set("published", published);
     if (universal) p.set("universal", universal);
     if (noFitment) p.set("no_fitment", "true");
+    if (sort) {
+      p.set("sort", sort);
+      p.set("dir", dir);
+    }
     api<Resp>(`/products?${p}`)
       .then((d) => {
         setData(d);
@@ -80,11 +100,29 @@ export default function ProductsPage() {
         if (published) filters.set("published", published);
         if (universal) filters.set("universal", universal);
         if (noFitment) filters.set("no_fitment", "true");
+        if (sort) {
+          filters.set("sort", sort);
+          filters.set("dir", dir);
+        }
         saveNav({ kind: "products", query: filters.toString(), limit: LIMIT, offset, total: d.total, ids: d.items.map((i) => i.id) });
       })
       .catch((e) => setError(errMsg(e)));
-  }, [ready, q, published, universal, noFitment, offset]);
+  }, [ready, q, published, universal, noFitment, offset, sort, dir]);
   useEffect(load, [load]);
+
+  // Click a heading: ascending, click again: descending, a third click goes back to the default order.
+  function clickSort(key: SortKey) {
+    if (sort !== key) {
+      setSort(key);
+      setDir("asc");
+    } else if (dir === "asc") {
+      setDir("desc");
+    } else {
+      setSort("");
+      setDir("asc");
+    }
+    setOffset(0);
+  }
 
   function filterChange(fn: () => void) {
     fn();
@@ -133,25 +171,32 @@ export default function ProductsPage() {
       <Pager total={data.total} limit={LIMIT} offset={offset} onChange={setOffset} />
 
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="w-full text-left text-sm">
+        <table className="w-full min-w-[68rem] table-fixed text-left text-sm">
+          <colgroup>
+            {COLUMNS.map((c) => (
+              <col key={c.key} className={c.width} />
+            ))}
+            <col className="w-24" />
+          </colgroup>
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
-              <th className="px-3 py-2">SKU</th>
-              <th className="px-3 py-2">Custom label SKU</th>
-              <th className="px-3 py-2">Title</th>
-              <th className="px-3 py-2">Price</th>
-              <th className="px-3 py-2">Qty</th>
-              <th className="px-3 py-2">Fitment</th>
-              <th className="px-3 py-2">Status</th>
+              {COLUMNS.map((c) => (
+                <th key={c.key} className="px-3 py-2" aria-sort={sort === c.key ? (dir === "asc" ? "ascending" : "descending") : "none"}>
+                  <button type="button" className="flex w-full items-center gap-1 text-left uppercase hover:text-gray-900" onClick={() => clickSort(c.key)}>
+                    <span className="truncate">{c.label}</span>
+                    <span className="w-3 shrink-0 text-gray-700">{sort === c.key ? (dir === "asc" ? "▲" : "▼") : ""}</span>
+                  </button>
+                </th>
+              ))}
               <th className="px-3 py-2" />
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {data.items.map((p) => (
               <ClickRow key={p.id} href={`/admin/products/${p.id}`}>
-                <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.sku}</td>
-                <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.custom_label_sku ?? "—"}</td>
-                <td className="max-w-md px-3 py-2 font-medium">
+                <td className="truncate px-3 py-2 text-gray-600" title={p.sku}>{p.sku}</td>
+                <td className="truncate px-3 py-2 text-gray-600" title={p.custom_label_sku ?? ""}>{p.custom_label_sku ?? "—"}</td>
+                <td className="px-3 py-2 font-medium">
                   <Link href={`/admin/products/${p.id}`} className="hover:underline">{p.title}</Link>
                 </td>
                 <td className="px-3 py-2">{p.list_price != null ? Number(p.list_price).toFixed(2) : "—"}</td>

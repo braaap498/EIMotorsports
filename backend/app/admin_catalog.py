@@ -570,6 +570,18 @@ def list_categories(db: Session = Depends(get_db)):
     return [dict(r._mapping) for r in rows]
 
 
+# Columns the products list can be sorted by (whitelisted: the client never sends SQL).
+_PRODUCT_SORTS = {
+    "sku": "p.sku_display",
+    "custom_label_sku": "p.custom_label_sku",
+    "title": "lower(p.title)",
+    "list_price": "p.list_price",
+    "quantity_on_hand": "p.quantity_on_hand",
+    "fitment_count": "(select count(*) from product_fitment pf2 where pf2.product_id = p.id)",
+    "is_published": "p.is_published",
+}
+
+
 @router.get("/products")
 @needs(*READ_LISTS)
 def list_products(
@@ -578,10 +590,17 @@ def list_products(
     published: Optional[bool] = None,
     universal: Optional[bool] = None,
     no_fitment: bool = False,
+    sort: Optional[str] = None,
+    dir: str = "asc",
     limit: int = Query(50, le=200),
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
+    sort_expr = _PRODUCT_SORTS.get(sort or "")
+    if sort and not sort_expr:
+        raise HTTPException(400, "Unknown sort column.")
+    direction = "desc" if dir == "desc" else "asc"
+    order_by = f"{sort_expr} {direction} nulls last, p.id desc" if sort_expr else "p.id desc"
     params = {
         "like": like(q),
         "category_id": category_id,
@@ -612,7 +631,7 @@ def list_products(
                    p.category_id, p.is_published, p.is_active, p.is_universal,
                    (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count
             from products p {where}
-            order by p.id desc limit :limit offset :offset
+            order by {order_by} limit :limit offset :offset
             """
         ),
         params,
