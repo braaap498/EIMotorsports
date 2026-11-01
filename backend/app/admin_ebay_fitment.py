@@ -542,13 +542,18 @@ class BulkIn(BaseModel):
     mode: Literal["accept_suggestions", "create_all"]
     min_score: float = 0.95
     include_existing: bool = False
+    make_key: Optional[str] = None  # create_all: only this make (required for create_all)
+    type_id: Optional[int] = None  # create_all: vehicle type for the new models (None = none, Ski-Doo / Sea-Doo defaults still apply)
 
 
 @router.post("/decide-bulk")
 def decide_bulk(body: BulkIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     """accept_suggestions: map every open machine whose best guess scores at least min_score (default 0.95, the
     'eBay submodel equals your model' kind; lower scores are guesses and need a look).
-    create_all: create every open machine as a new model from its own spelling (not the ambiguous ones)."""
+    create_all: create every open machine of ONE make (make_key) as a new model from its own spelling, with the given
+    type (not the ambiguous ones)."""
+    if body.mode == "create_all" and not body.make_key:
+        raise HTTPException(400, "Choose a make: new models are created one make at a time, so each gets the right type.")
     counts = {"mapped": 0, "created": 0, "skipped": 0, "left": 0}
     try:
         _build(db, body.include_existing)
@@ -563,10 +568,11 @@ def decide_bulk(body: BulkIn, db: Session = Depends(get_db), user: AuthUser = De
                     counts["left"] += 1
                     continue
             else:
-                if r["ambiguous"]:
+                if r["ambiguous"] or r["make_key"] != body.make_key:
                     counts["left"] += 1
                     continue
                 d.action = "create"
+                d.type_id = body.type_id
             counts[_apply_decision(db, d)] += 1
         finish(db, refresh=counts["created"] > 0)
     except HTTPException:

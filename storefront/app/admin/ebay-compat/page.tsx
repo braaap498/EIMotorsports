@@ -306,7 +306,14 @@ function FitmentCard() {
   const [note, setNote] = useState("");
   const [stale, setStale] = useState(false);
   const [types, setTypes] = useState<VType[]>([]);
-  const [newType, setNewType] = useState("");
+  // "Create new" asks for the type right then: createRow is the row being created, createType what was chosen
+  // ("" = not chosen yet, "none" = no type on purpose). The bulk create has its own make + type choice.
+  const [createRow, setCreateRow] = useState<string | null>(null);
+  const [createType, setCreateType] = useState("");
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [sel, setSel] = useState<string[]>([]); // ticked rows for the multi-create panel
+  const [selFilter, setSelFilter] = useState("");
+  const [bulkType, setBulkType] = useState("");
   const [pick, setPick] = useState<string | null>(null);
   const [pickQ, setPickQ] = useState("");
   const [hits, setHits] = useState<ModelHit[]>([]);
@@ -355,7 +362,7 @@ function FitmentCard() {
     }
   }
 
-  function decision(r: OpenRow, action: "map" | "create" | "skip", modelId?: number) {
+  function decision(r: OpenRow, action: "map" | "create" | "skip", modelId?: number, typeId?: number | null) {
     return {
       make_key: r.make_key,
       model_key: r.model_key,
@@ -363,17 +370,18 @@ function FitmentCard() {
       model: r.model,
       action,
       model_id: modelId ?? null,
-      type_id: action === "create" && newType ? Number(newType) : null,
+      type_id: action === "create" ? typeId ?? null : null,
     };
   }
 
-  async function decide(r: OpenRow, action: "map" | "create" | "skip", modelId?: number) {
+  async function decide(r: OpenRow, action: "map" | "create" | "skip", modelId?: number, typeId?: number | null) {
     setBusy("decide");
     setErr("");
     try {
-      await api("/ebay-compat/fitment/decide", { method: "POST", body: { decisions: [decision(r, action, modelId)] } });
+      await api("/ebay-compat/fitment/decide", { method: "POST", body: { decisions: [decision(r, action, modelId, typeId)] } });
       setPlan((p) => (p ? { ...p, open: p.open.filter((x) => rowKey(x) !== rowKey(r)), open_total: Math.max(0, p.open_total - 1) } : p));
       setPick(null);
+      setCreateRow(null);
       setStale(true);
     } catch (e) {
       setErr(errMsg(e));
@@ -382,23 +390,52 @@ function FitmentCard() {
     }
   }
 
-  async function bulk(mode: "accept_suggestions" | "create_all") {
-    const text =
-      mode === "accept_suggestions"
-        ? "Use the suggested model for every machine whose suggestion scores 0.95 or more (eBay's own submodel equals your model)?"
-        : `Create EVERY machine still in the list as a new model, using eBay's spelling${
-            newType ? " and the chosen type" : " (no vehicle type)"
-          }? Check the list first: a misspelling would become its own model.`;
-    if (!window.confirm(text)) return;
+  async function bulkAccept() {
+    if (!window.confirm("Use the suggested model for every machine whose suggestion scores 0.95 or more (eBay's own submodel equals your model)?")) return;
     setBusy("decide");
     setErr("");
     try {
       const r = await api<{ mapped: number; created: number; skipped: number; left: number }>("/ebay-compat/fitment/decide-bulk", {
         method: "POST",
-        body: { mode, include_existing: includeExisting, min_score: 0.95 },
+        body: { mode: "accept_suggestions", include_existing: includeExisting, min_score: 0.95 },
       });
-      setNote(`Saved: ${r.mapped} mapped, ${r.created} created. ${r.left} left for you. Press Preview again for the new counts.`);
+      setNote(`Saved: ${r.mapped} mapped. ${r.left} left for you. Press Preview again for the new counts.`);
       setPlan(null);
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  // Create the ticked machines as new models, all with the one type chosen in the panel.
+  async function bulkCreate() {
+    if (!plan || sel.length === 0 || !bulkType) return;
+    const rows = plan.open.filter((r) => sel.includes(rowKey(r)) && !r.ambiguous);
+    if (rows.length === 0) return;
+    const typeName = bulkType === "none" ? "no vehicle type" : types.find((t) => String(t.id) === bulkType)?.name ?? "the chosen type";
+    const all = rows.length >= plan.open.filter((r) => !r.ambiguous).length;
+    const msg =
+      `Create ${rows.length} machine${rows.length === 1 ? "" : "s"} as new models, all with type: ${typeName}, using eBay's spelling?` +
+      (all
+        ? `\n\nThis is EVERY machine left in the list, so they will all get the same type. If that is not what you intend, cancel, tick just one group (a make, or the rows of one kind), and repeat with the other types.`
+        : "") +
+      `\n\nCheck the names first: a misspelling would become its own model.`;
+    if (!window.confirm(msg)) return;
+    setBusy("decide");
+    setErr("");
+    try {
+      const typeId = bulkType === "none" ? null : Number(bulkType);
+      const r = await api<{ mapped: number; created: number; skipped: number }>("/ebay-compat/fitment/decide", {
+        method: "POST",
+        body: { decisions: rows.map((x) => decision(x, "create", undefined, typeId)) },
+      });
+      const done = new Set(rows.map(rowKey));
+      setPlan((p) => (p ? { ...p, open: p.open.filter((x) => !done.has(rowKey(x))), open_total: Math.max(0, p.open_total - rows.length) } : p));
+      setSel([]);
+      setBulkType("");
+      setNote(`Created ${r.created} new model${r.created === 1 ? "" : "s"}. Pick the next group and type, or press Preview for the new counts.`);
+      setStale(true);
     } catch (e) {
       setErr(errMsg(e));
     } finally {
@@ -421,6 +458,20 @@ function FitmentCard() {
   }
 
   const off = busy !== "";
+  const shownRows = (plan?.open ?? []).filter((r) => {
+    const f = bulkOpen ? selFilter.trim().toLowerCase() : "";
+    return !f || `${r.make} ${r.model}`.toLowerCase().includes(f);
+  });
+  const bulkMakes = (() => {
+    const m = new Map<string, { make_key: string; make: string; n: number }>();
+    for (const r of plan?.open ?? []) {
+      if (r.ambiguous) continue;
+      const e = m.get(r.make_key) ?? { make_key: r.make_key, make: r.make, n: 0 };
+      e.n += 1;
+      m.set(r.make_key, e);
+    }
+    return Array.from(m.values()).sort((a, b) => a.make.localeCompare(b.make));
+  })();
 
   return (
     <div className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
@@ -516,26 +567,62 @@ function FitmentCard() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-3 text-sm">
-                <label className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500">Type for new models</span>
-                  <select className={inputCls} value={newType} onChange={(e) => setNewType(e.target.value)} disabled={off}>
-                    <option value="">none</option>
-                    {types.map((t) => (
-                      <option key={t.id} value={t.id}>{t.name}</option>
-                    ))}
-                  </select>
-                </label>
-                <button type="button" className={btn2Cls} disabled={off} onClick={() => void bulk("accept_suggestions")}>
+                <button type="button" className={btn2Cls} disabled={off} onClick={() => void bulkAccept()}>
                   Use all suggestions scoring 0.95+
                 </button>
-                <button type="button" className={btn2Cls} disabled={off} onClick={() => void bulk("create_all")}>
-                  Create all remaining as new models
+                <button type="button" className={btn2Cls} disabled={off} onClick={() => setBulkOpen((v) => !v)}>
+                  Create several as new models…
                 </button>
               </div>
+              {bulkOpen && (
+                <div className="max-w-3xl space-y-2 rounded border border-gray-200 bg-gray-50 p-3 text-sm">
+                  <p className="text-xs text-gray-600">
+                    Tick the machines to create, choose their type, and press Create. Models of different types are done in
+                    separate rounds: tick one group, create it, then tick the next group and pick its type.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input className={inputCls} placeholder="Filter the list, e.g. Yamaha WaveRunner" value={selFilter} onChange={(e) => setSelFilter(e.target.value)} />
+                    <button type="button" className={btn2Cls} disabled={off} onClick={() => setSel(Array.from(new Set([...sel, ...shownRows.filter((r) => !r.ambiguous).map(rowKey)])))}>
+                      Tick all shown ({shownRows.filter((r) => !r.ambiguous).length})
+                    </button>
+                    <select
+                      className={inputCls}
+                      value=""
+                      disabled={off}
+                      onChange={(e) => {
+                        const k = e.target.value;
+                        if (k) setSel(Array.from(new Set([...sel, ...(plan?.open ?? []).filter((r) => r.make_key === k && !r.ambiguous).map(rowKey)])));
+                      }}
+                    >
+                      <option value="">Tick a whole make…</option>
+                      {bulkMakes.map((m) => (
+                        <option key={m.make_key} value={m.make_key}>{m.make} ({m.n})</option>
+                      ))}
+                    </select>
+                    <button type="button" className={btn2Cls} disabled={off || sel.length === 0} onClick={() => setSel([])}>
+                      Clear ticks
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-gray-600">{sel.length} ticked. Type for these:</span>
+                    <select className={inputCls} value={bulkType} onChange={(e) => setBulkType(e.target.value)} disabled={off}>
+                      <option value="">Choose a type…</option>
+                      {types.map((t) => (
+                        <option key={t.id} value={t.id}>{t.name}</option>
+                      ))}
+                      <option value="none">No type (set later)</option>
+                    </select>
+                    <button type="button" className={btnCls} disabled={off || sel.length === 0 || !bulkType} onClick={() => void bulkCreate()}>
+                      Create {sel.length} as new models
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="max-h-[32rem] overflow-auto rounded border border-gray-100">
                 <table className="w-full text-left text-xs">
                   <thead className="sticky top-0 bg-gray-50 text-gray-500">
                     <tr>
+                      {bulkOpen && <th className="px-2 py-1"></th>}
                       <th className="px-2 py-1">eBay / title says</th>
                       <th className="px-2 py-1 text-right">Parts</th>
                       <th className="px-2 py-1">Best guess</th>
@@ -543,8 +630,18 @@ function FitmentCard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {plan.open.map((r) => (
+                    {shownRows.map((r) => (
                       <tr key={rowKey(r)} className="align-top">
+                        {bulkOpen && (
+                          <td className="px-2 py-1">
+                            <input
+                              type="checkbox"
+                              disabled={off || r.ambiguous}
+                              checked={sel.includes(rowKey(r))}
+                              onChange={(e) => setSel(e.target.checked ? [...sel, rowKey(r)] : sel.filter((k) => k !== rowKey(r)))}
+                            />
+                          </td>
+                        )}
                         <td className="px-2 py-1">
                           <div className="font-medium">{r.make} {r.model}</div>
                           {!r.make_exists && <div className="text-amber-700">make not in the system either</div>}
@@ -561,11 +658,11 @@ function FitmentCard() {
                                 Use guess
                               </button>
                             )}
-                            <button type="button" className={btn2Cls} disabled={off} onClick={() => { setPick(pick === rowKey(r) ? null : rowKey(r)); setPickQ(""); setHits([]); }}>
+                            <button type="button" className={btn2Cls} disabled={off} onClick={() => { setPick(pick === rowKey(r) ? null : rowKey(r)); setPickQ(""); setHits([]); setCreateRow(null); }}>
                               Pick model
                             </button>
                             {!r.ambiguous && (
-                              <button type="button" className={btn2Cls} disabled={off} onClick={() => void decide(r, "create")}>
+                              <button type="button" className={btn2Cls} disabled={off} onClick={() => { setCreateRow(createRow === rowKey(r) ? null : rowKey(r)); setCreateType(""); setPick(null); }}>
                                 Create new
                               </button>
                             )}
@@ -573,6 +670,25 @@ function FitmentCard() {
                               Skip
                             </button>
                           </div>
+                          {createRow === rowKey(r) && (
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              <select className={inputCls} value={createType} onChange={(e) => setCreateType(e.target.value)} disabled={off}>
+                                <option value="">Choose a type…</option>
+                                {types.map((t) => (
+                                  <option key={t.id} value={t.id}>{t.name}</option>
+                                ))}
+                                <option value="none">No type (set later)</option>
+                              </select>
+                              <button
+                                type="button"
+                                className={btnCls}
+                                disabled={off || !createType}
+                                onClick={() => void decide(r, "create", undefined, createType === "none" ? null : Number(createType))}
+                              >
+                                Create {r.make} {r.model}
+                              </button>
+                            </div>
+                          )}
                           {pick === rowKey(r) && (
                             <div className="mt-2 space-y-1">
                               <input className={inputCls} placeholder="Search your models, e.g. TRX400EX" value={pickQ} onChange={(e) => void search(e.target.value)} />
