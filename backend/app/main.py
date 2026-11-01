@@ -26,6 +26,7 @@ from app.admin_inventory import router as admin_inventory_router
 from app.admin_photos import router as admin_photos_router
 from app.admin_purchase_orders import router as admin_purchase_orders_router
 from app.admin_users import router as admin_users_router
+from app.autodist import router as autodist_router
 from app.auth import AuthUser, require_staff
 from app.config import get_settings
 from app.database import get_db
@@ -94,6 +95,7 @@ admin_router.include_router(admin_users_router)
 admin_router.include_router(admin_about_router)
 admin_router.include_router(admin_reviews_router)
 admin_router.include_router(admin_help_router)
+admin_router.include_router(autodist_router)
 
 app.include_router(admin_router)
 app.include_router(fitment_router)

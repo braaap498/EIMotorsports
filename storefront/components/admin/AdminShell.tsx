@@ -25,6 +25,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
   { href: "/admin/cleanup", label: "eBay", match: ["/admin/cleanup", "/admin/ebay-new", "/admin/ebay-photos", "/admin/ebay-listings"] },
   { href: "/admin/quickbooks", label: "QuickBooks" },
+  { href: "/admin/supplier", label: "Autodist" },
   { href: "/admin/users", label: "Team" },
   { href: "/admin/about", label: "About page" },
   { href: "/admin/help", label: "Help pages" },
