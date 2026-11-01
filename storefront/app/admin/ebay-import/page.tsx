@@ -45,7 +45,7 @@ const n = (v: number) => v.toLocaleString();
 
 /* ------------------------------------------------------------------- page */
 
-export default function EbayProductImportPage() {
+export default function EbayListingImportPage() {
   const [store, setStore] = useState("");
   const [fileName, setFileName] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -121,12 +121,11 @@ export default function EbayProductImportPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="text-xl font-semibold">eBay product import</h2>
+        <h2 className="text-xl font-semibold">eBay listing import</h2>
         <p className="mt-1 max-w-3xl text-sm text-gray-600">
-          Makes a product for every eBay listing that is not linked to one yet, the same way &ldquo;Create product&rdquo; does on
-          the Link tab, and also attaches the photos the photo import saved and copies the compat data from the compat import.
+          Imports every eBay listing that is not on the website yet, the same way the Link tab does when you create one, and also attaches the photos the photo import saved and copies the compat data from the compat import.
           Title, price and store come from a Seller Hub &ldquo;all active listings&rdquo; report (upload one per store) or, when a
-          listing is not in a report, from the compat import. New products are unpublished, with stock 0.
+          listing is not in a report, from the compat import. New listings are unpublished, with stock 0.
         </p>
       </div>
 
@@ -177,7 +176,7 @@ export default function EbayProductImportPage() {
         {preview && (
           <div className="space-y-3">
             <dl className="grid max-w-3xl grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
-              <div><dt className="text-xs text-gray-500">Listings with no product</dt><dd>{n(preview.total)}</dd></div>
+              <div><dt className="text-xs text-gray-500">Not imported yet</dt><dd>{n(preview.total)}</dd></div>
               <div><dt className="text-xs text-gray-500">Ready to import</dt><dd className="font-medium">{n(preview.ready)}</dd></div>
               <div><dt className="text-xs text-gray-500">Missing store / missing title</dt><dd>{n(preview.no_store)} / {n(preview.no_title)}</dd></div>
               <div><dt className="text-xs text-gray-500">With a custom label</dt><dd>{n(preview.with_label)}</dd></div>
@@ -243,15 +242,15 @@ export default function EbayProductImportPage() {
           )}
         </div>
         <p className="text-xs text-gray-500">
-          Safe to repeat: listings that already have a product are skipped. Run the 5-listing test first and open one of the new products to check it.
+          Safe to repeat: listings that are already on the website are skipped. Run the 5-listing test first and open one of the new listings to check it.
         </p>
         {(totals.created > 0 || totals.problems.length > 0) && (
           <div className="space-y-1 text-sm text-gray-700">
             <div>
-              Created {n(totals.created)} products; attached {n(totals.photos)} photos; copied compat for {n(totals.compat)} listings
+              Created {n(totals.created)} listings; attached {n(totals.photos)} photos; copied compat for {n(totals.compat)} listings
               {totals.labels > 0 && `; ${n(totals.labels)} labels left empty because they matched the item number`}.
             </div>
-            {totals.compatError && <Notice kind="error">Compat copy problem (products were still created): {totals.compatError}</Notice>}
+            {totals.compatError && <Notice kind="error">Compat copy problem (the listings were still created): {totals.compatError}</Notice>}
             {totals.problems.length > 0 && (
               <details>
                 <summary className="cursor-pointer">Problems ({totals.problems.length})</summary>

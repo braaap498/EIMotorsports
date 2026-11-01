@@ -43,7 +43,7 @@ const EBAY_TABS = [
   { href: "/admin/ebay-new", label: "Link new eBay listings to a product" },
   { href: "/admin/ebay-photos", label: "eBay photo import" },
   { href: "/admin/ebay-compat", label: "eBay compat import" },
-  { href: "/admin/ebay-import", label: "eBay product import" },
+  { href: "/admin/ebay-import", label: "eBay listing import" },
   { href: "/admin/ebay-listings", label: "Live listings" },
 ];
 
