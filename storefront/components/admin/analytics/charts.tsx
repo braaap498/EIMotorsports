@@ -227,18 +227,23 @@ export function HBars({ rows, fmt = money0, color = PALETTE[0], labelWidth = "w-
 /* ------------------------------------------------------------------ vertical columns (weekday, order size ...) */
 export function Columns({ rows, fmt = num0, color = PALETTE[0], height = 180 }: { rows: BarRow[]; fmt?: (n: number) => string; color?: string; height?: number }) {
   if (!rows.length) return <Empty />;
-  const W = 420, H = height, T = 18, B = 34;
+  // Few bars: the original compact 420-wide canvas. Many bars (day of month, 31 of them): a wider canvas with
+  // smaller type, otherwise the whole drawing is scaled up to the card width and the numbers get huge and overlap.
+  const dense = rows.length > 12;
+  const W = dense ? Math.max(420, rows.length * 30) : 420;
+  const H = height, T = 18, B = 34;
+  const vFont = dense ? 9 : 10, lFont = dense ? 9.5 : 10.5;
   const max = Math.max(...rows.map((r) => r.value), 1);
   const bw = W / rows.length;
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" role="img">
+    <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" style={dense ? { maxHeight: 260 } : undefined} role="img">
       {rows.map((r, i) => {
         const h = (r.value / max) * (H - T - B);
         return (
           <g key={r.label}>
             <rect x={i * bw + bw * 0.16} y={H - B - h} width={bw * 0.68} height={h} rx="3" fill={r.color ?? color} />
-            <text x={i * bw + bw / 2} y={H - B - h - 5} textAnchor="middle" fontSize="10" fill="#374151">{fmt(r.value)}</text>
-            <text x={i * bw + bw / 2} y={H - 14} textAnchor="middle" fontSize="10.5" fill="#6b7280">{r.label}</text>
+            <text x={i * bw + bw / 2} y={H - B - h - 5} textAnchor="middle" fontSize={vFont} fill="#374151">{fmt(r.value)}</text>
+            <text x={i * bw + bw / 2} y={H - 14} textAnchor="middle" fontSize={lFont} fill="#6b7280">{r.label}</text>
           </g>
         );
       })}

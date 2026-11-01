@@ -493,7 +493,7 @@ function Buyers({ d }: { d: Ok }) {
       )}
 
       {b.power.top.length > 0 && (
-        <Card title="Heaviest buyers" sub="Usernames are masked. Many repeat orders can mean a shop or a reseller.">
+        <Card title="Heaviest buyers" sub="Many repeat orders can mean a shop or a reseller.">
           <table className="w-full text-left text-sm">
             <tbody>
               {b.power.top.map((t, i) => (

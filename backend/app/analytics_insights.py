@@ -6,7 +6,7 @@ Mounted at /admin/analytics/ebay/insights.
 
 Reads analytics_ebay_orders and analytics_ebay_order_items (nothing is written). The number crunching is in
 insights_calc.py. Cancelled / fully refunded orders (Total Price of $0) are left out of everything here, since
-they are not sales. Buyer usernames are only ever used to count and are masked if shown.
+they are not sales. Buyer usernames are only used to count and to list the heaviest buyers (admin only).
 """
 import logging
 from datetime import date

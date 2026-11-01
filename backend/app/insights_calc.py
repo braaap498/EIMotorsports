@@ -686,7 +686,7 @@ def _buyers(recs, complete, first_date, last_date) -> dict:
         "power": {
             "buyers": len(power), "share_of_buyers": _r(len(power) / n_buyers, 4) if n_buyers else 0,
             "share_of_revenue": _r(sum(buyer_rev[b] for b in power) / tot_rev, 3),
-            "top": [{"who": mask_user(b), "orders": buyer_orders[b], "revenue": _r(buyer_rev[b], 0)} for b in top_power],
+            "top": [{"who": (b or "(unknown)"), "orders": buyer_orders[b], "revenue": _r(buyer_rev[b], 0)} for b in top_power],
         },
         "day_of_month": dom,
         "weekend_share": _r(wk["weekend"] / max(wk["weekend"] + wk["weekday"], 1), 3),
