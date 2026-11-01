@@ -16,6 +16,7 @@ type Preview = {
   no_compat: number;
   no_price: number;
   with_label: number;
+  ready_ended: number;
   by_store: Record<string, number>;
   sample: Sample[];
   skipped_sample: { item: string; store: string | null; title: string | null }[];
@@ -23,6 +24,7 @@ type Preview = {
 };
 type ReportResult = {
   store: string;
+  listing_status?: string | null;
   listings_in_report: number;
   unreadable_rows: number;
   with_label: number;
@@ -111,8 +113,11 @@ export default function EbayListingImportPage() {
       // One file at a time, in the order chosen. A listing in more than one file keeps the data from the last file.
       for (const file of files) {
         const csv = await file.text();
+        // Which kind of report this is comes from the file name Seller Hub gave it ("inactive" must be tested before "active").
+        const lower = file.name.toLowerCase();
+        const status = lower.includes("inactive") ? "ended" : lower.includes("scheduled") ? "scheduled" : lower.includes("active") ? "active" : "";
         try {
-          const r = await api<ReportResult>("/ebay-import/report", { method: "POST", body: { store: store.trim(), csv } });
+          const r = await api<ReportResult>("/ebay-import/report", { method: "POST", body: { store: store.trim(), csv, status } });
           setReports((list) => [...list, { ...r, file: file.name }]);
         } catch (e) {
           setError(`${file.name}: ${errMsg(e)}${files.length > 1 ? " The files before it were saved; the ones after it were not uploaded." : ""}`);
@@ -235,7 +240,7 @@ export default function EbayListingImportPage() {
         <p className="text-xs text-gray-500">Leave the store blank for eandimotorsports; type genuine-oem-parts for the other store. Choose several files at once if they are all for the same store; do the other store in a second upload. Uploading again replaces the earlier rows for the same listings. Every listing in a file that has no product yet will be imported, including ended ones, so only upload ended-listing reports if you want those imported too.</p>
         {reports.map((report) => (
           <div key={report.file} className="text-sm text-gray-700">
-            <span className="font-medium">{report.file}:</span> {n(report.listings_in_report)} listings read for {report.store}; {n(report.with_label)} have a custom label, {n(report.without_price)} have no price
+            <span className="font-medium">{report.file}:</span> {n(report.listings_in_report)} {report.listing_status === "ended" ? "ended " : report.listing_status === "scheduled" ? "scheduled " : ""}listings read for {report.store}{report.listing_status ? "" : " (could not tell if active or ended from the file name, so they will be imported as drafts)"}; {n(report.with_label)} have a custom label, {n(report.without_price)} have no price
             {report.unreadable_rows > 0 && `, ${n(report.unreadable_rows)} unreadable rows`}.
             {report.store_mismatch > 0 && (
               <Notice kind="error">
@@ -261,6 +266,7 @@ export default function EbayListingImportPage() {
               <div><dt className="text-xs text-gray-500">Not imported yet</dt><dd>{n(preview.total)}</dd></div>
               <div><dt className="text-xs text-gray-500">Ready to import</dt><dd className="font-medium">{n(preview.ready)}</dd></div>
               <div><dt className="text-xs text-gray-500">Missing store / missing title</dt><dd>{n(preview.no_store)} / {n(preview.no_title)}</dd></div>
+              <div><dt className="text-xs text-gray-500">Ready, ended on eBay</dt><dd>{n(preview.ready_ended)}</dd></div>
               <div><dt className="text-xs text-gray-500">With a custom label</dt><dd>{n(preview.with_label)}</dd></div>
               <div><dt className="text-xs text-gray-500">No photos saved</dt><dd>{n(preview.no_photos)}</dd></div>
               <div><dt className="text-xs text-gray-500">No compatibility list</dt><dd>{n(preview.no_compat)}</dd></div>

@@ -88,6 +88,7 @@ select o.item,
        coalesce(nullif(trim(r.title), ''), nullif(trim(a.title), ''), nullif(trim(c.title), '')) as title,
        coalesce(r.price, a.price) as price,
        (r.item_id is not null) as in_report,
+       r.listing_status as listing_status,
        a.status as api_status,
        a.reason as api_reason,
        c.store as compat_store,
@@ -118,6 +119,20 @@ _ITEM = {"itemnumber", "itemid", "ebayitemid", "ebayitemnumber", "item"}
 class ReportIn(BaseModel):
     store: str = ""
     csv: str
+    status: str = ""  # "active", "ended" or "scheduled" (the page works it out from the file name); blank = unknown
+
+
+_REPORT_STATUS = {"active", "ended", "scheduled"}
+
+
+def _link_status(r) -> str:
+    """The status written on the new eBay link, in the words the existing links already use."""
+    ls = getattr(r, "listing_status", None)
+    if ls in ("active", "ended"):
+        return ls
+    if getattr(r, "api_status", None) == "ok":  # eBay itself just confirmed the listing is live
+        return "active"
+    return "draft"  # scheduled, or not known which kind of report it came from
 
 
 def _money(v: str) -> Optional[Decimal]:
@@ -135,6 +150,7 @@ def upload_report(body: ReportIn, db: Session = Depends(get_db)):
     if not info["known"]:
         raise HTTPException(404, f"'{info['store']}' is not in the store list yet. Add it on the Live listings tab first.")
     store = info["store"]
+    list_status = body.status.strip().lower() if body.status.strip().lower() in _REPORT_STATUS else None
 
     rows = list(csv.reader(io.StringIO(body.csv.lstrip("\ufeff"))))
     head_at = next(
@@ -165,13 +181,13 @@ def upload_report(body: ReportIn, db: Session = Depends(get_db)):
 
         qty = cell(cq)
         parsed[item] = {
-            "i": item, "s": store, "t": cell(ct)[:300] or None, "l": cell(cl) or None,
+            "i": item, "s": store, "ls": list_status, "t": cell(ct)[:300] or None, "l": cell(cl) or None,
             "p": _money(cell(cp)), "q": int(qty) if qty.isdigit() else None, "c": cell(cc) or None,
         }
     if not parsed:
         # A report with only the header row (e.g. no scheduled listings right now) is valid: nothing to save.
         return {
-            "store": store, "listings_in_report": 0, "unreadable_rows": bad,
+            "store": store, "listing_status": list_status, "listings_in_report": 0, "unreadable_rows": bad,
             "with_label": 0, "without_price": 0, "store_mismatch": 0,
         }
 
@@ -184,9 +200,11 @@ def upload_report(body: ReportIn, db: Session = Depends(get_db)):
         ).scalar()
     db.execute(
         text(
-            "insert into ebay_report_rows (item_id, store, title, custom_label_sku, price, quantity, ebay_category) "
-            "values (:i, :s, :t, :l, :p, :q, :c) "
-            "on conflict (item_id) do update set store = excluded.store, title = excluded.title, "
+            "insert into ebay_report_rows (item_id, store, listing_status, title, custom_label_sku, price, quantity, ebay_category) "
+            "values (:i, :s, :ls, :t, :l, :p, :q, :c) "
+            "on conflict (item_id) do update set store = excluded.store, "
+            "listing_status = coalesce(excluded.listing_status, ebay_report_rows.listing_status), "
+            "title = excluded.title, "
             "custom_label_sku = excluded.custom_label_sku, price = excluded.price, quantity = excluded.quantity, "
             "ebay_category = excluded.ebay_category, uploaded_at = now()"
         ),
@@ -194,7 +212,7 @@ def upload_report(body: ReportIn, db: Session = Depends(get_db)):
     )
     db.commit()
     return {
-        "store": store, "listings_in_report": len(parsed), "unreadable_rows": bad,
+        "store": store, "listing_status": list_status, "listings_in_report": len(parsed), "unreadable_rows": bad,
         "with_label": sum(1 for v in parsed.values() if v["l"]),
         "without_price": sum(1 for v in parsed.values() if v["p"] is None),
         "store_mismatch": mismatch,  # listings whose compat data came from the OTHER store: wrong file?
@@ -218,7 +236,7 @@ def state(db: Session = Depends(get_db)):
 # ------------------------------------------------------------------ preview
 def _summary(rows) -> dict:
     out = {"total": len(rows), "ready": 0, "no_store": 0, "no_title": 0, "no_photos": 0, "no_compat": 0,
-           "no_price": 0, "with_label": 0, "by_store": {}}
+           "no_price": 0, "with_label": 0, "ready_ended": 0, "by_store": {}}
     for r in rows:
         if not r.store:
             out["no_store"] += 1
@@ -226,6 +244,7 @@ def _summary(rows) -> dict:
             out["no_title"] += 1
         if _usable(r):
             out["ready"] += 1
+            out["ready_ended"] += 1 if r.listing_status == "ended" else 0
             out["by_store"][r.store] = out["by_store"].get(r.store, 0) + 1
         out["no_photos"] += 0 if r.has_photos else 1
         out["no_compat"] += 0 if r.has_compat else 1
@@ -276,14 +295,15 @@ class _Linker:
         self.numeric = by["external_id"].data_type in {"bigint", "integer", "smallint", "numeric"}
         self.prefix = "" if self.numeric else _stored_prefix(db)
 
-    def add(self, db: Session, item: str, product_id: int, store: str) -> int:
+    def add(self, db: Session, item: str, product_id: int, store: str, status: str = "draft") -> int:
         value_sql = "cast(:e as bigint)" if self.numeric else "cast(:e as text)"
         return db.execute(
             text(
-                f"insert into channel_listings (product_id, channel_id, external_id, store) "
-                f"values (:p, :c, {value_sql}, :st) returning id"
+                f"insert into channel_listings (product_id, channel_id, external_id, store, status) "
+                f"values (:p, :c, {value_sql}, :st, :ss) returning id"
             ),
-            {"p": product_id, "c": self.channel, "e": item if self.numeric else self.prefix + item, "st": store},
+            {"p": product_id, "c": self.channel, "e": item if self.numeric else self.prefix + item, "st": store,
+             "ss": status},
         ).scalar()
 
 
@@ -312,7 +332,7 @@ def _import_rows(db: Session, linker: _Linker, rows) -> dict:
                     ),
                     {"t": title, "s": slug, "e": clean_ebay_item_id(r.item), "l": label, "p": r.price},
                 ).scalar()
-                lid = linker.add(db, r.item, pid, r.store)
+                lid = linker.add(db, r.item, pid, r.store, _link_status(r))
                 photos += db.execute(
                     text("update product_photos set product_id = :p "
                          "where product_id is null and split_part(storage_path, '/', 1) = :f"),
