@@ -23,7 +23,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   },
   { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
-  { href: "/admin/cleanup", label: "eBay", match: ["/admin/cleanup", "/admin/ebay-new", "/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/ebay-listings"] },
+  { href: "/admin/ebay-photos", label: "eBay", match: ["/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/ebay-listings"] },
   { href: "/admin/quickbooks", label: "QuickBooks" },
   { href: "/admin/supplier", label: "Autodist" },
   { href: "/admin/users", label: "Team" },
@@ -31,19 +31,24 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   { href: "/admin/help", label: "Help pages" },
 ];
 
+type Tab = { href: string; label: string; match?: string[] };
+
+// A tab is lit when the page is its own address or one of the extra addresses it covers.
+const tabOn = (t: Tab, path: string) => (t.match ?? [t.href]).some((m) => path.startsWith(m));
+
 // Sub-pages shown as tabs under the Fitment button.
-const FITMENT_TABS = [
+const FITMENT_TABS: Tab[] = [
   { href: "/admin/models", label: "Models & years" },
   { href: "/admin/fitment", label: "Types & makes" },
 ];
 
-// Sub-pages shown as tabs under the eBay button.
-const EBAY_TABS = [
-  { href: "/admin/cleanup", label: "Merge existing products" },
-  { href: "/admin/ebay-new", label: "Link new eBay listings to a product" },
+// Sub-pages shown as tabs under the eBay button, in the order they are meant to be run.
+// (The old /admin/cleanup and /admin/ebay-new addresses still work and light up the merge-and-link tab.)
+const EBAY_TABS: Tab[] = [
   { href: "/admin/ebay-photos", label: "eBay photo import" },
   { href: "/admin/ebay-compat", label: "eBay compatibility import" },
   { href: "/admin/ebay-import", label: "eBay listing import" },
+  { href: "/admin/merge-link", label: "Merge and link products", match: ["/admin/merge-link", "/admin/cleanup", "/admin/ebay-new"] },
   { href: "/admin/ebay-listings", label: "Live listings" },
 ];
 
@@ -319,12 +324,12 @@ export default function AdminShell({ children }: { children: ReactNode }) {
                 { title: "eBay", tabs: EBAY_TABS },
               ].map(
                 (g) =>
-                  g.tabs.some((t) => pathname.startsWith(t.href)) && (
+                  g.tabs.some((t) => tabOn(t, pathname)) && (
                     <div key={g.title}>
                       <h1 className="mb-3 text-2xl font-semibold">{g.title}</h1>
                       <div className="mb-4 flex gap-1 overflow-x-auto border-b border-gray-200">
                         {g.tabs.map((t) => {
-                          const on = pathname.startsWith(t.href);
+                          const on = tabOn(t, pathname);
                           return (
                             <Link
                               key={t.href}
