@@ -319,6 +319,9 @@ def _build(db: Session, include_existing: bool):
         if stmt.strip():
             db.execute(text(stmt))
     db.execute(_CAND, params)
+    # the suggestion query looks machines up in _cand once per candidate model; without this it scans the table each time
+    db.execute(text("create index on _cand (make_key, model_key)"))
+    db.execute(text("analyze _cand"))
     for stmt in str(_PAIRS).split(";"):
         if stmt.strip():
             db.execute(text(stmt))
