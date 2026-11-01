@@ -49,7 +49,7 @@ export default function EbayListingImportPage() {
   const [store, setStore] = useState("");
   const [fileName, setFileName] = useState("");
   const [uploading, setUploading] = useState(false);
-  const [report, setReport] = useState<ReportResult | null>(null);
+  const [reports, setReports] = useState<(ReportResult & { file: string })[]>([]);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [running, setRunning] = useState(false);
@@ -71,21 +71,27 @@ export default function EbayListingImportPage() {
   }
 
   async function upload() {
-    const file = fileRef.current?.files?.[0];
-    if (!file) {
-      setError("Choose the Seller Hub report file first.");
+    const files = Array.from(fileRef.current?.files ?? []);
+    if (files.length === 0) {
+      setError("Choose the Seller Hub report file(s) first.");
       return;
     }
     setUploading(true);
     setError("");
-    setReport(null);
+    setReports([]);
     try {
-      const csv = await file.text();
-      const r = await api<ReportResult>("/ebay-import/report", { method: "POST", body: { store: store.trim(), csv } });
-      setReport(r);
+      // One file at a time, in the order chosen. A listing in more than one file keeps the data from the last file.
+      for (const file of files) {
+        const csv = await file.text();
+        try {
+          const r = await api<ReportResult>("/ebay-import/report", { method: "POST", body: { store: store.trim(), csv } });
+          setReports((list) => [...list, { ...r, file: file.name }]);
+        } catch (e) {
+          setError(`${file.name}: ${errMsg(e)}${files.length > 1 ? " The files before it were saved; the ones after it were not uploaded." : ""}`);
+          break;
+        }
+      }
       await loadPreview();
-    } catch (e) {
-      setError(errMsg(e));
     } finally {
       setUploading(false);
     }
@@ -139,31 +145,32 @@ export default function EbayListingImportPage() {
             <input className={inputCls} value={store} onChange={(e) => setStore(e.target.value)} placeholder="eandimotorsports" />
           </label>
           <label className="block text-sm">
-            <span className="mb-1 block font-medium">Report (.csv)</span>
+            <span className="mb-1 block font-medium">Report file(s) (.csv)</span>
             <input
               ref={fileRef}
               type="file"
               accept=".csv,text/csv"
-              onChange={(e) => setFileName(e.target.files?.[0]?.name ?? "")}
+              multiple
+              onChange={(e) => setFileName(Array.from(e.target.files ?? []).map((f) => f.name).join(", "))}
               className="block text-sm"
             />
           </label>
           <button type="button" className={btnCls} disabled={uploading || running || !fileName} onClick={() => void upload()}>
-            {uploading ? "Uploading…" : "Upload report"}
+            {uploading ? "Uploading…" : "Upload report(s)"}
           </button>
         </div>
-        <p className="text-xs text-gray-500">Leave the store blank for eandimotorsports; type genuine-oem-parts for the other store. Uploading again replaces the earlier rows for the same listings.</p>
-        {report && (
-          <div className="text-sm text-gray-700">
-            {n(report.listings_in_report)} listings read for {report.store}; {n(report.with_label)} have a custom label, {n(report.without_price)} have no price
+        <p className="text-xs text-gray-500">Leave the store blank for eandimotorsports; type genuine-oem-parts for the other store. Choose several files at once if they are all for the same store; do the other store in a second upload. Uploading again replaces the earlier rows for the same listings. Every listing in a file that has no product yet will be imported, including ended ones, so only upload ended-listing reports if you want those imported too.</p>
+        {reports.map((report) => (
+          <div key={report.file} className="text-sm text-gray-700">
+            <span className="font-medium">{report.file}:</span> {n(report.listings_in_report)} listings read for {report.store}; {n(report.with_label)} have a custom label, {n(report.without_price)} have no price
             {report.unreadable_rows > 0 && `, ${n(report.unreadable_rows)} unreadable rows`}.
             {report.store_mismatch > 0 && (
               <Notice kind="error">
-                {n(report.store_mismatch)} of these listings were saved by the compatibility import under a different store. Check you chose the right store for this file.
+                {n(report.store_mismatch)} of the listings in {report.file} were saved by the compatibility import under a different store. Check you chose the right store for this file.
               </Notice>
             )}
           </div>
-        )}
+        ))}
       </div>
 
       <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
