@@ -24,6 +24,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
   { href: "/admin/ebay-photos", label: "eBay", match: ["/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/ebay-listings"] },
+  { href: "/admin/analytics", label: "Analytics" },
   { href: "/admin/quickbooks", label: "QuickBooks" },
   { href: "/admin/supplier", label: "Autodist" },
   { href: "/admin/users", label: "Team" },
