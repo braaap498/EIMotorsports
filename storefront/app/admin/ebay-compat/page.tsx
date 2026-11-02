@@ -312,6 +312,8 @@ function FitmentCard() {
   const [createRow, setCreateRow] = useState<string | null>(null);
   const [createType, setCreateType] = useState("");
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [sortKey, setSortKey] = useState<"" | "name" | "parts" | "guess">("");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [sel, setSel] = useState<string[]>([]); // ticked rows for the multi-create panel
   const [selFilter, setSelFilter] = useState("");
   const [tickMake, setTickMake] = useState("");
@@ -513,10 +515,53 @@ function FitmentCard() {
   }
 
   const off = busy !== "";
-  const shownRows = (plan?.open ?? []).filter((r) => {
+  const filteredRows = (plan?.open ?? []).filter((r) => {
     const f = bulkOpen ? selFilter.trim().toLowerCase() : "";
     return !f || `${r.make} ${r.model}`.toLowerCase().includes(f);
   });
+  // Click a heading: ascending, again: descending, a third click goes back to the default order (most parts first).
+  function clickSort(key: "name" | "parts" | "guess") {
+    if (sortKey !== key) {
+      setSortKey(key);
+      setSortDir("asc");
+    } else if (sortDir === "asc") {
+      setSortDir("desc");
+    } else {
+      setSortKey("");
+      setSortDir("asc");
+    }
+  }
+  const shownRows = (() => {
+    if (!sortKey) return filteredRows;
+    const sign = sortDir === "asc" ? 1 : -1;
+    const idx = new Map(filteredRows.map((r, i) => [r, i] as const));
+    return [...filteredRows].sort((a, b) => {
+      let c = 0;
+      if (sortKey === "name") c = `${a.make} ${a.model}`.localeCompare(`${b.make} ${b.model}`, undefined, { sensitivity: "base", numeric: true });
+      else if (sortKey === "parts") c = a.products - b.products;
+      else {
+        // Rows with no suggestion always sit at the bottom, whichever way it is sorted.
+        if (!a.suggestion && !b.suggestion) return (idx.get(a) ?? 0) - (idx.get(b) ?? 0);
+        if (!a.suggestion) return 1;
+        if (!b.suggestion) return -1;
+        c = a.suggestion.score - b.suggestion.score;
+      }
+      return c !== 0 ? c * sign : (idx.get(a) ?? 0) - (idx.get(b) ?? 0);
+    });
+  })();
+  const sortTh = (key: "name" | "parts" | "guess", label: string, right = false) => (
+    <th className="px-2 py-1" aria-sort={sortKey === key ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
+      <button
+        type="button"
+        className={`inline-flex items-center gap-1 hover:text-gray-900 ${right ? "float-right" : "text-left"} ${sortKey === key ? "text-gray-900" : ""}`}
+        onClick={() => clickSort(key)}
+        title={`Sort by ${label.toLowerCase()}`}
+      >
+        <span>{label}</span>
+        <span className={`shrink-0 text-[10px] ${sortKey === key ? "" : "text-gray-300"}`}>{sortKey === key ? (sortDir === "asc" ? "▲" : "▼") : "▲▼"}</span>
+      </button>
+    </th>
+  );
   const bulkMakes = (() => {
     const m = new Map<string, { make_key: string; make: string; n: number }>();
     for (const r of plan?.open ?? []) {
@@ -682,9 +727,9 @@ function FitmentCard() {
                   <thead className="sticky top-0 bg-gray-50 text-gray-500">
                     <tr>
                       {bulkOpen && <th className="px-2 py-1"></th>}
-                      <th className="px-2 py-1">eBay / title says</th>
-                      <th className="px-2 py-1 text-right">Parts</th>
-                      <th className="px-2 py-1">Best guess</th>
+                      {sortTh("name", "eBay / title says")}
+                      {sortTh("parts", "Parts", true)}
+                      {sortTh("guess", "Best guess")}
                       <th className="px-2 py-1">Do this</th>
                     </tr>
                   </thead>
