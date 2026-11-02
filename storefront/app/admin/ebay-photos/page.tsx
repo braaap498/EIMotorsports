@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
-import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
+import { Badge, Notice, btnCls, btn2Cls } from "../../../components/admin/ui";
+import StoreInput from "../../../components/admin/StoreInput";
 
 /* ------------------------------------------------------------------ types */
 
@@ -170,13 +171,7 @@ export default function EbayPhotoImportPage() {
       <div className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
         <label className="block max-w-sm text-sm">
           <span className="mb-1 block font-medium">eBay store name</span>
-          <input
-            className={inputCls}
-            value={store}
-            onChange={(e) => setStore(e.target.value)}
-            placeholder="eandimotorsports"
-            disabled={running}
-          />
+          <StoreInput value={store} onChange={setStore} placeholder="eandimotorsports" disabled={running} />
         </label>
         <div className="flex flex-wrap gap-3">
           <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start("new_only")}>
@@ -254,13 +249,7 @@ export default function EbayPhotoImportPage() {
         </div>
         <label className="block max-w-sm text-sm">
           <span className="mb-1 block font-medium">eBay store name (optional)</span>
-          <input
-            className={inputCls}
-            value={labelsStore}
-            onChange={(e) => setLabelsStore(e.target.value)}
-            placeholder="eandimotorsports or genuine-oem-parts"
-            disabled={uploading}
-          />
+          <StoreInput value={labelsStore} onChange={setLabelsStore} placeholder="eandimotorsports or genuine-oem-parts" disabled={uploading} />
           <span className="mt-1 block text-xs text-gray-500">
             The store this report is from. Left blank, no store is recorded for these listings (it is not assumed).
           </span>

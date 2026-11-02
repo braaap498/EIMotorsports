@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
-import { Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
+import { Notice, btnCls, btn2Cls } from "../../../components/admin/ui";
+import StoreInput from "../../../components/admin/StoreInput";
 
 /* ------------------------------------------------------------------ types */
 
@@ -98,6 +99,16 @@ export default function EbayListingImportPage() {
 
   // The report buttons (and Check now) belong to a loaded report; the straight-from-eBay buttons to no report.
   const hasReport = (ebayState?.reports.length ?? 0) > 0;
+
+  // With a report on file, show what would be imported right away instead of waiting for "Check now".
+  const autoChecked = useRef(false);
+  useEffect(() => {
+    if (hasReport && !autoChecked.current) {
+      autoChecked.current = true;
+      void loadPreview();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasReport]);
 
   async function loadPreview() {
     setLoadingPreview(true);
@@ -225,7 +236,7 @@ export default function EbayListingImportPage() {
         <div className="flex flex-wrap items-end gap-3">
           <label className="block text-sm">
             <span className="mb-1 block font-medium">eBay store name</span>
-            <input className={inputCls} value={store} onChange={(e) => setStore(e.target.value)} placeholder="eandimotorsports" />
+            <StoreInput value={store} onChange={setStore} placeholder="eandimotorsports" />
           </label>
           <input
             ref={fileRef}
