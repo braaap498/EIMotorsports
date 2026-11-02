@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
+import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 
 /* ------------------------------------------------------------------ types */
@@ -60,6 +61,17 @@ const n = (v: number) => v.toLocaleString();
 
 export default function EbayListingImportPage() {
   const [store, setStore] = useState("");
+
+  // Remember the store name when you leave this page and come back (this browser tab only).
+  const [storeRestored, setStoreRestored] = useState(false);
+  useEffect(() => {
+    const saved = loadSaved<{ store: string }>("ebay-import");
+    if (saved) setStore(saved.store ?? "");
+    setStoreRestored(true);
+  }, []);
+  useEffect(() => {
+    if (storeRestored) saveSaved("ebay-import", { store });
+  }, [storeRestored, store]);
   const [fileName, setFileName] = useState("");
   const [uploading, setUploading] = useState(false);
   const [reports, setReports] = useState<(ReportResult & { file: string })[]>([]);

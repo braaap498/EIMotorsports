@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
+import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 
 /* ------------------------------------------------------------------ types */
@@ -65,6 +66,20 @@ const STATUS_TONE: Record<Job["status"], "green" | "gray" | "amber"> = {
 export default function EbayPhotoImportPage() {
   const [store, setStore] = useState("");
   const [labelsStore, setLabelsStore] = useState("");
+
+  // Remember the store names when you leave this page and come back (this browser tab only).
+  const [storesRestored, setStoresRestored] = useState(false);
+  useEffect(() => {
+    const saved = loadSaved<{ store: string; labelsStore: string }>("ebay-photos");
+    if (saved) {
+      setStore(saved.store ?? "");
+      setLabelsStore(saved.labelsStore ?? "");
+    }
+    setStoresRestored(true);
+  }, []);
+  useEffect(() => {
+    if (storesRestored) saveSaved("ebay-photos", { store, labelsStore });
+  }, [storesRestored, store, labelsStore]);
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState("");
   const [starting, setStarting] = useState(false);

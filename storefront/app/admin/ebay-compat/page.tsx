@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
+import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 
 /* ------------------------------------------------------------------ types */
@@ -61,6 +62,17 @@ const SAVED_NAME: Record<string, string> = {
 
 export default function EbayCompatImportPage() {
   const [store, setStore] = useState("");
+
+  // Remember the store name when you leave this page and come back (this browser tab only).
+  const [storeRestored, setStoreRestored] = useState(false);
+  useEffect(() => {
+    const saved = loadSaved<{ store: string }>("ebay-compat");
+    if (saved) setStore(saved.store ?? "");
+    setStoreRestored(true);
+  }, []);
+  useEffect(() => {
+    if (storeRestored) saveSaved("ebay-compat", { store });
+  }, [storeRestored, store]);
   const [job, setJob] = useState<Job | null>(null);
   const [saved, setSaved] = useState<Saved[]>([]);
   const [error, setError] = useState("");
