@@ -190,6 +190,52 @@ def _models_with_years(rows) -> list[dict]:
     return list(models.values())
 
 
+def _category_path_fn(db: Session):
+    """Returns a function: category id -> 'Parent › Child' text, for the warning details."""
+    rows = db.execute(text("select id, parent_id, name from categories")).all()
+    by = {r.id: r for r in rows}
+
+    def path(cid) -> str:
+        if cid is None or cid not in by:
+            return "No category set"
+        parts, seen, cur = [], set(), cid
+        while cur is not None and cur in by and cur not in seen:
+            seen.add(cur)
+            parts.append(by[cur].name)
+            cur = by[cur].parent_id
+        return " \u203a ".join(reversed(parts))
+
+    return path
+
+
+def _brand_names(db: Session, ids: list) -> dict:
+    """Brand id -> name. The brand table is found from the foreign key, and any problem just means no names."""
+    ids = [i for i in ids if i is not None]
+    if not ids:
+        return {}
+    try:
+        with db.begin_nested():
+            ref = db.execute(
+                text(
+                    """
+                    select c.confrelid::regclass::text
+                    from pg_constraint c
+                    join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1]
+                    where c.contype = 'f' and c.conrelid = 'public.products'::regclass
+                      and a.attname = 'part_manufacturer_id'
+                    """
+                )
+            ).scalar()
+            if not ref or not re.fullmatch(r'[A-Za-z0-9_".]+', ref):
+                return {}
+            rows = db.execute(
+                text(f"select id, name from {ref} where id = any(cast(:ids as bigint[]))"), {"ids": ids}
+            ).all()
+            return {r.id: r.name for r in rows}
+    except Exception:
+        return {}
+
+
 # --------------------------------------------------------------------------
 # 1. search
 # --------------------------------------------------------------------------
@@ -340,44 +386,115 @@ def preview(body: PreviewIn, db: Session = Depends(get_db)):
     by_id = {r.id: r for r in rows}
     survivor = by_id[body.survivor_id]
 
-    warnings: list[str] = []
+    cat_path = _category_path_fn(db)
+    brand_name = _brand_names(db, [r.part_manufacturer_id for r in rows])
+
+    def ref(r) -> dict:
+        return {
+            "id": r.id,
+            "ebay_item_id": r.ebay_item_id,
+            "title": r.title,
+            "kept": r.id == body.survivor_id,
+            "part_number": r.part_number,
+            "list_price": float(r.list_price) if r.list_price is not None else None,
+            "category": cat_path(r.category_id),
+        }
+
+    def groups(rs, keyfn) -> list[dict]:
+        g: dict[str, list] = {}
+        for r in rs:
+            g.setdefault(keyfn(r), []).append(ref(r))
+        # biggest group first, so the odd one out is easy to spot at the bottom
+        return [{"label": k, "products": v} for k, v in sorted(g.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+
+    details: list[dict] = []
+
+    def warn(kind: str, text_: str, explain: str, grps: Optional[list] = None) -> None:
+        details.append({"kind": kind, "text": text_, "explain": explain, "groups": grps or []})
+
     if len({r.category_id for r in rows}) > 1:
-        warnings.append("These products are in DIFFERENT categories. Make sure they are really the same part.")
+        warn(
+            "category",
+            "These products are in DIFFERENT categories. Make sure they are really the same part.",
+            "Every product sits in one category on the website (for example Engine \u203a Pistons). These "
+            "products are not all in the same one. Either one of them was put in the wrong category, or "
+            "they are really different parts. The kept product keeps its own category: "
+            f"{cat_path(survivor.category_id)}.",
+            groups(rows, lambda r: cat_path(r.category_id)),
+        )
     if len({r.part_manufacturer_id for r in rows}) > 1:
-        warnings.append("These products have DIFFERENT brands set.")
+        warn(
+            "brand",
+            "These products have DIFFERENT brands set.",
+            "The brand (Tusk, Wiseco, HiFlo and so on) is not the same on every product. The kept product "
+            "keeps its own brand.",
+            groups(rows, lambda r: brand_name.get(r.part_manufacturer_id) or ("No brand set" if r.part_manufacturer_id is None else f"Brand #{r.part_manufacturer_id}")),
+        )
     prices = [float(r.list_price) for r in rows if r.list_price is not None]
     if prices and max(prices) - min(prices) > 0.005:
-        warnings.append(f"Prices differ (from {min(prices):.2f} to {max(prices):.2f}). The survivor's price is kept.")
-    families = sorted(
-        {
-            m.group(0)
-            for r in rows
-            if r.part_number and (m := re.match(r"[A-Za-z]+[0-9]+", r.part_number.upper()))
-        }
-    )
+        warn(
+            "price",
+            f"Prices differ (from {min(prices):.2f} to {max(prices):.2f}). The survivor's price is kept.",
+            f"The kept product's price ({float(survivor.list_price):.2f}) stays as it is and the other prices "
+            "are thrown away. A big gap usually means different sizes, pack counts or kits."
+            if survivor.list_price is not None
+            else "The kept product has no price, so check it after the merge. Other prices are thrown away.",
+            groups(rows, lambda r: f"{float(r.list_price):.2f}" if r.list_price is not None else "No price"),
+        )
+    def family_of(r) -> Optional[str]:
+        m = re.match(r"[A-Za-z]+[0-9]+", r.part_number.upper()) if r.part_number else None
+        return m.group(0) if m else None
+
+    families = sorted({f for r in rows if (f := family_of(r))})
     if len(families) > 1:
-        warnings.append(
+        warn(
+            "family",
             "The part numbers come from "
             f"{len(families)} different families ({', '.join(families[:6])}). "
-            "Confirm these are the same physical part (e.g. same size/fit) before merging."
+            "Confirm these are the same physical part (e.g. same size/fit) before merging.",
+            "A family is the first letters and digits of a part number (HF303 and HF204 would be HF3 and HF2). "
+            "Manufacturers usually use a different family for a different size or fit, for example a different "
+            "oil filter for a different engine. Open a few of the products below and compare the part numbers and "
+            "titles. If they are truly the same part sold under several numbers, tick the box and carry on. If not, "
+            "go back and untick the odd ones out.",
+            groups(rows, lambda r: family_of(r) or "No part number on file"),
         )
     other_masters = [r for r in rows if r.id != body.survivor_id and r.prior_merges]
     if other_masters and not survivor.prior_merges:
         top = max(other_masters, key=lambda r: r.listing_count)
-        warnings.append(
+        warn(
+            "master",
             f"Product #{top.id} is already a merged master ({top.listing_count} eBay listings). "
-            "You are keeping a product that has never been merged. Usually you want to keep the master."
+            "You are keeping a product that has never been merged. Usually you want to keep the master.",
+            "A master is a product that earlier merges were already folded into. Keeping a different product "
+            "works, but everything on the master moves across.",
+            [{"label": "Merged masters", "products": [ref(r) for r in other_masters]}],
         )
     elif other_masters:
-        warnings.append(
+        warn(
+            "master",
             f"{len(other_masters)} of the ticked products are themselves merged masters. "
-            "All of their eBay listings, sales and fitment will move onto the one you keep."
+            "All of their eBay listings, sales and fitment will move onto the one you keep.",
+            "A master is a product that earlier merges were already folded into.",
+            [{"label": "Merged masters", "products": [ref(r) for r in other_masters]}],
         )
     unpub = [r.id for r in rows if not r.is_published]
     if unpub and survivor.is_published is False:
-        warnings.append("The product you are keeping is not published on the website.")
+        warn(
+            "unpublished",
+            "The product you are keeping is not published on the website.",
+            "Customers cannot see the kept product on the website until it is published.",
+            [{"label": "Kept product", "products": [ref(survivor)]}],
+        )
     if any(r.is_universal for r in rows):
-        warnings.append("At least one of these is marked universal-fit.")
+        warn(
+            "universal",
+            "At least one of these is marked universal-fit.",
+            "Universal-fit means the part fits every machine. You will be asked about this on the compatible "
+            "vehicles step.",
+            [{"label": "Marked universal-fit", "products": [ref(r) for r in rows if r.is_universal]}],
+        )
+    warnings = [d["text"] for d in details]
 
     qtys = [r.quantity_on_hand or 0 for r in rows]
     return {
@@ -402,6 +519,7 @@ def preview(body: PreviewIn, db: Session = Depends(get_db)):
         "proposed_fitment": _models_with_years(fitment_rows),
         "proposed_is_universal": any(r.is_universal for r in rows),
         "warnings": warnings,
+        "warning_details": details,
         "blockers": problems,
     }
 

@@ -2,6 +2,7 @@
 
 import ClearableInput from "../../../components/admin/ClearableInput";
 import ClickRow from "../../../components/admin/ClickRow";
+import { SortTh, sortRows, useSort } from "../../../components/admin/SortHeader";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -29,6 +30,16 @@ type YearFit = { vehicle_id: number; year: number; submodel: string | null; from
 type ModelFit = { model_id: number; make: string; model: string; vehicle_type: string | null; years: YearFit[] };
 
 type PreviewRow = Item & { sales_count: number; inventory_tx_count: number; po_line_count: number; photo_count: number };
+type WarnProduct = {
+  id: number;
+  ebay_item_id: string | null;
+  title: string;
+  kept: boolean;
+  part_number: string | null;
+  list_price: number | null;
+  category: string;
+};
+type WarnDetail = { kind: string; text: string; explain: string; groups: { label: string; products: WarnProduct[] }[] };
 type Preview = {
   fingerprint: string;
   survivor: PreviewRow;
@@ -46,6 +57,7 @@ type Preview = {
   proposed_fitment: ModelFit[];
   proposed_is_universal: boolean;
   warnings: string[];
+  warning_details?: WarnDetail[];
   blockers: string[];
 };
 type MergeResult = {
@@ -81,6 +93,51 @@ function suggestKeeper(items: Item[]): number | null {
     (a, b) =>
       Number(b.prior_merges) - Number(a.prior_merges) || b.listing_count - a.listing_count || a.id - b.id
   )[0].id;
+}
+
+/** One warning. Click it to see why it fired and which products are behind it. */
+function WarningCard({ w }: { w: WarnDetail }) {
+  const shown = (g: WarnDetail["groups"][number]) => g.products.slice(0, 200);
+  return (
+    <details className="rounded border border-amber-300 bg-amber-50 text-sm text-amber-900">
+      <summary className="flex cursor-pointer items-start justify-between gap-3 px-3 py-2">
+        <span>⚠ {w.text}</span>
+        <span className="shrink-0 text-xs font-medium underline">Click for details</span>
+      </summary>
+      <div className="space-y-3 border-t border-amber-200 bg-white px-3 py-3 text-gray-800">
+        <p>{w.explain}</p>
+        {w.groups.map((g) => (
+          <div key={g.label} className="rounded border border-gray-200">
+            <div className="flex items-center justify-between gap-2 bg-gray-50 px-3 py-1.5 text-xs font-semibold">
+              <span>{g.label}</span>
+              <span className="font-normal text-gray-500">
+                {g.products.length} product{g.products.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <ul className="max-h-60 divide-y divide-gray-100 overflow-y-auto">
+              {shown(g).map((p) => (
+                <li key={p.id} className="px-3 py-1.5">
+                  <div className="flex items-start gap-2">
+                    {p.kept && <Badge tone="green">KEPT</Badge>}
+                    <a href={`/admin/products/${p.id}`} target="_blank" rel="noopener noreferrer" className="font-medium hover:underline">
+                      {p.title}
+                    </a>
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    {p.ebay_item_id ?? "—"} · Part # {p.part_number ?? "—"} · {p.list_price == null ? "no price" : `$${p.list_price.toFixed(2)}`}
+                    {w.kind !== "category" && <> · {p.category}</>}
+                  </div>
+                </li>
+              ))}
+              {g.products.length > 200 && (
+                <li className="px-3 py-1.5 text-xs text-gray-500">…and {g.products.length - 200} more in this group.</li>
+              )}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
 }
 
 const STEPS: { key: Step; label: string }[] = [
@@ -672,6 +729,19 @@ export default function PartsCleanupPage() {
   }
 
   const selectedItems = items.filter((i) => selected.has(i.id));
+
+  // Click a column heading to sort the results. Only the display order changes, never the ticks or the list itself.
+  type ResultSort = "ebay" | "label" | "title" | "pn" | "price" | "qty" | "fits";
+  const { sort: resultSort, toggle: toggleResultSort } = useSort<ResultSort>();
+  const sortedItems = sortRows(items, resultSort, {
+    ebay: (p) => p.ebay_item_id,
+    label: (p) => p.custom_label_sku,
+    title: (p) => p.title,
+    pn: (p) => p.part_number,
+    price: (p) => (p.list_price == null ? null : Number(p.list_price)),
+    qty: (p) => p.quantity_on_hand,
+    fits: (p) => p.fitment_count,
+  });
   const tooMany = selected.size - 1 > 1500;
 
   /* ------------------------------------------------------------- render */
@@ -768,18 +838,18 @@ export default function PartsCleanupPage() {
                     <tr>
                       <th className="px-3 py-2">Merge</th>
                       <th className="px-3 py-2">Keep</th>
-                      <th className="px-3 py-2">eBay item #</th>
-                      <th className="px-3 py-2">Custom label SKU</th>
-                      <th className="px-3 py-2">Title</th>
-                      <th className="px-3 py-2">Part #</th>
-                      <th className="px-3 py-2">Price</th>
-                      <th className="px-3 py-2">Qty</th>
-                      <th className="px-3 py-2">Fits</th>
+                      <SortTh label="eBay item #" k="ebay" sort={resultSort} onSort={toggleResultSort} />
+                      <SortTh label="Custom label SKU" k="label" sort={resultSort} onSort={toggleResultSort} />
+                      <SortTh label="Title" k="title" sort={resultSort} onSort={toggleResultSort} />
+                      <SortTh label="Part #" k="pn" sort={resultSort} onSort={toggleResultSort} />
+                      <SortTh label="Price" k="price" sort={resultSort} onSort={toggleResultSort} />
+                      <SortTh label="Qty" k="qty" sort={resultSort} onSort={toggleResultSort} />
+                      <SortTh label="Fits" k="fits" sort={resultSort} onSort={toggleResultSort} />
                       <th className="px-3 py-2" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {items.map((p) => (
+                    {sortedItems.map((p) => (
                       <tr key={p.id} className={selected.has(p.id) ? "bg-blue-50" : ""}>
                         <td className="px-3 py-2">
                           <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} aria-label={`Merge ${p.ebay_item_id ?? p.title}`} />
@@ -896,11 +966,13 @@ export default function PartsCleanupPage() {
           )}
           {preview.warnings.length > 0 && (
             <div className="space-y-2">
-              {preview.warnings.map((w) => (
-                <p key={w} className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                  ⚠ {w}
-                </p>
-              ))}
+              {preview.warning_details?.length
+                ? preview.warning_details.map((w) => <WarningCard key={w.kind + w.text} w={w} />)
+                : preview.warnings.map((w) => (
+                    <p key={w} className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                      ⚠ {w}
+                    </p>
+                  ))}
               <label className="flex items-center gap-2 text-sm font-medium">
                 <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />I have read the warnings and these really are the same part
               </label>

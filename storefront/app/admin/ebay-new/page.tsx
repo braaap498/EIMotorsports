@@ -1,6 +1,7 @@
 "use client";
 
 import ClearableInput from "../../../components/admin/ClearableInput";
+import { SortBar, SortTh, sortRows, useSort } from "../../../components/admin/SortHeader";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -60,10 +61,36 @@ const money = (v: number | string | null) => (v == null ? "—" : Number(v).toFi
 
 /* ------------------------------------------------------ link-to-product box */
 
+type ProductSort = "title" | "ebay" | "label" | "pn" | "price" | "qty" | "listings";
+
 function ProductList({ items, linking, onLink }: { items: Product[]; linking: number | null; onLink: (p: Product) => void }) {
+  const { sort, toggle } = useSort<ProductSort>();
+  const sorted = sortRows(items, sort, {
+    title: (p) => p.title,
+    ebay: (p) => p.ebay_item_id,
+    label: (p) => p.custom_label_sku,
+    pn: (p) => p.part_number,
+    price: (p) => (p.list_price == null ? null : Number(p.list_price)),
+    qty: (p) => p.quantity_on_hand,
+    listings: (p) => p.listing_count,
+  });
   return (
+    <>
+    <SortBar
+      sort={sort}
+      onSort={toggle}
+      options={[
+        { k: "title", label: "Title" },
+        { k: "ebay", label: "eBay item #" },
+        { k: "label", label: "Custom label SKU" },
+        { k: "pn", label: "Part #" },
+        { k: "price", label: "Price" },
+        { k: "qty", label: "On hand" },
+        { k: "listings", label: "eBay listings" },
+      ]}
+    />
     <ul className="max-h-80 divide-y divide-gray-100 overflow-y-auto rounded border border-gray-200">
-      {items.map((p) => (
+      {sorted.map((p) => (
         <li key={p.id} className="flex items-center justify-between gap-3 p-3">
           <div className="min-w-0 text-sm">
             <div className="font-medium">{p.title}</div>
@@ -85,6 +112,7 @@ function ProductList({ items, linking, onLink }: { items: Product[]; linking: nu
         </li>
       ))}
     </ul>
+    </>
   );
 }
 
@@ -291,6 +319,15 @@ export default function NewEbayListingsPage() {
   const [linkedMsg, setLinkedMsg] = useState<LinkResp | null>(null);
   const [linking, setLinking] = useState<NewListing | null>(null);
   const [restored, setRestored] = useState(false);
+  type ListingSort = "item" | "label" | "title" | "price" | "listed";
+  const { sort: listSort, toggle: toggleListSort } = useSort<ListingSort>();
+  const sortedItems = sortRows(items, listSort, {
+    item: (i) => i.item_id,
+    label: (i) => i.custom_label,
+    title: (i) => i.title,
+    price: (i) => (i.price ? Number(i.price) : null),
+    listed: (i) => (i.listed_at ? new Date(i.listed_at).getTime() : null),
+  });
 
   // Coming back from another admin page: show the same results instead of an empty screen.
   useEffect(() => {
@@ -407,16 +444,16 @@ export default function NewEbayListingsPage() {
                 <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
                     <th className="px-3 py-2"></th>
-                    <th className="px-3 py-2">eBay item #</th>
-                    <th className="px-3 py-2">Custom label SKU</th>
-                    <th className="px-3 py-2">Listing</th>
-                    <th className="px-3 py-2">Price</th>
-                    <th className="px-3 py-2">Listed</th>
+                    <SortTh label="eBay item #" k="item" sort={listSort} onSort={toggleListSort} />
+                    <SortTh label="Custom label SKU" k="label" sort={listSort} onSort={toggleListSort} />
+                    <SortTh label="Listing" k="title" sort={listSort} onSort={toggleListSort} />
+                    <SortTh label="Price" k="price" sort={listSort} onSort={toggleListSort} />
+                    <SortTh label="Listed" k="listed" sort={listSort} onSort={toggleListSort} />
                     <th className="px-3 py-2"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {items.map((i) => (
+                  {sortedItems.map((i) => (
                     <tr key={i.item_id}>
                       <td className="w-16 px-3 py-2">
                         {i.image_url && (
