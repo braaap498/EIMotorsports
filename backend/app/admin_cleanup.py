@@ -12,7 +12,8 @@ Mounted at /admin/cleanup/* (owner/admin only). The flow the page follows:
 
 What a merge does (and does not do):
   * eBay links (channel_listings) are MOVED to the surviving product - never deleted.
-  * Sales history, inventory ledger rows and purchase-order lines are MOVED too.
+  * Sales history, inventory ledger rows, purchase-order lines (and their receiving history), eBay and website
+    order lines and live stock holds are MOVED too.
   * Fitment of the survivor is set to exactly the list the person verified.
   * Stock is NOT summed: every duplicate listing was counting the same shelf, so the person
     must type the real quantity. A ledger 'Adjustment' row records the change.
@@ -52,6 +53,12 @@ MOVE_TABLES = {
     "inventory_transactions",
     "sales_transactions",
     "purchase_order_lines",
+    "po_lines",               # the current purchase orders' lines (open, received or cancelled POs)
+    "po_line_receipts",       # receiving history of those lines
+    "po_receiving_issues",    # short / over / not-on-PO records
+    "ebay_order_lines",       # eBay order lines (history, and ones still waiting to be picked)
+    "order_items",            # website order lines
+    "stock_reservations",     # live holds follow the part, so an order waiting to be picked keeps its hold
     "product_barcodes",       # scanning an old label still finds the kept part
     "inventory_batch_lines",  # receiving / shipping history follows the part
 }
@@ -62,7 +69,6 @@ DROP_TABLES = {
     "product_item_specifics",
     "fitment_parse_review",
     "category_assignment_review",
-    "stock_reservations",  # only live holds / reservations; none can exist for a product with order rows
 }
 
 # Where the part number lives (it is not in products.manufacturer_part_number).
@@ -87,7 +93,8 @@ select p.id, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price, p.quanti
        (select count(*) from product_photos pp where pp.product_id = p.id)         as photo_count,
        (select count(*) from sales_transactions s where s.product_id = p.id)       as sales_count,
        (select count(*) from inventory_transactions it where it.product_id = p.id) as inventory_tx_count,
-       (select count(*) from purchase_order_lines pol where pol.product_id = p.id) as po_line_count,
+       ((select count(*) from purchase_order_lines pol where pol.product_id = p.id)
+        + (select count(*) from po_lines pl where pl.product_id = p.id))       as po_line_count,
        (select array_agg(cl.external_id order by cl.id) from channel_listings cl
          where cl.product_id = p.id)                                                as ebay_item_ids,
        (select coalesce(sum(l.merged_count), 0) from part_merge_log l
