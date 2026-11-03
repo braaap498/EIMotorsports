@@ -16,6 +16,10 @@ What a merge does (and does not do):
   * Fitment of the survivor is set to exactly the list the person verified.
   * Stock is NOT summed: every duplicate listing was counting the same shelf, so the person
     must type the real quantity. A ledger 'Adjustment' row records the change.
+  * Every eBay listing involved (the kept product's and the duplicates') is first copied into
+    ebay_listings (title, price, condition, description, item specifics, compatible vehicles,
+    photo rows, custom label) keyed by eBay item id and store, so the listing can still be edited
+    later. Those rows follow the part to the survivor.
   * The other products are deleted, after a full snapshot is saved in part_merge_log.
   * If anything unexpected is found (an unknown table pointing at products, changed data
     since the preview, a count that doesn't add up) the merge refuses or rolls back.
@@ -34,6 +38,7 @@ from sqlalchemy.orm import Session
 from app.admin_catalog import finish
 from app.auth import AuthUser, require_admin
 from app.database import get_db
+from app.ebay_oauth import MAIN_STORE
 from app.skus import PLACEHOLDER_SKU, clean_ebay_item_id
 
 router = APIRouter(prefix="/cleanup", tags=["admin-cleanup"], dependencies=[Depends(require_admin)])
@@ -43,6 +48,7 @@ MAX_MERGE = 1500  # products merged in one go (the biggest duplicate family is ~
 # Tables that point at products and whose rows must FOLLOW the part to the survivor.
 MOVE_TABLES = {
     "channel_listings",
+    "ebay_listings",          # each eBay listing's own saved data; follows the part to the survivor
     "inventory_transactions",
     "sales_transactions",
     "purchase_order_lines",
@@ -637,6 +643,53 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
             },
         ).scalar()
 
+        # ---- keep each eBay listing's own data (title, price, description ...) -----------
+        # The duplicates are about to be deleted; this is what keeps their listings editable.
+        item_digits = sorted({re.sub(r"\D", "", r.ebay_item_id or "") for r in rows} - {""})
+        db.execute(
+            text(
+                """
+                insert into ebay_listings
+                  (ebay_item_id, store, product_id, original_product_id, custom_label_sku, sku, title,
+                   list_price, quantity_on_hand, condition, description, item_specifics,
+                   fitment_vehicle_ids, photos, product_data, merge_log_id, source)
+                select d.digits, coalesce(st.store, :main), :sid, p.id, p.custom_label_sku, sv.sku_display,
+                       p.title, p.list_price, p.quantity_on_hand,
+                       to_jsonb(p)->>'condition', to_jsonb(p)->>'description',
+                       (select coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb)
+                          from product_item_specifics s where s.product_id = p.id),
+                       (select coalesce(array_agg(pf.vehicle_id order by pf.vehicle_id), '{}'::bigint[])
+                          from product_fitment pf where pf.product_id = p.id),
+                       (select coalesce(jsonb_agg(to_jsonb(pp)), '[]'::jsonb)
+                          from product_photos pp where pp.product_id = p.id),
+                       to_jsonb(p), :log, 'merge'
+                from products p
+                cross join lateral (
+                  select regexp_replace(coalesce(p.ebay_item_id, ''), '[^0-9]', '', 'g') as digits) d
+                left join lateral (
+                  select cl.store from channel_listings cl
+                  where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = d.digits
+                  limit 1) st on true
+                join products sv on sv.id = :sid
+                where p.id = any(cast(:ids as bigint[])) and d.digits <> ''
+                on conflict (ebay_item_id) do update
+                  set product_id = excluded.product_id, sku = excluded.sku, updated_at = now()
+                """
+            ),
+            {"main": MAIN_STORE, "sid": sid, "log": log_id, "ids": ids},
+        )
+        saved = db.execute(
+            text("select count(*) from ebay_listings where ebay_item_id = any(cast(:d as text[]))"),
+            {"d": item_digits},
+        ).scalar()
+        if saved != len(item_digits):
+            db.rollback()
+            raise HTTPException(
+                500,
+                f"Safety check failed: only {saved} of {len(item_digits)} eBay listings could be saved "
+                "before merging. Nothing was changed.",
+            )
+
         # ---- move eBay links, sales history, inventory ledger, PO lines -----------------
         for fk in fks:
             if fk["table"] in MOVE_TABLES:
@@ -733,6 +786,7 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
             "survivor_id": sid,
             "products_deleted": len(merged),
             "ebay_listings_now_on_part": expected["channel_listings"],
+            "listing_records_saved": saved,
             "fitment_vehicles": len(vids),
             "quantity_on_hand": body.quantity_on_hand,
         }
