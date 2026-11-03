@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import ClickRow from "../../../components/admin/ClickRow";
+import EbaySalesPanel from "../../../components/admin/EbaySalesPanel";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
@@ -352,6 +353,9 @@ export default function EbayLiveListingsPage() {
           </div>
         )}
       </div>
+
+      {/* ---- eBay sales: polling, set-aside, quantity sync */}
+      <EbaySalesPanel />
 
       {/* ---- search */}
       <form

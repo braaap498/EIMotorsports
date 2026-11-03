@@ -14,8 +14,9 @@ HOW STOCK IS COUNTED - read this before changing anything (rules live in app/sto
     shelf. Refunding is a separate, admin-only action through Stripe.
   * Orders paid BEFORE reservations existed (orders.reserved_stock = false) already had their stock
     taken at payment, so picking them takes nothing a second time.
-  * eBay / other sales are decreased by whatever records them (outside this file); scanning those
-    out only records who shipped what.
+  * eBay sales set parts aside the same way when the sale is recorded (app/ebay_sales.py). Scanning an eBay
+    order out with its order number as the reference takes the parts off the shelf and releases that
+    reservation. An "other" reference that matches no recorded eBay sale only records who shipped what.
   * Receiving scans ADD stock and write an inventory_transactions ledger row. Parts that came on a purchase
     order are received AGAINST that PO, line by line (see "receiving a PO" below): the count is checked
     against what was ordered, a short or over count must be acknowledged (who + when is kept), and the PO
@@ -67,6 +68,7 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, current_user, needs, require_route_access
 from app.database import get_db
 from app.images import thumb_url
+from app.ebay_sales import take_stock_for_reference
 from app.skus import PLACEHOLDER_SKU, shelf_code_for
 from app.stock import available_sql, lock_products, reserved_paid_sql, set_aside_sql
 
@@ -1289,7 +1291,8 @@ def ship(body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(c
     Website order: the scanned parts come off the shelf (see _take_stock_for_pick) and the order
     advances to the shipping stage once every part is picked. It is NOT shipped yet; that needs a
     tracking number (see mark_shipped). Partial commits are fine: the order stays open for the rest.
-    eBay / other sale: only records who shipped what; whatever recorded the sale handles the stock.
+    eBay sale (reference = its order number): the parts leave the shelf and the sale's reservation is released.
+    Any other reference: only records who shipped what.
     """
     merged = _merge_lines(body.lines)
     try:
@@ -1360,6 +1363,10 @@ def ship(body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(c
                     text("update orders set picked_at = now(), picked_by = :by where id = :id"),
                     {"by": user.email, "id": order.id},
                 )
+        else:
+            # eBay order: if its number matches a recorded eBay sale, the scanned parts leave the shelf and the
+            # sale's reservation is released. Any other reference is only recorded, as before.
+            take_stock_for_reference(db, (body.reference or "").strip(), merged, user.email)
         db.commit()
         return {
             "batch_id": str(body.batch_id),

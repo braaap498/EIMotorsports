@@ -24,6 +24,9 @@ from app.admin_ebay_new import router as admin_ebay_new_router
 from app.admin_ebay_listings import router as admin_ebay_listings_router
 from app.ebay_oauth import router as ebay_oauth_router
 from app.ebay_edit import router as ebay_edit_router
+from app.ebay_sales import public_router as ebay_sales_public_router
+from app.ebay_sales import router as ebay_sales_router
+from app.ebay_sales import start_background as start_ebay_sales
 from app.admin_ebay_photos import router as admin_ebay_photos_router
 from app.admin_inventory import router as admin_inventory_router
 from app.admin_photos import router as admin_photos_router
@@ -92,6 +95,7 @@ admin_router.include_router(admin_ebay_new_router)
 admin_router.include_router(admin_ebay_listings_router)
 admin_router.include_router(ebay_oauth_router)
 admin_router.include_router(ebay_edit_router)
+admin_router.include_router(ebay_sales_router)
 admin_router.include_router(admin_ebay_photos_router)
 admin_router.include_router(admin_ebay_compat_router)
 admin_router.include_router(admin_ebay_fitment_router)
@@ -110,6 +114,7 @@ admin_router.include_router(analytics_qb_router)
 admin_router.include_router(analytics_insights_router)
 
 app.include_router(admin_router)
+app.include_router(ebay_sales_public_router)  # optional outside pinger, protected by EBAY_POLL_SECRET
 app.include_router(fitment_router)
 app.include_router(store_extras_router)
 app.include_router(store_checkout_router)
@@ -118,3 +123,9 @@ app.include_router(store_about_router)
 app.include_router(store_reviews_router)
 app.include_router(store_help_router)
 app.include_router(qbwc_router)  # QuickBooks Web Connector (public URL, checks its own login)
+
+
+@app.on_event("startup")
+def _start_ebay_sales_timer():
+    """Per-store eBay sales checks (the interval is set on the Live listings screen)."""
+    start_ebay_sales()
