@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
-import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
+import { Badge, Notice, btnCls, btn2Cls } from "../../../components/admin/ui";
+import AutodistCatalog from "../../../components/admin/AutodistCatalog";
 
 // Automatic Distributors supplier data (owners and admins only). Licensed data: dealer cost and stock
 // are for this screen only and must never be shown on the public store.
@@ -20,20 +21,6 @@ type Run = {
   rows_deactivated: number;
   note: string | null;
   created_by: string | null;
-};
-type Item = {
-  id: number;
-  sku: string;
-  mfr_number: string | null;
-  manufacturer: string | null;
-  name: string | null;
-  unit_of_measure: string | null;
-  list_price: string | null;
-  dealer_cost: string | null;
-  qty_maine: number;
-  qty_indiana: number;
-  qty_nevada: number;
-  upc: string | null;
 };
 type Match = {
   total_products: number;
@@ -56,8 +43,6 @@ export default function SupplierPage() {
   const [busy, setBusy] = useState("");
   const [pending, setPending] = useState<{ runId: number; rowsSent: number; missing: number; held: number } | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const [q, setQ] = useState("");
-  const [found, setFound] = useState<{ total: number; rows: Item[] } | null>(null);
   const [match, setMatch] = useState<Match | null>(null);
 
   async function refresh() {
@@ -133,18 +118,6 @@ export default function SupplierPage() {
     }
   }
 
-  async function search() {
-    setBusy("search");
-    setMsg(null);
-    try {
-      setFound(await api<{ total: number; rows: Item[] }>(`/autodist/items?q=${encodeURIComponent(q)}&limit=50`));
-    } catch (e) {
-      setMsg({ kind: "error", text: errMsg(e) });
-    } finally {
-      setBusy("");
-    }
-  }
-
   async function runMatch() {
     setBusy("match");
     setMsg(null);
@@ -158,7 +131,7 @@ export default function SupplierPage() {
   }
 
   return (
-    <div className="max-w-5xl space-y-5">
+    <div className="max-w-7xl space-y-5">
       <div>
         <h1 className="text-2xl font-semibold">Automatic Distributors</h1>
         <p className="mt-1 text-sm text-gray-600">
@@ -268,62 +241,7 @@ export default function SupplierPage() {
         )}
       </div>
 
-      <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
-        <h2 className="font-semibold">Search supplier parts</h2>
-        <div className="flex gap-2">
-          <input
-            className={inputCls}
-            placeholder="Part number, SKU, name, brand or barcode"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void search();
-            }}
-          />
-          <button type="button" className={btn2Cls} disabled={busy !== "" || !counts?.active} onClick={() => void search()}>
-            Search
-          </button>
-        </div>
-        {found && (
-          <div className="overflow-x-auto">
-            <p className="mb-1 text-xs text-gray-500">{n(found.total)} found{found.total > found.rows.length ? `, showing the first ${found.rows.length}` : ""}</p>
-            <table className="w-full text-left text-xs">
-              <thead className="uppercase text-gray-500">
-                <tr>
-                  <th className="py-1 pr-3">Brand</th>
-                  <th className="py-1 pr-3">SKU / part no.</th>
-                  <th className="py-1 pr-3">Name</th>
-                  <th className="py-1 pr-3">List</th>
-                  <th className="py-1 pr-3">Cost</th>
-                  <th className="py-1 pr-3" title="Maine / Indiana / Nevada">ME / IN / NV</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {found.rows.map((r) => (
-                  <tr key={r.id} className="align-top">
-                    <td className="py-1 pr-3">{r.manufacturer}</td>
-                    <td className="py-1 pr-3">
-                      {r.sku}
-                      {r.mfr_number && r.mfr_number !== r.sku && <span className="text-gray-500"> / {r.mfr_number}</span>}
-                    </td>
-                    <td className="py-1 pr-3">{r.name}</td>
-                    <td className="py-1 pr-3">{money(r.list_price)}</td>
-                    <td className="py-1 pr-3">{money(r.dealer_cost)}</td>
-                    <td className="py-1 pr-3 whitespace-nowrap">
-                      {r.qty_maine} / {r.qty_indiana} / {r.qty_nevada}
-                    </td>
-                  </tr>
-                ))}
-                {found.rows.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="py-2 text-gray-500">Nothing matches that.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      <AutodistCatalog hasData={!!counts?.active} />
     </div>
   );
 }

@@ -7,7 +7,9 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /import/start           begin an import (the browser then sends the file in pieces)
   POST /import/chunk           one piece of the feed file
   POST /import/finish          check the whole file arrived, then retire parts that left the feed
-  GET  /items?q=               search the stored supplier parts
+  GET  /items                  browse / search / filter / sort the stored supplier parts (see items() for every filter)
+  GET  /items/{id}             one part in full: every stored field, our matching products, same-barcode / same-number parts
+  GET  /catalog/overview       the whole catalog at a glance: totals, data gaps, stock by warehouse, brands, price bands
   GET  /match-report           how many of OUR products match a supplier part (changes nothing)
 
 HOW IT FITS
@@ -368,36 +370,6 @@ def summary(db: Session = Depends(get_db)):
     return {"counts": dict(s._mapping), "runs": [dict(r._mapping) for r in runs]}
 
 
-@router.get("/items")
-def items(
-    q: Optional[str] = None,
-    active_only: bool = True,
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    where = ["supplier = :s"]
-    params: dict = {"s": SUPPLIER, "n": limit, "o": offset}
-    if active_only:
-        where.append("active")
-    for i, w in enumerate((q or "").split()[:6]):
-        params[f"w{i}"] = f"%{w}%"
-        where.append(
-            f"(sku ilike :w{i} or mfr_number ilike :w{i} or name ilike :w{i} or manufacturer ilike :w{i} or upc ilike :w{i})"
-        )
-    clause = " and ".join(where)
-    total = db.execute(text(f"select count(*) from supplier_items where {clause}"), params).scalar()
-    rows = db.execute(
-        text(
-            f"select id, sku, mfr_number, manufacturer, name, unit_of_measure, list_price, dealer_cost, "
-            f"qty_maine, qty_indiana, qty_nevada, upc, active, updated_at "
-            f"from supplier_items where {clause} order by manufacturer, sku limit :n offset :o"
-        ),
-        params,
-    ).all()
-    return {"total": total, "rows": [dict(r._mapping) for r in rows]}
-
-
 # --------------------------------------------------------------------------
 # which of our products have a supplier part (read only)
 # --------------------------------------------------------------------------
@@ -462,3 +434,367 @@ def match_report(db: Session = Depends(get_db)):
         ).all()
         review = [dict(f._mapping) for f in found]
     return {"total_products": len(rows), "counts": counts, "review": review, "review_limited": len(review_ids) == 300}
+
+
+# --------------------------------------------------------------------------
+# browsing the catalog in detail (read only)
+# --------------------------------------------------------------------------
+# What we hold for our own products, as comparable keys (barcode digits, part number letters+digits).
+_OURS_CTE = f"""
+ours as materialized (
+  select nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') as upc_n,
+         nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n
+  from products p
+)
+"""
+_IS_OURS = (
+    "(s.upc_norm in (select upc_n from ours where upc_n is not null and length(upc_n) >= 8) "
+    "or s.mfr_number_norm in (select mpn_n from ours where mpn_n is not null))"
+)
+_TOTAL_QTY = "(s.qty_maine + s.qty_indiana + s.qty_nevada)"
+_SORTS = {
+    "brand": "s.manufacturer",
+    "sku": "s.sku",
+    "mfr": "s.mfr_number",
+    "name": "s.name",
+    "uom": "s.unit_of_measure",
+    "list": "s.list_price",
+    "cost": "s.dealer_cost",
+    "margin": "(s.list_price - s.dealer_cost)",
+    "margin_pct": "((s.list_price - s.dealer_cost) / nullif(s.list_price, 0))",
+    "stock": _TOTAL_QTY,
+    "maine": "s.qty_maine",
+    "indiana": "s.qty_indiana",
+    "nevada": "s.qty_nevada",
+    "updated": "s.updated_at",
+    "seen": "s.last_seen_at",
+}
+_ITEM_COLS = (
+    "s.id, s.sku, s.mfr_number, s.mfr_number_norm, s.manufacturer, s.name, s.unit_of_measure, s.list_price, "
+    "s.dealer_cost, s.qty_maine, s.qty_indiana, s.qty_nevada, s.upc, s.upc_norm, s.active, s.updated_at, s.last_seen_at"
+)
+
+
+def _filters(
+    q, field, brand, status, stock, warehouse, min_qty, max_qty, min_cost, max_cost, min_list, max_list,
+    min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days,
+) -> tuple[str, str, dict]:
+    """Builds (with-clause, where-clause, params) for the catalog. Every value is bound, never pasted in."""
+    where = ["s.supplier = :sup"]
+    params: dict = {"sup": SUPPLIER}
+    if status == "active":
+        where.append("s.active")
+    elif status == "inactive":
+        where.append("not s.active")
+
+    cols = {
+        "sku": ["s.sku"],
+        "mfr": ["s.mfr_number"],
+        "name": ["s.name"],
+        "brand": ["s.manufacturer"],
+        "upc": ["s.upc"],
+        "all": ["s.sku", "s.mfr_number", "s.name", "s.manufacturer", "s.upc"],
+    }[field]
+    for i, w in enumerate((q or "").split()[:8]):
+        params[f"w{i}"] = f"%{w}%"
+        parts = [f"{c} ilike :w{i}" for c in cols]
+        # a part number typed without dashes or spaces still finds 'AB-14 1001'
+        wn = norm_part(w)
+        if wn and len(wn) >= 3 and field in ("all", "mfr", "sku"):
+            params[f"n{i}"] = f"%{wn}%"
+            parts.append(f"s.mfr_number_norm like :n{i}")
+            parts.append(f"upper(regexp_replace(s.sku, '[^A-Za-z0-9]', '', 'g')) like :n{i}")
+        where.append("(" + " or ".join(parts) + ")")
+
+    if brand:
+        params["brand"] = brand
+        where.append("s.manufacturer = :brand")
+    if uom:
+        params["uom"] = uom
+        where.append("s.unit_of_measure = :uom")
+    if stock == "in":
+        where.append(f"{_TOTAL_QTY} > 0")
+    elif stock == "out":
+        where.append(f"{_TOTAL_QTY} = 0")
+    if warehouse:
+        where.append({"maine": "s.qty_maine", "indiana": "s.qty_indiana", "nevada": "s.qty_nevada"}[warehouse] + " > 0")
+    for key, expr, op, val in (
+        ("min_qty", _TOTAL_QTY, ">=", min_qty), ("max_qty", _TOTAL_QTY, "<=", max_qty),
+        ("min_cost", "s.dealer_cost", ">=", min_cost), ("max_cost", "s.dealer_cost", "<=", max_cost),
+        ("min_list", "s.list_price", ">=", min_list), ("max_list", "s.list_price", "<=", max_list),
+    ):
+        if val is not None:
+            params[key] = val
+            where.append(f"{expr} {op} :{key}")
+    pct = "((s.list_price - s.dealer_cost) / nullif(s.list_price, 0) * 100)"
+    if min_margin_pct is not None:
+        params["min_mp"] = min_margin_pct
+        where.append(f"{pct} >= :min_mp")
+    if max_margin_pct is not None:
+        params["max_mp"] = max_margin_pct
+        where.append(f"{pct} <= :max_mp")
+    gaps = {
+        "upc": "s.upc_norm is null",
+        "mfr": "s.mfr_number is null",
+        "name": "s.name is null",
+        "cost": "s.dealer_cost is null",
+        "list": "s.list_price is null",
+        "below_cost": "s.list_price is not null and s.dealer_cost is not null and s.list_price < s.dealer_cost",
+    }
+    if missing:
+        where.append(gaps[missing])
+    with_clause = ""
+    if ours:
+        with_clause = "with " + _OURS_CTE
+        where.append(_IS_OURS if ours == "yes" else f"not {_IS_OURS}")
+    if changed_days:
+        params["cd"] = changed_days
+        where.append("s.updated_at >= now() - make_interval(days => :cd)")
+    if seen_days:
+        params["sd"] = seen_days
+        where.append("s.last_seen_at >= now() - make_interval(days => :sd)")
+    return with_clause, " and ".join(where), params
+
+
+@router.get("/items")
+def items(
+    q: Optional[str] = Query(None, max_length=200, description="every word must match"),
+    field: str = Query("all", pattern="^(all|sku|mfr|name|brand|upc)$", description="which column the words are matched against"),
+    brand: Optional[str] = Query(None, max_length=120),
+    status: str = Query("active", pattern="^(active|inactive|all)$"),
+    stock: Optional[str] = Query(None, pattern="^(in|out)$", description="in = stock at any warehouse, out = none anywhere"),
+    warehouse: Optional[str] = Query(None, pattern="^(maine|indiana|nevada)$", description="stock at that warehouse"),
+    min_qty: Optional[int] = Query(None, ge=0),
+    max_qty: Optional[int] = Query(None, ge=0),
+    min_cost: Optional[float] = Query(None, ge=0),
+    max_cost: Optional[float] = Query(None, ge=0),
+    min_list: Optional[float] = Query(None, ge=0),
+    max_list: Optional[float] = Query(None, ge=0),
+    min_margin_pct: Optional[float] = Query(None, description="(list - cost) / list, in percent"),
+    max_margin_pct: Optional[float] = Query(None),
+    uom: Optional[str] = Query(None, max_length=40),
+    missing: Optional[str] = Query(None, pattern="^(upc|mfr|name|cost|list|below_cost)$", description="data gaps to find"),
+    ours: Optional[str] = Query(None, pattern="^(yes|no)$", description="we already sell it (barcode or part number matches one of our products)"),
+    changed_days: Optional[int] = Query(None, ge=1, le=3650, description="price / stock / details changed within N days"),
+    seen_days: Optional[int] = Query(None, ge=1, le=3650, description="still in the feed as of N days ago"),
+    sort: str = Query("brand", pattern="^(" + "|".join(_SORTS) + ")$"),
+    dir: str = Query("asc", pattern="^(asc|desc)$"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """The catalog browser. Any mix of filters; the totals describe everything that matches, not just this page."""
+    with_clause, clause, params = _filters(
+        q, field, brand, status, stock, warehouse, min_qty, max_qty, min_cost, max_cost, min_list, max_list,
+        min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days,
+    )
+    agg = db.execute(
+        text(
+            f"{with_clause} select count(*) as total, count(*) filter (where {_TOTAL_QTY} > 0) as in_stock, "
+            f"count(distinct s.manufacturer) as brands, min(s.dealer_cost) as min_cost, max(s.dealer_cost) as max_cost, "
+            f"avg(s.dealer_cost) as avg_cost, coalesce(sum(s.dealer_cost * {_TOTAL_QTY}), 0) as stock_value_at_cost, "
+            f"coalesce(sum({_TOTAL_QTY}), 0) as units from supplier_items s where {clause}"
+        ),
+        params,
+    ).first()
+    page = db.execute(
+        text(
+            f"{with_clause} select {_ITEM_COLS}, {_TOTAL_QTY} as qty_total, (s.list_price - s.dealer_cost) as margin, "
+            f"((s.list_price - s.dealer_cost) / nullif(s.list_price, 0) * 100) as margin_pct "
+            f"from supplier_items s where {clause} "
+            f"order by {_SORTS[sort]} {'desc' if dir == 'desc' else 'asc'} nulls last, s.sku, s.id limit :n offset :o"
+        ),
+        {**params, "n": limit, "o": offset},
+    ).all()
+    rows = [dict(r._mapping) for r in page]
+
+    # Which of OUR products each part on this page matches (one pass over our products).
+    upcs = sorted({r["upc_norm"] for r in rows if r["upc_norm"] and len(r["upc_norm"]) >= 8})
+    mpns = sorted({r["mfr_number_norm"] for r in rows if r["mfr_number_norm"]})
+    ours_by_upc: dict[str, list] = {}
+    ours_by_mpn: dict[str, list] = {}
+    if upcs or mpns:
+        found = db.execute(
+            text(
+                f"""
+                select * from (
+                  select p.id, p.sku_display as sku, p.title, coalesce(p.quantity_on_hand, 0) as on_hand,
+                         nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') as upc_n,
+                         nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n
+                  from products p
+                ) x where x.upc_n = any(cast(:u as text[])) or x.mpn_n = any(cast(:m as text[]))
+                """
+            ),
+            {"u": upcs, "m": mpns},
+        ).all()
+        for f in found:
+            if f.upc_n:
+                ours_by_upc.setdefault(f.upc_n, []).append(f)
+            if f.mpn_n:
+                ours_by_mpn.setdefault(f.mpn_n, []).append(f)
+    for r in rows:
+        mine: dict[int, dict] = {}
+        for f in ours_by_upc.get(r["upc_norm"] or "", []) if r["upc_norm"] and len(r["upc_norm"]) >= 8 else []:
+            mine[f.id] = {"id": f.id, "sku": f.sku, "title": f.title, "on_hand": f.on_hand, "by": "barcode"}
+        for f in ours_by_mpn.get(r["mfr_number_norm"] or "", []):
+            mine.setdefault(f.id, {"id": f.id, "sku": f.sku, "title": f.title, "on_hand": f.on_hand, "by": "part number"})
+        r["ours"] = list(mine.values())
+        r.pop("upc_norm", None)
+        r.pop("mfr_number_norm", None)
+    return {"total": agg.total, "rows": rows, "summary": dict(agg._mapping)}
+
+
+@router.get("/items/{item_id}")
+def item_detail(item_id: int, db: Session = Depends(get_db)):
+    """Everything stored about one supplier part, what we sell that matches it, and other parts that share its
+    barcode or manufacturer number (the same thing under another SKU or brand)."""
+    row = db.execute(
+        text("select * from supplier_items where id = :id and supplier = :s"), {"id": item_id, "s": SUPPLIER}
+    ).first()
+    if not row:
+        raise HTTPException(404, "That supplier part isn't stored (it may have been removed).")
+    item = dict(row._mapping)
+    run = None
+    if item.get("last_run_id"):
+        r = db.execute(
+            text("select id, source, status, started_at, finished_at, rows_seen from supplier_import_runs where id = :id"),
+            {"id": item["last_run_id"]},
+        ).first()
+        run = dict(r._mapping) if r else None
+
+    upc_n = item.get("upc_norm") if item.get("upc_norm") and len(item["upc_norm"]) >= 8 else None
+    mpn_n = item.get("mfr_number_norm")
+    mine = []
+    if upc_n or mpn_n:
+        found = db.execute(
+            text(
+                f"""
+                select * from (
+                  select p.id, p.sku_display as sku, p.title, coalesce(p.quantity_on_hand, 0) as on_hand,
+                         p.list_price, p.cost, coalesce(p.is_active, true) as is_active,
+                         nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') as upc_n,
+                         nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n
+                  from products p
+                ) x where (cast(:u as text) is not null and x.upc_n = :u) or (cast(:m as text) is not null and x.mpn_n = :m)
+                order by x.id limit 25
+                """
+            ),
+            {"u": upc_n, "m": mpn_n},
+        ).all()
+        for f in found:
+            d = dict(f._mapping)
+            d["by"] = "barcode" if upc_n and d["upc_n"] == upc_n else "part number"
+            d.pop("upc_n", None)
+            d.pop("mpn_n", None)
+            mine.append(d)
+
+    cols = "id, sku, mfr_number, manufacturer, name, list_price, dealer_cost, qty_maine, qty_indiana, qty_nevada, upc, active"
+    same_upc = []
+    if upc_n:
+        same_upc = db.execute(
+            text(f"select {cols} from supplier_items where supplier = :s and upc_norm = :u and id <> :id order by manufacturer, sku limit 50"),
+            {"s": SUPPLIER, "u": upc_n, "id": item_id},
+        ).all()
+    same_mpn = []
+    if mpn_n:
+        same_mpn = db.execute(
+            text(f"select {cols} from supplier_items where supplier = :s and mfr_number_norm = :m and id <> :id order by manufacturer, sku limit 50"),
+            {"s": SUPPLIER, "m": mpn_n, "id": item_id},
+        ).all()
+    same_brand = 0
+    if item.get("manufacturer"):
+        same_brand = db.execute(
+            text("select count(*) from supplier_items where supplier = :s and manufacturer = :b and active"),
+            {"s": SUPPLIER, "b": item["manufacturer"]},
+        ).scalar()
+    return {
+        "item": item,
+        "last_run": run,
+        "ours": mine,
+        "same_barcode": [dict(r._mapping) for r in same_upc],
+        "same_part_number": [dict(r._mapping) for r in same_mpn],
+        "brand_part_count": same_brand,
+    }
+
+
+@router.get("/catalog/overview")
+def catalog_overview(db: Session = Depends(get_db)):
+    """The catalog at a glance: totals, data gaps, stock by warehouse, price bands, units of measure and every brand."""
+    t = db.execute(
+        text(
+            f"""
+            select count(*) as total,
+                   count(*) filter (where s.active) as active,
+                   count(*) filter (where not s.active) as retired,
+                   count(*) filter (where s.active and {_TOTAL_QTY} > 0) as in_stock,
+                   count(*) filter (where s.active and {_TOTAL_QTY} = 0) as out_of_stock,
+                   count(*) filter (where s.active and s.qty_maine > 0) as in_maine,
+                   count(*) filter (where s.active and s.qty_indiana > 0) as in_indiana,
+                   count(*) filter (where s.active and s.qty_nevada > 0) as in_nevada,
+                   coalesce(sum(s.qty_maine) filter (where s.active), 0) as units_maine,
+                   coalesce(sum(s.qty_indiana) filter (where s.active), 0) as units_indiana,
+                   coalesce(sum(s.qty_nevada) filter (where s.active), 0) as units_nevada,
+                   coalesce(sum(s.dealer_cost * {_TOTAL_QTY}) filter (where s.active), 0) as stock_value_at_cost,
+                   coalesce(sum(s.list_price * {_TOTAL_QTY}) filter (where s.active), 0) as stock_value_at_list,
+                   count(distinct s.manufacturer) filter (where s.active) as brands,
+                   count(*) filter (where s.active and s.upc_norm is null) as no_barcode,
+                   count(*) filter (where s.active and s.mfr_number is null) as no_mfr_number,
+                   count(*) filter (where s.active and s.name is null) as no_name,
+                   count(*) filter (where s.active and s.dealer_cost is null) as no_cost,
+                   count(*) filter (where s.active and s.list_price is null) as no_list_price,
+                   count(*) filter (where s.active and s.list_price < s.dealer_cost) as list_below_cost,
+                   count(*) filter (where s.active and s.updated_at >= now() - interval '7 days') as changed_7d,
+                   count(*) filter (where s.active and s.updated_at >= now() - interval '30 days') as changed_30d,
+                   avg((s.list_price - s.dealer_cost) / nullif(s.list_price, 0) * 100)
+                       filter (where s.active and s.list_price > 0 and s.dealer_cost is not null) as avg_margin_pct,
+                   max(s.last_seen_at) as last_seen
+            from supplier_items s where s.supplier = :s
+            """
+        ),
+        {"s": SUPPLIER},
+    ).first()
+    brands = db.execute(
+        text(
+            f"""
+            select coalesce(s.manufacturer, '(no brand)') as brand, s.manufacturer is null as unbranded,
+                   count(*) as parts, count(*) filter (where {_TOTAL_QTY} > 0) as in_stock,
+                   coalesce(sum({_TOTAL_QTY}), 0) as units,
+                   coalesce(sum(s.dealer_cost * {_TOTAL_QTY}), 0) as stock_value_at_cost,
+                   min(s.dealer_cost) as min_cost, max(s.dealer_cost) as max_cost, avg(s.dealer_cost) as avg_cost
+            from supplier_items s where s.supplier = :s and s.active
+            group by s.manufacturer order by count(*) desc, s.manufacturer limit 3000
+            """
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    bands = db.execute(
+        text(
+            """
+            select case when dealer_cost is null then 'No cost'
+                        when dealer_cost < 5 then 'Under $5'
+                        when dealer_cost < 25 then '$5 – $25'
+                        when dealer_cost < 100 then '$25 – $100'
+                        when dealer_cost < 250 then '$100 – $250'
+                        when dealer_cost < 500 then '$250 – $500'
+                        else '$500 and up' end as band,
+                   case when dealer_cost is null then 99 when dealer_cost < 5 then 1 when dealer_cost < 25 then 2
+                        when dealer_cost < 100 then 3 when dealer_cost < 250 then 4 when dealer_cost < 500 then 5 else 6 end as ord,
+                   count(*) as parts
+            from supplier_items where supplier = :s and active group by 1, 2 order by 2
+            """
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    uoms = db.execute(
+        text(
+            "select coalesce(unit_of_measure, '(none)') as uom, unit_of_measure is null as unset, count(*) as parts "
+            "from supplier_items where supplier = :s and active group by unit_of_measure order by count(*) desc limit 50"
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    return {
+        "totals": dict(t._mapping),
+        "brands": [dict(b._mapping) for b in brands],
+        "price_bands": [{"band": b.band, "parts": b.parts} for b in bands],
+        "units_of_measure": [dict(u._mapping) for u in uoms],
+    }
