@@ -20,6 +20,12 @@ HOW A SALE FLOWS
   5. A line whose item is not linked to a product yet is kept as 'unmatched' and re-checked on
      every poll, so it starts counting as soon as the listing is linked.
 
+REFUNDS: eBay's refund amounts (order MonetaryDetails) are saved on the order. A FULLY refunded order is not a
+sale: it is treated like a cancelled one (parts released if not yet picked, sales row removed). A partial refund
+keeps the sale and records the refunded amount on its sales row (sales_transactions.refund_amount) so reports can
+subtract it. Parts already picked are NOT put back on the shelf automatically; whether the part comes back is a
+person's decision (adjust the count on the Inventory screen if it does).
+
 THE FIRST CHECK (and "import history") never sets parts aside for orders eBay already shows as
 shipped; those are recorded as 'history' so old, finished sales don't lock up stock.
 
@@ -118,8 +124,18 @@ def _parse_orders(root: ET.Element) -> list[dict]:
                     "fee": _num(_t(tr, "FinalValueFee")),
                 }
             )
+        refund, refunded_at = Decimal(0), None
+        for rf in o.findall(f"{NS}MonetaryDetails/{NS}Refunds/{NS}Refund"):
+            if _t(rf, "RefundStatus").lower() == "failed":
+                continue
+            refund += _num(_t(rf, "RefundAmount")) or Decimal(0)
+            when = _dt(_t(rf, "RefundTime"))
+            if when and (refunded_at is None or when > refunded_at):
+                refunded_at = when
         out.append(
             {
+                "refund": refund,
+                "refunded_at": refunded_at,
                 "id": order_id,
                 "status": _t(o, "OrderStatus"),
                 "created": _dt(_t(o, "CreatedTime")),
@@ -277,15 +293,16 @@ _LINE_SQL = (
 
 
 def _save_order(db: Session, store: str, o: dict, channel_id: Optional[int], skip_shipped: bool) -> tuple[set, dict]:
-    counts = {"orders": 1, "new_lines": 0, "reserved": 0, "cancelled": 0, "unmatched": 0}
+    counts = {"orders": 1, "new_lines": 0, "reserved": 0, "cancelled": 0, "unmatched": 0, "refunded": 0}
     cancelled = o["status"] in ("Cancelled", "Inactive")
     paid = bool(o["paid"]) or o["status"] in ("Completed", "Shipped", "InProcess")
     row = db.execute(
         text(
             """
             insert into ebay_orders (store, ebay_order_id, ebay_status, paid_at, created_at_ebay, modified_at_ebay,
-                                     shipped_at_ebay, buyer_state, buyer_zip, shipping_charged, total, cancelled)
-            values (:s, :o, :st, :paid, :cr, :mod, :sh, :bs, :bz, :sc, :tot, :can)
+                                     shipped_at_ebay, buyer_state, buyer_zip, shipping_charged, total, cancelled,
+                                     refund_total, refunded_at)
+            values (:s, :o, :st, :paid, :cr, :mod, :sh, :bs, :bz, :sc, :tot, :can, :rf, :rfat)
             on conflict (store, ebay_order_id) do update set
               ebay_status = excluded.ebay_status,
               paid_at = coalesce(excluded.paid_at, ebay_orders.paid_at),
@@ -295,19 +312,25 @@ def _save_order(db: Session, store: str, o: dict, channel_id: Optional[int], ski
               buyer_zip = coalesce(excluded.buyer_zip, ebay_orders.buyer_zip),
               shipping_charged = coalesce(excluded.shipping_charged, ebay_orders.shipping_charged),
               total = coalesce(excluded.total, ebay_orders.total),
-              cancelled = excluded.cancelled, updated_at = now()
+              cancelled = excluded.cancelled,
+              refund_total = greatest(ebay_orders.refund_total, excluded.refund_total),
+              refunded_at = coalesce(excluded.refunded_at, ebay_orders.refunded_at),
+              updated_at = now()
             returning id
             """
         ),
         {
             "s": store, "o": o["id"], "st": o["status"], "paid": o["paid"], "cr": o["created"], "mod": o["modified"],
             "sh": o["shipped"], "bs": o["state"], "bz": o["zip"], "sc": o["ship_charged"], "tot": o["total"],
-            "can": cancelled,
+            "can": cancelled, "rf": o["refund"], "rfat": o["refunded_at"],
         },
     ).first()
     order_pk = row.id
+    # A FULLY refunded order is not a sale: treated like a cancelled one (parts released if not yet picked,
+    # sales row removed). A partial refund keeps the sale and records the refunded amount against it.
+    fully_refunded = o["refund"] > 0 and (o["total"] or 0) > 0 and o["refund"] >= (o["total"] - Decimal("0.01"))
     od = {
-        "paid": paid, "cancelled": cancelled, "shipped": o["shipped"], "state": o["state"], "zip": o["zip"],
+        "paid": paid, "cancelled": cancelled or fully_refunded, "shipped": o["shipped"], "state": o["state"], "zip": o["zip"],
         "ship_charged": o["ship_charged"],
     }
     changed: set = set()
@@ -336,6 +359,22 @@ def _save_order(db: Session, store: str, o: dict, channel_id: Optional[int], ski
             changed.add(pid)
         for k in ("reserved", "cancelled", "unmatched"):
             counts[k] += c[k]
+    if o["refund"] > 0:
+        counts["refunded"] = 1
+        sales = db.execute(
+            text(
+                "select sales_transaction_id as sid, coalesce(unit_price, 0) * quantity as v from ebay_order_lines "
+                "where order_pk = :o and sales_transaction_id is not null"
+            ),
+            {"o": order_pk},
+        ).all()
+        total_v = sum(float(r.v) for r in sales)
+        for r in sales:
+            share = o["refund"] * (Decimal(str(r.v)) / Decimal(str(total_v))) if total_v > 0 else o["refund"] / len(sales)
+            db.execute(
+                text("update sales_transactions set refund_amount = :a where id = :s"),
+                {"a": share.quantize(Decimal("0.01")), "s": r.sid},
+            )
     return changed, counts
 
 
@@ -464,7 +503,7 @@ def poll_store(db: Session, store: str, days: Optional[int] = None) -> dict:
     """Check one store for new and changed orders. `days` = look back that far (history import)."""
     if not _claim(db, store):
         raise HTTPException(409, "A check for this store is already running. Try again in a minute.")
-    summary = {"orders": 0, "new_lines": 0, "reserved": 0, "cancelled": 0, "unmatched": 0, "errors": 0}
+    summary = {"orders": 0, "new_lines": 0, "reserved": 0, "cancelled": 0, "unmatched": 0, "refunded": 0, "errors": 0}
     error: Optional[str] = None
     started = _now()
     try:
@@ -484,7 +523,7 @@ def poll_store(db: Session, store: str, days: Optional[int] = None) -> dict:
                 ch, c = _save_order(db, store, o, channel_id, skip_shipped)
                 db.commit()
                 changed |= ch
-                for k in ("orders", "new_lines", "reserved", "cancelled", "unmatched"):
+                for k in ("orders", "new_lines", "reserved", "cancelled", "unmatched", "refunded"):
                     summary[k] += c[k]
             except Exception:
                 db.rollback()
@@ -499,7 +538,7 @@ def poll_store(db: Session, store: str, days: Optional[int] = None) -> dict:
         q = run_queue(db, store)
         msg = (
             f"{summary['orders']} orders checked, {summary['new_lines']} new lines, {summary['reserved']} set aside, "
-            f"{summary['cancelled']} cancelled, {summary['unmatched']} not linked to a product"
+            f"{summary['cancelled']} cancelled, {summary['refunded']} with refunds, {summary['unmatched']} not linked to a product"
         )
         if summary["errors"]:
             msg += f", {summary['errors']} could not be saved (see server log)"
@@ -792,7 +831,7 @@ def lines(
             f"""
             select l.id, l.store, l.ebay_order_id, l.ebay_item_id, coalesce(l.title, p.title) as title, l.quantity,
                    l.unit_price, l.state, l.product_id, p.sku_display as sku, coalesce(l.sale_date, l.created_at) as sale_date,
-                   o.cancelled
+                   o.cancelled, o.refund_total
             from ebay_order_lines l
             join ebay_orders o on o.id = l.order_pk
             left join products p on p.id = l.product_id

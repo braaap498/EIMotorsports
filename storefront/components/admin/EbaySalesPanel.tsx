@@ -40,6 +40,7 @@ type Line = {
   sku: string | null;
   sale_date: string | null;
   cancelled: boolean;
+  refund_total: string | null;
 };
 
 type SortKey = "date" | "store" | "order" | "item" | "title" | "qty" | "price" | "state";
@@ -355,6 +356,9 @@ export default function EbaySalesPanel() {
                     <td className="px-3 py-2">{l.unit_price ? `$${Number(l.unit_price).toFixed(2)}` : "—"}</td>
                     <td className="px-3 py-2">
                       <Badge tone={STATE_TONE[l.state] ?? "gray"}>{STATE_LABEL[l.state] ?? l.state}</Badge>
+                      {Number(l.refund_total) > 0 && (
+                        <div className="mt-1 text-xs font-medium text-red-700">Refunded ${Number(l.refund_total).toFixed(2)}</div>
+                      )}
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-right">
                       {l.state === "reserved" && (
