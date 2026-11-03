@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.analytics import connected_stores
 from app.auth import require_admin
 from app.database import get_db
 from app.insights_calc import build_insights
@@ -38,9 +39,10 @@ def insights(
     store = (store or "").strip().lower() or None
     if store in ("all", "__all__"):
         store = None
-    p = {"store": store, "start": start, "end": end, "cap": MAX_LINES + 1}
+    p = {"store": store, "start": start, "end": end, "cap": MAX_LINES + 1, "connected": connected_stores(db)}
     flt = (
-        "(cast(:store as text) is null or o.store = cast(:store as text)) "
+        "lower(o.store) = any(cast(:connected as text[])) "
+        "and (cast(:store as text) is null or o.store = cast(:store as text)) "
         "and (cast(:start as date) is null or o.sale_date >= cast(:start as date)) "
         "and (cast(:end as date) is null or o.sale_date <= cast(:end as date)) "
         "and o.sale_date is not null"

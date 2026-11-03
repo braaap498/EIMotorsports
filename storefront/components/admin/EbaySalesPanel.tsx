@@ -243,15 +243,20 @@ export default function EbaySalesPanel() {
                       </option>
                     ))}
                   </select>
-                  <label className="flex items-center gap-2" title={s.live_pushes_enabled ? "" : "Turn Live pushes ON for this store first"}>
+                  <label className={`flex items-center gap-2 ${s.live_pushes_enabled ? "" : "text-gray-400"}`}>
                     <input
                       type="checkbox"
-                      checked={s.sales_qty_push_enabled}
+                      checked={s.sales_qty_push_enabled && s.live_pushes_enabled}
                       disabled={!s.authorized || !s.live_pushes_enabled || busy === s.store}
                       onChange={(e) => void save(s.store, { sales_qty_push_enabled: e.target.checked })}
                     />
                     <span>Update quantities on eBay after a sale</span>
                   </label>
+                  {!s.live_pushes_enabled && (
+                    <span className="text-xs font-medium text-amber-700">
+                      ⚠ Store pushes must be turned ON first (use “Turn pushes ON” in the Stores box above).
+                    </span>
+                  )}
                   <span className="ml-auto flex flex-wrap gap-2">
                     <button type="button" className={btn2Cls} disabled={!s.authorized || busy === s.store || s.running} onClick={() => void pollNow(s.store)}>
                       Check now

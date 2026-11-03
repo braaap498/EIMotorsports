@@ -319,7 +319,8 @@ def disconnect(body: StoreBody, db: Session = Depends(get_db)):
             """
             update ebay_accounts
                set refresh_token_enc = null, scopes = null, refresh_token_expires_at = null,
-                   authorized_at = null, authorized_by = null, live_pushes_enabled = false, updated_at = now()
+                   authorized_at = null, authorized_by = null, live_pushes_enabled = false,
+                   sales_polling_enabled = false, sales_qty_push_enabled = false, updated_at = now()
              where store = :s
             """
         ),

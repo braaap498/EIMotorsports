@@ -817,7 +817,11 @@ def live_pushes(body: SwitchIn, db: Session = Depends(get_db)):
     if body.enabled and not row.refresh_token_enc:
         raise HTTPException(409, f"{row.store} has not been approved yet.")
     db.execute(
-        text("update ebay_accounts set live_pushes_enabled = :e, updated_at = now() where store = :s"),
+        text(
+            "update ebay_accounts set live_pushes_enabled = :e, "
+            "sales_qty_push_enabled = case when :e then sales_qty_push_enabled else false end, "
+            "updated_at = now() where store = :s"
+        ),
         {"e": body.enabled, "s": row.store},
     )
     db.commit()

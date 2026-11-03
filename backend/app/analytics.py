@@ -66,17 +66,30 @@ def _need_tables(db: Session) -> None:
         )
 
 
+def connected_stores(db: Session) -> list[str]:
+    """Stores connected to eBay on the Live listings screen (lower case). The eBay analytics only show these."""
+    try:
+        rows = db.execute(text("select lower(store) as s from ebay_accounts where refresh_token_enc is not null")).all()
+    except Exception:
+        db.rollback()
+        return []
+    return [r.s for r in rows]
+
+
 @router.get("/ebay/stores")
 def stores(db: Session = Depends(get_db)):
+    connected = connected_stores(db)
     if not _tables_ready(db):
-        return {"tables_ready": False, "stores": []}
+        return {"tables_ready": False, "stores": [], "connected": connected, "hidden_stores": []}
     rows = db.execute(
         text(
             "select store, count(*) as orders, min(sale_date) as first_date, max(sale_date) as last_date, "
             "max(imported_at) as last_import from analytics_ebay_orders group by store order by store"
         )
     ).mappings().all()
-    return {"tables_ready": True, "stores": [dict(r) for r in rows]}
+    shown = [dict(r) for r in rows if r["store"].lower() in connected]
+    hidden = [r["store"] for r in rows if r["store"].lower() not in connected]
+    return {"tables_ready": True, "stores": shown, "connected": connected, "hidden_stores": hidden}
 
 
 @router.post("/ebay/import")
@@ -147,10 +160,12 @@ def summary(
     store = (store or "").strip().lower() or None
     if store in ("all", "__all__"):
         store = None
-    p = {"store": store, "start": start, "end": end}
-    # `o` = analytics_ebay_orders. Same filter for every query below.
+    p = {"store": store, "start": start, "end": end, "connected": connected_stores(db)}
+    # `o` = analytics_ebay_orders. Same filter for every query below. Only stores that are connected on the
+    # Live listings screen are counted.
     flt = (
-        "(cast(:store as text) is null or o.store = cast(:store as text)) "
+        "lower(o.store) = any(cast(:connected as text[])) "
+        "and (cast(:store as text) is null or o.store = cast(:store as text)) "
         "and (cast(:start as date) is null or o.sale_date >= cast(:start as date)) "
         "and (cast(:end as date) is null or o.sale_date <= cast(:end as date))"
     )

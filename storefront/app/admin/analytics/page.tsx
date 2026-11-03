@@ -96,18 +96,26 @@ export default function AnalyticsPage() {
   const [error, setError] = useState("");
   const [showImport, setShowImport] = useState(false);
   const [itemBy, setItemBy] = useState<"revenue" | "units">("revenue");
-  const [tab, setTab] = useState<Tab>("ebay");
+  const [tabState, setTabState] = useState<Tab>("ebay");
+  const [connected, setConnected] = useState<string[]>([]);
+  const [storesLoaded, setStoresLoaded] = useState(false);
+  // The eBay tab only exists while at least one store is connected on the Live listings screen.
+  const ebayAvailable = connected.length > 0;
+  const tab: Tab = storesLoaded && !ebayAvailable ? "quickbooks" : tabState;
   const [sub, setSub] = useState<Sub>("overview");
   const range = useMemo(() => rangeFor(preset, from, to), [preset, from, to]);
 
   const loadStores = useCallback(async () => {
     try {
-      const r = await api<{ tables_ready: boolean; stores: StoreInfo[] }>("/analytics/ebay/stores");
+      const r = await api<{ tables_ready: boolean; stores: StoreInfo[]; connected?: string[] }>("/analytics/ebay/stores");
       setTablesReady(r.tables_ready);
       setStores(r.stores);
-      if (r.tables_ready && r.stores.length === 0) setShowImport(true);
+      setConnected(r.connected ?? r.stores.map((x) => x.store));
+      if (r.tables_ready && (r.connected ?? r.stores).length > 0 && r.stores.length === 0) setShowImport(true);
     } catch (e) {
       setError(errMsg(e));
+    } finally {
+      setStoresLoaded(true);
     }
   }, []);
 
@@ -131,11 +139,11 @@ export default function AnalyticsPage() {
   // Remember the tab in the address (#ebay, #ebay/season, #quickbooks) so a reload or a shared link lands in the same place.
   useEffect(() => {
     const [t, sb] = window.location.hash.replace("#", "").split("/");
-    if (t === "quickbooks") setTab("quickbooks");
+    if (t === "quickbooks") setTabState("quickbooks");
     if (sb === "odd" || sb === "season" || sb === "buyers") setSub(sb);
   }, []);
   const go = (t: Tab, sb: Sub) => {
-    setTab(t);
+    setTabState(t);
     setSub(sb);
     window.history.replaceState(null, "", `#${t}${t === "ebay" && sb !== "overview" ? `/${sb}` : ""}`);
   };
@@ -209,7 +217,7 @@ export default function AnalyticsPage() {
 
       {/* ---- the two top tabs */}
       <div role="tablist" className="flex gap-1 border-b border-gray-200">
-        {([["ebay", "eBay"], ["quickbooks", "QuickBooks"]] as [Tab, string][]).map(([key, label]) => (
+        {([["ebay", "eBay"], ["quickbooks", "QuickBooks"]] as [Tab, string][]).filter(([key]) => key !== "ebay" || !storesLoaded || ebayAvailable).map(([key, label]) => (
           <button
             key={key} type="button" role="tab" aria-selected={tab === key}
             onClick={() => go(key, key === "ebay" ? sub : "overview")}
