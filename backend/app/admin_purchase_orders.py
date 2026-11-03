@@ -13,15 +13,19 @@ Mounted at /admin/purchase-orders/* (owner / admin, plus staff holding "inventor
   GET    /purchase-orders/{id}             one PO with its lines
   PUT    /purchase-orders/{id}             edit a PO (vendor, ship-to, note, open lines, and its PO number)
   PUT    /purchase-orders/{id}/sent        mark it sent to the distributor (or not)
-  POST   /purchase-orders/{id}/cancel      cancel a PO (it is kept, with its number; parts that are on no other open PO stop being Backordered)
+  POST   /purchase-orders/{id}/cancel      cancel a PO (it is kept until you delete it; parts that are on no other open PO stop being Backordered)
+  DELETE /purchase-orders/{id}             delete a cancelled or fully received PO for good (its number becomes free to use again)
   GET    /purchase-orders/issues           POs with receiving problems (short, over, or not on the PO), searchable
   GET    /purchase-orders/{id}/export?format=pdf|xlsx     download it again, any time
 
 The "Cost" on a PO line is what you pay the distributor. It starts from the product's cost (admin only, never shown
 to customers) and can be changed per PO line.
 
-A PO is never deleted. It is "open" until every line has been received (then "received"), or "cancelled".
-PO numbers count up from the highest one used (cancelled POs keep theirs), so the first PO ever made is 1.
+A PO is "open" until every line has been received (then "received"), or "cancelled". An open PO can't be deleted:
+cancel it first. A cancelled or received PO can be deleted, which removes it, its lines, its receiving history and
+its shortage/overage records. Stock counts are never touched.
+A new PO gets the LOWEST number not in use, so once old POs are deleted their numbers are used again (the first
+PO ever made is 1).
 Receiving against a PO happens on the Inventory > Receive tab (see admin_inventory.py); anything short, over or
 not on the PO is written to po_receiving_issues, which the "Shortages / overages" tab here reads.
 
@@ -112,11 +116,18 @@ def _who(email: Optional[str]) -> Optional[str]:
 OPEN_LINE = "l.received_at is null and exists (select 1 from po_headers hh where hh.id = l.po_id and hh.status <> 'cancelled')"
 
 
+_LOWEST_FREE_SQL = (
+    "select case when not exists (select 1 from po_headers where po_number = 1) then 1 "
+    "else (select min(h.po_number) + 1 from po_headers h "
+    "      where not exists (select 1 from po_headers x where x.po_number = h.po_number + 1)) end"
+)
+
+
 def _free_number(db: Session) -> int:
-    """The next PO number: one more than the highest used (1 when there are none). POs are never deleted,
-    so a number is never reused or skipped. The lock keeps two people creating a PO at once from getting the same number."""
+    """The number for a new PO: the lowest one nobody is using (1 when there are no POs, or when PO 1 was deleted).
+    The lock keeps two people creating a PO at once from getting the same number."""
     db.execute(text("select pg_advisory_xact_lock(7001)"))
-    return int(db.execute(text("select coalesce(max(po_number), 0) + 1 from po_headers")).scalar())
+    return int(db.execute(text(_LOWEST_FREE_SQL)).scalar())
 
 
 def _release_parts(db: Session, product_ids) -> None:
@@ -454,7 +465,7 @@ def list_pos(
 @needs("inventory.purchase")
 def defaults(db: Session = Depends(get_db)):
     """What the Create / Edit screens fill in: the usual Ship To address, and a PO number nobody uses yet."""
-    nxt = db.execute(text("select coalesce(max(po_number), 0) + 1 from po_headers")).scalar()
+    nxt = db.execute(text(_LOWEST_FREE_SQL)).scalar()
     return {"ship_to": DEFAULT_SHIP_TO, "next_po_number": int(nxt)}
 
 
@@ -718,7 +729,7 @@ class CancelIn(BaseModel):
 @router.post("/{po_id}/cancel")
 @needs("inventory.purchase")
 def cancel_po(po_id: int, body: CancelIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
-    """Cancel a PO. It is never deleted: it keeps its number and stays in the history, marked cancelled.
+    """Cancel a PO. It is not deleted: it keeps its number and stays in the history, marked cancelled (delete it afterwards if you want it gone).
     Stock counts are not touched. Parts that were only on this PO stop being Backordered. A PO that has
     been received in full can't be cancelled; one that is part-received keeps what was already received."""
     try:
@@ -752,6 +763,39 @@ def cancel_po(po_id: int, body: CancelIn, db: Session = Depends(get_db), user: A
         log.exception("Cancelling a purchase order failed")
         raise HTTPException(500, f"The purchase order was not cancelled. ({type(exc).__name__})")
     return {"ok": True, "po_number": h.po_number, "received_lines": sum(1 for l in lines if l.received_at is not None)}
+
+
+@router.delete("/{po_id}")
+@needs("inventory.purchase")
+def delete_po(po_id: int, db: Session = Depends(get_db)):
+    """Delete a cancelled or fully received PO for good, with its lines, receiving history and shortage records.
+    An open PO has to be cancelled first (that is what releases its parts from Backordered). Stock counts are not
+    touched. Its number becomes free, and the next new PO takes the lowest free number."""
+    try:
+        h = db.execute(
+            text("select id, po_number, status from po_headers where id = :id for update"), {"id": po_id}
+        ).first()
+        if not h:
+            db.rollback()
+            raise HTTPException(404, "That purchase order doesn't exist (it may already be deleted).")
+        if h.status == "open":
+            db.rollback()
+            raise HTTPException(409, f"Purchase order {h.po_number} is still open. Cancel it first, then delete it.")
+        for tbl in ("po_line_receipts", "po_receiving_issues", "po_lines"):
+            db.execute(text(f"delete from {tbl} where po_id = :id"), {"id": po_id})  # fixed names, never from the client
+        db.execute(text("delete from po_headers where id = :id"), {"id": po_id})
+        db.commit()
+    except HTTPException:
+        raise
+    except IntegrityError:
+        db.rollback()
+        log.exception("Deleting a purchase order hit a link from another table")
+        raise HTTPException(409, "Something else still points at this purchase order, so it was not deleted. Nothing changed.")
+    except Exception as exc:
+        db.rollback()
+        log.exception("Deleting a purchase order failed")
+        raise HTTPException(500, f"The purchase order was not deleted; nothing changed. ({type(exc).__name__})")
+    return {"ok": True, "po_number": h.po_number}
 
 
 @router.get("/{po_id}/export")

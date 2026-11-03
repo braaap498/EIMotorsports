@@ -119,7 +119,7 @@ async function download(po: { id: number; po_number: number }, fmt: "pdf" | "xls
 /**
  * Purchase orders.
  *  - Reorder: low and out-of-stock parts (or every part). Tick parts, press Create PO, pick a distributor.
- *  - History: every PO ever made (they are never deleted, only cancelled), searchable; view it or download it again as PDF or Excel.
+ *  - History: every PO made, searchable; cancelled and received POs can be deleted (the number is then free for the next new PO); view it or download it again as PDF or Excel.
  *  - Shortages / overages: every PO that had a receiving problem, searchable.
  *  - Distributors: add, edit and delete the distributors you order from.
  * Creating a PO marks its parts Backordered by default (un-tick on the Inventory > Stock tab).
@@ -621,7 +621,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
   async function cancelPo(po: { id: number; po_number: number }) {
     if (
       !window.confirm(
-        `Cancel purchase order ${po.po_number}? It stays in the history, marked cancelled, and its number is not reused. Stock counts are not changed, and parts that are on no other open PO stop being Backordered.`
+        `Cancel purchase order ${po.po_number}? It stays in the history, marked cancelled (you can delete it afterwards). Stock counts are not changed, and parts that are on no other open PO stop being Backordered.`
       )
     )
       return;
@@ -631,6 +631,24 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
       setEditing(null);
       setBump((b) => b + 1);
       setFlash({ kind: "success", text: `Purchase order ${po.po_number} cancelled.` });
+    } catch (e) {
+      setFlash({ kind: "error", text: errMsg(e) });
+    }
+  }
+
+  async function deletePo(po: { id: number; po_number: number }) {
+    if (
+      !window.confirm(
+        `Permanently delete purchase order ${po.po_number}? Its lines, receiving history and shortage records are removed and this can't be undone. Stock counts are not changed. Its number becomes free, and the next new PO will use the lowest free number.`
+      )
+    )
+      return;
+    try {
+      await api(`/purchase-orders/${po.id}`, { method: "DELETE" });
+      setOpen(null);
+      setEditing(null);
+      setBump((b) => b + 1);
+      setFlash({ kind: "success", text: `Purchase order ${po.po_number} deleted.` });
     } catch (e) {
       setFlash({ kind: "error", text: errMsg(e) });
     }
@@ -699,6 +717,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                     <button className={btn2Cls} onClick={() => dl(r, "pdf")}>PDF</button>
                     <button className={btn2Cls} onClick={() => dl(r, "xlsx")}>Excel</button>
                     {r.status === "open" && <button className={dangerCls} onClick={() => cancelPo(r)}>Cancel PO</button>}
+                    {r.status !== "open" && <button className={dangerCls} onClick={() => deletePo(r)}>Delete</button>}
                   </div>
                 </td>
               </ClickRow>
@@ -756,7 +775,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
             {open.status === "cancelled" && (
               <Notice kind="error">
                 Cancelled{open.cancelled_at ? ` ${new Date(open.cancelled_at).toLocaleDateString()}` : ""}
-                {open.cancelled_by_name || open.cancelled_by ? ` by ${who(open.cancelled_by_name, open.cancelled_by)}` : ""}. It is kept for the record and its number won’t be reused.
+                {open.cancelled_by_name || open.cancelled_by ? ` by ${who(open.cancelled_by_name, open.cancelled_by)}` : ""}. It is kept for the record until you delete it.
               </Notice>
             )}
             <div className="overflow-x-auto rounded border border-gray-200">
@@ -825,6 +844,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                 </button>
               )}
               {open.status === "open" && <button className={dangerCls} onClick={() => cancelPo(open)}>Cancel PO</button>}
+              {open.status !== "open" && <button className={dangerCls} onClick={() => deletePo(open)}>Delete PO</button>}
               <button className={btn2Cls} onClick={() => setOpen(null)}>Close</button>
             </div>
           </div>
