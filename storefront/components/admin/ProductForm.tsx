@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import DescriptionEditor from "./DescriptionEditor";
 import FitmentPanel from "./FitmentPanel";
+import KitPartsPanel, { type KitPart } from "./KitPartsPanel";
 import PhotosPanel, { type Photo } from "./PhotosPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
 import { useAccess } from "./AdminAccess";
@@ -36,7 +37,7 @@ const BASIC: FieldDef[] = [
   { key: "title", label: "Title", kind: "text", wide: true },
   { key: "ebay_item_id", label: "eBay item ID (optional)", kind: "text" },
   { key: "manufacturer_part_number", label: "Manufacturer part #", kind: "text" },
-  { key: "custom_label_sku", label: "eBay custom label (optional)", kind: "text" },
+  { key: "custom_label_sku", label: "eBay custom label (CLS) – built from the kit parts below; edit here to override", kind: "text" },
   { key: "part_type", label: "Part type", kind: "text" },
   { key: "condition", label: "Condition", kind: "text" },
 ];
@@ -129,6 +130,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [photosDirty, setPhotosDirty] = useState(false); // unsaved main-photo / order changes in the photos panel
   const [similar, setSimilar] = useState<SimilarMatch[]>([]);
+  const [kitParts, setKitParts] = useState<KitPart[]>([]); // pieces bought from a vendor that make up this product
   const [inHouseSku, setInHouseSku] = useState(""); // our EI- number; set by the database, never typed in
   const [loading, setLoading] = useState(!!productId);
   const [busy, setBusy] = useState(false);
@@ -217,11 +219,36 @@ export default function ProductForm({ productId }: { productId?: number }) {
     setBusy(true);
     try {
       if (productId) {
-        await api(`/products/${productId}`, { method: "PATCH", body: payload });
+        const r = await api<{ cls_changed?: boolean }>(`/products/${productId}`, { method: "PATCH", body: payload });
         if (baseline) setBaseline({ ...baseline, ...payload });
-        setMsg({ kind: "success", text: "Saved" });
+        let text = "Saved";
+        if (r.cls_changed) {
+          // the custom label is the same on every linked eBay listing, so send it to all of them
+          try {
+            const s = await api<{ results: { status: string; detail: string }[] }>(`/kits/${productId}/sync`, { method: "POST" });
+            const bad = s.results.filter((x) => x.status === "error" || x.status === "not_sent");
+            const ok = s.results.filter((x) => x.status === "updated" || x.status === "already_current").length;
+            text += `. Custom label on eBay: ${ok} of ${s.results.length} listing(s) correct${bad.length ? `. Problems: ${bad.map((b) => b.detail).join(" | ")}` : ""}`;
+          } catch (err) {
+            text += `. The label is saved here but was not sent to eBay: ${errMsg(err)}`;
+          }
+        }
+        setMsg({ kind: "success", text });
       } else {
-        const r = await api<{ id: number }>("/products", { method: "POST", body: payload });
+        const body = kitParts.length
+          ? {
+              ...payload,
+              kit_parts: kitParts.map((p) => ({
+                distributor_id: p.distributor_id,
+                supplier_item_id: p.supplier_item_id,
+                part_number: p.part_number,
+                description: p.description || null,
+                unit_cost: p.unit_cost,
+                quantity: p.quantity,
+              })),
+            }
+          : payload;
+        const r = await api<{ id: number }>("/products", { method: "POST", body });
         router.push(`/admin/products/${r.id}`);
       }
     } catch (err) {
@@ -396,6 +423,19 @@ export default function ProductForm({ productId }: { productId?: number }) {
             onChange={(html) => set("description", html)}
           />
         </section>
+
+        <KitPartsPanel
+          productId={productId}
+          parts={kitParts}
+          onChange={setKitParts}
+          disabled={!mayDetails}
+          cardCls={card}
+          onSaved={(c) => {
+            if (c == null) return;
+            set("custom_label_sku", c);
+            if (baseline) setBaseline({ ...baseline, custom_label_sku: c });
+          }}
+        />
 
         <section className={card}>
           <h2 className="text-lg font-semibold">Price &amp; stock</h2>

@@ -31,6 +31,7 @@ from app.auth import AuthUser, current_user, has_perm, needs, require_route_acce
 from app.database import get_db
 from app.images import thumb_url
 from app.permissions import FIELD_PERMS, label_for
+from app.kits import KitPartIn, replace_parts
 from app.skus import clean_ebay_item_id
 from app.sanitize import clean_description
 
@@ -496,6 +497,11 @@ class ProductFields(BaseModel):
     is_universal: Optional[bool] = None
 
 
+class ProductCreate(ProductFields):
+    # Pieces of a kit, picked from a vendor's catalog. When given, the custom label is built from them.
+    kit_parts: Optional[list[KitPartIn]] = None
+
+
 # sku (our EI-0000001 number) is never typed in: the database hands out the next number to a new product.
 PRODUCT_COLUMNS = ", ".join(f"p.{name}" for name in ProductFields.model_fields) + ", p.sku, p.id, p.updated_at"
 
@@ -663,8 +669,10 @@ def get_product(product_id: int, db: Session = Depends(get_db), user: AuthUser =
 
 @router.post("/products", status_code=201)
 @needs("products.create")
-def create_product(body: ProductFields, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+def create_product(body: ProductCreate, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     fields = body.model_dump(exclude_unset=True)
+    kit_parts = body.kit_parts or []
+    fields.pop("kit_parts", None)
     if not fields.get("title"):
         raise HTTPException(400, "A title is required")
     if "ebay_item_id" in fields:
@@ -681,8 +689,13 @@ def create_product(body: ProductFields, db: Session = Depends(get_db), user: Aut
         ).scalar()
     except IntegrityError:
         conflict(db, "A product with that eBay item ID already exists")
+    cls = None
+    if kit_parts:
+        if not has_perm(user, "products.edit_details") and not has_perm(user, "products.create"):
+            conflict(db, "You don't have permission to set kit parts.")
+        cls = replace_parts(db, new_id, kit_parts)["cls"]  # builds and stores the custom label
     finish(db, refresh=True)
-    return {"id": new_id, "slug": fields["slug"]}
+    return {"id": new_id, "slug": fields["slug"], "custom_label_sku": cls}
 
 
 @router.patch("/products/{product_id}")
@@ -718,7 +731,8 @@ def update_product(
     except IntegrityError:
         conflict(db, "That eBay item ID or slug is already used by another product")
     finish(db, refresh=True)
-    return {"id": product_id, "updated": list(fields)}
+    # A changed custom label must reach every linked eBay listing: the screen calls POST /kits/{id}/sync next.
+    return {"id": product_id, "updated": list(fields), "cls_changed": "custom_label_sku" in fields}
 
 
 # --------------------------------------------------------------------------

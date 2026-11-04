@@ -36,6 +36,7 @@ from app.analytics import router as analytics_router
 from app.analytics_qb import router as analytics_qb_router
 from app.analytics_insights import router as analytics_insights_router
 from app.autodist import router as autodist_router
+from app.kits import router as kits_router
 from app.auth import AuthUser, require_staff
 from app.config import get_settings
 from app.database import get_db
@@ -109,6 +110,7 @@ admin_router.include_router(admin_about_router)
 admin_router.include_router(admin_reviews_router)
 admin_router.include_router(admin_help_router)
 admin_router.include_router(autodist_router)
+admin_router.include_router(kits_router)
 admin_router.include_router(analytics_router)
 admin_router.include_router(analytics_qb_router)
 admin_router.include_router(analytics_insights_router)

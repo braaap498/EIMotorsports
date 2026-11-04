@@ -630,7 +630,7 @@ def receive_po_line(
             raise HTTPException(409, f"Purchase order {h.po_number} is not marked as sent yet. Nothing was received.")
         line = db.execute(
             text(
-                "select id, product_id, item, description, quantity, received_at, coalesce(received_qty, 0) as got "
+                "select id, product_id, item, description, quantity, received_at, coalesce(received_qty, 0) as got, kit_product_id "
                 "from po_lines where id = :l and po_id = :po for update"
             ),
             {"l": line_id, "po": po_id},
@@ -675,7 +675,7 @@ def receive_po_line(
 
         _open_batch(db, body.batch_id, "receive", user, f"PO {h.po_number}", body.note, None)
 
-        if body.quantity > 0:
+        if body.quantity > 0 and line.kit_product_id is None:
             new_qty = db.execute(
                 text(
                     "update products set quantity_on_hand = coalesce(quantity_on_hand, 0) + :q, "
@@ -725,6 +725,16 @@ def receive_po_line(
                 "ack_by": user.email if diff != 0 else None, "ack": diff != 0, "by": user.email,
             },
         )
+
+        if line.kit_product_id is not None:
+            # A piece of a kit: it is not stocked on its own; whole kits made from the pieces received are.
+            from app.kits import credit_kit_receipt
+
+            made = credit_kit_receipt(db, po_id, line.kit_product_id, user.email, h.po_number)
+            if made:
+                new_qty = db.execute(
+                    text("select quantity_on_hand from products where id = :p"), {"p": line.kit_product_id}
+                ).scalar()
 
         left = db.execute(
             text("select count(*) from po_lines where po_id = :id and received_at is null"), {"id": po_id}
