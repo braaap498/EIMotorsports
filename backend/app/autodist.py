@@ -721,6 +721,30 @@ def ftp_status():
     }
 
 
+_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp")
+
+
+def _ftp_tree(ftp: ftplib.FTP, max_entries: int = 400) -> list[dict]:
+    """Every folder and file on the server, two folder levels deep, so we can see what Autodist publishes
+    (data files, price files, images...). Capped so a huge image folder cannot stall the check."""
+    out: list[dict] = []
+
+    def walk(folder: str, depth: int) -> None:
+        for n, is_dir, size in _ftp_list(ftp, folder):
+            if len(out) >= max_entries:
+                return
+            path = _join(folder, n)
+            out.append({"path": path, "dir": bool(is_dir), "size": size, "image": n.lower().endswith(_IMAGE_EXT)})
+            if is_dir and depth < 2:
+                walk(path, depth + 1)
+
+    try:
+        walk("", 1)
+    except Exception as e:  # a folder we cannot open must not break the check
+        log.warning("autodist ftp tree stopped: %s", e)
+    return out
+
+
 @router.post("/ftp/check")
 def ftp_check():
     """Log in, list the top folder and the 'pricefile' folder, and preview the inventory file's columns.
@@ -736,6 +760,7 @@ def ftp_check():
             where = None
         top = [{"name": n, "dir": d, "size": sz} for n, d, sz in _ftp_list(ftp, "")]
         raw = _ftp_raw_list(ftp, "")[:60]
+        tree = _ftp_tree(ftp)
         price_folder = next((t["name"] for t in top if _norm_header(t["name"]) == "pricefile"), None)
         price_files = (
             [{"name": n, "size": sz} for n, d, sz in _ftp_list(ftp, price_folder) if d is not True] if price_folder else []
@@ -752,7 +777,8 @@ def ftp_check():
             ftp.quit()
         except Exception:
             ftp.close()
-    base = {"top": top, "price_files": price_files, "inventory_file": path, "login_folder": where, "raw_listing": raw, "error": error}
+    base = {"top": top, "price_files": price_files, "inventory_file": path, "login_folder": where, "raw_listing": raw, "error": error,
+            "tree": tree, "image_files": sum(1 for t in tree if t["image"])}
     if error or not data:
         return base
     if data[:2] == b"PK":

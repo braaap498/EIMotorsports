@@ -37,6 +37,8 @@ type FtpCheck = {
   inventory_file: string | null;
   login_folder?: string | null;
   raw_listing?: string[];
+  tree?: { path: string; dir: boolean; size: number | null; image: boolean }[];
+  image_files?: number;
   error?: string | null;
   columns?: string[];
   mapped?: Record<string, string>;
@@ -377,6 +379,17 @@ function AutodistInner() {
                 Top folder: {check.top.map((t) => t.name + (t.dir ? "/" : "")).join(", ") || "(empty)"}
                 {check.price_files.length > 0 && ` · pricefile folder: ${check.price_files.map((f) => f.name).join(", ")}`}
               </div>
+              {check.tree && check.tree.length > 0 && (
+                <details>
+                  <summary className="cursor-pointer text-gray-500">
+                    Everything on the server ({check.tree.length}
+                    {check.tree.length >= 400 ? "+" : ""} items, {check.image_files ?? 0} image files)
+                  </summary>
+                  <div className="overflow-x-auto whitespace-pre text-gray-600">
+                    {check.tree.map((e) => `${e.dir ? "📁 " : e.image ? "🖼 " : "   "}${e.path}${e.size != null && !e.dir ? `  (${n(e.size)} bytes)` : ""}`).join("\n")}
+                  </div>
+                </details>
+              )}
               {check.raw_listing && check.raw_listing.length > 0 && (
                 <details>
                   <summary className="cursor-pointer text-gray-500">What the server sent</summary>
