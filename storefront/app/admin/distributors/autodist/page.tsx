@@ -335,7 +335,7 @@ function AutodistInner() {
               {ftp == null
                 ? "…"
                 : ftp.configured
-                ? `Logging in to ${ftp.host} as ${ftp.user}. Pulls the "all products price and inventory" file.`
+                ? `Logging in to ${ftp.host} as ${ftp.user}. Pulls the "all products price and inventory" file, then your own prices (priceupdate.txt).`
                 : "Not set up yet: add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment, then redeploy."}
             </span>
           </div>
@@ -445,7 +445,10 @@ function AutodistInner() {
                 <span className="text-gray-500">{new Date(r.started_at).toLocaleString()}</span>
                 <Badge tone={tone(r.status)}>{r.status === "needs_review" ? "needs review" : r.status}</Badge>
                 <span>
-                  {n(r.rows_seen)} parts, {n(r.rows_new)} new{r.rows_skipped ? `, ${n(r.rows_skipped)} skipped` : ""}
+                  {r.source === "ftp_price"
+                    ? `Our prices: ${n(r.rows_seen)} lines, ${n(r.rows_new)} matched a part`
+                    : `${n(r.rows_seen)} parts, ${n(r.rows_new)} new`}
+                  {r.rows_skipped ? `, ${n(r.rows_skipped)} skipped` : ""}
                   {r.rows_deactivated ? `, ${n(r.rows_deactivated)} retired` : ""}
                 </span>
                 {r.note && <span className="text-red-700">{r.note}</span>}

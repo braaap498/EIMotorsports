@@ -10,7 +10,7 @@ Mounted at /admin/autodist/* (owner/admin only).
   GET  /ftp/status             is the Autodist FTP login set up on the server (nothing is contacted)
   POST /ftp/check              log in to the Autodist FTP server, list the folders, preview the inventory file
   POST /ftp/peek               column names and sample lines of each Autodist data file (nothing is stored)
-  POST /import/ftp             pull the live inventory file from the FTP server and import it (runs in the background)
+  POST /import/ftp             pull the live inventory file, then our own prices (priceupdate.txt), from the FTP server (runs in the background)
   GET  /ftp/schedule           the automatic-sync setting (off by default) and what the last check found
   PUT  /ftp/schedule           turn automatic sync on/off and set how often the server checks (minutes)
   GET  /items                  browse / search / filter / sort the stored supplier parts (see items() for every filter)
@@ -393,13 +393,13 @@ def _norm_header(h: Optional[str]) -> str:
     return re.sub(r"[^a-z0-9]", "", (h or "").lower())
 
 
-def map_headers(header: list[str]) -> dict[str, int]:
+def map_headers(header: list[str], aliases: Optional[dict] = None) -> dict[str, int]:
     """Header cells -> {our field: column index}. Raises 400 when there is no SKU column."""
     by_norm = {}
     for i, h in enumerate(header):
         by_norm.setdefault(_norm_header(h), i)
     out: dict[str, int] = {}
-    for field, names in _ALIASES.items():
+    for field, names in (aliases or _ALIASES).items():
         for nm in names:
             if nm in by_norm:
                 out[field] = by_norm[nm]
@@ -551,22 +551,23 @@ def _sniff_delimiter(first_line: str) -> str:
     return max([",", "\t", "|", ";"], key=lambda d: first_line.count(d))
 
 
-def _rows_from_stream(text_stream, mapping: Optional[dict] = None, delimiter: Optional[str] = None):
-    """Yield (clean_row | None) per data line of the feed (None = unreadable line)."""
-    reader = csv.reader(text_stream, delimiter=delimiter or ",")
+def _rows_from_stream(text_stream, mapping: Optional[dict] = None, delimiter: Optional[str] = None,
+                      aliases: Optional[dict] = None, cleaner=None, quoting: int = csv.QUOTE_MINIMAL):
+    """Yield (clean_row | None) per data line of a feed (None = unreadable line)."""
+    reader = csv.reader(text_stream, delimiter=delimiter or ",", quoting=quoting)
     header = next(reader, None)
     if header is None:
         return
-    mp = mapping or map_headers(header)
+    mp = mapping or map_headers(header, aliases)
     width = len(header)
+    clean = cleaner or clean_row
     for rec in reader:
         if not rec or all(not c.strip() for c in rec):
             continue
         if len(rec) != width:
             yield None
             continue
-        raw = {f: rec[i] for f, i in mp.items()}
-        yield clean_row(raw)
+        yield clean({f: rec[i] for f, i in mp.items()})
 
 
 def _open_downloaded(tmp_path: str):
@@ -615,17 +616,17 @@ def _remote_signature(ftp: ftplib.FTP, path: str) -> str:
 
 
 def _sync_note(db: Session, *, summary: Optional[str] = None, error: Optional[str] = None,
-               signature: Optional[str] = None, changed: bool = False) -> None:
+               signature: Optional[str] = None, price_signature: Optional[str] = None, changed: bool = False) -> None:
     """Record what the last check / import found. Never lets a missing settings table break an import."""
     try:
         db.execute(
             text(
                 "update supplier_sync_settings set last_summary = coalesce(:sm, last_summary), last_error = :er, "
-                "last_signature = coalesce(:sg, last_signature), "
+                "last_signature = coalesce(:sg, last_signature), last_price_signature = coalesce(:pg, last_price_signature), "
                 "last_changed_at = case when :ch then now() else last_changed_at end, updated_at = now() "
                 "where supplier = :s"
             ),
-            {"sm": summary, "er": (error or None) and error[:400], "sg": signature, "ch": changed, "s": SUPPLIER},
+            {"sm": summary, "er": (error or None) and error[:400], "sg": signature, "pg": price_signature, "ch": changed, "s": SUPPLIER},
         )
         db.commit()
     except Exception:
@@ -633,7 +634,7 @@ def _sync_note(db: Session, *, summary: Optional[str] = None, error: Optional[st
         log.warning("could not record the Autodist sync result (is sql/autodist_sync_settings.sql applied?)")
 
 
-def _ftp_job(run_id: int) -> None:
+def _ftp_job(run_id: int) -> bool:
     """Background: download the live file, store it in batches, then retire what left the feed."""
     gen = get_db()
     db = next(gen)
@@ -691,6 +692,7 @@ def _ftp_job(run_id: int) -> None:
         else:
             _sync_note(db, summary=f"Imported {seen:,} parts ({new_total:,} new, {result.get('retired', 0):,} retired).",
                        signature=signature, changed=True)
+        return True
     except HTTPException as e:
         db.rollback()
         _set_run_note(db, run_id, "failed", str(e.detail))
@@ -707,6 +709,7 @@ def _ftp_job(run_id: int) -> None:
             except OSError:
                 pass
         gen.close()
+    return False
 
 
 @router.get("/ftp/status")
@@ -858,8 +861,191 @@ def import_ftp(db: Session = Depends(get_db), user: AuthUser = Depends(require_a
     if not u or not pw:
         raise HTTPException(400, "The Autodist FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
     run_id = _begin_run(db, "ftp", user.email or user.user_id)
-    threading.Thread(target=_ftp_job, args=(run_id,), daemon=True, name=f"autodist-ftp-{run_id}").start()
+    threading.Thread(target=_ftp_sync_all, args=(run_id,), daemon=True, name=f"autodist-ftp-{run_id}").start()
     return {"run_id": run_id}
+
+
+# --------------------------------------------------------------------------
+# your own prices: PriceFile/priceupdate.txt
+# --------------------------------------------------------------------------
+# Custom to our account: our real dealer cost (Dlr Cost), MAP, ship weight, size, surcharge. It only updates parts
+# that are already stored from the inventory file; it never adds or retires parts.
+PRICE_FILE_DEFAULT = "PriceFile/priceupdate.txt"
+_PRICE_ALIASES = {
+    "sku": ["itemsku", "sku"],
+    "my_cost": ["dlrcost", "dealercost", "yourcost"],
+    "map_price": ["mapprice", "mappricing", "map"],
+    "weight_lb": ["actualweight", "itemweight"],
+    "ship_weight_lb": ["shipweight", "shippingweight"],
+    "length_in": ["length", "itemlength"],
+    "width_in": ["width", "itemwidth"],
+    "height_in": ["height", "itemheight"],
+    "special_order": ["specialorder"],
+    "surcharge": ["itemsurcharge", "surcharge"],
+    "flat_rate_group": ["flatrategroup"],
+}
+
+
+def _num(value: Optional[str], places: int = 2, limit: int = 10_000_000) -> Optional[Decimal]:
+    try:
+        v = Decimal((value or "").strip()).quantize(Decimal(1).scaleb(-places))
+    except InvalidOperation:
+        return None
+    return v if 0 <= v < limit else None
+
+
+def clean_price_row(raw: dict) -> Optional[dict]:
+    sku = (raw.get("sku") or "").strip()
+    if not sku:
+        return None
+    so = (raw.get("special_order") or "").strip().upper()
+    return {
+        "sku": sku[:60],
+        "my_cost": _num(raw.get("my_cost")),
+        "map_price": _num(raw.get("map_price")) or None,  # 0.00 means "no MAP", not a MAP of zero
+        "weight_lb": _num(raw.get("weight_lb"), 4, 100_000),
+        "ship_weight_lb": _num(raw.get("ship_weight_lb"), 4, 100_000),
+        "length_in": _num(raw.get("length_in"), 4, 100_000),
+        "width_in": _num(raw.get("width_in"), 4, 100_000),
+        "height_in": _num(raw.get("height_in"), 4, 100_000),
+        "special_order": so[:1] in ("Y", "1", "T"),
+        "surcharge": _num(raw.get("surcharge")),
+        "flat_rate_group": (raw.get("flat_rate_group") or "").strip()[:40] or None,
+    }
+
+
+_PRICE_UPDATE = """
+with incoming as (
+  select * from unnest(
+    cast(:sku as text[]), cast(:cost as numeric[]), cast(:map as numeric[]), cast(:wt as numeric[]),
+    cast(:swt as numeric[]), cast(:len as numeric[]), cast(:wid as numeric[]), cast(:hgt as numeric[]),
+    cast(:so as boolean[]), cast(:sur as numeric[]), cast(:frg as text[])
+  ) as t(sku, my_cost, map_price, weight_lb, ship_weight_lb, length_in, width_in, height_in, special_order, surcharge, flat_rate_group)
+), up as (
+  update supplier_items s set
+    my_cost = i.my_cost, map_price = i.map_price, weight_lb = i.weight_lb, ship_weight_lb = i.ship_weight_lb,
+    length_in = i.length_in, width_in = i.width_in, height_in = i.height_in, special_order = i.special_order,
+    surcharge = i.surcharge, flat_rate_group = i.flat_rate_group, price_synced_at = now(),
+    updated_at = case when (s.my_cost, s.map_price, s.surcharge) is distinct from (i.my_cost, i.map_price, i.surcharge)
+                      then now() else s.updated_at end
+  from incoming i
+  where s.supplier = :sup and s.sku = i.sku
+  returning 1
+)
+select count(*) from up
+"""
+
+
+def update_prices(db: Session, rows: list[dict]) -> int:
+    """Store these price rows on the parts we already hold. Returns how many parts matched. Does not commit."""
+    if not rows:
+        return 0
+    col = lambda k: [r[k] for r in rows]  # noqa: E731
+    return int(
+        db.execute(
+            text(_PRICE_UPDATE),
+            {"sup": SUPPLIER, "sku": col("sku"), "cost": col("my_cost"), "map": col("map_price"), "wt": col("weight_lb"),
+             "swt": col("ship_weight_lb"), "len": col("length_in"), "wid": col("width_in"), "hgt": col("height_in"),
+             "so": col("special_order"), "sur": col("surcharge"), "frg": col("flat_rate_group")},
+        ).scalar()
+        or 0
+    )
+
+
+def _price_path() -> str:
+    return os.environ.get("AUTODIST_FTP_PRICE_FILE", "").strip() or PRICE_FILE_DEFAULT
+
+
+def _price_job(run_id: int) -> bool:
+    """Background: download the price file and store our cost / MAP / weights on the parts we hold."""
+    gen = get_db()
+    db = next(gen)
+    tmp_path = None
+    try:
+        ftp = _ftp_connect()
+        try:
+            path = _price_path()
+            signature = _remote_signature(ftp, path)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".price") as tmp:
+                tmp_path = tmp.name
+                ftp.retrbinary("RETR " + path, tmp.write, blocksize=65536)
+        finally:
+            try:
+                ftp.quit()
+            except Exception:
+                ftp.close()
+        stream, delim, closer = _open_downloaded(tmp_path)
+        try:
+            seen = skipped = matched = 0
+            batch: dict[str, dict] = {}
+
+            def flush():
+                nonlocal seen, matched
+                if not batch:
+                    return
+                rows = list(batch.values())
+                matched += update_prices(db, rows)
+                seen += len(rows)
+                db.execute(
+                    text("update supplier_import_runs set rows_seen = :n, rows_new = :m, rows_skipped = :k where id = :i"),
+                    {"n": seen, "m": matched, "k": skipped, "i": run_id},
+                )
+                db.commit()
+                batch.clear()
+
+            quoting = csv.QUOTE_MINIMAL if delim == "," else csv.QUOTE_NONE
+            for row in _rows_from_stream(stream, delimiter=delim, aliases=_PRICE_ALIASES, cleaner=clean_price_row, quoting=quoting):
+                if row is None:
+                    skipped += 1
+                    continue
+                batch[row["sku"]] = row
+                if len(batch) >= _FTP_BATCH:
+                    flush()
+            flush()
+        finally:
+            closer()
+        if seen == 0:
+            raise HTTPException(400, "The price file held no usable lines.")
+        db.execute(
+            text("update supplier_import_runs set status = 'done', finished_at = now(), rows_skipped = :k, note = null where id = :i"),
+            {"k": skipped, "i": run_id},
+        )
+        db.commit()
+        _sync_note(db, summary=f"Prices updated: {matched:,} of the {seen:,} lines in the price file matched a stored part.",
+                   price_signature=signature, changed=True)
+        return True
+    except HTTPException as e:
+        db.rollback()
+        _set_run_note(db, run_id, "failed", str(e.detail))
+        _sync_note(db, error=str(e.detail))
+    except Exception:
+        db.rollback()
+        log.exception("autodist price import failed (run %s)", run_id)
+        _set_run_note(db, run_id, "failed", "The price import failed. See the server log.")
+        _sync_note(db, error="The price import failed. See the server log.")
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        gen.close()
+    return False
+
+
+def _ftp_sync_all(run_id: int) -> None:
+    """Manual sync: the inventory file first, then our prices."""
+    if not _ftp_job(run_id):
+        return
+    gen = get_db()
+    db = next(gen)
+    try:
+        price_run = _begin_run(db, "ftp_price", "sync")
+    except HTTPException:
+        return
+    finally:
+        gen.close()
+    _price_job(price_run)
 
 
 # --------------------------------------------------------------------------
@@ -885,18 +1071,19 @@ def _auto_tick() -> None:
             text(
                 "update supplier_sync_settings set last_checked_at = now() where supplier = :s and auto_enabled "
                 "and (last_checked_at is null or last_checked_at <= now() - make_interval(mins => interval_minutes)) "
-                "returning last_signature"
+                "returning last_signature, last_price_signature"
             ),
             {"s": SUPPLIER},
         ).first()
         db.commit()
         if claimed is None:
             return  # off, not due yet, or another copy of the server took this check
-        last_sig = claimed[0]
+        last_sig, last_price_sig = claimed[0], claimed[1]
         try:
             ftp = _ftp_connect()
             try:
                 sig = _remote_signature(ftp, _find_inventory_file(ftp))
+                price_sig = _remote_signature(ftp, _price_path())
             finally:
                 try:
                     ftp.quit()
@@ -905,14 +1092,24 @@ def _auto_tick() -> None:
         except HTTPException as e:
             _sync_note(db, error=str(e.detail))
             return
-        if sig != "-|-" and sig == last_sig:
-            _sync_note(db, summary="Checked: Autodist's file has not changed since the last import.")
+        inv_changed = sig == "-|-" or sig != last_sig
+        price_changed = price_sig == "-|-" or price_sig != last_price_sig
+        if not inv_changed and not price_changed:
+            _sync_note(db, summary="Checked: Autodist's files have not changed since the last import.")
             return
-        try:
-            run_id = _begin_run(db, "ftp_auto", "automatic sync")
-        except HTTPException:
-            return  # an import is already running
-        _ftp_job(run_id)
+        if inv_changed:
+            try:
+                run_id = _begin_run(db, "ftp_auto", "automatic sync")
+            except HTTPException:
+                return  # an import is already running
+            if not _ftp_job(run_id):
+                return
+        if price_changed:
+            try:
+                price_run = _begin_run(db, "ftp_price", "automatic sync")
+            except HTTPException:
+                return
+            _price_job(price_run)
     except Exception:
         db.rollback()
         log.exception("autodist automatic sync check failed")
@@ -1072,7 +1269,7 @@ def match_report(db: Session = Depends(get_db)):
             text(
                 f"""
                 select p.id, p.sku_display as sku, p.title,
-                       s.sku as supplier_sku, s.manufacturer, s.name as supplier_name, s.dealer_cost
+                       s.sku as supplier_sku, s.manufacturer, s.name as supplier_name, s.effective_cost
                 from products p
                 join supplier_items s on s.supplier = :s and s.active
                  and s.mfr_number_norm = nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '')
@@ -1109,9 +1306,9 @@ _SORTS = {
     "name": "s.name",
     "uom": "s.unit_of_measure",
     "list": "s.list_price",
-    "cost": "s.dealer_cost",
-    "margin": "(s.list_price - s.dealer_cost)",
-    "margin_pct": "((s.list_price - s.dealer_cost) / nullif(s.list_price, 0))",
+    "cost": "s.effective_cost",
+    "margin": "(s.list_price - s.effective_cost)",
+    "margin_pct": "((s.list_price - s.effective_cost) / nullif(s.list_price, 0))",
     "stock": _TOTAL_QTY,
     "maine": "s.qty_maine",
     "indiana": "s.qty_indiana",
@@ -1121,7 +1318,9 @@ _SORTS = {
 }
 _ITEM_COLS = (
     "s.id, s.sku, s.mfr_number, s.mfr_number_norm, s.manufacturer, s.name, s.unit_of_measure, s.list_price, "
-    "s.dealer_cost, s.qty_maine, s.qty_indiana, s.qty_nevada, s.upc, s.upc_norm, s.active, s.updated_at, s.last_seen_at"
+    "s.effective_cost as dealer_cost, s.dealer_cost as standard_cost, s.my_cost, s.map_price, s.weight_lb, "
+    "s.ship_weight_lb, s.length_in, s.width_in, s.height_in, s.special_order, s.surcharge, "
+    "s.qty_maine, s.qty_indiana, s.qty_nevada, s.upc, s.upc_norm, s.active, s.updated_at, s.last_seen_at"
 )
 
 
@@ -1170,13 +1369,13 @@ def _filters(
         where.append({"maine": "s.qty_maine", "indiana": "s.qty_indiana", "nevada": "s.qty_nevada"}[warehouse] + " > 0")
     for key, expr, op, val in (
         ("min_qty", _TOTAL_QTY, ">=", min_qty), ("max_qty", _TOTAL_QTY, "<=", max_qty),
-        ("min_cost", "s.dealer_cost", ">=", min_cost), ("max_cost", "s.dealer_cost", "<=", max_cost),
+        ("min_cost", "s.effective_cost", ">=", min_cost), ("max_cost", "s.effective_cost", "<=", max_cost),
         ("min_list", "s.list_price", ">=", min_list), ("max_list", "s.list_price", "<=", max_list),
     ):
         if val is not None:
             params[key] = val
             where.append(f"{expr} {op} :{key}")
-    pct = "((s.list_price - s.dealer_cost) / nullif(s.list_price, 0) * 100)"
+    pct = "((s.list_price - s.effective_cost) / nullif(s.list_price, 0) * 100)"
     if min_margin_pct is not None:
         params["min_mp"] = min_margin_pct
         where.append(f"{pct} >= :min_mp")
@@ -1187,9 +1386,9 @@ def _filters(
         "upc": "s.upc_norm is null",
         "mfr": "s.mfr_number is null",
         "name": "s.name is null",
-        "cost": "s.dealer_cost is null",
+        "cost": "s.effective_cost is null",
         "list": "s.list_price is null",
-        "below_cost": "s.list_price is not null and s.dealer_cost is not null and s.list_price < s.dealer_cost",
+        "below_cost": "s.list_price is not null and s.effective_cost is not null and s.list_price < s.effective_cost",
     }
     if missing:
         where.append(gaps[missing])
@@ -1241,16 +1440,16 @@ def items(
     agg = db.execute(
         text(
             f"{with_clause} select count(*) as total, count(*) filter (where {_TOTAL_QTY} > 0) as in_stock, "
-            f"count(distinct s.manufacturer) as brands, min(s.dealer_cost) as min_cost, max(s.dealer_cost) as max_cost, "
-            f"avg(s.dealer_cost) as avg_cost, coalesce(sum(s.dealer_cost * {_TOTAL_QTY}), 0) as stock_value_at_cost, "
+            f"count(distinct s.manufacturer) as brands, min(s.effective_cost) as min_cost, max(s.effective_cost) as max_cost, "
+            f"avg(s.effective_cost) as avg_cost, coalesce(sum(s.effective_cost * {_TOTAL_QTY}), 0) as stock_value_at_cost, "
             f"coalesce(sum({_TOTAL_QTY}), 0) as units from supplier_items s where {clause}"
         ),
         params,
     ).first()
     page = db.execute(
         text(
-            f"{with_clause} select {_ITEM_COLS}, {_TOTAL_QTY} as qty_total, (s.list_price - s.dealer_cost) as margin, "
-            f"((s.list_price - s.dealer_cost) / nullif(s.list_price, 0) * 100) as margin_pct "
+            f"{with_clause} select {_ITEM_COLS}, {_TOTAL_QTY} as qty_total, (s.list_price - s.effective_cost) as margin, "
+            f"((s.list_price - s.effective_cost) / nullif(s.list_price, 0) * 100) as margin_pct "
             f"from supplier_items s where {clause} "
             f"order by {_SORTS[sort]} {'desc' if dir == 'desc' else 'asc'} nulls last, s.sku, s.id limit :n offset :o"
         ),
@@ -1304,6 +1503,10 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(404, "That supplier part isn't stored (it may have been removed).")
     item = dict(row._mapping)
+    item["standard_cost"] = item["dealer_cost"]
+    if item.get("effective_cost") is not None:
+        item["dealer_cost"] = item["effective_cost"]
+    item.pop("effective_cost", None)
     run = None
     if item.get("last_run_id"):
         r = db.execute(
@@ -1338,7 +1541,7 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
             d.pop("mpn_n", None)
             mine.append(d)
 
-    cols = "id, sku, mfr_number, manufacturer, name, list_price, dealer_cost, qty_maine, qty_indiana, qty_nevada, upc, active"
+    cols = "id, sku, mfr_number, manufacturer, name, list_price, effective_cost as dealer_cost, qty_maine, qty_indiana, qty_nevada, upc, active"
     same_upc = []
     if upc_n:
         same_upc = db.execute(
@@ -1384,19 +1587,19 @@ def catalog_overview(db: Session = Depends(get_db)):
                    coalesce(sum(s.qty_maine) filter (where s.active), 0) as units_maine,
                    coalesce(sum(s.qty_indiana) filter (where s.active), 0) as units_indiana,
                    coalesce(sum(s.qty_nevada) filter (where s.active), 0) as units_nevada,
-                   coalesce(sum(s.dealer_cost * {_TOTAL_QTY}) filter (where s.active), 0) as stock_value_at_cost,
+                   coalesce(sum(s.effective_cost * {_TOTAL_QTY}) filter (where s.active), 0) as stock_value_at_cost,
                    coalesce(sum(s.list_price * {_TOTAL_QTY}) filter (where s.active), 0) as stock_value_at_list,
                    count(distinct s.manufacturer) filter (where s.active) as brands,
                    count(*) filter (where s.active and s.upc_norm is null) as no_barcode,
                    count(*) filter (where s.active and s.mfr_number is null) as no_mfr_number,
                    count(*) filter (where s.active and s.name is null) as no_name,
-                   count(*) filter (where s.active and s.dealer_cost is null) as no_cost,
+                   count(*) filter (where s.active and s.effective_cost is null) as no_cost,
                    count(*) filter (where s.active and s.list_price is null) as no_list_price,
-                   count(*) filter (where s.active and s.list_price < s.dealer_cost) as list_below_cost,
+                   count(*) filter (where s.active and s.list_price < s.effective_cost) as list_below_cost,
                    count(*) filter (where s.active and s.updated_at >= now() - interval '7 days') as changed_7d,
                    count(*) filter (where s.active and s.updated_at >= now() - interval '30 days') as changed_30d,
-                   avg((s.list_price - s.dealer_cost) / nullif(s.list_price, 0) * 100)
-                       filter (where s.active and s.list_price > 0 and s.dealer_cost is not null) as avg_margin_pct,
+                   avg((s.list_price - s.effective_cost) / nullif(s.list_price, 0) * 100)
+                       filter (where s.active and s.list_price > 0 and s.effective_cost is not null) as avg_margin_pct,
                    max(s.last_seen_at) as last_seen
             from supplier_items s where s.supplier = :s
             """
@@ -1409,8 +1612,8 @@ def catalog_overview(db: Session = Depends(get_db)):
             select coalesce(s.manufacturer, '(no brand)') as brand, s.manufacturer is null as unbranded,
                    count(*) as parts, count(*) filter (where {_TOTAL_QTY} > 0) as in_stock,
                    coalesce(sum({_TOTAL_QTY}), 0) as units,
-                   coalesce(sum(s.dealer_cost * {_TOTAL_QTY}), 0) as stock_value_at_cost,
-                   min(s.dealer_cost) as min_cost, max(s.dealer_cost) as max_cost, avg(s.dealer_cost) as avg_cost
+                   coalesce(sum(s.effective_cost * {_TOTAL_QTY}), 0) as stock_value_at_cost,
+                   min(s.effective_cost) as min_cost, max(s.effective_cost) as max_cost, avg(s.effective_cost) as avg_cost
             from supplier_items s where s.supplier = :s and s.active
             group by s.manufacturer order by count(*) desc, s.manufacturer limit 3000
             """
@@ -1420,15 +1623,15 @@ def catalog_overview(db: Session = Depends(get_db)):
     bands = db.execute(
         text(
             """
-            select case when dealer_cost is null then 'No cost'
-                        when dealer_cost < 5 then 'Under $5'
-                        when dealer_cost < 25 then '$5 – $25'
-                        when dealer_cost < 100 then '$25 – $100'
-                        when dealer_cost < 250 then '$100 – $250'
-                        when dealer_cost < 500 then '$250 – $500'
+            select case when effective_cost is null then 'No cost'
+                        when effective_cost < 5 then 'Under $5'
+                        when effective_cost < 25 then '$5 – $25'
+                        when effective_cost < 100 then '$25 – $100'
+                        when effective_cost < 250 then '$100 – $250'
+                        when effective_cost < 500 then '$250 – $500'
                         else '$500 and up' end as band,
-                   case when dealer_cost is null then 99 when dealer_cost < 5 then 1 when dealer_cost < 25 then 2
-                        when dealer_cost < 100 then 3 when dealer_cost < 250 then 4 when dealer_cost < 500 then 5 else 6 end as ord,
+                   case when effective_cost is null then 99 when effective_cost < 5 then 1 when effective_cost < 25 then 2
+                        when effective_cost < 100 then 3 when effective_cost < 250 then 4 when effective_cost < 500 then 5 else 6 end as ord,
                    count(*) as parts
             from supplier_items where supplier = :s and active group by 1, 2 order by 2
             """
