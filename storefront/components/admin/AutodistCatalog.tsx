@@ -110,6 +110,46 @@ function Lbl({ text, children }: { text: string; children: ReactNode }) {
   );
 }
 
+/* What the unit-of-measure codes in the feed stand for. Only codes listed here get a meaning shown; anything else
+   shows just the code, so nothing is guessed. */
+const UOM_NAMES: Record<string, string> = {
+  EA: "Each",
+  PR: "Pair",
+  SET: "Set",
+  ST: "Set",
+  KT: "Kit",
+  KIT: "Kit",
+  PK: "Pack",
+  PKG: "Package",
+  PC: "Piece",
+  PCS: "Pieces",
+  BX: "Box",
+  CS: "Case",
+  CA: "Case",
+  CT: "Carton",
+  DZ: "Dozen",
+  RL: "Roll",
+  FT: "Foot",
+  YD: "Yard",
+  IN: "Inch",
+  GL: "Gallon",
+  GAL: "Gallon",
+  QT: "Quart",
+  PT: "Pint",
+  OZ: "Ounce",
+  LB: "Pound",
+  LT: "Liter",
+  ML: "Milliliter",
+  BG: "Bag",
+  BT: "Bottle",
+  CN: "Can",
+  TB: "Tube",
+  PL: "Pail",
+  DR: "Drum",
+  SH: "Sheet",
+};
+const uomName = (code: string | null | undefined) => (code ? UOM_NAMES[code.trim().toUpperCase()] : undefined);
+
 export default function AutodistCatalog({ hasData, search }: { hasData: boolean; search?: { q: string; n: number } | null }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [showBrands, setShowBrands] = useState(false);
@@ -365,9 +405,10 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                     type="button"
                     disabled={u.unset}
                     onClick={() => set({ uom: u.uom })}
-                    className="rounded border border-gray-200 px-2 py-1 hover:bg-gray-50 disabled:opacity-60"
+                    className="rounded border border-gray-200 px-2 py-1 text-center hover:bg-gray-50 disabled:opacity-60"
                   >
                     {u.uom} <b>{n(u.parts)}</b>
+                    {uomName(u.uom) && <div className="text-[11px] font-normal text-gray-500">({uomName(u.uom)})</div>}
                   </button>
                 ))}
               </div>
@@ -638,7 +679,7 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                       </td>
                       <td className="truncate py-1 pr-3" title={r.mfr_number ?? ""}>{r.mfr_number ?? "—"}</td>
                       <td className="break-words py-1 pr-3">{r.name ?? "—"}</td>
-                      <td className="whitespace-nowrap py-1 pr-3">{r.unit_of_measure ?? ""}</td>
+                      <td className="whitespace-nowrap py-1 pr-3" title={uomName(r.unit_of_measure) ?? ""}>{r.unit_of_measure ?? ""}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right">{money(r.list_price)}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right">{money(r.dealer_cost)}</td>
                       <td className="py-1 pr-3 text-right whitespace-nowrap" title={r.margin == null ? "" : `${money(r.margin)} per unit`}>
