@@ -10,6 +10,7 @@ Mounted at /admin/autodist/* (owner/admin only).
   GET  /ftp/status             is the Autodist FTP login set up on the server (nothing is contacted)
   POST /ftp/check              log in to the Autodist FTP server, list the folders, preview the inventory file
   POST /ftp/peek               column names and sample lines of each Autodist data file (nothing is stored)
+  POST /import/ftp-photos      read the photo links from the big All Products file (manual only; runs in the background)
   POST /import/ftp             pull the live inventory file, then our own prices (priceupdate.txt), from the FTP server (runs in the background)
   GET  /ftp/schedule           the automatic-sync setting (off by default) and what the last check found
   PUT  /ftp/schedule           turn automatic sync on/off and set how often the server checks (minutes)
@@ -853,6 +854,17 @@ def ftp_peek():
     return {"files": out}
 
 
+@router.post("/import/ftp-photos")
+def import_ftp_photos(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Start reading the photo links out of the big All Products file. Returns at once; it runs in the background."""
+    _, u, pw = _ftp_settings()
+    if not u or not pw:
+        raise HTTPException(400, "The Autodist FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
+    run_id = _begin_run(db, "ftp_photos", user.email or user.user_id)
+    threading.Thread(target=_photo_job, args=(run_id,), daemon=True, name=f"autodist-photos-{run_id}").start()
+    return {"run_id": run_id}
+
+
 @router.post("/import/ftp")
 def import_ftp(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     """Start pulling the live inventory file from the FTP server. Returns at once; the import runs in the background
@@ -956,17 +968,16 @@ def _price_path() -> str:
     return os.environ.get("AUTODIST_FTP_PRICE_FILE", "").strip() or PRICE_FILE_DEFAULT
 
 
-def _price_job(run_id: int) -> bool:
-    """Background: download the price file and store our cost / MAP / weights on the parts we hold."""
+def _update_job(run_id: int, path: str, aliases: dict, cleaner, updater, summarize, price_signature: bool = False) -> bool:
+    """Background: download a feed file and use its lines to update parts we already hold (never adds or retires)."""
     gen = get_db()
     db = next(gen)
     tmp_path = None
     try:
         ftp = _ftp_connect()
         try:
-            path = _price_path()
             signature = _remote_signature(ftp, path)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".price") as tmp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".feed") as tmp:
                 tmp_path = tmp.name
                 ftp.retrbinary("RETR " + path, tmp.write, blocksize=65536)
         finally:
@@ -984,7 +995,7 @@ def _price_job(run_id: int) -> bool:
                 if not batch:
                     return
                 rows = list(batch.values())
-                matched += update_prices(db, rows)
+                matched += updater(db, rows)
                 seen += len(rows)
                 db.execute(
                     text("update supplier_import_runs set rows_seen = :n, rows_new = :m, rows_skipped = :k where id = :i"),
@@ -994,7 +1005,7 @@ def _price_job(run_id: int) -> bool:
                 batch.clear()
 
             quoting = csv.QUOTE_MINIMAL if delim == "," else csv.QUOTE_NONE
-            for row in _rows_from_stream(stream, delimiter=delim, aliases=_PRICE_ALIASES, cleaner=clean_price_row, quoting=quoting):
+            for row in _rows_from_stream(stream, delimiter=delim, aliases=aliases, cleaner=cleaner, quoting=quoting):
                 if row is None:
                     skipped += 1
                     continue
@@ -1005,14 +1016,14 @@ def _price_job(run_id: int) -> bool:
         finally:
             closer()
         if seen == 0:
-            raise HTTPException(400, "The price file held no usable lines.")
+            raise HTTPException(400, "That file held no usable lines.")
         db.execute(
             text("update supplier_import_runs set status = 'done', finished_at = now(), rows_skipped = :k, note = null where id = :i"),
             {"k": skipped, "i": run_id},
         )
         db.commit()
-        _sync_note(db, summary=f"Prices updated: {matched:,} of the {seen:,} lines in the price file matched a stored part.",
-                   price_signature=signature, changed=True)
+        _sync_note(db, summary=summarize(matched, seen, skipped),
+                   price_signature=signature if price_signature else None, changed=price_signature)
         return True
     except HTTPException as e:
         db.rollback()
@@ -1020,9 +1031,9 @@ def _price_job(run_id: int) -> bool:
         _sync_note(db, error=str(e.detail))
     except Exception:
         db.rollback()
-        log.exception("autodist price import failed (run %s)", run_id)
-        _set_run_note(db, run_id, "failed", "The price import failed. See the server log.")
-        _sync_note(db, error="The price import failed. See the server log.")
+        log.exception("autodist file update failed (run %s, %s)", run_id, path)
+        _set_run_note(db, run_id, "failed", "The import failed. See the server log.")
+        _sync_note(db, error="The import failed. See the server log.")
     finally:
         if tmp_path:
             try:
@@ -1031,6 +1042,70 @@ def _price_job(run_id: int) -> bool:
                 pass
         gen.close()
     return False
+
+
+def _price_job(run_id: int) -> bool:
+    return _update_job(
+        run_id, _price_path(), _PRICE_ALIASES, clean_price_row, update_prices,
+        lambda matched, seen, skipped: f"Prices updated: {matched:,} of the {seen:,} lines in the price file matched a stored part.",
+        price_signature=True,
+    )
+
+
+# --------------------------------------------------------------------------
+# photo links: DataFeed/All Products.txt (Image_URL_1 .. Image_URL_6)
+# --------------------------------------------------------------------------
+# A 140 MB file, so it only runs when someone clicks the button (photos rarely change). Only the photo links are
+# kept; the photos themselves stay on Autodist's image server until a part is actually listed.
+DETAILS_FILE_DEFAULT = "DataFeed/All Products.txt"
+_DETAIL_ALIASES = {
+    "sku": ["sku"],
+    **{f"image_{i}": [f"imageurl{i}"] for i in range(1, 7)},
+}
+
+
+def clean_detail_row(raw: dict) -> Optional[dict]:
+    sku = (raw.get("sku") or "").strip()
+    if not sku:
+        return None
+    urls = []
+    for i in range(1, 7):
+        u = (raw.get(f"image_{i}") or "").strip()
+        if u.lower().startswith(("http://", "https://")) and " " not in u and u not in urls:
+            urls.append(u[:500])
+    return {"sku": sku[:60], "images": "\n".join(urls)}
+
+
+_DETAIL_UPDATE = """
+with incoming as (
+  select * from unnest(cast(:sku as text[]), cast(:imgs as text[])) as t(sku, imgs)
+), up as (
+  update supplier_items s set
+    images = case when i.imgs = '' then null else string_to_array(i.imgs, chr(10)) end,
+    images_synced_at = now()
+  from incoming i
+  where s.supplier = :sup and s.sku = i.sku
+  returning 1
+)
+select count(*) from up
+"""
+
+
+def update_details(db: Session, rows: list[dict]) -> int:
+    if not rows:
+        return 0
+    return int(
+        db.execute(text(_DETAIL_UPDATE), {"sup": SUPPLIER, "sku": [r["sku"] for r in rows], "imgs": [r["images"] for r in rows]}).scalar()
+        or 0
+    )
+
+
+def _photo_job(run_id: int) -> bool:
+    return _update_job(
+        run_id, os.environ.get("AUTODIST_FTP_DETAILS_FILE", "").strip() or DETAILS_FILE_DEFAULT,
+        _DETAIL_ALIASES, clean_detail_row, update_details,
+        lambda matched, seen, skipped: f"Photo links updated for {matched:,} parts ({seen:,} lines read).",
+    )
 
 
 def _ftp_sync_all(run_id: int) -> None:
@@ -1320,7 +1395,7 @@ _ITEM_COLS = (
     "s.id, s.sku, s.mfr_number, s.mfr_number_norm, s.manufacturer, s.name, s.unit_of_measure, s.list_price, "
     "s.effective_cost as dealer_cost, s.dealer_cost as standard_cost, s.my_cost, s.map_price, s.weight_lb, "
     "s.ship_weight_lb, s.length_in, s.width_in, s.height_in, s.special_order, s.surcharge, "
-    "s.qty_maine, s.qty_indiana, s.qty_nevada, s.upc, s.upc_norm, s.active, s.updated_at, s.last_seen_at"
+    "s.qty_maine, s.qty_indiana, s.qty_nevada, s.upc, s.upc_norm, s.images, s.active, s.updated_at, s.last_seen_at"
 )
 
 
@@ -1389,6 +1464,7 @@ def _filters(
         "cost": "s.effective_cost is null",
         "list": "s.list_price is null",
         "below_cost": "s.list_price is not null and s.effective_cost is not null and s.list_price < s.effective_cost",
+        "photo": "s.images is null",
     }
     if missing:
         where.append(gaps[missing])
@@ -1422,7 +1498,7 @@ def items(
     min_margin_pct: Optional[float] = Query(None, description="(list - cost) / list, in percent"),
     max_margin_pct: Optional[float] = Query(None),
     uom: Optional[str] = Query(None, max_length=40),
-    missing: Optional[str] = Query(None, pattern="^(upc|mfr|name|cost|list|below_cost)$", description="data gaps to find"),
+    missing: Optional[str] = Query(None, pattern="^(upc|mfr|name|cost|list|below_cost|photo)$", description="data gaps to find"),
     ours: Optional[str] = Query(None, pattern="^(yes|no)$", description="we already sell it (barcode or part number matches one of our products)"),
     changed_days: Optional[int] = Query(None, ge=1, le=3650, description="price / stock / details changed within N days"),
     seen_days: Optional[int] = Query(None, ge=1, le=3650, description="still in the feed as of N days ago"),
@@ -1591,6 +1667,7 @@ def catalog_overview(db: Session = Depends(get_db)):
                    coalesce(sum(s.list_price * {_TOTAL_QTY}) filter (where s.active), 0) as stock_value_at_list,
                    count(distinct s.manufacturer) filter (where s.active) as brands,
                    count(*) filter (where s.active and s.upc_norm is null) as no_barcode,
+                   count(*) filter (where s.active and s.images is null) as no_photo,
                    count(*) filter (where s.active and s.mfr_number is null) as no_mfr_number,
                    count(*) filter (where s.active and s.name is null) as no_name,
                    count(*) filter (where s.active and s.effective_cost is null) as no_cost,

@@ -17,7 +17,7 @@ type Totals = {
   in_maine: number; in_indiana: number; in_nevada: number;
   units_maine: number; units_indiana: number; units_nevada: number;
   stock_value_at_cost: string | number; stock_value_at_list: string | number; brands: number;
-  no_barcode: number; no_mfr_number: number; no_name: number; no_cost: number; no_list_price: number; list_below_cost: number;
+  no_barcode: number; no_mfr_number: number; no_name: number; no_cost: number; no_list_price: number; list_below_cost: number; no_photo: number;
   changed_7d: number; changed_30d: number; avg_margin_pct: string | number | null; last_seen: string | null;
 };
 type BrandRow = {
@@ -35,7 +35,7 @@ type Row = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
   unit_of_measure: string | null; list_price: string | null; dealer_cost: string | null;
   qty_maine: number; qty_indiana: number; qty_nevada: number; qty_total: number;
-  upc: string | null; active: boolean; updated_at: string | null; last_seen_at: string | null;
+  upc: string | null; images: string[] | null; active: boolean; updated_at: string | null; last_seen_at: string | null;
   margin: string | null; margin_pct: string | number | null; ours: Mine[];
 };
 type Summary = {
@@ -77,7 +77,7 @@ const when = (v: unknown) => (typeof v === "string" && v ? new Date(v).toLocaleS
 
 const MISSING_LABEL: Record<string, string> = {
   upc: "no barcode", mfr: "no manufacturer number", name: "no name", cost: "no dealer cost", list: "no list price",
-  below_cost: "list price below dealer cost",
+  below_cost: "list price below dealer cost", photo: "no photo",
 };
 
 type SortKey =
@@ -322,7 +322,7 @@ export default function AutodistCatalog({ hasData }: { hasData: boolean }) {
               <div className="flex flex-wrap gap-2 text-xs">
                 {(
                   [
-                    ["upc", t.no_barcode], ["mfr", t.no_mfr_number], ["name", t.no_name],
+                    ["upc", t.no_barcode], ["mfr", t.no_mfr_number], ["name", t.no_name], ["photo", t.no_photo],
                     ["cost", t.no_cost], ["list", t.no_list_price], ["below_cost", t.list_below_cost],
                   ] as const
                 ).map(([k, c]) => (
@@ -568,6 +568,7 @@ export default function AutodistCatalog({ hasData }: { hasData: boolean }) {
               <table className="w-full text-left text-xs">
                 <thead className="text-gray-500">
                   <tr>
+                    <th className="py-1 pr-2"></th>
                     <Th k="brand">Brand</Th>
                     <Th k="sku">SKU</Th>
                     <Th k="mfr">Mfr no.</Th>
@@ -592,6 +593,23 @@ export default function AutodistCatalog({ hasData }: { hasData: boolean }) {
                       className={`cursor-pointer align-top hover:bg-gray-50 ${r.active ? "" : "text-gray-400"}`}
                       onClick={() => void openDetail(r.id)}
                     >
+                      <td className="py-1 pr-2">
+                        {r.images && r.images.length > 0 ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={r.images[0]}
+                            alt=""
+                            loading="lazy"
+                            referrerPolicy="no-referrer"
+                            className="h-9 w-9 rounded border border-gray-100 bg-white object-contain"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).style.visibility = "hidden";
+                            }}
+                          />
+                        ) : (
+                          <div className="h-9 w-9" />
+                        )}
+                      </td>
                       <td className="whitespace-nowrap py-1 pr-3">{r.manufacturer ?? "—"}</td>
                       <td className="py-1 pr-3 font-medium whitespace-nowrap">
                         {r.sku}
@@ -661,7 +679,7 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
     ["Last seen in a feed", when(it.last_seen_at)],
     ["First stored", when(it.created_at)],
   ];
-  const known = new Set(["id", "supplier", "sku", "mfr_number", "mfr_number_norm", "manufacturer", "name", "unit_of_measure", "list_price", "dealer_cost", "qty_maine", "qty_indiana", "qty_nevada", "upc", "upc_norm", "active", "updated_at", "last_seen_at", "created_at", "last_run_id"]);
+  const known = new Set(["id", "supplier", "sku", "mfr_number", "mfr_number_norm", "manufacturer", "name", "unit_of_measure", "list_price", "dealer_cost", "qty_maine", "qty_indiana", "qty_nevada", "upc", "upc_norm", "images", "images_synced_at", "active", "updated_at", "last_seen_at", "created_at", "last_run_id"]);
   const extra = Object.entries(it).filter(([k, v]) => !known.has(k) && v != null && v !== "");
 
   const mini = (title: string, list: Mini[]) =>
@@ -688,6 +706,16 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
     <Modal title={`${it.manufacturer ? `${it.manufacturer} ` : ""}${it.sku}`} onClose={onClose}>
       <div className="space-y-4 text-sm">
         <p className="font-medium">{(it.name as string) ?? "(no name)"}</p>
+        {Array.isArray(it.images) && it.images.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {(it.images as string[]).map((u) => (
+              <a key={u} href={u} target="_blank" rel="noreferrer" title="Open the full-size photo">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={u} alt="" loading="lazy" referrerPolicy="no-referrer" className="h-28 w-28 rounded border border-gray-200 bg-white object-contain" />
+              </a>
+            ))}
+          </div>
+        )}
         <dl className="grid grid-cols-[10rem_1fr] gap-x-3 gap-y-1 text-xs">
           {rows.map(([k, v]) => (
             <div key={k} className="contents">

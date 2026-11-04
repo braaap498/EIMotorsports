@@ -151,6 +151,20 @@ function AutodistInner() {
     }
   }
 
+  async function photoSync() {
+    setBusy("photos");
+    setMsg(null);
+    try {
+      await api("/autodist/import/ftp-photos", { method: "POST" });
+      setMsg({ kind: "info", text: "Started. It reads Autodist's 140 MB product file, so it takes several minutes. Progress shows in the list below." });
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+      void refresh();
+    }
+  }
+
   async function ftpPeek() {
     setBusy("peek");
     setMsg(null);
@@ -328,6 +342,9 @@ function AutodistInner() {
             <button type="button" className={btn2Cls} disabled={busy !== "" || !ftp?.configured} onClick={() => void ftpTest()}>
               {busy === "ftpcheck" ? "Connecting…" : "Test FTP connection"}
             </button>
+            <button type="button" className={btn2Cls} disabled={busy !== "" || ftpRunning || !ftp?.configured} onClick={() => void photoSync()} title="Reads the big All Products file. Only needed now and then.">
+              {busy === "photos" ? "Starting…" : "Update photo links"}
+            </button>
             <button type="button" className={btn2Cls} disabled={busy !== "" || !ftp?.configured} onClick={() => void ftpPeek()}>
               {busy === "peek" ? "Reading files…" : "Look inside the data files"}
             </button>
@@ -447,6 +464,8 @@ function AutodistInner() {
                 <span>
                   {r.source === "ftp_price"
                     ? `Our prices: ${n(r.rows_seen)} lines, ${n(r.rows_new)} matched a part`
+                    : r.source === "ftp_photos"
+                    ? `Photo links: ${n(r.rows_seen)} lines read, ${n(r.rows_new)} parts updated`
                     : `${n(r.rows_seen)} parts, ${n(r.rows_new)} new`}
                   {r.rows_skipped ? `, ${n(r.rows_skipped)} skipped` : ""}
                   {r.rows_deactivated ? `, ${n(r.rows_deactivated)} retired` : ""}
