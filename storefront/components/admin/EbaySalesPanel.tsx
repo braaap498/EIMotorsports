@@ -155,6 +155,20 @@ export default function EbaySalesPanel() {
     }
   }
 
+  async function feedAnalytics(store: string) {
+    if (!window.confirm(`Send every saved paid order of ${store} to the eBay Analytics tab again? Rows that came from an uploaded report are never changed.`)) return;
+    setBusy(store);
+    setMsg(null);
+    try {
+      const r = await api<{ sent: number }>("/ebay-sales/feed-analytics", { method: "POST", body: { store } });
+      setMsg({ kind: "success", text: `${store}: ${r.sent} orders sent to analytics.` });
+    } catch (e) {
+      setMsg({ kind: "error", text: `${store}: ${errMsg(e)}` });
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function runQueue(store: string) {
     setBusy(store);
     setMsg(null);
@@ -264,6 +278,9 @@ export default function EbaySalesPanel() {
                     </button>
                     <button type="button" className={btn2Cls} disabled={!s.authorized || busy === s.store || s.running} onClick={() => void pollNow(s.store, 89)}>
                       Import 90 days
+                    </button>
+                    <button type="button" className={btn2Cls} disabled={!s.authorized || busy === s.store || s.running} onClick={() => void feedAnalytics(s.store)}>
+                      Resend to analytics
                     </button>
                     {(s.qty_pending > 0 || s.qty_failed > 0) && (
                       <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void runQueue(s.store)}>

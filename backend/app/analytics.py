@@ -87,7 +87,13 @@ def stores(db: Session = Depends(get_db)):
             "max(imported_at) as last_import from analytics_ebay_orders group by store order by store"
         )
     ).mappings().all()
-    shown = [dict(r) for r in rows if r["store"].lower() in connected]
+    by = {r["store"].lower(): dict(r) for r in rows}
+    # Every connected store gets its own button, even before it has any orders; one that is connected later
+    # appears here by itself, and a disconnected store drops out.
+    shown = [
+        by.get(c) or {"store": c, "orders": 0, "first_date": None, "last_date": None, "last_import": None}
+        for c in sorted(connected)
+    ]
     hidden = [r["store"] for r in rows if r["store"].lower() not in connected]
     return {"tables_ready": True, "stores": shown, "connected": connected, "hidden_stores": hidden}
 
@@ -110,7 +116,17 @@ def import_orders(body: ImportBody, db: Session = Depends(get_db)):
     by_number = {r["order"]["order_number"]: r for r in recs}
     recs = list(by_number.values())
     numbers = list(by_number)
+    dates = [r["order"]["sale_date"] for r in recs if r["order"].get("sale_date")]
     try:
+        # Orders the live feed added for these days are replaced by the report's own rows (no double counting).
+        if dates:
+            db.execute(
+                text(
+                    "delete from analytics_ebay_orders where store = :s and source_file = 'api' "
+                    "and sale_date between :lo and :hi"
+                ),
+                {"s": store, "lo": min(dates), "hi": max(dates)},
+            )
         existing = db.execute(
             text("select count(*) from analytics_ebay_orders where store = :s and order_number in :n").bindparams(
                 bindparam("n", expanding=True)

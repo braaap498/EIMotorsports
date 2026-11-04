@@ -5,11 +5,11 @@ import { errMsg } from "../../../lib/adminApi";
 import { Notice, btnCls, btn2Cls, inputCls } from "../ui";
 import { readFiles, sendReport, type ImportResult, type ReportFile } from "./importCsv";
 
-export type StoreInfo = { store: string; orders: number; first_date: string; last_date: string; last_import: string };
+export type StoreInfo = { store: string; orders: number; first_date: string | null; last_date: string | null; last_import: string | null };
 
 type Row = ReportFile & { storeName: string; state: "ready" | "sending" | "done" | "error"; done: number; result?: ImportResult; error?: string };
 
-const fmtDay = (d: string) => new Date(d + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+const fmtDay = (d: string | null) => (d ? new Date(d + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "no orders yet");
 
 export default function ImportPanel({ stores, onDone }: { stores: StoreInfo[]; onDone: () => void }) {
   const [rows, setRows] = useState<Row[]>([]);

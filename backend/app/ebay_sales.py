@@ -17,6 +17,8 @@ HOW A SALE FLOWS
      quantity_on_hand does NOT change here. It changes when the part is scanned out on the Ship
      screen with the eBay order number as the reference (see take_stock_for_reference).
   4. A cancelled order that has not been picked releases its parts and removes its sales row.
+  4b. Every paid order is also copied into the analytics tables (feed_analytics), so the eBay Analytics tab
+     needs no report uploads for new sales. A report you upload later replaces those rows for its dates.
   5. A line whose item is not linked to a product yet is kept as 'unmatched' and re-checked on
      every poll, so it starts counting as soon as the listing is linked.
 
@@ -44,7 +46,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, require_admin
@@ -107,7 +109,9 @@ def _parse_orders(root: ET.Element) -> list[dict]:
         if not order_id:
             continue
         lines = []
+        tax = Decimal(0)
         for tr in o.findall(f"{NS}TransactionArray/{NS}Transaction"):
+            tax += _num(_t(tr, "Taxes/TotalTaxAmount")) or Decimal(0)
             item_id = _t(tr, "Item/ItemID")
             if not item_id:
                 continue
@@ -136,6 +140,10 @@ def _parse_orders(root: ET.Element) -> list[dict]:
             {
                 "refund": refund,
                 "refunded_at": refunded_at,
+                "tax": tax,
+                "buyer": _t(o, "BuyerUserID")[:80] or None,
+                "country": _t(o, "ShippingAddress/Country")[:60] or None,
+                "ship_service": _t(o, "ShippingServiceSelected/ShippingService")[:80] or None,
                 "id": order_id,
                 "status": _t(o, "OrderStatus"),
                 "created": _dt(_t(o, "CreatedTime")),
@@ -293,7 +301,7 @@ _LINE_SQL = (
 
 
 def _save_order(db: Session, store: str, o: dict, channel_id: Optional[int], skip_shipped: bool) -> tuple[set, dict]:
-    counts = {"orders": 1, "new_lines": 0, "reserved": 0, "cancelled": 0, "unmatched": 0, "refunded": 0}
+    counts = {"orders": 1, "new_lines": 0, "reserved": 0, "cancelled": 0, "unmatched": 0, "refunded": 0, "pk": 0}
     cancelled = o["status"] in ("Cancelled", "Inactive")
     paid = bool(o["paid"]) or o["status"] in ("Completed", "Shipped", "InProcess")
     row = db.execute(
@@ -301,8 +309,8 @@ def _save_order(db: Session, store: str, o: dict, channel_id: Optional[int], ski
             """
             insert into ebay_orders (store, ebay_order_id, ebay_status, paid_at, created_at_ebay, modified_at_ebay,
                                      shipped_at_ebay, buyer_state, buyer_zip, shipping_charged, total, cancelled,
-                                     refund_total, refunded_at)
-            values (:s, :o, :st, :paid, :cr, :mod, :sh, :bs, :bz, :sc, :tot, :can, :rf, :rfat)
+                                     refund_total, refunded_at, buyer_username, buyer_country, shipping_service, tax_total)
+            values (:s, :o, :st, :paid, :cr, :mod, :sh, :bs, :bz, :sc, :tot, :can, :rf, :rfat, :bu, :bc, :sv, :tx)
             on conflict (store, ebay_order_id) do update set
               ebay_status = excluded.ebay_status,
               paid_at = coalesce(excluded.paid_at, ebay_orders.paid_at),
@@ -315,6 +323,10 @@ def _save_order(db: Session, store: str, o: dict, channel_id: Optional[int], ski
               cancelled = excluded.cancelled,
               refund_total = greatest(ebay_orders.refund_total, excluded.refund_total),
               refunded_at = coalesce(excluded.refunded_at, ebay_orders.refunded_at),
+              buyer_username = coalesce(excluded.buyer_username, ebay_orders.buyer_username),
+              buyer_country = coalesce(excluded.buyer_country, ebay_orders.buyer_country),
+              shipping_service = coalesce(excluded.shipping_service, ebay_orders.shipping_service),
+              tax_total = case when excluded.tax_total > 0 then excluded.tax_total else ebay_orders.tax_total end,
               updated_at = now()
             returning id
             """
@@ -323,9 +335,11 @@ def _save_order(db: Session, store: str, o: dict, channel_id: Optional[int], ski
             "s": store, "o": o["id"], "st": o["status"], "paid": o["paid"], "cr": o["created"], "mod": o["modified"],
             "sh": o["shipped"], "bs": o["state"], "bz": o["zip"], "sc": o["ship_charged"], "tot": o["total"],
             "can": cancelled, "rf": o["refund"], "rfat": o["refunded_at"],
+            "bu": o["buyer"], "bc": o["country"], "sv": o["ship_service"], "tx": o["tax"],
         },
     ).first()
     order_pk = row.id
+    counts["pk"] = order_pk
     # A FULLY refunded order is not a sale: treated like a cancelled one (parts released if not yet picked,
     # sales row removed). A partial refund keeps the sale and records the refunded amount against it.
     fully_refunded = o["refund"] > 0 and (o["total"] or 0) > 0 and o["refund"] >= (o["total"] - Decimal("0.01"))
@@ -503,7 +517,7 @@ def poll_store(db: Session, store: str, days: Optional[int] = None) -> dict:
     """Check one store for new and changed orders. `days` = look back that far (history import)."""
     if not _claim(db, store):
         raise HTTPException(409, "A check for this store is already running. Try again in a minute.")
-    summary = {"orders": 0, "new_lines": 0, "reserved": 0, "cancelled": 0, "unmatched": 0, "refunded": 0, "errors": 0}
+    summary = {"orders": 0, "new_lines": 0, "reserved": 0, "cancelled": 0, "unmatched": 0, "refunded": 0, "errors": 0, "fed": 0}
     error: Optional[str] = None
     started = _now()
     try:
@@ -518,10 +532,12 @@ def poll_store(db: Session, store: str, days: Optional[int] = None) -> dict:
             since, skip_shipped = started - timedelta(days=FIRST_LOOKBACK_DAYS), True
         channel_id = _channel_id(db)
         changed: set = set()
+        touched: list = []
         for o in _fetch_orders(db, store, since, started):
             try:
                 ch, c = _save_order(db, store, o, channel_id, skip_shipped)
                 db.commit()
+                touched.append(c.pop("pk"))
                 changed |= ch
                 for k in ("orders", "new_lines", "reserved", "cancelled", "unmatched", "refunded"):
                     summary[k] += c[k]
@@ -535,10 +551,20 @@ def poll_store(db: Session, store: str, days: Optional[int] = None) -> dict:
         for pid in changed:
             enqueue_product(db, pid)
         db.commit()
+        fed = 0
+        try:  # a problem here must never stop the sales themselves from being saved
+            if _analytics_ready(db):
+                everything = _api_rows(db, store.lower()) == 0
+                fed = feed_analytics(db, store, None if everything else touched)
+        except Exception:
+            db.rollback()
+            log.exception("sending %s orders to analytics failed", store)
+        summary["fed"] = fed
         q = run_queue(db, store)
         msg = (
             f"{summary['orders']} orders checked, {summary['new_lines']} new lines, {summary['reserved']} set aside, "
-            f"{summary['cancelled']} cancelled, {summary['refunded']} with refunds, {summary['unmatched']} not linked to a product"
+            f"{summary['cancelled']} cancelled, {summary['refunded']} with refunds, {summary['unmatched']} not linked to a product, "
+            f"{summary['fed']} orders sent to analytics"
         )
         if summary["errors"]:
             msg += f", {summary['errors']} could not be saved (see server log)"
@@ -632,6 +658,191 @@ def run_due_public(x_poll_key: Optional[str] = Header(None), key: Optional[str] 
     if not secret or not hmac.compare_digest(secret.encode(), given.encode()):
         raise HTTPException(404, "Not found")
     return {"checked": run_due()}
+
+
+# --------------------------------------------------------------------------
+# the live feed into the analytics tables (analytics_ebay_orders / analytics_ebay_order_items)
+# --------------------------------------------------------------------------
+API_SOURCE = "api"
+
+
+def _analytics_ready(db: Session) -> bool:
+    return bool(db.execute(text("select to_regclass('public.analytics_ebay_orders') is not null")).scalar())
+
+
+def _api_rows(db: Session, store_lc: str) -> int:
+    return int(
+        db.execute(
+            text("select count(*) from analytics_ebay_orders where store = :s and source_file = :a"),
+            {"s": store_lc, "a": API_SOURCE},
+        ).scalar()
+        or 0
+    )
+
+
+def _boundary(db: Session, store_lc: str):
+    """Reports and eBay's order call may number orders differently. If report-imported orders cover days the
+    order call also returned but NONE of the numbers match, only orders after the last report day are added, so
+    nothing is counted twice. When the numbers do match, everything is added and a report simply overwrites."""
+    mx = db.execute(
+        text("select max(sale_date) from analytics_ebay_orders where store = :s and source_file is distinct from :a"),
+        {"s": store_lc, "a": API_SOURCE},
+    ).scalar()
+    if mx is None:
+        return None
+    overlap = db.execute(
+        text(
+            "select count(*) from ebay_orders o where lower(o.store) = :s "
+            "and coalesce(o.created_at_ebay, o.paid_at)::date <= :mx"
+        ),
+        {"s": store_lc, "mx": mx},
+    ).scalar()
+    if not overlap:
+        return None
+    matches = db.execute(
+        text(
+            "select count(*) from ebay_orders o join analytics_ebay_orders x on x.store = lower(o.store) "
+            "and x.order_number = o.ebay_order_id and x.source_file is distinct from :a where lower(o.store) = :s"
+        ),
+        {"s": store_lc, "a": API_SOURCE},
+    ).scalar()
+    return None if matches else mx
+
+
+def feed_analytics(db: Session, store: str, order_pks: Optional[list] = None) -> int:
+    """Copy this store's paid eBay orders into the analytics tables (all of them when order_pks is None).
+    Rows that came from an uploaded report are never changed. Refunds are real amounts from eBay, and an order
+    that was cancelled or fully refunded counts as no sale (net 0). Returns how many orders were written."""
+    if not _analytics_ready(db):
+        return 0
+    s_lc = store.lower()
+    boundary = _boundary(db, s_lc)
+    where, params = "lower(o.store) = :s and o.paid_at is not null", {"s": s_lc}
+    if order_pks is not None:
+        if not order_pks:
+            return 0
+        where += " and o.id = any(cast(:ids as bigint[]))"
+        params["ids"] = list(order_pks)
+    orders = db.execute(
+        text(
+            "select o.id, o.ebay_order_id, o.paid_at, o.created_at_ebay, o.shipped_at_ebay, o.buyer_username, "
+            "o.buyer_state, o.buyer_country, o.shipping_charged, o.total, o.cancelled, o.refund_total, "
+            "o.shipping_service, o.tax_total from ebay_orders o where " + where
+        ),
+        params,
+    ).all()
+    if not orders:
+        return 0
+    lines: dict[int, list] = {}
+    for r in db.execute(
+        text(
+            "select order_pk, ebay_item_id, ebay_transaction_id, custom_label, title, quantity, unit_price "
+            "from ebay_order_lines where order_pk = any(cast(:ids as bigint[])) order by order_pk, id"
+        ),
+        {"ids": [o.id for o in orders]},
+    ).all():
+        lines.setdefault(r.order_pk, []).append(r)
+
+    recs, items = [], []
+    for o in orders:
+        ls = lines.get(o.id) or []
+        sale = (o.created_at_ebay or o.paid_at).date()
+        if not ls or (boundary and sale <= boundary):
+            continue
+        subtotal = sum(((l.unit_price or Decimal(0)) * l.quantity for l in ls), Decimal(0))
+        shipping = o.shipping_charged or Decimal(0)
+        gross = subtotal + shipping
+        before = o.total if o.total and o.total > 0 else gross + (o.tax_total or Decimal(0))
+        tax = o.tax_total if o.tax_total and o.tax_total > 0 else max(before - gross, Decimal(0))
+        refunded = min(o.refund_total or Decimal(0), before)
+        paid_ex_tax = max(before - tax, Decimal(0))      # what the buyer actually paid, items + shipping, no tax
+        # Refunds are eBay's real amounts, never guessed from a gap between totals. A coupon or discount lowers
+        # net sales (the buyer paid less) but is not called a refund.
+        if o.cancelled or (refunded > 0 and refunded >= before - Decimal("0.01")):
+            net, refund, after = Decimal(0), gross, Decimal(0)           # not a sale at all
+        elif refunded > 0:
+            share = min(paid_ex_tax / before, Decimal(1)) if before > 0 else Decimal(1)   # the part of it that was not tax
+            refund = min(refunded * share, paid_ex_tax)
+            net, after = min(paid_ex_tax - refund, gross), before - refunded
+        else:
+            net, refund, after = min(paid_ex_tax, gross), Decimal(0), before
+        shipped = o.shipped_at_ebay.date() if o.shipped_at_ebay else None
+        recs.append(
+            {
+                "store": s_lc, "order_number": o.ebay_order_id[:40], "sale_date": sale, "paid": o.paid_at.date(),
+                "shipped": shipped, "bu": o.buyer_username, "bs": o.buyer_state, "bc": o.buyer_country,
+                "lc": len(ls), "units": sum(l.quantity for l in ls), "sub": subtotal.quantize(Decimal("0.01")),
+                "ship": shipping, "tax": tax.quantize(Decimal("0.01")), "total": after.quantize(Decimal("0.01")),
+                "gross": gross.quantize(Decimal("0.01")), "net": net.quantize(Decimal("0.01")),
+                "refund": refund.quantize(Decimal("0.01")), "svc": o.shipping_service,
+                "dts": (shipped - sale).days if shipped and shipped >= sale else None, "src": API_SOURCE,
+            }
+        )
+        for i, l in enumerate(ls, start=1):
+            items.append(
+                {
+                    "store": s_lc, "order_number": o.ebay_order_id[:40], "line_no": i, "item": l.ebay_item_id,
+                    "title": (l.title or "")[:300] or None, "label": (l.custom_label or "")[:200] or None,
+                    "txn": l.ebay_transaction_id, "qty": l.quantity, "price": l.unit_price or Decimal(0),
+                }
+            )
+    if not recs:
+        return 0
+    db.execute(
+        text(
+            """
+            insert into analytics_ebay_orders
+              (store, order_number, sale_date, paid_on_date, shipped_on_date, buyer_username, buyer_state, buyer_country,
+               line_count, units, items_subtotal, shipping_charged, tax_collected, total_price, gross_sales, net_sales,
+               refund_est, shipping_service, days_to_ship, source_file, imported_at)
+            values (:store, :order_number, :sale_date, :paid, :shipped, :bu, :bs, :bc, :lc, :units, :sub, :ship, :tax,
+                    :total, :gross, :net, :refund, :svc, :dts, :src, now())
+            on conflict (store, order_number) do update set
+              sale_date = excluded.sale_date, paid_on_date = excluded.paid_on_date,
+              shipped_on_date = excluded.shipped_on_date,
+              buyer_username = coalesce(excluded.buyer_username, analytics_ebay_orders.buyer_username),
+              buyer_state = coalesce(excluded.buyer_state, analytics_ebay_orders.buyer_state),
+              buyer_country = coalesce(excluded.buyer_country, analytics_ebay_orders.buyer_country),
+              line_count = excluded.line_count, units = excluded.units, items_subtotal = excluded.items_subtotal,
+              shipping_charged = excluded.shipping_charged, tax_collected = excluded.tax_collected,
+              total_price = excluded.total_price, gross_sales = excluded.gross_sales, net_sales = excluded.net_sales,
+              refund_est = excluded.refund_est, shipping_service = excluded.shipping_service,
+              days_to_ship = excluded.days_to_ship, imported_at = now()
+            where analytics_ebay_orders.source_file = 'api'
+            """
+        ),
+        recs,
+    )
+    numbers = [r["order_number"] for r in recs]
+    owned = {
+        r.order_number
+        for r in db.execute(
+            text(
+                "select order_number from analytics_ebay_orders where store = :s and source_file = 'api' "
+                "and order_number in :n"
+            ).bindparams(bindparam("n", expanding=True)),
+            {"s": s_lc, "n": numbers},
+        ).all()
+    }
+    if owned:
+        db.execute(
+            text("delete from analytics_ebay_order_items where store = :s and order_number in :n").bindparams(
+                bindparam("n", expanding=True)
+            ),
+            {"s": s_lc, "n": sorted(owned)},
+        )
+        mine = [i for i in items if i["order_number"] in owned]
+        if mine:
+            db.execute(
+                text(
+                    "insert into analytics_ebay_order_items (store, order_number, line_no, item_number, item_title, "
+                    "custom_label, transaction_id, quantity, unit_price) values (:store, :order_number, :line_no, "
+                    ":item, :title, :label, :txn, :qty, :price) on conflict do nothing"
+                ),
+                mine,
+            )
+    db.commit()
+    return len(owned)
 
 
 # --------------------------------------------------------------------------
@@ -785,6 +996,22 @@ def queue_run(body: StoreIn, db: Session = Depends(get_db)):
     if not a:
         raise HTTPException(404, "That store is not in the list.")
     return run_queue(db, a.store, QTY_PER_RUN)
+
+
+@router.post("/feed-analytics")
+def feed_analytics_now(body: StoreIn, db: Session = Depends(get_db)):
+    """Send EVERY saved paid order of this store to the analytics tables again (uploaded-report rows are never changed)."""
+    a = db.execute(text("select store from ebay_accounts where lower(store) = lower(:s)"), {"s": body.store.strip()}).first()
+    if not a:
+        raise HTTPException(404, "That store is not in the list.")
+    if not _analytics_ready(db):
+        raise HTTPException(409, "The analytics tables don't exist yet. Run analytics_ebay_tables.sql first.")
+    try:
+        return {"ok": True, "sent": feed_analytics(db, a.store, None)}
+    except Exception:
+        db.rollback()
+        log.exception("sending %s orders to analytics failed", a.store)
+        raise HTTPException(500, "That did not work and nothing was changed.")
 
 
 _LINE_SORTS = {

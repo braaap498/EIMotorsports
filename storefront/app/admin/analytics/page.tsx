@@ -111,7 +111,7 @@ export default function AnalyticsPage() {
       setTablesReady(r.tables_ready);
       setStores(r.stores);
       setConnected(r.connected ?? r.stores.map((x) => x.store));
-      if (r.tables_ready && (r.connected ?? r.stores).length > 0 && r.stores.length === 0) setShowImport(true);
+      if (r.tables_ready && r.stores.length > 0 && r.stores.every((x) => x.orders === 0)) setShowImport(true);
     } catch (e) {
       setError(errMsg(e));
     } finally {
