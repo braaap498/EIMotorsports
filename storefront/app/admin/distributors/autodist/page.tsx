@@ -249,7 +249,7 @@ function AutodistInner() {
   }
 
   return (
-    <div className="max-w-7xl space-y-5">
+    <div className="space-y-5">
       <div>
         <Link href="/admin/distributors" className="text-sm text-gray-600 underline">
           ← All distributors

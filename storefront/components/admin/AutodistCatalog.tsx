@@ -229,7 +229,7 @@ export default function AutodistCatalog({ hasData }: { hasData: boolean }) {
   function Th({ k, children, title, right }: { k: SortKey; children: ReactNode; title?: string; right?: boolean }) {
     const on = sort === k;
     return (
-      <th className={`py-1 pr-3 ${right ? "text-right" : ""}`} title={title}>
+      <th className={`whitespace-nowrap py-1 pr-3 ${right ? "text-right" : ""}`} title={title}>
         <button type="button" onClick={() => clickSort(k)} className={`uppercase hover:text-black ${on ? "text-black" : ""}`}>
           {children} <span className={on ? "" : "text-gray-300"}>{on ? (dir === "asc" ? "▲" : "▼") : "▲▼"}</span>
         </button>
@@ -580,8 +580,8 @@ export default function AutodistCatalog({ hasData }: { hasData: boolean }) {
                     <Th k="indiana" right>IN</Th>
                     <Th k="nevada" right>NV</Th>
                     <Th k="stock" right>Total</Th>
-                    <th className="py-1 pr-3">Barcode</th>
-                    <th className="py-1 pr-3">Ours</th>
+                    <th className="whitespace-nowrap py-1 pr-3">Barcode</th>
+                    <th className="whitespace-nowrap py-1 pr-3">Ours</th>
                     <Th k="updated">Changed</Th>
                   </tr>
                 </thead>
@@ -592,23 +592,23 @@ export default function AutodistCatalog({ hasData }: { hasData: boolean }) {
                       className={`cursor-pointer align-top hover:bg-gray-50 ${r.active ? "" : "text-gray-400"}`}
                       onClick={() => void openDetail(r.id)}
                     >
-                      <td className="py-1 pr-3">{r.manufacturer ?? "—"}</td>
+                      <td className="whitespace-nowrap py-1 pr-3">{r.manufacturer ?? "—"}</td>
                       <td className="py-1 pr-3 font-medium whitespace-nowrap">
                         {r.sku}
                         {!r.active && <span className="ml-1"><Badge tone="gray">retired</Badge></span>}
                       </td>
                       <td className="py-1 pr-3 whitespace-nowrap">{r.mfr_number ?? "—"}</td>
-                      <td className="py-1 pr-3">{r.name ?? "—"}</td>
-                      <td className="py-1 pr-3">{r.unit_of_measure ?? ""}</td>
-                      <td className="py-1 pr-3 text-right">{money(r.list_price)}</td>
-                      <td className="py-1 pr-3 text-right">{money(r.dealer_cost)}</td>
+                      <td className="min-w-[16rem] py-1 pr-3">{r.name ?? "—"}</td>
+                      <td className="whitespace-nowrap py-1 pr-3">{r.unit_of_measure ?? ""}</td>
+                      <td className="whitespace-nowrap py-1 pr-3 text-right">{money(r.list_price)}</td>
+                      <td className="whitespace-nowrap py-1 pr-3 text-right">{money(r.dealer_cost)}</td>
                       <td className="py-1 pr-3 text-right whitespace-nowrap" title={r.margin == null ? "" : `${money(r.margin)} per unit`}>
                         {r.margin == null ? "—" : <span className={Number(r.margin) < 0 ? "text-red-700" : ""}>{pct(r.margin_pct)}</span>}
                       </td>
-                      <td className="py-1 pr-3 text-right">{n(r.qty_maine)}</td>
-                      <td className="py-1 pr-3 text-right">{n(r.qty_indiana)}</td>
-                      <td className="py-1 pr-3 text-right">{n(r.qty_nevada)}</td>
-                      <td className="py-1 pr-3 text-right font-medium">{n(r.qty_total)}</td>
+                      <td className="whitespace-nowrap py-1 pr-3 text-right">{n(r.qty_maine)}</td>
+                      <td className="whitespace-nowrap py-1 pr-3 text-right">{n(r.qty_indiana)}</td>
+                      <td className="whitespace-nowrap py-1 pr-3 text-right">{n(r.qty_nevada)}</td>
+                      <td className="whitespace-nowrap py-1 pr-3 text-right font-medium">{n(r.qty_total)}</td>
                       <td className="py-1 pr-3 whitespace-nowrap">{r.upc ?? "—"}</td>
                       <td className="py-1 pr-3 whitespace-nowrap">
                         {r.ours.length > 0 ? <Badge tone="green">{r.ours.length === 1 ? r.ours[0].sku : `${r.ours.length} products`}</Badge> : ""}
