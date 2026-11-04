@@ -714,8 +714,25 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
   );
 }
 
+type LiveAvail = { mode: "live" | "test"; warehouses: { warehouse: string; quantity: number | null; price: number | null }[]; total: number };
+
 function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () => void; onBrand: (b: string) => void; onOpen: (id: number) => void }) {
   const it = d.item as Record<string, string | number | boolean | null>;
+  const [live, setLive] = useState<LiveAvail | null>(null);
+  const [liveErr, setLiveErr] = useState<string | null>(null);
+  const [liveBusy, setLiveBusy] = useState(false);
+  async function checkLive() {
+    setLiveBusy(true);
+    setLiveErr(null);
+    setLive(null);
+    try {
+      setLive(await api<LiveAvail>(`/autodist/api/avail?number=${encodeURIComponent(String(it.sku))}&quantity=1`, { method: "POST" }));
+    } catch (e) {
+      setLiveErr(errMsg(e));
+    } finally {
+      setLiveBusy(false);
+    }
+  }
   const cost = it.dealer_cost == null ? null : Number(it.dealer_cost);
   const list = it.list_price == null ? null : Number(it.list_price);
   const total = Number(it.qty_indiana ?? 0) + Number(it.qty_nevada ?? 0);
@@ -796,6 +813,24 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
             </div>
           )}
         </dl>
+
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-3">
+            <h3 className="text-xs font-semibold uppercase text-gray-500">Live stock</h3>
+            <button type="button" className={btn2Cls} disabled={liveBusy} onClick={() => void checkLive()}>
+              {liveBusy ? "Asking…" : "Check live stock now"}
+            </button>
+            <span className="text-xs text-gray-500">Asks Automatic Distributors right now; the numbers above are from the last feed.</span>
+          </div>
+          {liveErr && <p className="text-xs text-red-700">{liveErr}</p>}
+          {live && (
+            <p className="text-xs">
+              {live.warehouses.map((w) => `${w.warehouse} ${n(w.quantity ?? 0)}`).join(" · ")} · <b>{n(live.total)} total</b>
+              {live.warehouses[0]?.price != null ? ` · your price ${money(String(live.warehouses[0].price))}` : ""}
+              {live.mode === "test" ? " (test server)" : ""}
+            </p>
+          )}
+        </div>
 
         <div>
           <h3 className="mb-1 text-xs font-semibold uppercase text-gray-500">Our products that match</h3>

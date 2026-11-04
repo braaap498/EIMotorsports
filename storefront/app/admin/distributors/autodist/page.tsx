@@ -47,6 +47,16 @@ type FtpCheck = {
   sample?: string[][];
   note?: string;
 };
+type ApiStatus = { configured: boolean; server: string; mode: "live" | "test" };
+type ApiAvail = {
+  server: string;
+  mode: "live" | "test";
+  number: string;
+  quantity: number;
+  image: string | null;
+  warehouses: { warehouse: string; quantity: number | null; price: number | null; extended_price: number | null }[];
+  total: number;
+};
 type Peek = { files: { path: string; columns: string[] | null; sample: string[]; error: string | null }[] };
 type Schedule = {
   auto_enabled: boolean;
@@ -116,8 +126,12 @@ function AutodistInner() {
   const [tab, setTab] = useState<Tab>("catalog");
   const [opened, setOpened] = useState<Record<string, boolean>>({ catalog: true });
   const [feedOpen, setFeedOpen] = useState(true);
-  const [feedTab, setFeedTab] = useState<"connection" | "log">("connection");
+  const [feedTab, setFeedTab] = useState<"connection" | "api" | "log">("connection");
   const [logQ, setLogQ] = useState("");
+  const [apiStatus, setApiStatus] = useState<ApiStatus | null>(null);
+  const [apiNumber, setApiNumber] = useState("");
+  const [apiRes, setApiRes] = useState<ApiAvail | null>(null);
+  const [apiErr, setApiErr] = useState<string | null>(null);
   const [findReq, setFindReq] = useState<{ q: string; n: number } | null>(null);
 
   function pick(k: Tab) {
@@ -148,6 +162,7 @@ function AutodistInner() {
   useEffect(() => {
     void refresh();
     api<FtpStatus>("/autodist/ftp/status").then(setFtp).catch(() => setFtp(null));
+    api<ApiStatus>("/autodist/api/status").then(setApiStatus).catch(() => setApiStatus(null));
     void loadSched();
     const t = setInterval(() => void loadSched(), 30000);
     return () => clearInterval(t);
@@ -196,6 +211,21 @@ function AutodistInner() {
     } finally {
       setBusy("");
       void refresh();
+    }
+  }
+
+  async function apiTest() {
+    setBusy("api");
+    setApiErr(null);
+    setApiRes(null);
+    try {
+      const q = new URLSearchParams({ quantity: "1" });
+      if (apiNumber.trim()) q.set("number", apiNumber.trim());
+      setApiRes(await api<ApiAvail>(`/autodist/api/avail?${q.toString()}`, { method: "POST" }));
+    } catch (e) {
+      setApiErr(errMsg(e));
+    } finally {
+      setBusy("");
     }
   }
 
@@ -415,14 +445,14 @@ function AutodistInner() {
             {feedOpen && (
               <div className="border-t border-gray-100 p-4">
                 <div className="mb-3 flex gap-1 border-b border-gray-200">
-                  {(["connection", "log"] as const).map((k) => (
+                  {(["connection", "api", "log"] as const).map((k) => (
                     <button
                       key={k}
                       type="button"
                       onClick={() => setFeedTab(k)}
                       className={`-mb-px rounded-t px-3 py-1.5 text-sm ${feedTab === k ? "border border-gray-200 border-b-white bg-white font-medium" : "text-gray-600 hover:text-gray-900"}`}
                     >
-                      {k === "connection" ? "Connection" : `Log (${runs.length})`}
+                      {k === "connection" ? "Connection" : k === "api" ? "Ordering API" : `Log (${runs.length})`}
                     </button>
                   ))}
                 </div>
@@ -549,6 +579,64 @@ function AutodistInner() {
           )}
         </div>
 
+                )}
+                {feedTab === "api" && (
+                  <div className="space-y-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+                      {apiStatus == null ? (
+                        "…"
+                      ) : (
+                        <>
+                          <Badge tone={apiStatus.mode === "test" ? "amber" : "blue"}>{apiStatus.mode === "test" ? "TEST server" : "LIVE server"}</Badge>
+                          <span>{apiStatus.server}</span>
+                          {!apiStatus.configured && (
+                            <span className="text-amber-700">The key is not set: add AUTOMATIC_DIST_API_KEY in the Render environment, then redeploy.</span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      The key stays on the server. Which server is used is set by AUTOMATIC_DIST_API_URL in Render; leave it empty for the live server, or use the test address while we try ordering.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <input
+                        className={`${inputCls} !w-56`}
+                        placeholder="Part number (blank = any stored part)"
+                        value={apiNumber}
+                        onChange={(e) => setApiNumber(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && !busy && apiStatus?.configured && void apiTest()}
+                      />
+                      <button type="button" className={btnCls} disabled={busy !== "" || !apiStatus?.configured} onClick={() => void apiTest()}>
+                        {busy === "api" ? "Asking…" : "Test API connection"}
+                      </button>
+                    </div>
+                    {apiErr && <Notice kind="error">{apiErr}</Notice>}
+                    {apiRes && (
+                      <div className="space-y-1 rounded bg-gray-50 p-3 text-xs">
+                        <div>
+                          <b>{apiRes.number}</b> · works on the {apiRes.mode === "test" ? "test" : "live"} server · {n(apiRes.total)} in stock right now
+                        </div>
+                        <table className="text-left">
+                          <thead className="text-gray-500">
+                            <tr>
+                              <th className="py-0.5 pr-4">Warehouse</th>
+                              <th className="py-0.5 pr-4 text-right">Quantity</th>
+                              <th className="py-0.5 text-right">Our price</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {apiRes.warehouses.map((w) => (
+                              <tr key={w.warehouse}>
+                                <td className="py-0.5 pr-4">{w.warehouse}</td>
+                                <td className="py-0.5 pr-4 text-right">{n(w.quantity ?? 0)}</td>
+                                <td className="py-0.5 text-right">{money(w.price == null ? null : String(w.price))}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
                 )}
                 {feedTab === "log" && (
                   <div className="space-y-2">

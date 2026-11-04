@@ -7,6 +7,8 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /import/start           begin an import (the browser then sends the file in pieces)
   POST /import/chunk           one piece of the feed file
   POST /import/finish          check the whole file arrived, then retire parts that left the feed
+  GET  /api/status             is the ordering API set up, and which server (live or test) it points at
+  POST /api/avail              live availability and our price for one part from the ordering API
   GET  /opportunities          ranked lists of the parts most worth selling (margin, stock, our own sales)
   GET  /ftp/status             is the Automatic Distributors FTP login set up on the server (nothing is contacted)
   POST /ftp/check              log in to the Automatic Distributors FTP server, list the folders, preview the inventory file
@@ -41,12 +43,16 @@ LICENSE (Product Data License Agreement)
 import csv
 import ftplib
 import io
+import json
 import logging
 import os
 import re
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -1645,6 +1651,105 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
         "same_barcode": [dict(r._mapping) for r in same_upc],
         "same_part_number": [dict(r._mapping) for r in same_mpn],
         "brand_part_count": same_brand,
+    }
+
+
+# --------------------------------------------------------------------------
+# the ordering API (live availability now; quotes and orders later)
+# --------------------------------------------------------------------------
+# Settings come from Render, never from the browser: AUTOMATIC_DIST_API_KEY (sent as the Authorization header,
+# exactly as issued) and AUTOMATIC_DIST_API_URL. With no URL set the live server is used; Automatic Distributors'
+# test server is https://testapi.autodist.com:8443 (its key may differ from the live one).
+API_DEFAULT_URL = "https://api.autodist.com"
+API_TIMEOUT = 20
+# Warehouse numbers in the API. "1" is Maine, decommissioned: it is never shown or counted.
+API_WAREHOUSES = {"2": "Indiana", "3": "Nevada"}
+
+
+def _api_settings() -> tuple[str, str]:
+    url = os.environ.get("AUTOMATIC_DIST_API_URL", "").strip().rstrip("/") or API_DEFAULT_URL
+    return url, os.environ.get("AUTOMATIC_DIST_API_KEY", "").strip()
+
+
+def _api_mode(url: str) -> str:
+    host = urllib.parse.urlparse(url).hostname or ""
+    return "test" if host.startswith("test") else "live"
+
+
+def _api_get(path: str, params: Optional[dict] = None):
+    """GET a JSON endpoint. Raises HTTPException with a plain-English message; the key is never put in a message."""
+    url, key = _api_settings()
+    if not key:
+        raise HTTPException(400, "The API key is not set. Add AUTOMATIC_DIST_API_KEY in the Render environment.")
+    full = url + path + (("?" + urllib.parse.urlencode(params)) if params else "")
+    req = urllib.request.Request(full, headers={"Authorization": key, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace") or "null")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            body = json.loads(e.read().decode("utf-8", errors="replace"))
+            detail = str(body.get("message") or "")[:200]
+        except Exception:
+            pass
+        if e.code == 404:
+            raise HTTPException(404, "Automatic Distributors does not know that part number." + (f" ({detail})" if detail else ""))
+        if e.code == 422:
+            raise HTTPException(422, "That part is restricted for our account." + (f" ({detail})" if detail else ""))
+        if e.code == 429:
+            wait = e.headers.get("Retry-After") if e.headers else None
+            raise HTTPException(429, "Too many requests to Automatic Distributors" + (f"; wait {wait} seconds and try again." if wait else "; wait a moment and try again."))
+        if e.code in (401, 403):
+            raise HTTPException(502, f"The {_api_mode(url)} server refused the API key. Check AUTOMATIC_DIST_API_KEY, and that it belongs to that server.")
+        raise HTTPException(502, f"The API answered with an error ({e.code}). {detail}".strip())
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        log.warning("autodist api unreachable: %s", e)
+        raise HTTPException(502, "Could not reach the Automatic Distributors API. Try again in a moment.")
+
+
+@router.get("/api/status")
+def api_status():
+    """Is the API set up, and which server does it point at? Calls nothing and never returns the key."""
+    url, key = _api_settings()
+    return {"configured": bool(key), "server": url, "mode": _api_mode(url)}
+
+
+@router.post("/api/avail")
+def api_avail(
+    number: Optional[str] = Query(None, max_length=60, description="Automatic Distributors SKU; a stored in-stock part is used when empty"),
+    quantity: int = Query(1, ge=1, le=100000),
+    db: Session = Depends(get_db),
+):
+    """Live availability and our price for one part, straight from Automatic Distributors."""
+    sku = (number or "").strip()
+    if not sku:
+        row = db.execute(
+            text(f"select s.sku from supplier_items s where s.supplier = :s and s.active and {_TOTAL_QTY} > 0 order by s.id limit 1"),
+            {"s": SUPPLIER},
+        ).first()
+        if row is None:
+            raise HTTPException(400, "No stored part to test with. Enter a part number.")
+        sku = row[0]
+    data = _api_get("/item/avail/" + urllib.parse.quote(sku, safe=""), {"quantity": quantity})
+    if not isinstance(data, dict):
+        raise HTTPException(502, "The API sent something unexpected.")
+    rows = []
+    for a in data.get("availability") or []:
+        w = str(a.get("warehouse"))
+        if w in API_WAREHOUSES:
+            rows.append(
+                {"warehouse": API_WAREHOUSES[w], "quantity": a.get("quantity"), "price": a.get("price"), "extended_price": a.get("extendedPrice")}
+            )
+    url, _key = _api_settings()
+    return {
+        "server": url,
+        "mode": _api_mode(url),
+        "number": data.get("number") or sku,
+        "quantity": quantity,
+        "image": data.get("image"),
+        "warehouses": rows,
+        "total": sum(int(r["quantity"] or 0) for r in rows),
     }
 
 
