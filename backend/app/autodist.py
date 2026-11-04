@@ -436,6 +436,16 @@ def _ftp_connect() -> ftplib.FTP:
     return ftp
 
 
+def _ftp_raw_list(ftp: ftplib.FTP, folder: str = "") -> list[str]:
+    """The server's own directory listing lines, exactly as it sends them (for diagnosis and as a last fallback)."""
+    lines: list[str] = []
+    try:
+        ftp.retrlines(("LIST " + folder).strip(), lines.append)
+    except (ftplib.error_perm, ftplib.error_reply):
+        pass
+    return lines
+
+
 def _ftp_list(ftp: ftplib.FTP, folder: str = "") -> list[tuple[str, Optional[bool], Optional[int]]]:
     """[(name, is_dir or None when unknown, size or None)] for a folder."""
     out: list[tuple[str, Optional[bool], Optional[int]]] = []
@@ -446,7 +456,8 @@ def _ftp_list(ftp: ftplib.FTP, folder: str = "") -> list[tuple[str, Optional[boo
                 continue
             size = int(facts["size"]) if facts.get("size", "").isdigit() else None
             out.append((name, t == "dir", size))
-        return out
+        if out:
+            return out
     except (ftplib.error_perm, ftplib.error_reply, AttributeError):
         pass
     try:
@@ -454,6 +465,22 @@ def _ftp_list(ftp: ftplib.FTP, folder: str = "") -> list[tuple[str, Optional[boo
             out.append((full.replace("\\", "/").rstrip("/").split("/")[-1], None, None))
     except ftplib.error_perm:  # "550 No files found" on an empty folder
         pass
+    if out:
+        return out
+    for line in _ftp_raw_list(ftp, folder):  # unix "ls -l" style lines, or DOS style
+        parts = line.split(None, 8)
+        if len(parts) >= 9 and line[:1] in "d-l":
+            name = parts[8].split(" -> ")[0]
+            if name not in (".", ".."):
+                out.append((name, line[0] == "d", int(parts[4]) if parts[4].isdigit() else None))
+        elif len(parts) >= 4 and re.match(r"\d\d-\d\d-\d\d", parts[0]):  # "11-03-26 10:15AM <DIR> name"
+            rest = line.split(None, 3)[3] if len(line.split(None, 3)) > 3 else ""
+            is_dir = "<DIR>" in line
+            name = rest.replace("<DIR>", "").strip() if is_dir else (line.split(None, 3)[3] if len(line.split(None, 3)) > 3 else "")
+            if is_dir:
+                name = line.split("<DIR>", 1)[1].strip()
+            if name:
+                out.append((name, is_dir, None))
     return out
 
 
@@ -461,27 +488,37 @@ def _join(folder: str, name: str) -> str:
     return f"{folder.rstrip('/')}/{name}" if folder else name
 
 
+def _is_inventory_name(name: str) -> bool:
+    k = _norm_header(name)
+    return "priceupdate" not in k and "allproducts" in k and "inventory" in k and "price" in k
+
+
 def _find_inventory_file(ftp: ftplib.FTP) -> str:
-    """The path of the live inventory file: AUTODIST_FTP_INVENTORY_FILE if set, else the file in the top folder
-    called 'all products price and inventory' (any spacing / underscores / extension)."""
+    """The path of the live inventory file: AUTODIST_FTP_INVENTORY_FILE if set, else the file called
+    'all products price and inventory' (any spacing / underscores / extension) in the top folder or in a folder
+    directly under it."""
     forced = os.environ.get("AUTODIST_FTP_INVENTORY_FILE", "").strip()
     if forced:
         return forced
-    files = [(n, sz) for n, is_dir, sz in _ftp_list(ftp, "") if is_dir is not True]
-    hits = []
-    for n, _sz in files:
-        k = _norm_header(n)
-        if "priceupdate" in k:
-            continue
-        if "allproducts" in k and "inventory" in k and "price" in k:
-            hits.append(n)
+    top = _ftp_list(ftp, "")
+    hits = [n for n, d, _sz in top if d is not True and _is_inventory_name(n)]
+    seen_folders = [n for n, d, _sz in top if d is not False and "." not in n]
+    seen_files = [n for n, d, _sz in top if d is False or (d is None and "." in n)]
     if not hits:
-        seen = ", ".join(n for n, _ in files[:40]) or "(nothing listed)"
+        for folder in [n for n, d, _sz in top if d is True or (d is None and "." not in n)][:12]:
+            try:
+                sub = _ftp_list(ftp, folder)
+            except Exception:
+                continue
+            for n, d, _sz in sub:
+                if d is not True and _is_inventory_name(n):
+                    hits.append(_join(folder, n))
+    if not hits:
         raise HTTPException(
             404,
-            "Could not find the 'all products price and inventory' file on the server. Files seen: "
-            + seen
-            + ". Set AUTODIST_FTP_INVENTORY_FILE in Render to its exact path.",
+            "Could not find the 'all products price and inventory' file on the server. "
+            f"Folders: {', '.join(seen_folders[:30]) or '(none)'}. Files in the top folder: {', '.join(seen_files[:30]) or '(none)'}. "
+            "Set AUTODIST_FTP_INVENTORY_FILE in Render to its exact path.",
         )
     hits.sort(key=lambda n: (0 if n.lower().endswith((".csv", ".txt", ".zip")) else 1, len(n)))
     return hits[0]
@@ -687,36 +724,52 @@ def ftp_status():
 @router.post("/ftp/check")
 def ftp_check():
     """Log in, list the top folder and the 'pricefile' folder, and preview the inventory file's columns.
-    Changes nothing."""
+    Changes nothing. When the file cannot be found it still returns what the server showed, to diagnose."""
     ftp = _ftp_connect()
+    error = None
+    path = None
+    data = b""
     try:
+        try:
+            where = ftp.pwd()
+        except Exception:
+            where = None
         top = [{"name": n, "dir": d, "size": sz} for n, d, sz in _ftp_list(ftp, "")]
+        raw = _ftp_raw_list(ftp, "")[:60]
         price_folder = next((t["name"] for t in top if _norm_header(t["name"]) == "pricefile"), None)
         price_files = (
             [{"name": n, "size": sz} for n, d, sz in _ftp_list(ftp, price_folder) if d is not True] if price_folder else []
         )
-        path = _find_inventory_file(ftp)
-        data = _preview_remote(ftp, path)
+        try:
+            path = _find_inventory_file(ftp)
+            data = _preview_remote(ftp, path)
+        except HTTPException as e:
+            error = str(e.detail)
+        except Exception as e:
+            error = f"Could not read {path}: {e}"
     finally:
         try:
             ftp.quit()
         except Exception:
             ftp.close()
+    base = {"top": top, "price_files": price_files, "inventory_file": path, "login_folder": where, "raw_listing": raw, "error": error}
+    if error or not data:
+        return base
     if data[:2] == b"PK":
-        return {"top": top, "price_files": price_files, "inventory_file": path, "preview": None,
-                "note": "The inventory file is a zip; it is unzipped during import."}
+        return {**base, "preview": None, "note": "The inventory file is a zip; it is unzipped during import."}
     txt = data.decode("utf-8-sig", errors="replace")
     lines = txt.splitlines()[:-1] if "\n" in txt else txt.splitlines()  # the last line is probably cut off
     if not lines:
-        raise HTTPException(400, "The inventory file looks empty.")
+        return {**base, "error": "The inventory file looks empty."}
     delim = _sniff_delimiter(lines[0])
     recs = list(csv.reader(lines[:4], delimiter=delim))
     header = recs[0]
-    mapping = map_headers(header)
+    try:
+        mapping = map_headers(header)
+    except HTTPException as e:
+        return {**base, "columns": header, "error": str(e.detail)}
     return {
-        "top": top,
-        "price_files": price_files,
-        "inventory_file": path,
+        **base,
         "columns": header,
         "mapped": {f: header[i] for f, i in mapping.items()},
         "unmapped": [h for i, h in enumerate(header) if i not in mapping.values()],
