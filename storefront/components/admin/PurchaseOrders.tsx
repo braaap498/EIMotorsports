@@ -93,7 +93,7 @@ type IssuePo = {
   issues: Issue[];
 };
 type Sel = { part: Part; qty: string; rate: string };
-type Tab = "reorder" | "history" | "issues" | "distributors";
+type Tab = "reorder" | "history" | "issues";
 
 const PARTS_LIMIT = 50;
 const PO_LIMIT = 30;
@@ -121,7 +121,7 @@ async function download(po: { id: number; po_number: number }, fmt: "pdf" | "xls
  *  - Reorder: low and out-of-stock parts (or every part). Tick parts, press Create PO, pick a distributor.
  *  - History: every PO made, searchable; cancelled and received POs can be deleted (the number is then free for the next new PO); view it or download it again as PDF or Excel.
  *  - Shortages / overages: every PO that had a receiving problem, searchable.
- *  - Distributors: add, edit and delete the distributors you order from.
+ * The distributors you order from are managed on the Distributors page.
  * Creating a PO marks its parts Backordered by default (un-tick on the Inventory > Stock tab).
  */
 export default function PurchaseOrders() {
@@ -138,6 +138,14 @@ export default function PurchaseOrders() {
       .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
   }, []);
   useEffect(loadDists, [loadDists]);
+
+  // Distributors are managed on their own page. It opens in a new tab so the ticked parts here are kept;
+  // coming back to this tab reloads the list, so a distributor you just added is there to pick.
+  useEffect(() => {
+    window.addEventListener("focus", loadDists);
+    return () => window.removeEventListener("focus", loadDists);
+  }, [loadDists]);
+  const openDistributors = () => window.open("/admin/distributors", "_blank", "noopener");
 
   const tabBtn = (key: Tab, label: string) => (
     <button
@@ -158,7 +166,6 @@ export default function PurchaseOrders() {
         {tabBtn("reorder", `Reorder parts${Object.keys(sel).length ? ` (${Object.keys(sel).length} ticked)` : ""}`)}
         {tabBtn("history", "PO history")}
         {tabBtn("issues", "Shortages / overages")}
-        {tabBtn("distributors", "Distributors")}
       </div>
 
       {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
@@ -169,7 +176,7 @@ export default function PurchaseOrders() {
           sel={sel}
           setSel={setSel}
           partsKey={partsKey}
-          goDistributors={() => setTab("distributors")}
+          goDistributors={openDistributors}
           onCreated={() => {
             setSel({});
             setHistoryKey((k) => k + 1);
@@ -183,9 +190,6 @@ export default function PurchaseOrders() {
       </div>
       <div className={tab === "issues" ? "" : "hidden"}>
         <Issues reloadKey={historyKey} active={tab === "issues"} setFlash={setFlash} />
-      </div>
-      <div className={tab === "distributors" ? "" : "hidden"}>
-        <Distributors dists={dists} reload={loadDists} setFlash={setFlash} />
       </div>
     </div>
   );
@@ -474,9 +478,9 @@ function CreatePo({
             <p className="text-gray-600">
               You haven’t added a distributor yet.{" "}
               <button className="underline" onClick={goDistributors}>
-                Add one on the Distributors tab
+                Add one on the Distributors page
               </button>{" "}
-              (your ticked parts are kept).
+              (it opens in a new tab, so your ticked parts are kept).
             </p>
           ) : (
             <div className="flex flex-wrap items-center gap-3">
@@ -489,7 +493,7 @@ function CreatePo({
                 ))}
               </select>
               <button className="underline" onClick={goDistributors}>
-                Add / edit / delete distributors
+                Add / edit / delete distributors (opens in a new tab)
               </button>
             </div>
           )}
@@ -1021,121 +1025,6 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
           </div>
         </Modal>
       )}
-    </div>
-  );
-}
-
-/* ============================================================== Distributors */
-type DForm = { name: string; address: string; email: string; phone: string; notes: string };
-const blank: DForm = { name: "", address: "", email: "", phone: "", notes: "" };
-
-function Distributors({ dists, reload, setFlash }: { dists: Dist[]; reload: () => void; setFlash: FlashFn }) {
-  const [editing, setEditing] = useState<number | "new" | null>(null);
-  const [form, setForm] = useState<DForm>(blank);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  function start(d?: Dist) {
-    setError("");
-    setEditing(d ? d.id : "new");
-    setForm(d ? { name: d.name, address: d.address ?? "", email: d.email ?? "", phone: d.phone ?? "", notes: d.notes ?? "" } : blank);
-  }
-
-  async function save() {
-    if (!form.name.trim()) return setError("A distributor needs a name.");
-    setBusy(true);
-    setError("");
-    try {
-      await api(editing === "new" ? "/purchase-orders/distributors" : `/purchase-orders/distributors/${editing}`, {
-        method: editing === "new" ? "POST" : "PUT",
-        body: form,
-      });
-      setEditing(null);
-      reload();
-      setFlash({ kind: "success", text: "Distributor saved." });
-    } catch (e) {
-      setError(errMsg(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function remove(d: Dist) {
-    if (!window.confirm(`Delete ${d.name}? Purchase orders already made keep their own copy of the vendor.`)) return;
-    try {
-      await api(`/purchase-orders/distributors/${d.id}`, { method: "DELETE" });
-      reload();
-      setFlash({ kind: "success", text: `${d.name} deleted.` });
-    } catch (e) {
-      setFlash({ kind: "error", text: errMsg(e) });
-    }
-  }
-
-  const set = (k: keyof DForm, v: string) => setForm((f) => ({ ...f, [k]: v }));
-
-  return (
-    <div className="space-y-4">
-      <p className="text-base text-gray-600">
-        The distributors you order from. The address prints in the Vendor box on the PO, one line per line you type.
-      </p>
-      <button className={btnCls} onClick={() => start()}>
-        Add a distributor
-      </button>
-
-      {editing !== null && (
-        <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4 text-base">
-          <div className="font-semibold">{editing === "new" ? "New distributor" : "Edit distributor"}</div>
-          {error && <Notice kind="error">{error}</Notice>}
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block font-medium text-gray-700">
-              <span className="mb-1 block">Name</span>
-              <input className={inp} value={form.name} maxLength={100} onChange={(e) => set("name", e.target.value)} />
-            </label>
-            <label className="block font-medium text-gray-700">
-              <span className="mb-1 block">Email</span>
-              <input className={inp} value={form.email} onChange={(e) => set("email", e.target.value)} />
-            </label>
-            <label className="block font-medium text-gray-700 sm:row-span-2">
-              <span className="mb-1 block">Address (prints in the Vendor box)</span>
-              <textarea className={inp} rows={4} value={form.address} onChange={(e) => set("address", e.target.value)} />
-            </label>
-            <label className="block font-medium text-gray-700">
-              <span className="mb-1 block">Phone</span>
-              <input className={inp} value={form.phone} onChange={(e) => set("phone", e.target.value)} />
-            </label>
-            <label className="block font-medium text-gray-700">
-              <span className="mb-1 block">Notes (not printed)</span>
-              <input className={inp} value={form.notes} onChange={(e) => set("notes", e.target.value)} />
-            </label>
-          </div>
-          <div className="flex gap-2">
-            <button className={btnCls} disabled={busy} onClick={save}>
-              {busy ? "Saving…" : "Save"}
-            </button>
-            <button className={btn2Cls} disabled={busy} onClick={() => setEditing(null)}>
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 bg-white">
-        {dists.length === 0 && <li className="p-6 text-center text-base text-gray-500">No distributors yet.</li>}
-        {dists.map((d) => (
-          <li key={d.id} className="flex flex-wrap items-start justify-between gap-3 p-4 text-base">
-            <div>
-              <div className="font-semibold">{d.name}</div>
-              <div className="whitespace-pre-line text-gray-600">{d.address}</div>
-              <div className="text-gray-500">{[d.email, d.phone].filter(Boolean).join(" · ")}</div>
-              {d.notes && <div className="text-sm text-gray-500">{d.notes}</div>}
-            </div>
-            <div className="flex gap-2">
-              <button className={btn2Cls} onClick={() => start(d)}>Edit</button>
-              <button className={dangerCls} onClick={() => remove(d)}>Delete</button>
-            </div>
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }
