@@ -378,7 +378,7 @@ _ALIASES = {
     "name": ["itemname", "name", "itemdescription", "description"],
     "unit_of_measure": ["unitofmeasure", "uom"],
     "list_price": ["listprice", "retailprice", "retail"],
-    "dealer_cost": ["regulardealerprice", "dealerprice", "dealercost"],
+    "dealer_cost": ["regulardealerprice", "standarddealerprice", "dealerprice", "dealercost"],
     "qty_maine": ["mainequantity", "warehouse1quantity", "warehouse1qty"],
     "qty_indiana": ["indianaquantity", "warehouse2quantity", "warehouse2qty"],
     "qty_nevada": ["nevadaquantity", "warehouse3quantity", "warehouse3qty"],
