@@ -34,7 +34,10 @@ type FtpStatus = { configured: boolean; host: string; user: string | null; inven
 type FtpCheck = {
   top: { name: string; dir: boolean | null; size: number | null }[];
   price_files: { name: string; size: number | null }[];
-  inventory_file: string;
+  inventory_file: string | null;
+  login_folder?: string | null;
+  raw_listing?: string[];
+  error?: string | null;
   columns?: string[];
   mapped?: Record<string, string>;
   unmapped?: string[];
@@ -355,10 +358,14 @@ function AutodistInner() {
           {sched?.last_error && <div className="text-xs text-red-700">Last problem: {sched.last_error}</div>}
           {check && (
             <div className="space-y-1 rounded bg-gray-50 p-3 text-xs">
-              <div>
-                Found inventory file: <b>{check.inventory_file}</b>
-                {check.note ? ` (${check.note})` : ""}
-              </div>
+              {check.error && <div className="text-red-700">{check.error}</div>}
+              {check.inventory_file && (
+                <div>
+                  Found inventory file: <b>{check.inventory_file}</b>
+                  {check.note ? ` (${check.note})` : ""}
+                </div>
+              )}
+              {check.login_folder && <div className="text-gray-500">Logged in at folder: {check.login_folder}</div>}
               {check.mapped && (
                 <div>
                   Columns read: {Object.entries(check.mapped).map(([k, v]) => `${k} ← ${v}`).join(", ")}
@@ -370,6 +377,12 @@ function AutodistInner() {
                 Top folder: {check.top.map((t) => t.name + (t.dir ? "/" : "")).join(", ") || "(empty)"}
                 {check.price_files.length > 0 && ` · pricefile folder: ${check.price_files.map((f) => f.name).join(", ")}`}
               </div>
+              {check.raw_listing && check.raw_listing.length > 0 && (
+                <details>
+                  <summary className="cursor-pointer text-gray-500">What the server sent</summary>
+                  <div className="overflow-x-auto whitespace-pre text-gray-600">{check.raw_listing.join("\n")}</div>
+                </details>
+              )}
             </div>
           )}
         </div>
