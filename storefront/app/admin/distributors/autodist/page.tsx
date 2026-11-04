@@ -46,6 +46,7 @@ type FtpCheck = {
   sample?: string[][];
   note?: string;
 };
+type Peek = { files: { path: string; columns: string[] | null; sample: string[]; error: string | null }[] };
 type Schedule = {
   auto_enabled: boolean;
   interval_minutes: number;
@@ -84,6 +85,7 @@ function AutodistInner() {
   const [ftp, setFtp] = useState<FtpStatus | null>(null);
   const [check, setCheck] = useState<FtpCheck | null>(null);
   const [sched, setSched] = useState<Schedule | null>(null);
+  const [peek, setPeek] = useState<Peek | null>(null);
 
   async function refresh() {
     try {
@@ -146,6 +148,19 @@ function AutodistInner() {
     } finally {
       setBusy("");
       void refresh();
+    }
+  }
+
+  async function ftpPeek() {
+    setBusy("peek");
+    setMsg(null);
+    setPeek(null);
+    try {
+      setPeek(await api<Peek>("/autodist/ftp/peek", { method: "POST" }));
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
     }
   }
 
@@ -313,6 +328,9 @@ function AutodistInner() {
             <button type="button" className={btn2Cls} disabled={busy !== "" || !ftp?.configured} onClick={() => void ftpTest()}>
               {busy === "ftpcheck" ? "Connecting…" : "Test FTP connection"}
             </button>
+            <button type="button" className={btn2Cls} disabled={busy !== "" || !ftp?.configured} onClick={() => void ftpPeek()}>
+              {busy === "peek" ? "Reading files…" : "Look inside the data files"}
+            </button>
             <span className="text-xs text-gray-500">
               {ftp == null
                 ? "…"
@@ -358,6 +376,27 @@ function AutodistInner() {
             <div className="text-xs text-amber-700">Automatic sync needs the new settings table: run sql/autodist_sync_settings.sql in Supabase, then reload.</div>
           )}
           {sched?.last_error && <div className="text-xs text-red-700">Last problem: {sched.last_error}</div>}
+          {peek && (
+            <div className="space-y-3 rounded bg-gray-50 p-3 text-xs">
+              {peek.files.map((f) => (
+                <div key={f.path}>
+                  <div className="font-medium">{f.path}</div>
+                  {f.error ? (
+                    <div className="text-red-700">{f.error}</div>
+                  ) : (
+                    <>
+                      <div className="text-gray-700">{f.columns?.map((c, i) => `${i + 1}. ${c}`).join("   ")}</div>
+                      {f.sample.map((r, i) => (
+                        <div key={i} className="overflow-x-auto whitespace-pre text-gray-500">
+                          {r}
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           {check && (
             <div className="space-y-1 rounded bg-gray-50 p-3 text-xs">
               {check.error && <div className="text-red-700">{check.error}</div>}

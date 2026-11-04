@@ -9,6 +9,7 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /import/finish          check the whole file arrived, then retire parts that left the feed
   GET  /ftp/status             is the Autodist FTP login set up on the server (nothing is contacted)
   POST /ftp/check              log in to the Autodist FTP server, list the folders, preview the inventory file
+  POST /ftp/peek               column names and sample lines of each Autodist data file (nothing is stored)
   POST /import/ftp             pull the live inventory file from the FTP server and import it (runs in the background)
   GET  /ftp/schedule           the automatic-sync setting (off by default) and what the last check found
   PUT  /ftp/schedule           turn automatic sync on/off and set how often the server checks (minutes)
@@ -801,6 +802,52 @@ def ftp_check():
         "unmapped": [h for i, h in enumerate(header) if i not in mapping.values()],
         "sample": recs[1:4],
     }
+
+
+_PEEK_FILES = [
+    "PriceFile/priceupdate.txt",
+    "DataFeed/All Products.txt",
+    "DataFeed/DealerPriceInventoryWithShipWeight.txt",
+    "DataFeed/Warehouse_Inventory.txt",
+    "DataFeed/DealerInventoryUpdate.txt",
+    "DataFeed/ActiveProducts.txt",
+    "DataFeed/SuspendedProducts.txt",
+    "DataFeed/Item Catalog Pages.txt",
+    "DataFeed/DealerPriceInventory.txt",
+]
+
+
+@router.post("/ftp/peek")
+def ftp_peek():
+    """The column names and two sample lines of each Autodist data file (first 32 KB of each, nothing is stored).
+    Each file gets its own login so one odd file cannot upset the rest."""
+    out = []
+    for path in _PEEK_FILES:
+        item: dict = {"path": path, "columns": None, "sample": [], "error": None}
+        try:
+            ftp = _ftp_connect()
+            try:
+                data = _preview_remote(ftp, path, 32768)
+            finally:
+                try:
+                    ftp.quit()
+                except Exception:
+                    ftp.close()
+            txt = data.decode("utf-8-sig", errors="replace")
+            lines = txt.splitlines()[:-1] if "\n" in txt else txt.splitlines()  # the last line is cut off
+            if not lines:
+                item["error"] = "empty"
+            else:
+                delim = _sniff_delimiter(lines[0])
+                recs = list(csv.reader(lines[:3], delimiter=delim))
+                item["columns"] = [c.strip() for c in recs[0]]
+                item["sample"] = [" | ".join(r)[:400] for r in recs[1:3]]
+        except HTTPException as e:
+            item["error"] = str(e.detail)
+        except Exception as e:
+            item["error"] = str(e)[:200]
+        out.append(item)
+    return {"files": out}
 
 
 @router.post("/import/ftp")
