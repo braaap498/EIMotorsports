@@ -601,7 +601,7 @@ function AutodistInner() {
                     <div className="flex flex-wrap items-center gap-3">
                       <input
                         className={`${inputCls} !w-56`}
-                        placeholder="Part number (blank = any stored part)"
+                        placeholder="SKU (blank = any stored part)"
                         value={apiNumber}
                         onChange={(e) => setApiNumber(e.target.value)}
                         onKeyDown={(e) => e.key === "Enter" && !busy && apiStatus?.configured && void apiTest()}
