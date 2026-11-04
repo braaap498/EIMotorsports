@@ -7,6 +7,11 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /import/start           begin an import (the browser then sends the file in pieces)
   POST /import/chunk           one piece of the feed file
   POST /import/finish          check the whole file arrived, then retire parts that left the feed
+  GET  /ftp/status             is the Autodist FTP login set up on the server (nothing is contacted)
+  POST /ftp/check              log in to the Autodist FTP server, list the folders, preview the inventory file
+  POST /import/ftp             pull the live inventory file from the FTP server and import it (runs in the background)
+  GET  /ftp/schedule           the automatic-sync setting (off by default) and what the last check found
+  PUT  /ftp/schedule           turn automatic sync on/off and set how often the server checks (minutes)
   GET  /items                  browse / search / filter / sort the stored supplier parts (see items() for every filter)
   GET  /items/{id}             one part in full: every stored field, our matching products, same-barcode / same-number parts
   GET  /catalog/overview       the whole catalog at a glance: totals, data gaps, stock by warehouse, brands, price bands
@@ -20,6 +25,9 @@ HOW IT FITS
     Autodist API is wired in, its adapter should build the same dicts (see clean_row) and call
     `upsert_rows` - nothing else here changes. The API key belongs in the server's settings
     (autodist_api_key in app/config.py), never in the browser.
+  * The FTP login is read from Render environment variables (AUTODIST_FTP_USER, AUTODIST_FTP_PASSWORD, and
+    optionally AUTODIST_FTP_HOST, AUTODIST_FTP_INVENTORY_FILE, AUTODIST_FTP_TLS), never stored in the database
+    or sent to the browser.
 
 LICENSE (Product Data License Agreement)
   This is licensed data. Dealer cost and stock are confidential (7.3) and must not be made available in
@@ -28,9 +36,15 @@ LICENSE (Product Data License Agreement)
   in supplier_items / supplier_import_runs so it can be deleted in one step if the agreement ends (11.2).
 """
 import csv
+import ftplib
 import io
 import logging
+import os
 import re
+import tempfile
+import threading
+import time
+import zipfile
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -240,8 +254,7 @@ def _run_or_404(db: Session, run_id: int):
     return run
 
 
-@router.post("/import/start")
-def import_start(body: StartIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+def _begin_run(db: Session, source: str, who: str) -> int:
     busy = db.execute(
         text(
             "select id from supplier_import_runs where supplier = :s and status = 'running' "
@@ -253,10 +266,15 @@ def import_start(body: StartIn, db: Session = Depends(get_db), user: AuthUser = 
         raise HTTPException(409, "An import is already running. Wait for it to finish (or about 30 minutes).")
     run_id = db.execute(
         text("insert into supplier_import_runs (supplier, source, created_by) values (:s, :src, :u) returning id"),
-        {"s": SUPPLIER, "src": body.source, "u": user.email or user.user_id},
+        {"s": SUPPLIER, "src": source, "u": who},
     ).scalar()
     db.commit()
-    return {"run_id": run_id}
+    return run_id
+
+
+@router.post("/import/start")
+def import_start(body: StartIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    return {"run_id": _begin_run(db, body.source, user.email or user.user_id)}
 
 
 @router.post("/import/chunk")
@@ -290,37 +308,37 @@ def import_chunk(body: ChunkIn, db: Session = Depends(get_db)):
     return {"stored": len(rows), "new": new_rows, "skipped": skipped}
 
 
-@router.post("/import/finish")
-def import_finish(body: FinishIn, db: Session = Depends(get_db)):
-    run = _run_or_404(db, body.run_id)
+def _finish_run(db: Session, run_id: int, rows_sent: int, force: bool) -> dict:
+    """Check the whole file arrived, then retire the parts that left the feed. Shared by the browser upload and the FTP pull."""
+    run = _run_or_404(db, run_id)
     if run.status not in ("running", "needs_review"):
         raise HTTPException(409, "That import is already finished.")
 
     def fail(note: str, code: int = 409):
         db.execute(
             text("update supplier_import_runs set status = 'failed', finished_at = now(), note = :n where id = :i"),
-            {"n": note, "i": body.run_id},
+            {"n": note, "i": run_id},
         )
         db.commit()
         raise HTTPException(code, note + " Nothing was retired.")
 
     if run.rows_seen == 0:
         fail("The file held no usable parts.")
-    if run.rows_seen + run.rows_skipped != body.rows_sent:
+    if run.rows_seen + run.rows_skipped != rows_sent:
         fail(
-            f"The server received {run.rows_seen + run.rows_skipped:,} lines but {body.rows_sent:,} were sent; "
+            f"The server received {run.rows_seen + run.rows_skipped:,} lines but {rows_sent:,} were sent; "
             "part of the file did not arrive."
         )
 
     stale = db.execute(
         text("select count(*) from supplier_items where supplier = :s and active and last_run_id is distinct from :r"),
-        {"s": SUPPLIER, "r": body.run_id},
+        {"s": SUPPLIER, "r": run_id},
     ).scalar() or 0
     prior = stale + (run.rows_seen - run.rows_new)  # parts we held before this file: the ones it re-sent, plus the ones it didn't
-    if prior > 0 and stale > (1 - MIN_KEEP_RATIO) * prior and not body.force:
+    if prior > 0 and stale > (1 - MIN_KEEP_RATIO) * prior and not force:
         db.execute(
             text("update supplier_import_runs set status = 'needs_review', note = :n where id = :i"),
-            {"n": f"{stale:,} of the {prior:,} parts we hold are not in this file.", "i": body.run_id},
+            {"n": f"{stale:,} of the {prior:,} parts we hold are not in this file.", "i": run_id},
         )
         db.commit()
         return {"ok": False, "needs_review": True, "missing": int(stale), "held": int(prior), "stored": run.rows_seen, "new": run.rows_new}
@@ -330,16 +348,522 @@ def import_finish(body: FinishIn, db: Session = Depends(get_db)):
             "update supplier_items set active = false, updated_at = now() "
             "where supplier = :s and active and last_run_id is distinct from :r"
         ),
-        {"s": SUPPLIER, "r": body.run_id},
+        {"s": SUPPLIER, "r": run_id},
     ).rowcount
     db.execute(
         text(
             "update supplier_import_runs set status = 'done', finished_at = now(), rows_deactivated = :d, note = null where id = :i"
         ),
-        {"d": retired, "i": body.run_id},
+        {"d": retired, "i": run_id},
     )
     db.commit()
     return {"ok": True, "needs_review": False, "stored": run.rows_seen, "new": run.rows_new, "skipped": run.rows_skipped, "retired": retired}
+
+
+@router.post("/import/finish")
+def import_finish(body: FinishIn, db: Session = Depends(get_db)):
+    return _finish_run(db, body.run_id, body.rows_sent, body.force)
+
+
+# --------------------------------------------------------------------------
+# pulling the live inventory file from Autodist's FTP server
+# --------------------------------------------------------------------------
+# The file "all products price and inventory" lists stock per warehouse in columns F, G and J
+# (Warehouse_1 = Maine, decommissioned; Warehouse_2 = Indiana; Warehouse_3 = Nevada). Header names are matched
+# loosely (case, spaces and underscores ignored) so the older "Maine_Quantity" style also works.
+_ALIASES = {
+    "sku": ["sku", "autodistsku", "autodistnumber", "itemsku"],
+    "mfr_number": ["manufacturernumber", "mfrnumber", "manufacturerpartnumber", "mfrpartnumber", "mfrpart"],
+    "manufacturer": ["manufacturer", "manufacturername", "brand", "brandname"],
+    "name": ["itemname", "name", "itemdescription", "description"],
+    "unit_of_measure": ["unitofmeasure", "uom"],
+    "list_price": ["listprice", "retailprice", "retail"],
+    "dealer_cost": ["regulardealerprice", "dealerprice", "dealercost"],
+    "qty_maine": ["mainequantity", "warehouse1quantity", "warehouse1qty"],
+    "qty_indiana": ["indianaquantity", "warehouse2quantity", "warehouse2qty"],
+    "qty_nevada": ["nevadaquantity", "warehouse3quantity", "warehouse3qty"],
+    "upc": ["upc", "upccode", "barcode"],
+}
+_FTP_BATCH = 2000
+_FTP_TIMEOUT = 60
+
+
+def _norm_header(h: Optional[str]) -> str:
+    return re.sub(r"[^a-z0-9]", "", (h or "").lower())
+
+
+def map_headers(header: list[str]) -> dict[str, int]:
+    """Header cells -> {our field: column index}. Raises 400 when there is no SKU column."""
+    by_norm = {}
+    for i, h in enumerate(header):
+        by_norm.setdefault(_norm_header(h), i)
+    out: dict[str, int] = {}
+    for field, names in _ALIASES.items():
+        for nm in names:
+            if nm in by_norm:
+                out[field] = by_norm[nm]
+                break
+    if "sku" not in out:
+        raise HTTPException(
+            400,
+            "No SKU column found in the file. Its columns are: " + ", ".join(h for h in header if h)[:600],
+        )
+    return out
+
+
+def _ftp_settings() -> tuple[str, str, str]:
+    host = re.sub(r"^ftps?://", "", os.environ.get("AUTODIST_FTP_HOST", "ftp.autodist.com").strip()).strip("/")
+    return host, os.environ.get("AUTODIST_FTP_USER", "").strip(), os.environ.get("AUTODIST_FTP_PASSWORD", "")
+
+
+def _ftp_connect() -> ftplib.FTP:
+    host, user, pw = _ftp_settings()
+    if not user or not pw:
+        raise HTTPException(400, "The Autodist FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
+    use_tls = os.environ.get("AUTODIST_FTP_TLS", "").strip().lower() in ("1", "true", "yes")
+    ftp: ftplib.FTP = ftplib.FTP_TLS(timeout=_FTP_TIMEOUT) if use_tls else ftplib.FTP(timeout=_FTP_TIMEOUT)
+    try:
+        ftp.connect(host, 21)
+        ftp.login(user, pw)
+        if use_tls:
+            ftp.prot_p()  # type: ignore[attr-defined]
+        ftp.set_pasv(True)
+    except ftplib.error_perm:
+        raise HTTPException(502, "Autodist's FTP server refused the username or password.")
+    except Exception as e:  # network, timeout, DNS
+        log.warning("autodist ftp connect failed: %s", e)
+        raise HTTPException(502, f"Could not reach the Autodist FTP server ({host}): {e}")
+    return ftp
+
+
+def _ftp_list(ftp: ftplib.FTP, folder: str = "") -> list[tuple[str, Optional[bool], Optional[int]]]:
+    """[(name, is_dir or None when unknown, size or None)] for a folder."""
+    out: list[tuple[str, Optional[bool], Optional[int]]] = []
+    try:
+        for name, facts in ftp.mlsd(folder or ""):
+            t = facts.get("type", "")
+            if t in ("cdir", "pdir"):
+                continue
+            size = int(facts["size"]) if facts.get("size", "").isdigit() else None
+            out.append((name, t == "dir", size))
+        return out
+    except (ftplib.error_perm, ftplib.error_reply, AttributeError):
+        pass
+    try:
+        for full in ftp.nlst(folder or ""):
+            out.append((full.replace("\\", "/").rstrip("/").split("/")[-1], None, None))
+    except ftplib.error_perm:  # "550 No files found" on an empty folder
+        pass
+    return out
+
+
+def _join(folder: str, name: str) -> str:
+    return f"{folder.rstrip('/')}/{name}" if folder else name
+
+
+def _find_inventory_file(ftp: ftplib.FTP) -> str:
+    """The path of the live inventory file: AUTODIST_FTP_INVENTORY_FILE if set, else the file in the top folder
+    called 'all products price and inventory' (any spacing / underscores / extension)."""
+    forced = os.environ.get("AUTODIST_FTP_INVENTORY_FILE", "").strip()
+    if forced:
+        return forced
+    files = [(n, sz) for n, is_dir, sz in _ftp_list(ftp, "") if is_dir is not True]
+    hits = []
+    for n, _sz in files:
+        k = _norm_header(n)
+        if "priceupdate" in k:
+            continue
+        if "allproducts" in k and "inventory" in k and "price" in k:
+            hits.append(n)
+    if not hits:
+        seen = ", ".join(n for n, _ in files[:40]) or "(nothing listed)"
+        raise HTTPException(
+            404,
+            "Could not find the 'all products price and inventory' file on the server. Files seen: "
+            + seen
+            + ". Set AUTODIST_FTP_INVENTORY_FILE in Render to its exact path.",
+        )
+    hits.sort(key=lambda n: (0 if n.lower().endswith((".csv", ".txt", ".zip")) else 1, len(n)))
+    return hits[0]
+
+
+def _preview_remote(ftp: ftplib.FTP, path: str, limit: int = 65536) -> bytes:
+    """The first bytes of a remote file, without downloading all of it."""
+    conn = ftp.transfercmd("RETR " + path)
+    data = b""
+    try:
+        while len(data) < limit:
+            chunk = conn.recv(min(8192, limit - len(data)))
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        try:
+            ftp.voidresp()
+        except Exception:
+            pass
+    return data
+
+
+def _sniff_delimiter(first_line: str) -> str:
+    return max([",", "\t", "|", ";"], key=lambda d: first_line.count(d))
+
+
+def _rows_from_stream(text_stream, mapping: Optional[dict] = None, delimiter: Optional[str] = None):
+    """Yield (clean_row | None) per data line of the feed (None = unreadable line)."""
+    reader = csv.reader(text_stream, delimiter=delimiter or ",")
+    header = next(reader, None)
+    if header is None:
+        return
+    mp = mapping or map_headers(header)
+    width = len(header)
+    for rec in reader:
+        if not rec or all(not c.strip() for c in rec):
+            continue
+        if len(rec) != width:
+            yield None
+            continue
+        raw = {f: rec[i] for f, i in mp.items()}
+        yield clean_row(raw)
+
+
+def _open_downloaded(tmp_path: str):
+    """The downloaded file as (text stream, delimiter, closer). Unzips a .zip first."""
+    if zipfile.is_zipfile(tmp_path):
+        zf = zipfile.ZipFile(tmp_path)
+        names = [n for n in zf.namelist() if not n.endswith("/")]
+        if not names:
+            raise HTTPException(400, "The downloaded zip file is empty.")
+        raw = zf.open(names[0])
+        closer = lambda: (raw.close(), zf.close())  # noqa: E731
+    else:
+        raw = open(tmp_path, "rb")
+        closer = raw.close
+    text_stream = io.TextIOWrapper(raw, encoding="utf-8-sig", errors="replace", newline="")
+    first = text_stream.readline()
+    delim = _sniff_delimiter(first)
+    text_stream.seek(0)
+    return text_stream, delim, closer
+
+
+def _set_run_note(db: Session, run_id: int, status: str, note: str) -> None:
+    db.execute(
+        text("update supplier_import_runs set status = :st, finished_at = now(), note = :n where id = :i"),
+        {"st": status, "n": note[:400], "i": run_id},
+    )
+    db.commit()
+
+
+def _remote_signature(ftp: ftplib.FTP, path: str) -> str:
+    """A cheap fingerprint of the remote file (its modified time and size) so a check can tell whether Autodist
+    has published something new WITHOUT downloading it. '-|-' means the server told us neither."""
+    mtime = size = None
+    try:
+        resp = ftp.sendcmd("MDTM " + path)
+        if resp.startswith("213"):
+            mtime = resp.split()[-1]
+    except Exception:
+        pass
+    try:
+        ftp.voidcmd("TYPE I")
+        size = ftp.size(path)
+    except Exception:
+        pass
+    return f"{mtime or '-'}|{size if size is not None else '-'}"
+
+
+def _sync_note(db: Session, *, summary: Optional[str] = None, error: Optional[str] = None,
+               signature: Optional[str] = None, changed: bool = False) -> None:
+    """Record what the last check / import found. Never lets a missing settings table break an import."""
+    try:
+        db.execute(
+            text(
+                "update supplier_sync_settings set last_summary = coalesce(:sm, last_summary), last_error = :er, "
+                "last_signature = coalesce(:sg, last_signature), "
+                "last_changed_at = case when :ch then now() else last_changed_at end, updated_at = now() "
+                "where supplier = :s"
+            ),
+            {"sm": summary, "er": (error or None) and error[:400], "sg": signature, "ch": changed, "s": SUPPLIER},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.warning("could not record the Autodist sync result (is sql/autodist_sync_settings.sql applied?)")
+
+
+def _ftp_job(run_id: int) -> None:
+    """Background: download the live file, store it in batches, then retire what left the feed."""
+    gen = get_db()
+    db = next(gen)
+    tmp_path = None
+    try:
+        ftp = _ftp_connect()
+        try:
+            path = _find_inventory_file(ftp)
+            signature = _remote_signature(ftp, path)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".feed") as tmp:
+                tmp_path = tmp.name
+                ftp.retrbinary("RETR " + path, tmp.write, blocksize=65536)
+        finally:
+            try:
+                ftp.quit()
+            except Exception:
+                ftp.close()
+
+        stream, delim, closer = _open_downloaded(tmp_path)
+        try:
+            seen = skipped = new_total = 0
+            batch: dict[str, dict] = {}
+
+            def flush():
+                nonlocal seen, new_total
+                if not batch:
+                    return
+                rows = list(batch.values())
+                new_rows = upsert_rows(db, run_id, rows)
+                seen += len(rows)
+                new_total += new_rows
+                db.execute(
+                    text(
+                        "update supplier_import_runs set rows_seen = :n, rows_new = :w, rows_skipped = :k where id = :i"
+                    ),
+                    {"n": seen, "w": new_total, "k": skipped, "i": run_id},
+                )
+                db.commit()
+                batch.clear()
+
+            for row in _rows_from_stream(stream, delimiter=delim):
+                if row is None:
+                    skipped += 1
+                    continue
+                batch[row["sku"]] = row
+                if len(batch) >= _FTP_BATCH:
+                    flush()
+            flush()
+        finally:
+            closer()
+        result = _finish_run(db, run_id, seen + skipped, False)
+        if result.get("needs_review"):
+            _sync_note(db, summary=f"Stored {seen:,} parts; waiting for you to confirm retiring the missing ones.",
+                       signature=signature, changed=True)
+        else:
+            _sync_note(db, summary=f"Imported {seen:,} parts ({new_total:,} new, {result.get('retired', 0):,} retired).",
+                       signature=signature, changed=True)
+    except HTTPException as e:
+        db.rollback()
+        _set_run_note(db, run_id, "failed", str(e.detail))
+        _sync_note(db, error=str(e.detail))
+    except Exception:
+        db.rollback()
+        log.exception("autodist ftp import failed (run %s)", run_id)
+        _set_run_note(db, run_id, "failed", "The FTP import failed. See the server log. Nothing was retired.")
+        _sync_note(db, error="The FTP import failed. See the server log.")
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        gen.close()
+
+
+@router.get("/ftp/status")
+def ftp_status():
+    """Is the login set up? Contacts nothing and never returns the password."""
+    host, user, pw = _ftp_settings()
+    return {
+        "configured": bool(user and pw),
+        "host": host,
+        "user": user or None,
+        "inventory_file": os.environ.get("AUTODIST_FTP_INVENTORY_FILE", "").strip() or None,
+        "tls": os.environ.get("AUTODIST_FTP_TLS", "").strip().lower() in ("1", "true", "yes"),
+    }
+
+
+@router.post("/ftp/check")
+def ftp_check():
+    """Log in, list the top folder and the 'pricefile' folder, and preview the inventory file's columns.
+    Changes nothing."""
+    ftp = _ftp_connect()
+    try:
+        top = [{"name": n, "dir": d, "size": sz} for n, d, sz in _ftp_list(ftp, "")]
+        price_folder = next((t["name"] for t in top if _norm_header(t["name"]) == "pricefile"), None)
+        price_files = (
+            [{"name": n, "size": sz} for n, d, sz in _ftp_list(ftp, price_folder) if d is not True] if price_folder else []
+        )
+        path = _find_inventory_file(ftp)
+        data = _preview_remote(ftp, path)
+    finally:
+        try:
+            ftp.quit()
+        except Exception:
+            ftp.close()
+    if data[:2] == b"PK":
+        return {"top": top, "price_files": price_files, "inventory_file": path, "preview": None,
+                "note": "The inventory file is a zip; it is unzipped during import."}
+    txt = data.decode("utf-8-sig", errors="replace")
+    lines = txt.splitlines()[:-1] if "\n" in txt else txt.splitlines()  # the last line is probably cut off
+    if not lines:
+        raise HTTPException(400, "The inventory file looks empty.")
+    delim = _sniff_delimiter(lines[0])
+    recs = list(csv.reader(lines[:4], delimiter=delim))
+    header = recs[0]
+    mapping = map_headers(header)
+    return {
+        "top": top,
+        "price_files": price_files,
+        "inventory_file": path,
+        "columns": header,
+        "mapped": {f: header[i] for f, i in mapping.items()},
+        "unmapped": [h for i, h in enumerate(header) if i not in mapping.values()],
+        "sample": recs[1:4],
+    }
+
+
+@router.post("/import/ftp")
+def import_ftp(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Start pulling the live inventory file from the FTP server. Returns at once; the import runs in the background
+    and shows up in the list of imports."""
+    _, u, pw = _ftp_settings()
+    if not u or not pw:
+        raise HTTPException(400, "The Autodist FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
+    run_id = _begin_run(db, "ftp", user.email or user.user_id)
+    threading.Thread(target=_ftp_job, args=(run_id,), daemon=True, name=f"autodist-ftp-{run_id}").start()
+    return {"run_id": run_id}
+
+
+# --------------------------------------------------------------------------
+# automatic sync (off until someone turns it on)
+# --------------------------------------------------------------------------
+# FTP cannot tell us when a file changes, so every N minutes the server logs in and asks for the file's modified
+# time and size (a few bytes). It downloads and imports only when those differ from the last import. The setting
+# lives in supplier_sync_settings (sql/autodist_sync_settings.sql). The checker is one background thread started
+# when this module loads; the "claim" below makes it safe when the server runs several copies.
+SCHEDULER_TICK_SECONDS = 30
+
+
+class ScheduleIn(BaseModel):
+    enabled: Optional[bool] = None
+    interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
+
+
+def _auto_tick() -> None:
+    gen = get_db()
+    db = next(gen)
+    try:
+        claimed = db.execute(
+            text(
+                "update supplier_sync_settings set last_checked_at = now() where supplier = :s and auto_enabled "
+                "and (last_checked_at is null or last_checked_at <= now() - make_interval(mins => interval_minutes)) "
+                "returning last_signature"
+            ),
+            {"s": SUPPLIER},
+        ).first()
+        db.commit()
+        if claimed is None:
+            return  # off, not due yet, or another copy of the server took this check
+        last_sig = claimed[0]
+        try:
+            ftp = _ftp_connect()
+            try:
+                sig = _remote_signature(ftp, _find_inventory_file(ftp))
+            finally:
+                try:
+                    ftp.quit()
+                except Exception:
+                    ftp.close()
+        except HTTPException as e:
+            _sync_note(db, error=str(e.detail))
+            return
+        if sig != "-|-" and sig == last_sig:
+            _sync_note(db, summary="Checked: Autodist's file has not changed since the last import.")
+            return
+        try:
+            run_id = _begin_run(db, "ftp_auto", "automatic sync")
+        except HTTPException:
+            return  # an import is already running
+        _ftp_job(run_id)
+    except Exception:
+        db.rollback()
+        log.exception("autodist automatic sync check failed")
+    finally:
+        gen.close()
+
+
+def _scheduler_loop() -> None:
+    time.sleep(45)  # let the server finish starting
+    while True:
+        try:
+            _auto_tick()
+        except Exception:
+            log.exception("autodist scheduler")
+        time.sleep(SCHEDULER_TICK_SECONDS)
+
+
+def _start_scheduler() -> None:
+    if os.environ.get("AUTODIST_SCHEDULER", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+    threading.Thread(target=_scheduler_loop, daemon=True, name="autodist-auto-sync").start()
+
+
+_start_scheduler()
+
+
+def _schedule_row(db: Session) -> dict:
+    row = db.execute(
+        text(
+            "select auto_enabled, interval_minutes, last_checked_at, last_changed_at, last_summary, last_error "
+            "from supplier_sync_settings where supplier = :s"
+        ),
+        {"s": SUPPLIER},
+    ).first()
+    if row is None:
+        db.execute(text("insert into supplier_sync_settings (supplier) values (:s) on conflict do nothing"), {"s": SUPPLIER})
+        db.commit()
+        return _schedule_row(db)
+    d = dict(row._mapping)
+    d["running"] = bool(
+        db.execute(
+            text("select 1 from supplier_import_runs where supplier = :s and status = 'running' and started_at > now() - interval '30 minutes' limit 1"),
+            {"s": SUPPLIER},
+        ).scalar()
+    )
+    return d
+
+
+@router.get("/ftp/schedule")
+def ftp_schedule(db: Session = Depends(get_db)):
+    return _schedule_row(db)
+
+
+@router.put("/ftp/schedule")
+def ftp_schedule_set(body: ScheduleIn, db: Session = Depends(get_db)):
+    _schedule_row(db)  # makes sure the row exists
+    if body.enabled is not None:
+        if body.enabled:
+            _, u, pw = _ftp_settings()
+            if not u or not pw:
+                raise HTTPException(400, "Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment first.")
+        # turning it on makes the first check happen within a minute
+        db.execute(
+            text(
+                "update supplier_sync_settings set auto_enabled = :e, "
+                "last_checked_at = case when :e and not auto_enabled then null else last_checked_at end, "
+                "updated_at = now() where supplier = :s"
+            ),
+            {"e": body.enabled, "s": SUPPLIER},
+        )
+    if body.interval_minutes is not None:
+        db.execute(
+            text("update supplier_sync_settings set interval_minutes = :m, updated_at = now() where supplier = :s"),
+            {"m": body.interval_minutes, "s": SUPPLIER},
+        )
+    db.commit()
+    return _schedule_row(db)
 
 
 # --------------------------------------------------------------------------
