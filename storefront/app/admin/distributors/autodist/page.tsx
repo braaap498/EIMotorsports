@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../../lib/adminApi";
-import { Badge, Notice, btnCls, btn2Cls } from "../../../../components/admin/ui";
+import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../../components/admin/ui";
 import { useAccess } from "../../../../components/admin/AdminAccess";
 import AutodistCatalog from "../../../../components/admin/AutodistCatalog";
 
@@ -30,8 +30,38 @@ type Match = {
   review: { id: number; sku: string; title: string; supplier_sku: string; manufacturer: string | null; supplier_name: string | null; dealer_cost: string | null }[];
   review_limited: boolean;
 };
+type FtpStatus = { configured: boolean; host: string; user: string | null; inventory_file: string | null; tls: boolean };
+type FtpCheck = {
+  top: { name: string; dir: boolean | null; size: number | null }[];
+  price_files: { name: string; size: number | null }[];
+  inventory_file: string;
+  columns?: string[];
+  mapped?: Record<string, string>;
+  unmapped?: string[];
+  sample?: string[][];
+  note?: string;
+};
+type Schedule = {
+  auto_enabled: boolean;
+  interval_minutes: number;
+  last_checked_at: string | null;
+  last_changed_at: string | null;
+  last_summary: string | null;
+  last_error: string | null;
+  running: boolean;
+};
 type Finish = { ok: boolean; needs_review: boolean; missing?: number; held?: number; stored: number; new: number; skipped?: number; retired?: number };
 
+const MINUTES = [1, 2, 5, 10, 15, 30, 60, 120, 360, 1440];
+const minLabel = (m: number) => (m < 60 ? `${m} minute${m === 1 ? "" : "s"}` : m === 60 ? "1 hour" : m === 1440 ? "24 hours" : `${m / 60} hours`);
+function ago(iso: string | null) {
+  if (!iso) return "never";
+  const sec = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (sec < 90) return "just now";
+  if (sec < 5400) return `${Math.round(sec / 60)} min ago`;
+  if (sec < 172800) return `${Math.round(sec / 3600)} h ago`;
+  return new Date(iso).toLocaleDateString();
+}
 const PIECE = 5000; // data lines per request
 const n = (x: number) => x.toLocaleString("en-US");
 const money = (v: string | null) => (v == null ? "—" : `$${Number(v).toFixed(2)}`);
@@ -46,6 +76,9 @@ function AutodistInner() {
   const [pending, setPending] = useState<{ runId: number; rowsSent: number; missing: number; held: number } | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [match, setMatch] = useState<Match | null>(null);
+  const [ftp, setFtp] = useState<FtpStatus | null>(null);
+  const [check, setCheck] = useState<FtpCheck | null>(null);
+  const [sched, setSched] = useState<Schedule | null>(null);
 
   async function refresh() {
     try {
@@ -59,7 +92,70 @@ function AutodistInner() {
 
   useEffect(() => {
     void refresh();
+    api<FtpStatus>("/autodist/ftp/status").then(setFtp).catch(() => setFtp(null));
+    void loadSched();
+    const t = setInterval(() => void loadSched(), 30000);
+    return () => clearInterval(t);
   }, []);
+
+  async function loadSched() {
+    try {
+      setSched(await api<Schedule>("/autodist/ftp/schedule"));
+    } catch {
+      setSched(null); // the settings table is not there yet; the manual button still works
+    }
+  }
+
+  async function saveSched(body: { enabled?: boolean; interval_minutes?: number }) {
+    setBusy("sched");
+    setMsg(null);
+    try {
+      setSched(await api<Schedule>("/autodist/ftp/schedule", { method: "PUT", body }));
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  // While an FTP import runs in the background, keep the list fresh.
+  const ftpRunning = runs.some((r) => r.source.startsWith("ftp") && r.status === "running");
+  useEffect(() => {
+    if (!ftpRunning) return;
+    const t = setInterval(() => void refresh(), 4000);
+    return () => clearInterval(t);
+  }, [ftpRunning]);
+
+  // An FTP import that stopped for review: offer the same confirm button as a file upload.
+  const ftpReview = runs.find((r) => r.source.startsWith("ftp") && r.status === "needs_review" && r.id === runs[0]?.id);
+
+  async function ftpSync() {
+    setBusy("ftp");
+    setMsg(null);
+    setPending(null);
+    try {
+      await api("/autodist/import/ftp", { method: "POST" });
+      setMsg({ kind: "info", text: "Started. The import runs on the server and appears in the list below; this page updates by itself." });
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+      void refresh();
+    }
+  }
+
+  async function ftpTest() {
+    setBusy("ftpcheck");
+    setMsg(null);
+    setCheck(null);
+    try {
+      setCheck(await api<FtpCheck>("/autodist/ftp/check", { method: "POST" }));
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
 
   async function importFile(file: File | null) {
     if (!file) return;
@@ -145,6 +241,29 @@ function AutodistInner() {
       </div>
 
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+      {!pending && ftpReview && (
+        <div className="flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+          <span>The FTP file is much smaller than what is stored ({ftpReview.note}). Nothing was retired. If Autodist really dropped these parts, confirm.</span>
+          <button
+            type="button"
+            className={btnCls}
+            disabled={busy !== ""}
+            onClick={async () => {
+              setBusy("import");
+              try {
+                await finish(ftpReview.id, ftpReview.rows_seen + ftpReview.rows_skipped, true);
+              } catch (e) {
+                setMsg({ kind: "error", text: errMsg(e) });
+              } finally {
+                setBusy("");
+                void refresh();
+              }
+            }}
+          >
+            Retire the missing parts
+          </button>
+        </div>
+      )}
       {pending && (
         <div className="flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
           <span>
@@ -180,6 +299,79 @@ function AutodistInner() {
             {busy === "import" ? "Importing…" : "Import Inventory Feed (CSV)"}
           </button>
           <span className="text-xs text-gray-500">{progress || "Choose the Inventory Feed CSV from the Autodist dealer site. Takes a minute or two."}</span>
+        </div>
+        <div className="space-y-2 border-t border-gray-100 pt-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <button type="button" className={btnCls} disabled={busy !== "" || ftpRunning || !ftp?.configured} onClick={() => void ftpSync()}>
+              {ftpRunning ? "FTP import running…" : busy === "ftp" ? "Starting…" : "Sync from Autodist FTP"}
+            </button>
+            <button type="button" className={btn2Cls} disabled={busy !== "" || !ftp?.configured} onClick={() => void ftpTest()}>
+              {busy === "ftpcheck" ? "Connecting…" : "Test FTP connection"}
+            </button>
+            <span className="text-xs text-gray-500">
+              {ftp == null
+                ? "…"
+                : ftp.configured
+                ? `Logging in to ${ftp.host} as ${ftp.user}. Pulls the "all products price and inventory" file.`
+                : "Not set up yet: add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment, then redeploy."}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={!!sched?.auto_enabled}
+                disabled={!sched || !ftp?.configured || busy === "sched"}
+                onChange={(e) => void saveSched({ enabled: e.target.checked })}
+              />
+              <span>Check Autodist for changes every</span>
+            </label>
+            <select
+              className={`${inputCls} !w-auto`}
+              value={sched?.interval_minutes ?? 15}
+              disabled={!sched || busy === "sched"}
+              onChange={(e) => void saveSched({ interval_minutes: Number(e.target.value) })}
+            >
+              {sched && !MINUTES.includes(sched.interval_minutes) && <option value={sched.interval_minutes}>{minLabel(sched.interval_minutes)}</option>}
+              {MINUTES.map((m) => (
+                <option key={m} value={m}>
+                  {minLabel(m)}
+                </option>
+              ))}
+            </select>
+            {sched?.running && <Badge tone="blue">Importing now…</Badge>}
+          </div>
+          {sched ? (
+            <div className="text-xs text-gray-500">
+              {sched.auto_enabled ? "Automatic sync is ON." : "Automatic sync is OFF."} Each check only asks the FTP server for the file’s date and size; it downloads and imports only when Autodist has
+              published a newer file. Last checked {ago(sched.last_checked_at)}
+              {sched.last_changed_at ? ` · last import ${ago(sched.last_changed_at)}` : ""}
+              {sched.last_summary ? ` · ${sched.last_summary}` : ""}
+              {" "}While the server is asleep nothing is checked; the next check after it wakes catches up.
+            </div>
+          ) : (
+            <div className="text-xs text-amber-700">Automatic sync needs the new settings table: run sql/autodist_sync_settings.sql in Supabase, then reload.</div>
+          )}
+          {sched?.last_error && <div className="text-xs text-red-700">Last problem: {sched.last_error}</div>}
+          {check && (
+            <div className="space-y-1 rounded bg-gray-50 p-3 text-xs">
+              <div>
+                Found inventory file: <b>{check.inventory_file}</b>
+                {check.note ? ` (${check.note})` : ""}
+              </div>
+              {check.mapped && (
+                <div>
+                  Columns read: {Object.entries(check.mapped).map(([k, v]) => `${k} ← ${v}`).join(", ")}
+                  {check.unmapped && check.unmapped.length > 0 && <span className="text-gray-500"> · not used: {check.unmapped.join(", ")}</span>}
+                </div>
+              )}
+              {check.sample && check.sample.length > 0 && <div className="overflow-x-auto whitespace-pre text-gray-600">{check.sample.map((r) => r.join(" | ")).join("\n")}</div>}
+              <div className="text-gray-500">
+                Top folder: {check.top.map((t) => t.name + (t.dir ? "/" : "")).join(", ") || "(empty)"}
+                {check.price_files.length > 0 && ` · pricefile folder: ${check.price_files.map((f) => f.name).join(", ")}`}
+              </div>
+            </div>
+          )}
         </div>
         {runs.length > 0 && (
           <ul className="divide-y divide-gray-100 border-t border-gray-100 text-xs">
