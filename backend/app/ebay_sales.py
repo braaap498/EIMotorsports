@@ -220,8 +220,8 @@ def _release_line(db: Session, line_id: int, sales_id: Optional[int]) -> None:
 def _apply_line(db: Session, ln, od: dict, channel_id: Optional[int], skip_shipped: bool, first_in_order: bool) -> tuple[Optional[int], dict]:
     """Moves one order line to the state it should be in. Returns (product id whose stock changed or None, counts)."""
     c = {"reserved": 0, "cancelled": 0, "unmatched": 0}
-    if ln.state in ("picked", "history", "cancelled") and not od["cancelled"]:
-        return None, c
+    if ln.state in ("picked", "history", "cancelled", "reserved") and not od["cancelled"]:
+        return None, c        # nothing to do: already finished, or already set aside (do not count it again)
     if od["cancelled"]:
         if ln.state in ("pending", "reserved", "unmatched"):
             _release_line(db, ln.id, ln.sales_transaction_id)
