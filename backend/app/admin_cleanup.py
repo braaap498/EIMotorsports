@@ -133,6 +133,40 @@ def _fingerprint(rows) -> str:
     return hashlib.sha256(json.dumps(payload).encode()).hexdigest()
 
 
+def _norm_label(v) -> str:
+    return (v or "").strip().upper()
+
+
+def _label_mismatches(rows, survivor_id: int) -> list:
+    """Ticked products whose custom label SKU is set and is NOT exactly the kept part's label.
+    (A product with no label at all is not counted: it has nothing to disagree with.)"""
+    keep = next((r for r in rows if r.id == survivor_id), None)
+    keep_label = _norm_label(keep.custom_label_sku) if keep else ""
+    return [r for r in rows if r.id != survivor_id and _norm_label(r.custom_label_sku) not in ("", keep_label)]
+
+
+def _label_block_message(rows, survivor_id: int) -> Optional[str]:
+    """HARD RULE: every ticked product must have the kept part's exact custom label SKU.
+    Returns the reason the merge is refused, or None when it is fine."""
+    bad = _label_mismatches(rows, survivor_id)
+    if not bad:
+        return None
+    keep = next((r for r in rows if r.id == survivor_id), None)
+    keep_label = (keep.custom_label_sku or "").strip() if keep else ""
+    counts: dict[str, int] = {}
+    for r in bad:
+        k = (r.custom_label_sku or "").strip()
+        counts[k] = counts.get(k, 0) + 1
+    shown = ", ".join(f"{k} (x{n})" for k, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5])
+    more = f" and {len(counts) - 5} more" if len(counts) > 5 else ""
+    return (
+        f"Only products with the SAME custom label SKU can be merged. The kept part's label is "
+        f"{keep_label or 'empty'}, but {len(bad)} ticked product{'s' if len(bad) != 1 else ''} "
+        f"{'has' if len(bad) == 1 else 'have'} a different one: {shown}{more}. "
+        "Go back and untick them (the Exact match box helps), or make the labels match first."
+    )
+
+
 def _foreign_keys(db: Session) -> list[dict]:
     """Every table with a foreign key to products, found live from the database."""
     rows = db.execute(
@@ -256,16 +290,29 @@ def _brand_names(db: Session, ids: list) -> dict:
 def search(
     q: str = Query(..., min_length=2),
     limit: int = Query(400, le=1500),
+    exact: bool = Query(False, description="match the custom label SKU (or eBay item id / SKU) EXACTLY, not as part of a longer one"),
     db: Session = Depends(get_db),
 ):
-    words = [w for w in re.split(r"\s+", q.strip()) if w][:8]
-    if not words:
-        raise HTTPException(400, "Type something to search for")
-    params: dict = {f"w{i}": f"%{w}%" for i, w in enumerate(words)}
-    where = " and ".join(
-        f"(p.title ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) or p.custom_label_sku ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text))"
-        for i in range(len(words))
-    )
+    if exact:
+        # Whole-value match only: 1032020141 will NOT find CYL008xx4419M08300xx1032020141.
+        term = q.strip()
+        if not term:
+            raise HTTPException(400, "Type something to search for")
+        params: dict = {"exact": term.upper()}
+        where = (
+            "(upper(btrim(coalesce(p.custom_label_sku, ''))) = cast(:exact as text) "
+            "or upper(btrim(coalesce(p.ebay_item_id, ''))) = cast(:exact as text) "
+            "or upper(btrim(coalesce(p.sku, ''))) = cast(:exact as text))"
+        )
+    else:
+        words = [w for w in re.split(r"\s+", q.strip()) if w][:8]
+        if not words:
+            raise HTTPException(400, "Type something to search for")
+        params = {f"w{i}": f"%{w}%" for i, w in enumerate(words)}
+        where = " and ".join(
+            f"(p.title ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) or p.custom_label_sku ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text))"
+            for i in range(len(words))
+        )
     total = db.execute(text(f"select count(*) from products p where {where}"), params).scalar()
     rows = db.execute(
         text(
@@ -376,6 +423,9 @@ def preview(body: PreviewIn, db: Session = Depends(get_db)):
         raise HTTPException(409, f"Some products no longer exist (already merged?): {sorted(set(ids) - found)[:10]}")
 
     _, problems = _blockers(db, merged_ids)
+    label_problem = _label_block_message(rows, body.survivor_id)
+    if label_problem:
+        problems = [label_problem, *problems]
 
     fitment_rows = db.execute(
         text(
@@ -582,6 +632,11 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
         if _fingerprint(rows) != body.fingerprint:
             db.rollback()
             raise HTTPException(409, "These products changed since you previewed them. Nothing was merged - open the preview again.")
+
+        label_problem = _label_block_message(rows, sid)
+        if label_problem:
+            db.rollback()
+            raise HTTPException(409, label_problem)
 
         fks, problems = _blockers(db, merged)
         if problems:

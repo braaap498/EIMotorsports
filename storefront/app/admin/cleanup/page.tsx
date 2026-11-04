@@ -525,6 +525,8 @@ export default function PartsCleanupPage() {
   // step 1
   const [qInput, setQInput] = useState("");
   const [searchedQ, setSearchedQ] = useState("");
+  const [exactInput, setExactInput] = useState(false); // "Exact match" tick box next to the search
+  const [searchedExact, setSearchedExact] = useState(false);
   const [items, setItems] = useState<Item[]>([]);
   const [total, setTotal] = useState(0);
   const [searching, setSearching] = useState(false);
@@ -563,14 +565,15 @@ export default function PartsCleanupPage() {
     return () => window.removeEventListener("beforeunload", h);
   }, [step]);
 
-  const runSearch = useCallback(async (q: string) => {
+  const runSearch = useCallback(async (q: string, exact: boolean = false) => {
     setSearching(true);
     setSearchErr("");
     try {
-      const r = await api<SearchResp>(`/cleanup/search?q=${encodeURIComponent(q)}&limit=400`);
+      const r = await api<SearchResp>(`/cleanup/search?q=${encodeURIComponent(q)}&limit=400${exact ? "&exact=true" : ""}`);
       setItems(r.items);
       setTotal(r.total);
       setSearchedQ(q);
+      setSearchedExact(exact);
       setListMode("title");
       setNotFound([]);
       setSelected(new Set());
@@ -624,7 +627,7 @@ export default function PartsCleanupPage() {
         setSearchErr(errMsg(e));
       }
     } else if (searchedQ) {
-      await runSearch(searchedQ);
+      await runSearch(searchedQ, searchedExact);
     }
   }
 
@@ -766,12 +769,19 @@ export default function PartsCleanupPage() {
               className="flex flex-wrap items-end gap-2"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (qInput.trim().length >= 2) runSearch(qInput.trim());
+                if (qInput.trim().length >= 2) runSearch(qInput.trim(), exactInput);
               }}
             >
               <Field label="Search Title, Item Number or Custom Label" className="w-full max-w-md">
                 <ClearableInput className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder={'e.g. "Tusk 1.8 bar" or 536M07200xx1032020111'} autoFocus />
               </Field>
+              <label
+                className="flex items-center gap-1.5 pb-2 text-sm text-gray-700"
+                title="Only products whose custom label SKU (or eBay item number) is exactly what you typed. Longer labels that merely contain it are left out."
+              >
+                <input type="checkbox" checked={exactInput} onChange={(e) => setExactInput(e.target.checked)} />
+                Exact match
+              </label>
               <button className={btnCls} disabled={searching || qInput.trim().length < 2}>
                 {searching ? "Searching…" : "Search"}
               </button>
@@ -817,7 +827,7 @@ export default function PartsCleanupPage() {
                 <span className="text-gray-600">
                   {listMode === "items"
                     ? `${items.length} part${items.length === 1 ? "" : "s"} added by item number`
-                    : `${items.length} result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
+                    : `${items.length} ${searchedExact ? "exact " : ""}result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
                 </span>
                 <button type="button" className={btn2Cls} onClick={() => applySelection(new Set(items.map((i) => i.id)))} disabled={items.length === 0}>
                   Tick all {items.length}
