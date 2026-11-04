@@ -5,7 +5,7 @@ import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Modal, Notice, Pager, btn2Cls, inputCls } from "./ui";
 
 /**
- * The Autodist catalog in detail (owners and admins only; licensed data, never shown on the public store).
+ * The Automatic Distributors catalog in detail (owners and admins only; licensed data, never shown on the public store).
  *  - Overview: totals, data gaps, stock and stock value per warehouse, price bands, units of measure, every brand.
  *  - Browser: search any column, filter on brand / stock / warehouse / price / margin / data gaps / "we already sell it" /
  *    recently changed, sort on any column, and open any part to see everything stored about it.
@@ -14,8 +14,8 @@ import { Badge, Modal, Notice, Pager, btn2Cls, inputCls } from "./ui";
 
 type Totals = {
   total: number; active: number; retired: number; in_stock: number; out_of_stock: number;
-  in_maine: number; in_indiana: number; in_nevada: number;
-  units_maine: number; units_indiana: number; units_nevada: number;
+  in_indiana: number; in_nevada: number;
+  units_indiana: number; units_nevada: number;
   stock_value_at_cost: string | number; stock_value_at_list: string | number; brands: number;
   no_barcode: number; no_mfr_number: number; no_name: number; no_cost: number; no_list_price: number; list_below_cost: number; no_photo: number;
   changed_7d: number; changed_30d: number; avg_margin_pct: string | number | null; last_seen: string | null;
@@ -34,7 +34,7 @@ type Mine = { id: number; sku: string; title: string; on_hand: number; by: strin
 type Row = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
   unit_of_measure: string | null; list_price: string | null; dealer_cost: string | null;
-  qty_maine: number; qty_indiana: number; qty_nevada: number; qty_total: number;
+  qty_indiana: number; qty_nevada: number; qty_total: number;
   upc: string | null; images: string[] | null; active: boolean; updated_at: string | null; last_seen_at: string | null;
   margin: string | null; margin_pct: string | number | null; ours: Mine[];
 };
@@ -44,7 +44,7 @@ type Summary = {
 };
 type Mini = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
-  list_price: string | null; dealer_cost: string | null; qty_maine: number; qty_indiana: number; qty_nevada: number;
+  list_price: string | null; dealer_cost: string | null; qty_indiana: number; qty_nevada: number;
   upc: string | null; active: boolean;
 };
 type Detail = {
@@ -82,7 +82,7 @@ const MISSING_LABEL: Record<string, string> = {
 
 type SortKey =
   | "brand" | "sku" | "mfr" | "name" | "uom" | "list" | "cost" | "margin" | "margin_pct"
-  | "stock" | "maine" | "indiana" | "nevada" | "updated" | "seen";
+  | "stock" | "indiana" | "nevada" | "updated" | "seen";
 
 function Stat({ label, value, sub, onClick }: { label: string; value: string; sub?: string; onClick?: () => void }) {
   const body = (
@@ -189,7 +189,7 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
     if (k === sort) setDir((d) => (d === "asc" ? "desc" : "asc"));
     else {
       setSort(k);
-      setDir(["list", "cost", "margin", "margin_pct", "stock", "maine", "indiana", "nevada", "updated", "seen"].includes(k) ? "desc" : "asc");
+      setDir(["list", "cost", "margin", "margin_pct", "stock", "indiana", "nevada", "updated", "seen"].includes(k) ? "desc" : "asc");
     }
     setOffset(0);
   }
@@ -286,7 +286,6 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                   <tbody className="divide-y divide-gray-100">
                     {(
                       [
-                        ["Maine", "maine", t.in_maine, t.units_maine],
                         ["Indiana", "indiana", t.in_indiana, t.units_indiana],
                         ["Nevada", "nevada", t.in_nevada, t.units_nevada],
                       ] as const
@@ -302,7 +301,7 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                   </tbody>
                 </table>
                 <p className="mt-1 text-xs text-gray-500">
-                  All Autodist stock is worth {money0(t.stock_value_at_cost)} at your dealer cost ({money0(t.stock_value_at_list)} at list). This is their shelf, not yours.
+                  All Automatic Distributors stock is worth {money0(t.stock_value_at_cost)} at your dealer cost ({money0(t.stock_value_at_list)} at list). This is their shelf, not yours.
                 </p>
               </div>
 
@@ -464,7 +463,6 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
           <Lbl text="Warehouse with stock">
             <select className={inputCls} value={f.warehouse} onChange={(e) => set({ warehouse: e.target.value })}>
               <option value="">Any</option>
-              <option value="maine">Maine</option>
               <option value="indiana">Indiana</option>
               <option value="nevada">Nevada</option>
             </select>
@@ -565,7 +563,7 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
         {data && (
           <div className="rounded bg-gray-50 px-3 py-2 text-xs text-gray-700">
             <b>{n(data.total)}</b> parts match · <b>{n(data.summary.in_stock)}</b> in stock · <b>{n(data.summary.brands)}</b> brands ·{" "}
-            <b>{n(data.summary.units)}</b> units at Autodist worth <b>{money0(data.summary.stock_value_at_cost)}</b> at cost · cost range{" "}
+            <b>{n(data.summary.units)}</b> units at Automatic Distributors worth <b>{money0(data.summary.stock_value_at_cost)}</b> at cost · cost range{" "}
             {money(data.summary.min_cost)} – {money(data.summary.max_cost)}, average {money(data.summary.avg_cost)}
           </div>
         )}
@@ -585,7 +583,6 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                     <Th k="list" right>List</Th>
                     <Th k="cost" right>Cost</Th>
                     <Th k="margin_pct" right title="(list − cost) / list">Margin</Th>
-                    <Th k="maine" right>ME</Th>
                     <Th k="indiana" right>IN</Th>
                     <Th k="nevada" right>NV</Th>
                     <Th k="stock" right>Total</Th>
@@ -631,7 +628,6 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                       <td className="py-1 pr-3 text-right whitespace-nowrap" title={r.margin == null ? "" : `${money(r.margin)} per unit`}>
                         {r.margin == null ? "—" : <span className={Number(r.margin) < 0 ? "text-red-700" : ""}>{pct(r.margin_pct)}</span>}
                       </td>
-                      <td className="whitespace-nowrap py-1 pr-3 text-right">{n(r.qty_maine)}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right">{n(r.qty_indiana)}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right">{n(r.qty_nevada)}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right font-medium">{n(r.qty_total)}</td>
@@ -643,14 +639,14 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                     </tr>
                   ))}
                   {data.rows.length === 0 && (
-                    <tr><td colSpan={15} className="py-3 text-gray-500">Nothing matches those filters.</td></tr>
+                    <tr><td colSpan={14} className="py-3 text-gray-500">Nothing matches those filters.</td></tr>
                   )}
                 </tbody>
               </table>
             </div>
             <Pager total={data.total} limit={limit} offset={offset} onChange={setOffset} />
             <p className="text-[11px] text-gray-400">
-              Click a part to see everything stored about it. “Changed” is the last time its price, stock or details differed from the previous feed. ME / IN / NV = Maine / Indiana / Nevada.
+              Click a part to see everything stored about it. “Changed” is the last time its price, stock or details differed from the previous feed. IN / NV = Indiana / Nevada.
             </p>
           </>
         )}
@@ -665,9 +661,9 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
   const it = d.item as Record<string, string | number | boolean | null>;
   const cost = it.dealer_cost == null ? null : Number(it.dealer_cost);
   const list = it.list_price == null ? null : Number(it.list_price);
-  const total = Number(it.qty_maine ?? 0) + Number(it.qty_indiana ?? 0) + Number(it.qty_nevada ?? 0);
+  const total = Number(it.qty_indiana ?? 0) + Number(it.qty_nevada ?? 0);
   const rows: [string, ReactNode][] = [
-    ["Autodist SKU", it.sku as string],
+    ["Automatic Distributors SKU", it.sku as string],
     ["Manufacturer number", (it.mfr_number as string) ?? "—"],
     ["Brand", it.manufacturer ? <button type="button" className="underline" onClick={() => onBrand(String(it.manufacturer))}>{String(it.manufacturer)} ({n(d.brand_part_count)} parts)</button> : "—"],
     ["Unit of measure", (it.unit_of_measure as string) ?? "—"],
@@ -678,7 +674,6 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
       "Margin",
       cost != null && list != null && list > 0 ? `${money(list - cost)} per unit (${(((list - cost) / list) * 100).toFixed(1)}% of list)` : "—",
     ],
-    ["Stock — Maine", n(it.qty_maine as number)],
     ["Stock — Indiana", n(it.qty_indiana as number)],
     ["Stock — Nevada", n(it.qty_nevada as number)],
     ["Stock — total", `${n(total)}${cost != null ? ` (${money0(cost * total)} at cost)` : ""}`],
@@ -702,7 +697,7 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
                 <td className="py-1 pr-2 font-medium">{m.sku}</td>
                 <td className="py-1 pr-2">{m.name}</td>
                 <td className="py-1 pr-2 text-right">{money(m.dealer_cost)}</td>
-                <td className="py-1 text-right whitespace-nowrap">{m.qty_maine} / {m.qty_indiana} / {m.qty_nevada}</td>
+                <td className="py-1 text-right whitespace-nowrap">{m.qty_indiana} / {m.qty_nevada}</td>
               </tr>
             ))}
           </tbody>
@@ -770,8 +765,8 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
           )}
         </div>
 
-        {mini("Other Autodist parts with the same barcode", d.same_barcode)}
-        {mini("Other Autodist parts with the same manufacturer number", d.same_part_number)}
+        {mini("Other Automatic Distributors parts with the same barcode", d.same_barcode)}
+        {mini("Other Automatic Distributors parts with the same manufacturer number", d.same_part_number)}
         <p className="text-[11px] text-gray-400">Licensed data: dealer cost and stock are for this screen only.</p>
         <div className="flex justify-end"><button type="button" className={btn2Cls} onClick={onClose}>Close</button></div>
       </div>

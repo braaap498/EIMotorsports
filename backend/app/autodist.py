@@ -8,9 +8,9 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /import/chunk           one piece of the feed file
   POST /import/finish          check the whole file arrived, then retire parts that left the feed
   GET  /opportunities          ranked lists of the parts most worth selling (margin, stock, our own sales)
-  GET  /ftp/status             is the Autodist FTP login set up on the server (nothing is contacted)
-  POST /ftp/check              log in to the Autodist FTP server, list the folders, preview the inventory file
-  POST /ftp/peek               column names and sample lines of each Autodist data file (nothing is stored)
+  GET  /ftp/status             is the Automatic Distributors FTP login set up on the server (nothing is contacted)
+  POST /ftp/check              log in to the Automatic Distributors FTP server, list the folders, preview the inventory file
+  POST /ftp/peek               column names and sample lines of each Automatic Distributors data file (nothing is stored)
   POST /import/ftp-photos      read the photo links from the big All Products file (manual only; runs in the background)
   POST /import/ftp             pull the live inventory file, then our own prices (priceupdate.txt), from the FTP server (runs in the background)
   GET  /ftp/schedule           the automatic-sync setting (off by default) and what the last check found
@@ -25,7 +25,7 @@ HOW IT FITS
     that number drives reservations, picking and reordering (app/stock.py) and must only count parts on
     our shelf.
   * `upsert_rows` is the one door the data goes through. Today the rows come from the feed file; when the
-    Autodist API is wired in, its adapter should build the same dicts (see clean_row) and call
+    Automatic Distributors API is wired in, its adapter should build the same dicts (see clean_row) and call
     `upsert_rows` - nothing else here changes. The API key belongs in the server's settings
     (autodist_api_key in app/config.py), never in the browser.
   * The FTP login is read from Render environment variables (AUTODIST_FTP_USER, AUTODIST_FTP_PASSWORD, and
@@ -35,7 +35,7 @@ HOW IT FITS
 LICENSE (Product Data License Agreement)
   This is licensed data. Dealer cost and stock are confidential (7.3) and must not be made available in
   bulk (4(c)). So: every route here is admin-only, nothing here is mounted on the public store API, and
-  the tables are closed to the public Supabase roles (see sql/autodist_tables.sql). All Autodist data sits
+  the tables are closed to the public Supabase roles (see sql/autodist_tables.sql). All Automatic Distributors data sits
   in supplier_items / supplier_import_runs so it can be deleted in one step if the agreement ends (11.2).
 """
 import csv
@@ -68,7 +68,7 @@ SUPPLIER = "autodist"
 # the file; nothing is retired until a person confirms.
 MIN_KEEP_RATIO = 0.8
 
-# Column names in Autodist's Inventory Feed file -> our names.
+# Column names in Automatic Distributors' Inventory Feed file -> our names.
 FEED_COLUMNS = {
     "SKU": "sku",
     "Manufacturer Number": "mfr_number",
@@ -369,7 +369,7 @@ def import_finish(body: FinishIn, db: Session = Depends(get_db)):
 
 
 # --------------------------------------------------------------------------
-# pulling the live inventory file from Autodist's FTP server
+# pulling the live inventory file from Automatic Distributors' FTP server
 # --------------------------------------------------------------------------
 # The file "all products price and inventory" lists stock per warehouse in columns F, G and J
 # (Warehouse_1 = Maine, decommissioned; Warehouse_2 = Indiana; Warehouse_3 = Nevada). Header names are matched
@@ -422,7 +422,7 @@ def _ftp_settings() -> tuple[str, str, str]:
 def _ftp_connect() -> ftplib.FTP:
     host, user, pw = _ftp_settings()
     if not user or not pw:
-        raise HTTPException(400, "The Autodist FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
+        raise HTTPException(400, "The Automatic Distributors FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
     use_tls = os.environ.get("AUTODIST_FTP_TLS", "").strip().lower() in ("1", "true", "yes")
     ftp: ftplib.FTP = ftplib.FTP_TLS(timeout=_FTP_TIMEOUT) if use_tls else ftplib.FTP(timeout=_FTP_TIMEOUT)
     try:
@@ -432,10 +432,10 @@ def _ftp_connect() -> ftplib.FTP:
             ftp.prot_p()  # type: ignore[attr-defined]
         ftp.set_pasv(True)
     except ftplib.error_perm:
-        raise HTTPException(502, "Autodist's FTP server refused the username or password.")
+        raise HTTPException(502, "Automatic Distributors' FTP server refused the username or password.")
     except Exception as e:  # network, timeout, DNS
         log.warning("autodist ftp connect failed: %s", e)
-        raise HTTPException(502, f"Could not reach the Autodist FTP server ({host}): {e}")
+        raise HTTPException(502, f"Could not reach the Automatic Distributors FTP server ({host}): {e}")
     return ftp
 
 
@@ -600,7 +600,7 @@ def _set_run_note(db: Session, run_id: int, status: str, note: str) -> None:
 
 
 def _remote_signature(ftp: ftplib.FTP, path: str) -> str:
-    """A cheap fingerprint of the remote file (its modified time and size) so a check can tell whether Autodist
+    """A cheap fingerprint of the remote file (its modified time and size) so a check can tell whether Automatic Distributors
     has published something new WITHOUT downloading it. '-|-' means the server told us neither."""
     mtime = size = None
     try:
@@ -633,7 +633,7 @@ def _sync_note(db: Session, *, summary: Optional[str] = None, error: Optional[st
         db.commit()
     except Exception:
         db.rollback()
-        log.warning("could not record the Autodist sync result (is sql/autodist_sync_settings.sql applied?)")
+        log.warning("could not record the Automatic Distributors sync result (is sql/autodist_sync_settings.sql applied?)")
 
 
 def _ftp_job(run_id: int) -> bool:
@@ -731,7 +731,7 @@ _IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp")
 
 
 def _ftp_tree(ftp: ftplib.FTP, max_entries: int = 400) -> list[dict]:
-    """Every folder and file on the server, two folder levels deep, so we can see what Autodist publishes
+    """Every folder and file on the server, two folder levels deep, so we can see what Automatic Distributors publishes
     (data files, price files, images...). Capped so a huge image folder cannot stall the check."""
     out: list[dict] = []
 
@@ -824,7 +824,7 @@ _PEEK_FILES = [
 
 @router.post("/ftp/peek")
 def ftp_peek():
-    """The column names and two sample lines of each Autodist data file (first 32 KB of each, nothing is stored).
+    """The column names and two sample lines of each Automatic Distributors data file (first 32 KB of each, nothing is stored).
     Each file gets its own login so one odd file cannot upset the rest."""
     out = []
     for path in _PEEK_FILES:
@@ -860,7 +860,7 @@ def import_ftp_photos(db: Session = Depends(get_db), user: AuthUser = Depends(re
     """Start reading the photo links out of the big All Products file. Returns at once; it runs in the background."""
     _, u, pw = _ftp_settings()
     if not u or not pw:
-        raise HTTPException(400, "The Autodist FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
+        raise HTTPException(400, "The Automatic Distributors FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
     run_id = _begin_run(db, "ftp_photos", user.email or user.user_id)
     threading.Thread(target=_photo_job, args=(run_id,), daemon=True, name=f"autodist-photos-{run_id}").start()
     return {"run_id": run_id}
@@ -872,7 +872,7 @@ def import_ftp(db: Session = Depends(get_db), user: AuthUser = Depends(require_a
     and shows up in the list of imports."""
     _, u, pw = _ftp_settings()
     if not u or not pw:
-        raise HTTPException(400, "The Autodist FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
+        raise HTTPException(400, "The Automatic Distributors FTP login is not set. Add AUTODIST_FTP_USER and AUTODIST_FTP_PASSWORD in the Render environment.")
     run_id = _begin_run(db, "ftp", user.email or user.user_id)
     threading.Thread(target=_ftp_sync_all, args=(run_id,), daemon=True, name=f"autodist-ftp-{run_id}").start()
     return {"run_id": run_id}
@@ -1057,7 +1057,7 @@ def _price_job(run_id: int) -> bool:
 # photo links: DataFeed/All Products.txt (Image_URL_1 .. Image_URL_6)
 # --------------------------------------------------------------------------
 # A 140 MB file, so it only runs when someone clicks the button (photos rarely change). Only the photo links are
-# kept; the photos themselves stay on Autodist's image server until a part is actually listed.
+# kept; the photos themselves stay on Automatic Distributors' image server until a part is actually listed.
 DETAILS_FILE_DEFAULT = "DataFeed/All Products.txt"
 _DETAIL_ALIASES = {
     "sku": ["sku"],
@@ -1171,7 +1171,7 @@ def _auto_tick() -> None:
         inv_changed = sig == "-|-" or sig != last_sig
         price_changed = price_sig == "-|-" or price_sig != last_price_sig
         if not inv_changed and not price_changed:
-            _sync_note(db, summary="Checked: Autodist's files have not changed since the last import.")
+            _sync_note(db, summary="Checked: Automatic Distributors' files have not changed since the last import.")
             return
         if inv_changed:
             try:
@@ -1275,7 +1275,7 @@ def summary(db: Session = Depends(get_db)):
             """
             select count(*) as total,
                    count(*) filter (where active) as active,
-                   count(*) filter (where active and qty_maine + qty_indiana + qty_nevada > 0) as in_stock,
+                   count(*) filter (where active and qty_indiana + qty_nevada > 0) as in_stock,
                    count(distinct manufacturer) filter (where active) as brands,
                    max(last_seen_at) as last_seen
             from supplier_items where supplier = :s
@@ -1374,7 +1374,8 @@ _IS_OURS = (
     "(s.upc_norm in (select upc_n from ours where upc_n is not null and length(upc_n) >= 8) "
     "or s.mfr_number_norm in (select mpn_n from ours where mpn_n is not null))"
 )
-_TOTAL_QTY = "(s.qty_maine + s.qty_indiana + s.qty_nevada)"
+# Maine (Warehouse_1) is decommissioned: its column is still stored but never counted or shown.
+_TOTAL_QTY = "(s.qty_indiana + s.qty_nevada)"
 _SORTS = {
     "brand": "s.manufacturer",
     "sku": "s.sku",
@@ -1386,7 +1387,6 @@ _SORTS = {
     "margin": "(s.list_price - s.effective_cost)",
     "margin_pct": "((s.list_price - s.effective_cost) / nullif(s.list_price, 0))",
     "stock": _TOTAL_QTY,
-    "maine": "s.qty_maine",
     "indiana": "s.qty_indiana",
     "nevada": "s.qty_nevada",
     "updated": "s.updated_at",
@@ -1396,7 +1396,7 @@ _ITEM_COLS = (
     "s.id, s.sku, s.mfr_number, s.mfr_number_norm, s.manufacturer, s.name, s.unit_of_measure, s.list_price, "
     "s.effective_cost as dealer_cost, s.dealer_cost as standard_cost, s.my_cost, s.map_price, s.weight_lb, "
     "s.ship_weight_lb, s.length_in, s.width_in, s.height_in, s.special_order, s.surcharge, "
-    "s.qty_maine, s.qty_indiana, s.qty_nevada, s.upc, s.upc_norm, s.images, s.active, s.updated_at, s.last_seen_at"
+    "s.qty_indiana, s.qty_nevada, s.upc, s.upc_norm, s.images, s.active, s.updated_at, s.last_seen_at"
 )
 
 
@@ -1442,7 +1442,7 @@ def _filters(
     elif stock == "out":
         where.append(f"{_TOTAL_QTY} = 0")
     if warehouse:
-        where.append({"maine": "s.qty_maine", "indiana": "s.qty_indiana", "nevada": "s.qty_nevada"}[warehouse] + " > 0")
+        where.append({"indiana": "s.qty_indiana", "nevada": "s.qty_nevada"}[warehouse] + " > 0")
     for key, expr, op, val in (
         ("min_qty", _TOTAL_QTY, ">=", min_qty), ("max_qty", _TOTAL_QTY, "<=", max_qty),
         ("min_cost", "s.effective_cost", ">=", min_cost), ("max_cost", "s.effective_cost", "<=", max_cost),
@@ -1489,7 +1489,7 @@ def items(
     brand: Optional[str] = Query(None, max_length=120),
     status: str = Query("active", pattern="^(active|inactive|all)$"),
     stock: Optional[str] = Query(None, pattern="^(in|out)$", description="in = stock at any warehouse, out = none anywhere"),
-    warehouse: Optional[str] = Query(None, pattern="^(maine|indiana|nevada)$", description="stock at that warehouse"),
+    warehouse: Optional[str] = Query(None, pattern="^(indiana|nevada)$", description="stock at that warehouse"),
     min_qty: Optional[int] = Query(None, ge=0),
     max_qty: Optional[int] = Query(None, ge=0),
     min_cost: Optional[float] = Query(None, ge=0),
@@ -1584,6 +1584,7 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
     if item.get("effective_cost") is not None:
         item["dealer_cost"] = item["effective_cost"]
     item.pop("effective_cost", None)
+    item.pop("qty_maine", None)
     run = None
     if item.get("last_run_id"):
         r = db.execute(
@@ -1618,7 +1619,7 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
             d.pop("mpn_n", None)
             mine.append(d)
 
-    cols = "id, sku, mfr_number, manufacturer, name, list_price, effective_cost as dealer_cost, qty_maine, qty_indiana, qty_nevada, upc, active"
+    cols = "id, sku, mfr_number, manufacturer, name, list_price, effective_cost as dealer_cost, qty_indiana, qty_nevada, upc, active"
     same_upc = []
     if upc_n:
         same_upc = db.execute(
@@ -1650,10 +1651,10 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
 # --------------------------------------------------------------------------
 # opportunities: which parts look most worth selling (read only)
 # --------------------------------------------------------------------------
-# Autodist's feed carries no sales or popularity data, so "popular" can only come from OUR OWN sales: eBay sales
+# Automatic Distributors' feed carries no sales or popularity data, so "popular" can only come from OUR OWN sales: eBay sales
 # lines that are already matched to one of our products. That table is found by its columns (product_id, quantity,
 # ebay_order_id) instead of by name; when it cannot be found the "Sells for us" list is simply left out.
-# Selling price used for margin: Autodist's MAP price when it sets one, otherwise the list price.
+# Selling price used for margin: Automatic Distributors' MAP price when it sets one, otherwise the list price.
 _sales_table_cache: dict = {}
 
 
@@ -1688,7 +1689,7 @@ def opportunities(
     min_margin_pct: float = Query(20, ge=0, le=100, description="hide parts below this margin (percent of selling price)"),
     max_margin_pct: float = Query(80, ge=0, le=100, description="hide parts above this: usually a placeholder list price, not a real margin"),
     min_margin: float = Query(5, ge=0, description="hide parts that earn less than this per unit, in dollars"),
-    in_stock: bool = Query(True, description="only parts Autodist has in stock"),
+    in_stock: bool = Query(True, description="only parts Automatic Distributors has in stock"),
     hide_special_order: bool = Query(True),
     ours: str = Query("all", pattern="^(all|yes|no)$", description="no = parts we do not sell yet"),
     brand: Optional[str] = Query(None, max_length=120),
@@ -1706,7 +1707,7 @@ def opportunities(
              coalesce(s.map_price, s.list_price) as price,
              case when s.map_price is not null then 'MAP' else 'list' end as price_basis,
              s.effective_cost as cost, {_TOTAL_QTY} as qty_total,
-             ((s.qty_maine > 0)::int + (s.qty_indiana > 0)::int + (s.qty_nevada > 0)::int) as warehouses,
+             ((s.qty_indiana > 0)::int + (s.qty_nevada > 0)::int) as warehouses,
              {_IS_OURS} as is_ours
       from supplier_items s
       where s.supplier = :s and s.active and s.effective_cost > 0 and coalesce(s.map_price, s.list_price) > s.effective_cost
@@ -1808,10 +1809,8 @@ def catalog_overview(db: Session = Depends(get_db)):
                    count(*) filter (where not s.active) as retired,
                    count(*) filter (where s.active and {_TOTAL_QTY} > 0) as in_stock,
                    count(*) filter (where s.active and {_TOTAL_QTY} = 0) as out_of_stock,
-                   count(*) filter (where s.active and s.qty_maine > 0) as in_maine,
                    count(*) filter (where s.active and s.qty_indiana > 0) as in_indiana,
                    count(*) filter (where s.active and s.qty_nevada > 0) as in_nevada,
-                   coalesce(sum(s.qty_maine) filter (where s.active), 0) as units_maine,
                    coalesce(sum(s.qty_indiana) filter (where s.active), 0) as units_indiana,
                    coalesce(sum(s.qty_nevada) filter (where s.active), 0) as units_nevada,
                    coalesce(sum(s.effective_cost * {_TOTAL_QTY}) filter (where s.active), 0) as stock_value_at_cost,

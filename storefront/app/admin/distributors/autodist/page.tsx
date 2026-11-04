@@ -204,7 +204,7 @@ function AutodistInner() {
     setMsg(null);
     try {
       await api("/autodist/import/ftp-photos", { method: "POST" });
-      setMsg({ kind: "info", text: "Started. It reads Autodist's 140 MB product file, so it takes several minutes. Progress shows in the list below." });
+      setMsg({ kind: "info", text: "Started. It reads Automatic Distributors' 140 MB product file, so it takes several minutes. Progress shows in the list below." });
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -325,7 +325,7 @@ function AutodistInner() {
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
       {!pending && ftpReview && (
         <div className="flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
-          <span>The FTP file is much smaller than what is stored ({ftpReview.note}). Nothing was retired. If Autodist really dropped these parts, confirm.</span>
+          <span>The FTP file is much smaller than what is stored ({ftpReview.note}). Nothing was retired. If Automatic Distributors really dropped these parts, confirm.</span>
           <button
             type="button"
             className={btnCls}
@@ -349,7 +349,7 @@ function AutodistInner() {
       {pending && (
         <div className="flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
           <span>
-            That file is much smaller than what is stored. If it is the wrong file, leave it: nothing was retired. If Autodist really dropped these parts, confirm.
+            That file is much smaller than what is stored. If it is the wrong file, leave it: nothing was retired. If Automatic Distributors really dropped these parts, confirm.
           </span>
           <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => void confirmRetire()}>
             Retire the {n(pending.missing)} missing parts
@@ -359,7 +359,7 @@ function AutodistInner() {
 
       {counts && (
         <p className="text-sm text-gray-600">
-          <b className="text-gray-900">{n(counts.active)}</b> parts · <b className="text-gray-900">{n(counts.in_stock)}</b> with stock at Autodist · <b className="text-gray-900">{n(counts.brands)}</b>{" "}
+          <b className="text-gray-900">{n(counts.active)}</b> parts · <b className="text-gray-900">{n(counts.in_stock)}</b> with stock at Automatic Distributors · <b className="text-gray-900">{n(counts.brands)}</b>{" "}
           brands · last update {counts.last_seen ? new Date(counts.last_seen).toLocaleString() : "never"}
         </p>
       )}
@@ -394,7 +394,7 @@ function AutodistInner() {
           <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => fileRef.current?.click()}>
             {busy === "import" ? "Importing…" : "Import Inventory Feed (CSV)"}
           </button>
-          <span className="text-xs text-gray-500">{progress || "Choose the Inventory Feed CSV from the Autodist dealer site. Takes a minute or two."}</span>
+          <span className="text-xs text-gray-500">{progress || "Choose the Inventory Feed CSV from the Automatic Distributors dealer site. Takes a minute or two."}</span>
         </div>
 
           <div className="rounded border border-gray-200 bg-white text-sm">
@@ -430,7 +430,7 @@ function AutodistInner() {
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-3">
             <button type="button" className={btnCls} disabled={busy !== "" || ftpRunning || !ftp?.configured} onClick={() => void ftpSync()}>
-              {ftpRunning ? "FTP import running…" : busy === "ftp" ? "Starting…" : "Sync from Autodist FTP"}
+              {ftpRunning ? "FTP import running…" : busy === "ftp" ? "Starting…" : "Sync from Automatic Distributors FTP"}
             </button>
             <button type="button" className={btn2Cls} disabled={busy !== "" || !ftp?.configured} onClick={() => void ftpTest()}>
               {busy === "ftpcheck" ? "Connecting…" : "Test FTP connection"}
@@ -457,7 +457,7 @@ function AutodistInner() {
                 disabled={!sched || !ftp?.configured || busy === "sched"}
                 onChange={(e) => void saveSched({ enabled: e.target.checked })}
               />
-              <span>Check Autodist for changes every</span>
+              <span>Check Automatic Distributors for changes every</span>
             </label>
             <select
               className={`${inputCls} !w-auto`}
@@ -476,7 +476,7 @@ function AutodistInner() {
           </div>
           {sched ? (
             <div className="text-xs text-gray-500">
-              {sched.auto_enabled ? "Automatic sync is ON." : "Automatic sync is OFF."} Each check only asks the FTP server for the file’s date and size; it downloads and imports only when Autodist has
+              {sched.auto_enabled ? "Automatic sync is ON." : "Automatic sync is OFF."} Each check only asks the FTP server for the file’s date and size; it downloads and imports only when Automatic Distributors has
               published a newer file. Last checked {ago(sched.last_checked_at)}
               {sched.last_changed_at ? ` · last import ${ago(sched.last_changed_at)}` : ""}
               {sched.last_summary ? ` · ${sched.last_summary}` : ""}
@@ -587,7 +587,7 @@ function AutodistInner() {
       {tab === "match" && (
       <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="font-semibold">Which of our products does Autodist carry?</h2>
+          <h2 className="font-semibold">Which of our products does Automatic Distributors carry?</h2>
           <button type="button" className={btn2Cls} disabled={busy !== "" || !counts?.active} onClick={() => void runMatch()}>
             {busy === "match" ? "Checking…" : "Run match report"}
           </button>
@@ -608,7 +608,7 @@ function AutodistInner() {
                   <thead className="uppercase text-gray-500">
                     <tr>
                       <th className="py-1 pr-3">Our part</th>
-                      <th className="py-1 pr-3">Autodist part</th>
+                      <th className="py-1 pr-3">Automatic Distributors part</th>
                       <th className="py-1">Cost</th>
                     </tr>
                   </thead>

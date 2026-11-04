@@ -4,8 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Notice, inputCls } from "./ui";
 
-/* The "Opportunities" tab: ranks the Autodist parts that look most worth selling, so effort goes to the ones most
-   likely to be profitable. Read only. Selling price is Autodist's MAP price when it sets one, otherwise list. */
+/* The "Opportunities" tab: ranks the Automatic Distributors parts that look most worth selling, so effort goes to the ones most
+   likely to be profitable. Read only. Selling price is Automatic Distributors' MAP price when it sets one, otherwise list. */
 
 type Opp = {
   id: number;
@@ -67,7 +67,7 @@ const VIEWS: { key: View; label: string; help: string }[] = [
   {
     key: "best_bets",
     label: "Best bets",
-    help: "Ranked by profit per unit, weighted by how much Autodist has in stock (full weight at 10 or more units), so it favors parts you can actually fill orders for.",
+    help: "Ranked by profit per unit, weighted by how much Automatic Distributors has in stock (full weight at 10 or more units), so it favors parts you can actually fill orders for.",
   },
   { key: "best_margin", label: "Best margin $", help: "The most profit per unit sold." },
   { key: "best_margin_pct", label: "Best margin %", help: "The highest margin as a percent of the selling price (still at least your minimum dollars per unit)." },
@@ -76,7 +76,7 @@ const VIEWS: { key: View; label: string; help: string }[] = [
     label: "Brands to focus on",
     help: "Brands ranked by profit potential: for each qualifying part, its profit per unit times the units in stock (up to 10), added up. Brands with fewer than 3 qualifying parts are left out.",
   },
-  { key: "sales", label: "Sells for us", help: "Parts we have already sold, from our own eBay sales, most units first, with what they would earn at Autodist's price today." },
+  { key: "sales", label: "Sells for us", help: "Parts we have already sold, from our own eBay sales, most units first, with what they would earn at Automatic Distributors' price today." },
 ];
 
 function Thumb({ url }: { url: string | null }) {
@@ -147,7 +147,7 @@ export default function AutodistOpportunities({ hasData, onFind }: { hasData: bo
     };
   }, [qs, hasData]);
 
-  if (!hasData) return <Notice kind="info">Import the Autodist feed first; there is nothing to analyze yet.</Notice>;
+  if (!hasData) return <Notice kind="info">Import the Automatic Distributors feed first; there is nothing to analyze yet.</Notice>;
 
   const help = VIEWS.find((v) => v.key === view)?.help;
   const partRows = data && (view === "best_bets" || view === "best_margin" || view === "best_margin_pct") ? data.lists[view] : null;
@@ -156,7 +156,7 @@ export default function AutodistOpportunities({ hasData, onFind }: { hasData: bo
     <div className="space-y-4 text-sm">
       <div className="space-y-3 rounded border border-gray-200 bg-white p-4">
         <p className="text-xs text-gray-600">
-          Where to focus first. Margin uses Autodist’s MAP price as the selling price when there is one, otherwise the list price, against your own cost. Autodist’s feed has no
+          Where to focus first. Margin uses Automatic Distributors’ MAP price as the selling price when there is one, otherwise the list price, against your own cost. Automatic Distributors’ feed has no
           popularity data, so “popular” here means what has sold for us (see “Sells for us”).
         </p>
         <div className="flex flex-wrap items-end gap-x-4 gap-y-2 text-xs">
@@ -194,7 +194,7 @@ export default function AutodistOpportunities({ hasData, onFind }: { hasData: bo
           </label>
           <label className="flex items-center gap-1.5 pb-1.5">
             <input type="checkbox" checked={inStock} onChange={(e) => setInStock(e.target.checked)} />
-            <span>In stock at Autodist</span>
+            <span>In stock at Automatic Distributors</span>
           </label>
           <label className="flex items-center gap-1.5 pb-1.5">
             <input type="checkbox" checked={hideSpecial} onChange={(e) => setHideSpecial(e.target.checked)} />
@@ -328,7 +328,7 @@ export default function AutodistOpportunities({ hasData, onFind }: { hasData: bo
                         <th className="py-1 pr-2"></th>
                         <th className="py-1 pr-3">Our product</th>
                         <th className="py-1 pr-3 text-right">Units sold</th>
-                        <th className="py-1 pr-3">Autodist part</th>
+                        <th className="py-1 pr-3">Automatic Distributors part</th>
                         <th className="py-1 pr-3 text-right">Price</th>
                         <th className="py-1 pr-3 text-right">Cost</th>
                         <th className="py-1 pr-3 text-right">Margin $</th>
@@ -346,7 +346,7 @@ export default function AutodistOpportunities({ hasData, onFind }: { hasData: bo
                             <span className="font-medium">{r.our_sku}</span> {r.our_title}
                           </td>
                           <td className="py-1 pr-3 text-right font-medium">{n(r.units)}</td>
-                          <td className="whitespace-nowrap py-1 pr-3">{r.sku ? `${r.manufacturer ?? ""} ${r.sku}` : "not carried by Autodist"}</td>
+                          <td className="whitespace-nowrap py-1 pr-3">{r.sku ? `${r.manufacturer ?? ""} ${r.sku}` : "not carried by Automatic Distributors"}</td>
                           <td className="whitespace-nowrap py-1 pr-3 text-right">{r.price ? `${money(r.price)} ${r.price_basis ?? ""}` : "—"}</td>
                           <td className="whitespace-nowrap py-1 pr-3 text-right">{money(r.cost)}</td>
                           <td className="whitespace-nowrap py-1 pr-3 text-right font-medium">{money(r.margin)}</td>
