@@ -113,6 +113,7 @@ function Lbl({ text, children }: { text: string; children: ReactNode }) {
 export default function AutodistCatalog({ hasData, search }: { hasData: boolean; search?: { q: string; n: number } | null }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [showBrands, setShowBrands] = useState(false);
+  const [overviewOpen, setOverviewOpen] = useState(true);
   const [brandQ, setBrandQ] = useState("");
   const [f, setF] = useState<Filters>(EMPTY);
   const [qInput, setQInput] = useState("");
@@ -259,11 +260,20 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
 
       {/* ---------------------------------------------------------------- overview */}
       <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="font-semibold">Catalog overview</h2>
-          <span className="text-xs text-gray-500">Click any number to browse those parts.</span>
-        </div>
-        {!t ? (
+        <button
+          type="button"
+          className="flex w-full flex-wrap items-center justify-between gap-2 text-left"
+          onClick={() => setOverviewOpen((o) => !o)}
+          aria-expanded={overviewOpen}
+        >
+          <span className="font-semibold">
+            <span className="mr-2 inline-block w-3 text-gray-500">{overviewOpen ? "▾" : "▸"}</span>Catalog overview
+          </span>
+          <span className="text-xs text-gray-500">
+            {overviewOpen ? "Click any number to browse those parts." : t ? `${n(t.active)} active parts · ${n(t.in_stock)} in stock` : ""}
+          </span>
+        </button>
+        {overviewOpen && (!t ? (
           <p className="text-gray-500">Loading…</p>
         ) : (
           <>
@@ -411,7 +421,7 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
               )}
             </div>
           </>
-        )}
+        ))}
       </div>
 
       {/* ---------------------------------------------------------------- browser */}
@@ -571,7 +581,13 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
         {data && (
           <>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
+              {/* fixed layout: every column keeps the same width on every page and filter; the name takes what is left */}
+              <table className="w-full min-w-[90rem] table-fixed text-left text-xs">
+                <colgroup>
+                  {["2.75rem", "9rem", "8rem", "9rem", "", "3.5rem", "5rem", "5rem", "5rem", "3.5rem", "3.5rem", "4rem", "7.5rem", "5.5rem", "6rem"].map((w, i) => (
+                    <col key={i} style={w ? { width: w } : undefined} />
+                  ))}
+                </colgroup>
                 <thead className="text-gray-500">
                   <tr>
                     <th className="py-1 pr-2"></th>
@@ -615,13 +631,13 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                           <div className="h-9 w-9" />
                         )}
                       </td>
-                      <td className="whitespace-nowrap py-1 pr-3">{r.manufacturer ?? "—"}</td>
-                      <td className="py-1 pr-3 font-medium whitespace-nowrap">
+                      <td className="truncate py-1 pr-3" title={r.manufacturer ?? ""}>{r.manufacturer ?? "—"}</td>
+                      <td className="truncate py-1 pr-3 font-medium" title={r.sku}>
                         {r.sku}
                         {!r.active && <span className="ml-1"><Badge tone="gray">retired</Badge></span>}
                       </td>
-                      <td className="py-1 pr-3 whitespace-nowrap">{r.mfr_number ?? "—"}</td>
-                      <td className="min-w-[16rem] py-1 pr-3">{r.name ?? "—"}</td>
+                      <td className="truncate py-1 pr-3" title={r.mfr_number ?? ""}>{r.mfr_number ?? "—"}</td>
+                      <td className="break-words py-1 pr-3">{r.name ?? "—"}</td>
                       <td className="whitespace-nowrap py-1 pr-3">{r.unit_of_measure ?? ""}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right">{money(r.list_price)}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right">{money(r.dealer_cost)}</td>
@@ -631,15 +647,15 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                       <td className="whitespace-nowrap py-1 pr-3 text-right">{n(r.qty_indiana)}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right">{n(r.qty_nevada)}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right font-medium">{n(r.qty_total)}</td>
-                      <td className="py-1 pr-3 whitespace-nowrap">{r.upc ?? "—"}</td>
-                      <td className="py-1 pr-3 whitespace-nowrap">
+                      <td className="truncate py-1 pr-3" title={r.upc ?? ""}>{r.upc ?? "—"}</td>
+                      <td className="truncate py-1 pr-3">
                         {r.ours.length > 0 ? <Badge tone="green">{r.ours.length === 1 ? r.ours[0].sku : `${r.ours.length} products`}</Badge> : ""}
                       </td>
                       <td className="py-1 pr-3 whitespace-nowrap text-gray-500">{r.updated_at ? new Date(r.updated_at).toLocaleDateString() : "—"}</td>
                     </tr>
                   ))}
                   {data.rows.length === 0 && (
-                    <tr><td colSpan={14} className="py-3 text-gray-500">Nothing matches those filters.</td></tr>
+                    <tr><td colSpan={15} className="py-3 text-gray-500">Nothing matches those filters.</td></tr>
                   )}
                 </tbody>
               </table>
