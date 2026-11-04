@@ -6,6 +6,7 @@ import { api, errMsg } from "../../../../lib/adminApi";
 import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../../components/admin/ui";
 import { useAccess } from "../../../../components/admin/AdminAccess";
 import AutodistCatalog from "../../../../components/admin/AutodistCatalog";
+import AutodistOpportunities from "../../../../components/admin/AutodistOpportunities";
 
 // Automatic Distributors supplier data (owners and admins only). Licensed data: dealer cost and stock
 // are for this screen only and must never be shown on the public store.
@@ -73,6 +74,32 @@ const n = (x: number) => x.toLocaleString("en-US");
 const money = (v: string | null) => (v == null ? "—" : `$${Number(v).toFixed(2)}`);
 const tone = (s: string) => (s === "done" ? "green" : s === "running" ? "blue" : "amber");
 
+type Tab = "catalog" | "opps" | "data" | "match";
+const TABS: { key: Tab; label: string }[] = [
+  { key: "catalog", label: "Catalog" },
+  { key: "opps", label: "Opportunities" },
+  { key: "data", label: "Data feed" },
+  { key: "match", label: "Match report" },
+];
+const SOURCE_LABEL: Record<string, string> = {
+  csv_upload: "file upload",
+  ftp: "FTP, by hand",
+  ftp_auto: "FTP, automatic",
+  ftp_price: "prices",
+  ftp_photos: "photo links",
+};
+
+/** One line describing an import, used by the log and by its search box. */
+function runLabel(r: Run) {
+  const base =
+    r.source === "ftp_price"
+      ? `Our prices: ${n(r.rows_seen)} lines, ${n(r.rows_new)} matched a part`
+      : r.source === "ftp_photos"
+      ? `Photo links: ${n(r.rows_seen)} lines read, ${n(r.rows_new)} parts updated`
+      : `${n(r.rows_seen)} parts, ${n(r.rows_new)} new`;
+  return base + (r.rows_skipped ? `, ${n(r.rows_skipped)} skipped` : "") + (r.rows_deactivated ? `, ${n(r.rows_deactivated)} retired` : "");
+}
+
 function AutodistInner() {
   const [counts, setCounts] = useState<Counts | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -86,6 +113,27 @@ function AutodistInner() {
   const [check, setCheck] = useState<FtpCheck | null>(null);
   const [sched, setSched] = useState<Schedule | null>(null);
   const [peek, setPeek] = useState<Peek | null>(null);
+  const [tab, setTab] = useState<Tab>("catalog");
+  const [opened, setOpened] = useState<Record<string, boolean>>({ catalog: true });
+  const [feedOpen, setFeedOpen] = useState(true);
+  const [feedTab, setFeedTab] = useState<"connection" | "log">("connection");
+  const [logQ, setLogQ] = useState("");
+  const [findReq, setFindReq] = useState<{ q: string; n: number } | null>(null);
+
+  function pick(k: Tab) {
+    setTab(k);
+    setOpened((o) => (o[k] ? o : { ...o, [k]: true }));
+  }
+  function findInCatalog(sku: string) {
+    setFindReq({ q: sku, n: Date.now() });
+    pick("catalog");
+  }
+  const logWords = logQ.toLowerCase().split(/\s+/).filter(Boolean);
+  const logRows = runs.filter((r) => {
+    if (logWords.length === 0) return true;
+    const hay = `${new Date(r.started_at).toLocaleString()} ${r.status} ${SOURCE_LABEL[r.source] ?? r.source} ${runLabel(r)} ${r.note ?? ""} ${r.created_by ?? ""}`.toLowerCase();
+    return logWords.every((w) => hay.includes(w));
+  });
 
   async function refresh() {
     try {
@@ -309,32 +357,77 @@ function AutodistInner() {
         </div>
       )}
 
-      <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
-        <h2 className="font-semibold">What is stored</h2>
-        {counts ? (
-          <div className="flex flex-wrap gap-x-8 gap-y-1">
-            <span>
-              <b>{n(counts.active)}</b> parts
-            </span>
-            <span>
-              <b>{n(counts.in_stock)}</b> with stock at Autodist
-            </span>
-            <span>
-              <b>{n(counts.brands)}</b> brands
-            </span>
-            <span className="text-gray-500">Last update: {counts.last_seen ? new Date(counts.last_seen).toLocaleString() : "never"}</span>
-          </div>
-        ) : (
-          <p className="text-gray-500">Loading…</p>
-        )}
-        <div className="flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3">
+      {counts && (
+        <p className="text-sm text-gray-600">
+          <b className="text-gray-900">{n(counts.active)}</b> parts · <b className="text-gray-900">{n(counts.in_stock)}</b> with stock at Autodist · <b className="text-gray-900">{n(counts.brands)}</b>{" "}
+          brands · last update {counts.last_seen ? new Date(counts.last_seen).toLocaleString() : "never"}
+        </p>
+      )}
+
+      <div className="flex flex-wrap gap-1 border-b border-gray-200">
+        {TABS.map((x) => (
+          <button
+            key={x.key}
+            type="button"
+            onClick={() => pick(x.key)}
+            className={`-mb-px rounded-t px-4 py-2 text-sm ${tab === x.key ? "border border-gray-200 border-b-white bg-white font-medium" : "text-gray-600 hover:text-gray-900"}`}
+          >
+            {x.label}
+          </button>
+        ))}
+      </div>
+
+      <div className={tab === "catalog" ? "" : "hidden"}>
+        <AutodistCatalog hasData={!!counts?.active} search={findReq} />
+      </div>
+
+      {opened.opps && (
+        <div className={tab === "opps" ? "" : "hidden"}>
+          <AutodistOpportunities hasData={!!counts?.active} onFind={findInCatalog} />
+        </div>
+      )}
+
+      {tab === "data" && (
+        <div className="space-y-4">
+        <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-white p-4 text-sm">
           <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => void importFile(e.target.files?.[0] ?? null)} />
           <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => fileRef.current?.click()}>
             {busy === "import" ? "Importing…" : "Import Inventory Feed (CSV)"}
           </button>
           <span className="text-xs text-gray-500">{progress || "Choose the Inventory Feed CSV from the Autodist dealer site. Takes a minute or two."}</span>
         </div>
-        <div className="space-y-2 border-t border-gray-100 pt-3">
+
+          <div className="rounded border border-gray-200 bg-white text-sm">
+            <button
+              type="button"
+              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+              onClick={() => setFeedOpen((o) => !o)}
+              aria-expanded={feedOpen}
+            >
+              <span className="font-semibold">
+                <span className="mr-2 inline-block w-3 text-gray-500">{feedOpen ? "▾" : "▸"}</span>Connection &amp; FTP
+              </span>
+              <span className="flex items-center gap-2 text-xs text-gray-500">
+                {sched?.auto_enabled ? <Badge tone="green">auto sync on</Badge> : <Badge tone="gray">auto sync off</Badge>}
+                {ftpRunning && <Badge tone="blue">importing…</Badge>}
+              </span>
+            </button>
+            {feedOpen && (
+              <div className="border-t border-gray-100 p-4">
+                <div className="mb-3 flex gap-1 border-b border-gray-200">
+                  {(["connection", "log"] as const).map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setFeedTab(k)}
+                      className={`-mb-px rounded-t px-3 py-1.5 text-sm ${feedTab === k ? "border border-gray-200 border-b-white bg-white font-medium" : "text-gray-600 hover:text-gray-900"}`}
+                    >
+                      {k === "connection" ? "Connection" : `Log (${runs.length})`}
+                    </button>
+                  ))}
+                </div>
+                {feedTab === "connection" && (
+        <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-3">
             <button type="button" className={btnCls} disabled={busy !== "" || ftpRunning || !ftp?.configured} onClick={() => void ftpSync()}>
               {ftpRunning ? "FTP import running…" : busy === "ftp" ? "Starting…" : "Sync from Autodist FTP"}
@@ -455,28 +548,43 @@ function AutodistInner() {
             </div>
           )}
         </div>
-        {runs.length > 0 && (
-          <ul className="divide-y divide-gray-100 border-t border-gray-100 text-xs">
-            {runs.map((r) => (
-              <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5">
-                <span className="text-gray-500">{new Date(r.started_at).toLocaleString()}</span>
-                <Badge tone={tone(r.status)}>{r.status === "needs_review" ? "needs review" : r.status}</Badge>
-                <span>
-                  {r.source === "ftp_price"
-                    ? `Our prices: ${n(r.rows_seen)} lines, ${n(r.rows_new)} matched a part`
-                    : r.source === "ftp_photos"
-                    ? `Photo links: ${n(r.rows_seen)} lines read, ${n(r.rows_new)} parts updated`
-                    : `${n(r.rows_seen)} parts, ${n(r.rows_new)} new`}
-                  {r.rows_skipped ? `, ${n(r.rows_skipped)} skipped` : ""}
-                  {r.rows_deactivated ? `, ${n(r.rows_deactivated)} retired` : ""}
-                </span>
-                {r.note && <span className="text-red-700">{r.note}</span>}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
 
+                )}
+                {feedTab === "log" && (
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <input
+                        className={`${inputCls} !w-72`}
+                        placeholder="Search the log (date, status, text…)"
+                        value={logQ}
+                        onChange={(e) => setLogQ(e.target.value)}
+                      />
+                      <span className="text-xs text-gray-500">
+                        {logRows.length} of {runs.length} entries{runs.length >= 300 ? " (the latest 300)" : ""}
+                      </span>
+                    </div>
+                    <ul className="max-h-[28rem] divide-y divide-gray-100 overflow-y-auto rounded border border-gray-100 text-xs">
+                      {logRows.map((r) => (
+                        <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1.5">
+                          <span className="text-gray-500">{new Date(r.started_at).toLocaleString()}</span>
+                          <Badge tone={tone(r.status)}>{r.status === "needs_review" ? "needs review" : r.status}</Badge>
+                          <span className="text-gray-500">{SOURCE_LABEL[r.source] ?? r.source}</span>
+                          <span>{runLabel(r)}</span>
+                          {r.created_by && <span className="text-gray-400">{r.created_by}</span>}
+                          {r.note && <span className="text-red-700">{r.note}</span>}
+                        </li>
+                      ))}
+                      {logRows.length === 0 && <li className="px-2 py-4 text-center text-gray-500">{runs.length === 0 ? "Nothing has been imported yet." : "No entries match."}</li>}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "match" && (
       <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-semibold">Which of our products does Autodist carry?</h2>
@@ -524,8 +632,9 @@ function AutodistInner() {
           </>
         )}
       </div>
+      )}
 
-      <AutodistCatalog hasData={!!counts?.active} />
+
     </div>
   );
 }

@@ -7,6 +7,7 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /import/start           begin an import (the browser then sends the file in pieces)
   POST /import/chunk           one piece of the feed file
   POST /import/finish          check the whole file arrived, then retire parts that left the feed
+  GET  /opportunities          ranked lists of the parts most worth selling (margin, stock, our own sales)
   GET  /ftp/status             is the Autodist FTP login set up on the server (nothing is contacted)
   POST /ftp/check              log in to the Autodist FTP server, list the folders, preview the inventory file
   POST /ftp/peek               column names and sample lines of each Autodist data file (nothing is stored)
@@ -1285,7 +1286,7 @@ def summary(db: Session = Depends(get_db)):
     runs = db.execute(
         text(
             "select id, source, status, started_at, finished_at, rows_seen, rows_new, rows_skipped, rows_deactivated, note, created_by "
-            "from supplier_import_runs where supplier = :s order by id desc limit 5"
+            "from supplier_import_runs where supplier = :s order by id desc limit 300"
         ),
         {"s": SUPPLIER},
     ).all()
@@ -1643,6 +1644,156 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
         "same_barcode": [dict(r._mapping) for r in same_upc],
         "same_part_number": [dict(r._mapping) for r in same_mpn],
         "brand_part_count": same_brand,
+    }
+
+
+# --------------------------------------------------------------------------
+# opportunities: which parts look most worth selling (read only)
+# --------------------------------------------------------------------------
+# Autodist's feed carries no sales or popularity data, so "popular" can only come from OUR OWN sales: eBay sales
+# lines that are already matched to one of our products. That table is found by its columns (product_id, quantity,
+# ebay_order_id) instead of by name; when it cannot be found the "Sells for us" list is simply left out.
+# Selling price used for margin: Autodist's MAP price when it sets one, otherwise the list price.
+_sales_table_cache: dict = {}
+
+
+def _sales_table(db: Session) -> Optional[str]:
+    if "t" in _sales_table_cache:
+        return _sales_table_cache["t"]
+    found = None
+    try:
+        rows = db.execute(
+            text(
+                "select table_name from information_schema.columns where table_schema = 'public' "
+                "and column_name in ('product_id', 'quantity', 'ebay_order_id') "
+                "group by table_name having count(distinct column_name) = 3 order by (table_name like '%line%') desc, table_name"
+            )
+        ).all()
+        if rows and re.fullmatch(r"[a-z_][a-z0-9_]*", rows[0][0]):
+            found = rows[0][0]
+    except Exception:
+        db.rollback()
+    _sales_table_cache["t"] = found
+    return found
+
+
+_OPP_COLS = (
+    "id, sku, manufacturer, name, images[1] as image, price, price_basis, cost, margin, margin_pct, qty_total, "
+    "warehouses, is_ours, special_order, ship_weight_lb"
+)
+
+
+@router.get("/opportunities")
+def opportunities(
+    min_margin_pct: float = Query(20, ge=0, le=100, description="hide parts below this margin (percent of selling price)"),
+    max_margin_pct: float = Query(80, ge=0, le=100, description="hide parts above this: usually a placeholder list price, not a real margin"),
+    min_margin: float = Query(5, ge=0, description="hide parts that earn less than this per unit, in dollars"),
+    in_stock: bool = Query(True, description="only parts Autodist has in stock"),
+    hide_special_order: bool = Query(True),
+    ours: str = Query("all", pattern="^(all|yes|no)$", description="no = parts we do not sell yet"),
+    brand: Optional[str] = Query(None, max_length=120),
+    limit: int = Query(25, ge=5, le=100),
+    db: Session = Depends(get_db),
+):
+    params = {
+        "s": SUPPLIER, "minp": min_margin_pct, "maxp": max_margin_pct, "minm": min_margin, "stock": in_stock,
+        "hide_so": hide_special_order, "ours": ours, "brand": (brand or "").strip() or None, "n": limit,
+    }
+    head = f"""
+    with {_OURS_CTE},
+    base as materialized (
+      select s.id, s.sku, s.manufacturer, s.name, s.images, s.special_order, s.ship_weight_lb,
+             coalesce(s.map_price, s.list_price) as price,
+             case when s.map_price is not null then 'MAP' else 'list' end as price_basis,
+             s.effective_cost as cost, {_TOTAL_QTY} as qty_total,
+             ((s.qty_maine > 0)::int + (s.qty_indiana > 0)::int + (s.qty_nevada > 0)::int) as warehouses,
+             {_IS_OURS} as is_ours
+      from supplier_items s
+      where s.supplier = :s and s.active and s.effective_cost > 0 and coalesce(s.map_price, s.list_price) > s.effective_cost
+    ), scored as materialized (
+      select b.*, (b.price - b.cost) as margin, ((b.price - b.cost) / b.price * 100) as margin_pct
+      from base b
+      where (not :stock or b.qty_total > 0)
+        and (not :hide_so or not coalesce(b.special_order, false))
+        and (cast(:brand as text) is null or b.manufacturer ilike '%' || cast(:brand as text) || '%')
+        and (:ours = 'all' or (:ours = 'yes') = b.is_ours)
+    ), good as materialized (
+      select * from scored where margin_pct >= :minp and margin_pct <= :maxp and margin >= :minm
+    )
+    """
+
+    def top(order: str) -> list[dict]:
+        rows = db.execute(text(f"{head} select {_OPP_COLS} from good order by {order} limit :n"), params).all()
+        return [dict(r._mapping) for r in rows]
+
+    lists = {
+        "best_bets": top("margin * least(qty_total, 10) / 10.0 desc, margin desc"),
+        "best_margin": top("margin desc, margin_pct desc"),
+        "best_margin_pct": top("margin_pct desc, margin desc"),
+    }
+    totals = db.execute(
+        text(f"{head} select (select count(*) from base) as with_margin, (select count(*) from scored) as after_filters, "
+             f"(select count(*) from good) as qualifying"),
+        params,
+    ).first()
+    brands = db.execute(
+        text(
+            f"""{head}
+            select manufacturer, count(*) as parts, count(*) filter (where qty_total > 0) as in_stock_parts,
+                   avg(margin_pct) as avg_margin_pct, avg(margin) as avg_margin,
+                   sum(margin * least(qty_total, 10)) as potential
+            from good where manufacturer is not null
+            group by manufacturer having count(*) >= 3
+            order by potential desc nulls last limit 40"""
+        ),
+        params,
+    ).all()
+
+    sales = None
+    table = _sales_table(db)
+    if table:
+        try:
+            sold = db.execute(
+                text(
+                    f"""
+                    with prod_sold as (
+                      select p.id as product_id, p.sku_display as our_sku, p.title as our_title, x.units,
+                             nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') as upc_n,
+                             nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n
+                      from (select product_id, sum(quantity) as units from {table} where product_id is not null group by 1) x
+                      join products p on p.id = x.product_id
+                    )
+                    select ps.product_id, ps.our_sku, ps.our_title, ps.units,
+                           m.id, m.sku, m.manufacturer, m.images[1] as image, m.effective_cost as cost,
+                           coalesce(m.map_price, m.list_price) as price,
+                           case when m.map_price is not null then 'MAP' else 'list' end as price_basis,
+                           (coalesce(m.map_price, m.list_price) - m.effective_cost) as margin,
+                           ((coalesce(m.map_price, m.list_price) - m.effective_cost) / nullif(coalesce(m.map_price, m.list_price), 0) * 100) as margin_pct,
+                           ({_TOTAL_QTY.replace('s.', 'm.')}) as qty_total
+                    from prod_sold ps
+                    left join lateral (
+                      select s.* from supplier_items s
+                      where s.supplier = :s and s.active
+                        and ((ps.upc_n is not null and length(ps.upc_n) >= 8 and s.upc_norm = ps.upc_n)
+                             or (ps.mpn_n is not null and s.mfr_number_norm = ps.mpn_n))
+                      order by (s.upc_norm = ps.upc_n) desc nulls last, s.id limit 1
+                    ) m on true
+                    order by ps.units desc nulls last limit :n
+                    """
+                ),
+                {"s": SUPPLIER, "n": limit},
+            ).all()
+            sales = {"table": table, "rows": [dict(r._mapping) for r in sold]}
+        except Exception:
+            db.rollback()
+            log.exception("autodist opportunities: could not read our sales from %s", table)
+            sales = None
+
+    return {
+        "totals": dict(totals._mapping),
+        "lists": lists,
+        "brands": [dict(b._mapping) for b in brands],
+        "sales": sales,
     }
 
 

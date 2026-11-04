@@ -110,7 +110,7 @@ function Lbl({ text, children }: { text: string; children: ReactNode }) {
   );
 }
 
-export default function AutodistCatalog({ hasData }: { hasData: boolean }) {
+export default function AutodistCatalog({ hasData, search }: { hasData: boolean; search?: { q: string; n: number } | null }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [showBrands, setShowBrands] = useState(false);
   const [brandQ, setBrandQ] = useState("");
@@ -130,6 +130,14 @@ export default function AutodistCatalog({ hasData }: { hasData: boolean }) {
     setF((p) => ({ ...p, ...patch }));
     setOffset(0);
   }, []);
+
+  // another tab asked to look something up (a row clicked on Opportunities): show just that part
+  useEffect(() => {
+    if (!search) return;
+    setQInput(search.q);
+    setF({ ...EMPTY, q: search.q });
+    setOffset(0);
+  }, [search?.n]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!hasData) return;
