@@ -1070,8 +1070,8 @@ def clean_detail_row(raw: dict) -> Optional[dict]:
         return None
     urls = []
     for i in range(1, 7):
-        u = (raw.get(f"image_{i}") or "").strip()
-        if u.lower().startswith(("http://", "https://")) and " " not in u and u not in urls:
+        u = (raw.get(f"image_{i}") or "").strip().replace(" ", "%20")
+        if u.lower().startswith(("http://", "https://")) and u not in urls:
             urls.append(u[:500])
     return {"sku": sku[:60], "images": "\n".join(urls)}
 
