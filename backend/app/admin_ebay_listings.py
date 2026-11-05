@@ -293,6 +293,7 @@ _REPO_SORTS = {
 @router.get("/repo")
 def repo_listings(
     store: Optional[str] = Query(None, description="eBay store; empty means the main store"),
+    all_stores: bool = Query(False, description="true = every store at once; the store parameter is then ignored"),
     status: str = Query("all", pattern="^(all|active|inactive)$"),
     q: str = Query("", max_length=100),
     sort: str = Query("newest", pattern="^(newest|title|price_low|price_high)$"),
@@ -300,9 +301,14 @@ def repo_listings(
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    who = _resolve(db, store)
-    base = ["lower(cl.store) = lower(:store)", f"{_DIGITS} <> ''"]
-    params: dict = {"store": who["store"], "n": limit, "o": offset}
+    if all_stores:
+        who = {"store": "", "seller": "", "known": True}
+        base = [f"{_DIGITS} <> ''"]
+        params: dict = {"n": limit, "o": offset}
+    else:
+        who = _resolve(db, store)
+        base = ["lower(cl.store) = lower(:store)", f"{_DIGITS} <> ''"]
+        params = {"store": who["store"], "n": limit, "o": offset}
     # counts and raw statuses for the whole store (the search box does not change them)
     counts = db.execute(
         text(
@@ -334,7 +340,7 @@ def repo_listings(
     rows = db.execute(
         text(
             f"""
-            select {_DIGITS} as item_id, cl.id as listing_id, cl.status, cl.api_type,
+            select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
                    p.id as product_id, p.title, p.custom_label_sku, p.list_price, p.quantity_on_hand,
                    (select ph.image_key from product_photos ph where ph.product_id = p.id
                      order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as image_key
@@ -350,6 +356,7 @@ def repo_listings(
         key = d.pop("image_key", None)
         items.append(
             {
+                "store": d["store"],
                 "item_id": d["item_id"],
                 "listing_id": d["listing_id"],
                 "title": d["title"] or "(no title)",

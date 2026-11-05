@@ -24,6 +24,7 @@ type Store = {
 type StoresResp = { main_store: string; stores: Store[] };
 
 type RepoItem = {
+  store: string;
   item_id: string;
   listing_id: number;
   title: string;
@@ -52,6 +53,7 @@ type RepoResp = {
 };
 
 const PAGE_SIZE = 50;
+const ALL = "__all__"; // the "All stores" choice in the store drop-down
 
 function money(v: string | number | null | undefined, cur?: string | null) {
   if (v === null || v === undefined || v === "") return "—";
@@ -99,7 +101,7 @@ export default function EbayLiveListingsPage() {
     const saved = loadSaved<{ store: string; q: string; sort: string; offset: number; statusF?: "all" | "active" | "inactive" }>("ebay-listings");
     const names = stores.map((x) => x.store);
     const first = names.includes(mainStore) ? mainStore : names[0];
-    if (saved && names.includes(saved.store)) {
+    if (saved && (saved.store === ALL || names.includes(saved.store))) {
       setStore(saved.store);
       setQ(saved.q);
       setSort(saved.sort);
@@ -118,21 +120,25 @@ export default function EbayLiveListingsPage() {
   // Each one is logged like a single push.
   async function bulkSet(want: "inactive" | "active") {
     if (!repo || picked.size === 0) return;
-    const st = stores.find((x) => x.store === repo.store);
-    if (!st?.authorized) {
-      setActMsg({ kind: "error", text: `${repo.store} is not connected to eBay yet (connect it in Store API → Stores), so nothing can be changed there. Nothing was sent.` });
-      return;
-    }
-    if (!st.live_pushes_enabled) {
-      setActMsg({ kind: "error", text: `Live pushes are OFF for ${repo.store}, so nothing can go to eBay. Turn them on in Store API → Stores. Nothing was sent.` });
-      return;
-    }
     const todo = repo.items.filter((x) => picked.has(x.listing_id) && (want === "inactive" ? x.active : !x.active));
     const n = todo.length;
     if (n === 0) return;
+    // each listing is sent to its own store, so check every store involved first
+    const names = todo.map((x) => x.store).filter((v, i, a) => a.indexOf(v) === i);
+    const stFor = (nm: string) => stores.find((x) => x.store.toLowerCase() === nm.toLowerCase());
+    const notConnected = names.filter((nm) => !stFor(nm)?.authorized);
+    if (notConnected.length) {
+      setActMsg({ kind: "error", text: `${notConnected.join(", ")} ${notConnected.length === 1 ? "is" : "are"} not connected to eBay yet (connect in Store API → Stores), so nothing can be changed there. Nothing was sent.` });
+      return;
+    }
+    const pushesOff = names.filter((nm) => !stFor(nm)?.live_pushes_enabled);
+    if (pushesOff.length) {
+      setActMsg({ kind: "error", text: `Live pushes are OFF for ${pushesOff.join(", ")}, so nothing can go to eBay. Turn them on in Store API → Stores. Nothing was sent.` });
+      return;
+    }
     const one = n === 1;
     const idList = (xs: { item_id: string }[]) => xs.slice(0, 10).map((x) => x.item_id).join(", ") + (xs.length > 10 ? ` and ${xs.length - 10} more` : "");
-    const store = repo.store;
+    const store = names.length === 1 ? names[0] : `${names.length} stores: ${names.join(", ")}`;
     let done = 0;
     let streak = 0;
     let stopped = false;
@@ -147,7 +153,7 @@ export default function EbayLiveListingsPage() {
         const it = todo[i];
         setActMsg({ kind: "success", text: `Working… ${i + 1} of ${n} (item ${it.item_id}). Keep this page open.` });
         try {
-          await api("/ebay-edit/end", { method: "POST", body: { store, item_id: it.item_id } });
+          await api("/ebay-edit/end", { method: "POST", body: { store: it.store, item_id: it.item_id } });
           done++;
           streak = 0;
         } catch (e) {
@@ -170,7 +176,7 @@ export default function EbayLiveListingsPage() {
         try {
           const pv = await api<{ fingerprint: string; diff: Diff[]; live_pushes_enabled: boolean }>("/ebay-edit/preview", {
             method: "POST",
-            body: { store, item_id: it.item_id, changes: {}, action: "relist" },
+            body: { store: it.store, item_id: it.item_id, changes: {}, action: "relist" },
           });
           if (!pv.live_pushes_enabled) {
             setActMsg({ kind: "error", text: `Live pushes are OFF for ${store}, so nothing can go to eBay. Turn them on in Store API → Stores. Nothing was sent.` });
@@ -217,7 +223,7 @@ export default function EbayLiveListingsPage() {
         try {
           const res = await api<{ warnings: { message: string }[] }>("/ebay-edit/push", {
             method: "POST",
-            body: { store, item_id: r.it.item_id, changes: {}, action: "relist", fingerprint: r.fingerprint },
+            body: { store: r.it.store, item_id: r.it.item_id, changes: {}, action: "relist", fingerprint: r.fingerprint },
           });
           if (res.warnings?.length) warns.push(`${r.it.item_id}: ${res.warnings.map((w) => w.message).join("; ")}`);
           done++;
@@ -253,7 +259,8 @@ export default function EbayLiveListingsPage() {
     try {
       // the database list sorts by title / price / newest; eBay's own "newest" and price orders map onto these
       const params = new URLSearchParams({ q: useQ.trim(), sort: useSort, status: useStatus, offset: String(offset), limit: String(PAGE_SIZE) });
-      if (useStore.trim()) params.set("store", useStore.trim());
+      if (useStore === ALL) params.set("all_stores", "1");
+      else if (useStore.trim()) params.set("store", useStore.trim());
       saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset, statusF: useStatus });
       setRepo(await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`));
     } catch (e) {
@@ -263,6 +270,8 @@ export default function EbayLiveListingsPage() {
       setLoading(false);
     }
   }
+
+  const allMode = !!repo && repo.store === ""; // the "All stores" view
 
   // which bulk buttons make sense: Inactivate for ticked listings that are active, Activate for ticked listings that are not
   const pickedItems = repo ? repo.items.filter((x) => picked.has(x.listing_id)) : [];
@@ -301,6 +310,7 @@ export default function EbayLiveListingsPage() {
               void loadRepo(0, { store: e.target.value, q, sort, statusF });
             }}
           >
+            <option value={ALL}>All stores</option>
             {stores.map((s) => (
               <option key={s.store} value={s.store}>
                 {s.display_name || s.store}
@@ -348,7 +358,7 @@ export default function EbayLiveListingsPage() {
         <div className="space-y-3">
           <Pager total={repo.total} limit={repo.limit} offset={repo.offset} onChange={(o) => void loadRepo(o)} />
           <p className="text-sm text-gray-700">
-            <span className="font-medium">{repo.store}</span> in our database: {repo.counts.all} listing{repo.counts.all === 1 ? "" : "s"}, {repo.counts.active} active, {repo.counts.inactive} inactive.
+            <span className="font-medium">{allMode ? "All stores" : repo.store}</span> in our database: {repo.counts.all} listing{repo.counts.all === 1 ? "" : "s"}, {repo.counts.active} active, {repo.counts.inactive} inactive.
             {repo.statuses.length > 0 && (
               <span className="ml-1 text-xs text-gray-500">
                 Statuses on file: {repo.statuses.map((x) => `${x.status} (${x.count})`).join(", ")}.
@@ -372,11 +382,11 @@ export default function EbayLiveListingsPage() {
               <button type="button" className="text-xs underline" onClick={() => setPicked(new Set())}>
                 Clear
               </button>
-              <span className="text-xs text-gray-500">Sends to eBay one at a time (needs live pushes ON for this store).</span>
+              <span className="text-xs text-gray-500">Sends to eBay one at a time (needs live pushes ON for each store involved).</span>
             </div>
           )}
           {repo.items.length === 0 ? (
-            <Notice>No listings{statusF !== "all" ? ` marked ${statusF}` : ""}{q.trim() ? " match that search" : ""} for this store.</Notice>
+            <Notice>No listings{statusF !== "all" ? ` marked ${statusF}` : ""}{q.trim() ? " match that search" : ""} for {allMode ? "these stores" : "this store"}.</Notice>
           ) : (
             <div className="overflow-x-auto rounded border border-gray-200 bg-white">
               <table className="w-full text-left text-sm">
@@ -392,6 +402,7 @@ export default function EbayLiveListingsPage() {
                     </th>
                     <th className="w-16 px-3 py-2"></th>
                     <th className="px-3 py-2">Listing</th>
+                    <th className="px-3 py-2">Store</th>
                     <th className="px-3 py-2">Custom label</th>
                     <th className="px-3 py-2">Price</th>
                     <th className="px-3 py-2">Quantity</th>
@@ -400,8 +411,9 @@ export default function EbayLiveListingsPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {repo.items.map((it) => {
-                    const canEdit = stores.find((x) => x.store === repo.store)?.authorized;
-                    const editHref = `/admin/ebay-edit?store=${encodeURIComponent(repo.store)}&item=${it.item_id}`;
+                    const rowStore = stores.find((x) => x.store.toLowerCase() === it.store.toLowerCase());
+                    const canEdit = rowStore?.authorized;
+                    const editHref = `/admin/ebay-edit?store=${encodeURIComponent(it.store)}&item=${it.item_id}`;
                     return (
                       <ClickRow key={it.listing_id} className="align-top" href={canEdit ? editHref : undefined}>
                         <td className="px-3 py-2">
@@ -441,6 +453,7 @@ export default function EbayLiveListingsPage() {
                             Product {it.product_id}
                           </Link>
                         </td>
+                        <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-700">{rowStore?.display_name || it.store}</td>
                         <td className="px-3 py-2 font-mono text-xs">{it.custom_label ?? "—"}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{money(it.price, it.currency)}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{it.quantity ?? "—"}</td>
