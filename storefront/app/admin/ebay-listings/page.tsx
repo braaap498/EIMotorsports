@@ -80,6 +80,7 @@ type RepoResp = {
 };
 
 const PAGE_SIZE = 50;
+const MAIN = "eandimotorsports"; // opened first when it is in the list
 
 function money(v: string | number | null | undefined, cur?: string | null) {
   if (v === null || v === undefined || v === "") return "—";
@@ -131,13 +132,16 @@ export default function EbayLiveListingsPage() {
     void loadStores();
   }, []);
 
-  // Coming back from another admin page: put the search and page back and show the same listings.
+  // Coming back from another admin page: put the store, search and page back and show the same listings.
+  // Waits for the store list, because the dropdown can only hold a store that exists; a first visit opens the first store.
   const restored = useRef(false);
   useEffect(() => {
-    if (restored.current) return;
+    if (restored.current || stores.length === 0) return;
     restored.current = true;
     const saved = loadSaved<{ store: string; q: string; sort: string; offset: number; source?: "db" | "ebay"; statusF?: "all" | "active" | "inactive" }>("ebay-listings");
-    if (saved) {
+    const names = stores.map((x) => x.store);
+    const first = names.includes(MAIN) ? MAIN : names[0];
+    if (saved && names.includes(saved.store)) {
       setStore(saved.store);
       setQ(saved.q);
       setSort(saved.sort);
@@ -148,10 +152,11 @@ export default function EbayLiveListingsPage() {
       if (src === "ebay") void load(saved.offset, saved);
       else void loadRepo(saved.offset, { store: saved.store, q: saved.q, sort: saved.sort, statusF: st });
     } else {
-      void loadRepo(0, { store: "", q: "", sort: "newest", statusF: "all" });
+      setStore(first);
+      void loadRepo(0, { store: first, q: "", sort: "newest", statusF: "all" });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [stores]);
 
   async function loadRepo(offset: number, from?: { store: string; q: string; sort: string; statusF: "all" | "active" | "inactive" }) {
     const useStore = from ? from.store : store;
@@ -476,7 +481,6 @@ export default function EbayLiveListingsPage() {
               if (source === "db") void loadRepo(0, { store: e.target.value, q, sort, statusF });
             }}
           >
-            <option value="">(main store)</option>
             {stores.map((s) => (
               <option key={s.store} value={s.store}>
                 {s.display_name || s.store}
@@ -515,9 +519,9 @@ export default function EbayLiveListingsPage() {
                 void loadRepo(0, { store, q, sort, statusF: v });
               }}
             >
-              <option value="all">All{repo ? ` (${repo.counts.all})` : ""}</option>
               <option value="active">Active{repo ? ` (${repo.counts.active})` : ""}</option>
               <option value="inactive">Inactive{repo ? ` (${repo.counts.inactive})` : ""}</option>
+              <option value="all">All{repo ? ` (${repo.counts.all})` : ""}</option>
             </select>
           </label>
         )}
@@ -625,7 +629,7 @@ export default function EbayLiveListingsPage() {
           {data.items.length === 0 ? (
             <Notice>
               eBay returned no listings for {data.seller}
-              {q.trim() ? " with that search" : ""}. If this is the main store, leave the store name empty.
+              {q.trim() ? " with that search" : ""}.
             </Notice>
           ) : (
             <div className="overflow-x-auto rounded border border-gray-200 bg-white">
