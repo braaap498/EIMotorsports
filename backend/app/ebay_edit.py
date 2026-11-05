@@ -3,9 +3,13 @@ Editing existing eBay listings (older "Trading" API) from the Live listings tab.
 
 Mounted at /admin/ebay-edit/* (owner/admin only).
 
-  GET  /item?store=&item_id=      the listing as it is on eBay right now
+  GET  /item?store=&item_id=      the listing as it is on eBay right now, plus any edits saved on the website (draft)
+  PUT  /draft                     save edits on the website only (nothing goes to eBay)
+  DELETE /draft?store=&item_id=   throw the saved edits away
+  POST /end                       end a live listing on eBay (needs the store's live-push switch ON)
   POST /photo-upload              put a picture from the computer into the website's photo storage (nothing goes to eBay)
   POST /preview                   exactly what would be sent. NOTHING is sent. Logged as a dry run.
+                                  (action "relist" = bring an ended listing back on eBay; the listing gets a new item number)
   POST /push                      sends it, but only if (a) the store's live-push switch is ON and
                                   (b) it is the very same request that was previewed
   PUT  /live-pushes               the per-store on/off switch (off by default)
@@ -205,15 +209,19 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
     except ValueError:
         compat_count = len(compat_rows)
 
-    reason = None
-    if status and status != "Active":
-        reason = f"This listing is {status}, not Active."
-    elif listing_type not in ("FixedPriceItem", "StoresFixedPrice"):
-        reason = f"This is a {listing_type or 'non fixed-price'} listing; only fixed-price listings can be edited here."
+    structural = None
+    if listing_type not in ("FixedPriceItem", "StoresFixedPrice"):
+        structural = f"This is a {listing_type or 'non fixed-price'} listing; only fixed-price listings can be edited here."
     elif has_var and any(not v["sku"] for v in variations):
-        reason = "A variation on this listing has no SKU, so it cannot be addressed safely. Give each variation a SKU on eBay first."
+        structural = "A variation on this listing has no SKU, so it cannot be addressed safely. Give each variation a SKU on eBay first."
     elif has_var and len({v["sku"] for v in variations}) != len(variations):
-        reason = "Two variations on this listing share a SKU, so they cannot be told apart. Fix that on eBay first."
+        structural = "Two variations on this listing share a SKU, so they cannot be told apart. Fix that on eBay first."
+    ended = bool(status) and status != "Active"
+    # an ended (Completed) fixed-price listing can be brought back with eBay's relist call; a scheduled one cannot
+    relistable = ended and status in ("Completed", "Ended") and structural is None
+    reason = f"This listing is {status}, not Active." if ended else structural
+    if relistable:
+        reason = None  # it can be edited and relisted, just not revised in place
 
     return {
         "store": row.store,
@@ -233,6 +241,8 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
         "has_variations": has_var,
         "variations": variations,
         "item_specifics": specifics_list,
+        "ended": ended,
+        "relistable": relistable,
         "specifics_editable": reason is None and not has_var,
         "condition": {
             "id": t("ConditionID"),
@@ -247,9 +257,26 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
     }
 
 
+def _read_draft(db: Session, store: str, item_id: str) -> Optional[dict]:
+    """Edits saved on the website for this listing (None when there are none, or the table is not there yet)."""
+    try:
+        r = db.execute(
+            text("select changes, updated_by, updated_at from ebay_listing_drafts where store = :s and item_id = :i"),
+            {"s": store, "i": item_id},
+        ).first()
+    except Exception:
+        db.rollback()
+        return None
+    if not r:
+        return None
+    return {"changes": r.changes, "updated_by": r.updated_by, "updated_at": r.updated_at.isoformat() if r.updated_at else None}
+
+
 @router.get("/item")
 def get_item(store: str = Query(...), item_id: str = Query(...), db: Session = Depends(get_db)):
-    return _read_item(db, store, item_id.strip())
+    item = _read_item(db, store, item_id.strip())
+    item["draft"] = _read_draft(db, item["store"], item["item_id"])
+    return item
 
 
 # --------------------------------------------------------------------------
@@ -264,6 +291,7 @@ class VarChange(BaseModel):
 class PhotoRef(BaseModel):
     url: Optional[str] = None  # a picture already on the listing (its eBay address, as read from eBay)
     key: Optional[str] = None  # a picture in the website's storage, to be sent to eBay
+    thumb: Optional[str] = None  # a small picture for the screen (kept in saved edits only; never sent to eBay)
 
 
 class SpecIn(BaseModel):
@@ -286,6 +314,7 @@ class EditIn(BaseModel):
     store: str
     item_id: str
     changes: Changes
+    action: str = Field("revise", pattern="^(revise|relist)$")  # revise a live listing, or relist an ended one
 
 
 class PushIn(EditIn):
@@ -409,7 +438,7 @@ def _specifics_part(current: dict, specs: list[SpecIn]) -> tuple[str, list[dict]
     return xml, diff
 
 
-def _build(current: dict, ch: Changes) -> tuple[list[dict], list[dict]]:
+def _build(current: dict, ch: Changes, allow_empty: bool = False, call: str = "ReviseFixedPriceItem") -> tuple[list[dict], list[dict]]:
     """The exact request(s), plus the before/after rows. Raises 400/409 with a readable reason."""
     if not current["editable"]:
         raise HTTPException(409, current["not_editable_reason"])
@@ -520,13 +549,34 @@ def _build(current: dict, ch: Changes) -> tuple[list[dict], list[dict]]:
         if var_xml:
             parts.append(f"<Variations>{var_xml}</Variations>")
 
-    if not parts:
+    if not parts and not allow_empty:
         raise HTTPException(400, "Nothing is different from what is on eBay, so there is nothing to send.")
     xml = (
-        '<ReviseFixedPriceItemRequest xmlns="urn:ebay:apis:eBLBaseComponents"><Item>'
-        f"<ItemID>{current['item_id']}</ItemID>" + "".join(parts) + "</Item></ReviseFixedPriceItemRequest>"
+        f'<{call}Request xmlns="urn:ebay:apis:eBLBaseComponents"><Item>'
+        f"<ItemID>{current['item_id']}</ItemID>" + "".join(parts) + f"</Item></{call}Request>"
     )
-    return [{"call": "ReviseFixedPriceItem", "xml": xml}], diff
+    return [{"call": call, "xml": xml}], diff
+
+
+def _plan(current: dict, ch: Changes, action: str) -> tuple[list[dict], list[dict]]:
+    """The request(s) for either revising a live listing or relisting an ended one."""
+    if action != "relist":
+        if current["ended"]:
+            raise HTTPException(409, f"This listing is {current['status']}, not live, so it cannot be revised. Use Activate to relist it.")
+        return _build(current, ch)
+    if not current["relistable"]:
+        raise HTTPException(409, current["not_editable_reason"] or f"This listing is {current['status']} and cannot be relisted.")
+    # a relisted item starts fresh: nothing has sold on it yet, so quantities are sent as they are and a title change is allowed
+    cur = dict(current, editable=True, quantity_sold=0, variations=[dict(v, quantity_sold=0) for v in current["variations"]])
+    calls, diff = _build(cur, ch, allow_empty=True, call="RelistFixedPriceItem")
+    if not current["has_variations"] and "<Quantity>" not in calls[0]["xml"]:
+        qty = ch.quantity if ch.quantity is not None else current["quantity_available"]
+        if qty < 1 or qty > 9999:
+            raise HTTPException(400, "Set an available quantity of 1 or more before activating; a relisted item needs stock.")
+        calls[0]["xml"] = calls[0]["xml"].replace("</Item>", f"<Quantity>{qty}</Quantity></Item>", 1)
+        diff.append({"field": "Available quantity", "before": str(current["quantity_available"]), "after": str(qty), "note": "sent so the relisted item has stock"})
+    diff.insert(0, {"field": "Listing", "before": current["status"], "after": "Active on eBay", "note": "relisting gives the listing a new item number"})
+    return calls, diff
 
 
 def _pic_id(url: str) -> str:
@@ -728,13 +778,16 @@ def photo_upload(body: UploadIn):
 # --------------------------------------------------------------------------
 # preview and push
 # --------------------------------------------------------------------------
+_ACTION = {"revise": "revise_fixed_price_item", "relist": "relist_fixed_price_item"}
+
+
 @router.post("/preview")
 def preview(body: EditIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     row = _store_row(db, body.store)
     current = _read_item(db, row.store, body.item_id.strip())
-    calls, diff = _build(current, body.changes)
+    calls, diff = _plan(current, body.changes, body.action)
     fp = _fingerprint(row.store, calls)
-    _log(db, user, row.store, current["item_id"], "revise_fixed_price_item", True, {"calls": calls, "diff": diff}, {}, True, None)
+    _log(db, user, row.store, current["item_id"], _ACTION[body.action], True, {"calls": calls, "diff": diff}, {}, True, None)
     enabled = bool(
         db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
     )
@@ -756,7 +809,8 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     if not enabled:
         raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
     current = _read_item(db, row.store, body.item_id.strip())
-    calls, diff = _build(current, body.changes)
+    calls, diff = _plan(current, body.changes, body.action)
+    act = _ACTION[body.action]
     if _fingerprint(row.store, calls) != body.fingerprint:
         raise HTTPException(409, "The listing or the changes are not the same as in the preview. Nothing was sent. Preview again.")
 
@@ -766,7 +820,7 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
             if r.key and r.key not in uploaded:
                 uploaded[r.key] = _media_upload(db, row.store, r.key)
     except HTTPException as e:
-        _log(db, user, row.store, current["item_id"], "revise_fixed_price_item", False, {"calls": calls, "diff": diff}, {"stage": "photo upload"}, False, str(e.detail)[:500])
+        _log(db, user, row.store, current["item_id"], act, False, {"calls": calls, "diff": diff}, {"stage": "photo upload"}, False, str(e.detail)[:500])
         raise HTTPException(e.status_code, f"{e.detail} Nothing on the listing was changed.")
 
     warnings: list[dict] = []
@@ -779,28 +833,143 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
         errs = _errors(root)
         ok = not _failed(root)
         resp = {"ack": root.findtext(f"{NS}Ack"), "errors": errs, "uploaded_photos": uploaded}
-        _log(db, user, row.store, current["item_id"], "revise_fixed_price_item", False, {"calls": calls, "diff": diff}, resp, ok, None if ok else _first_message(root))
+        _log(db, user, row.store, current["item_id"], act, False, {"calls": calls, "diff": diff}, resp, ok, None if ok else _first_message(root))
         if not ok:
             raise HTTPException(502, "eBay did not accept the change: " + _first_message(root))
         warnings += [e for e in errs if e["severity"] == "Warning"]
-    db.execute(
-        text(
-            "update channel_listings set last_pushed_at = now() "
-            "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i and store = :s"
-        ),
-        {"i": current["item_id"], "s": row.store},
-    )
-    db.commit()
-    fresh = _read_item(db, row.store, current["item_id"])
+        new_id = (root.findtext(f"{NS}ItemID") or "").strip() if body.action == "relist" else ""
+    live_id = current["item_id"]
+    if body.action == "relist":
+        if not new_id or not ITEM_RE.fullmatch(new_id):
+            raise HTTPException(502, "eBay accepted the relist but did not say the new item number. Look at the store on eBay and re-import the listings.")
+        _move_listing(db, row.store, current["item_id"], new_id)
+        live_id = new_id
+    else:
+        db.execute(
+            text(
+                "update channel_listings set last_pushed_at = now() "
+                "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i and store = :s"
+            ),
+            {"i": current["item_id"], "s": row.store},
+        )
+        db.commit()
+    _drop_draft(db, row.store, current["item_id"])  # what was saved is on eBay now
+    fresh = _read_item(db, row.store, live_id)
     notes: list[str] = []
     if body.changes.photos is not None:
         try:
-            notes = _record_photo_urls(db, row.store, current["item_id"], body.changes.photos, fresh)
+            notes = _record_photo_urls(db, row.store, live_id, body.changes.photos, fresh)
         except Exception:  # eBay already has the change; a bookkeeping problem must not look like a failed push
             log.exception("could not record photo addresses for %s", current["item_id"])
             db.rollback()
             notes = ["The change is on eBay, but the photo addresses could not be recorded on the website."]
     return {"ok": True, "warnings": warnings, "item": fresh, "differences": _differences(fresh, body.changes), "notes": notes}
+
+
+def _drop_draft(db: Session, store: str, item_id: str) -> None:
+    try:
+        db.execute(text("delete from ebay_listing_drafts where store = :s and item_id = :i"), {"s": store, "i": item_id})
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
+def _move_listing(db: Session, store: str, old_id: str, new_id: str) -> None:
+    """After a relist the listing has a new item number: point our record at it and mark it active.
+    The column may hold a number or text with a prefix; the new value is written the way the old one was."""
+    row = db.execute(
+        text(
+            "select id, cast(external_id as text) as ext from channel_listings "
+            "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i and store = :s"
+        ),
+        {"i": old_id, "s": store},
+    ).all()
+    if not row:
+        return
+    kind = db.execute(
+        text("select data_type from information_schema.columns where table_name = 'channel_listings' and column_name = 'external_id'")
+    ).scalar()
+    cast = "bigint" if kind in ("bigint", "integer", "smallint", "numeric") else "text"
+    for r in row:
+        value = re.sub(r"\d+$", new_id, r.ext or "")
+        db.execute(
+            text(f"update channel_listings set external_id = cast(:v as {cast}), status = 'active', last_pushed_at = now() where id = :id"),
+            {"v": value, "id": r.id},
+        )
+    db.commit()
+
+
+class DraftIn(BaseModel):
+    store: str
+    item_id: str
+    changes: Changes
+
+
+@router.put("/draft")
+def save_draft(body: DraftIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Save edits on the website only. Nothing is sent to eBay."""
+    row = _store_row(db, body.store)
+    item_id = body.item_id.strip()
+    if not ITEM_RE.fullmatch(item_id):
+        raise HTTPException(400, "That does not look like an eBay item number.")
+    try:
+        db.execute(
+            text(
+                "insert into ebay_listing_drafts (store, item_id, changes, updated_by, updated_at) "
+                "values (:s, :i, cast(:c as jsonb), :u, now()) "
+                "on conflict (store, item_id) do update set changes = excluded.changes, updated_by = excluded.updated_by, updated_at = now()"
+            ),
+            {"s": row.store, "i": item_id, "c": json.dumps(body.changes.model_dump(exclude_none=True)), "u": user.email or user.user_id},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(503, "Saved edits cannot be stored yet. Run sql/ebay_listing_drafts.sql in Supabase, then try again.")
+    return {"ok": True, "draft": _read_draft(db, row.store, item_id)}
+
+
+@router.delete("/draft")
+def delete_draft(store: str = Query(...), item_id: str = Query(...), db: Session = Depends(get_db)):
+    row = _store_row(db, store)
+    _drop_draft(db, row.store, item_id.strip())
+    return {"ok": True}
+
+
+class EndIn(BaseModel):
+    store: str
+    item_id: str
+
+
+@router.post("/end")
+def end_listing(body: EndIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Ends a live fixed-price listing on eBay (the Inactive button). It can be brought back with Activate (relist)."""
+    row = _store_row(db, body.store)
+    enabled = db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
+    if not enabled:
+        raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
+    current = _read_item(db, row.store, body.item_id.strip())  # also proves the listing is this store's
+    if current["ended"]:
+        raise HTTPException(409, f"This listing is already {current['status']}.")
+    if current["listing_type"] not in ("FixedPriceItem", "StoresFixedPrice"):
+        raise HTTPException(409, "Only fixed-price listings can be ended here.")
+    request = {"call": "EndFixedPriceItem", "item_id": current["item_id"], "reason": "NotAvailable"}
+    root = _trading(db, row.store, "EndFixedPriceItem", f"<ItemID>{current['item_id']}</ItemID><EndingReason>NotAvailable</EndingReason>")
+    ok = not _failed(root)
+    _log(db, user, row.store, current["item_id"], "end_fixed_price_item", False, request,
+         {"ack": root.findtext(f"{NS}Ack"), "errors": _errors(root)}, ok, None if ok else _first_message(root))
+    if not ok:
+        raise HTTPException(502, "eBay did not end the listing: " + _first_message(root))
+    db.execute(
+        text(
+            "update channel_listings set status = 'ended', last_pushed_at = now() "
+            "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i and store = :s"
+        ),
+        {"i": current["item_id"], "s": row.store},
+    )
+    db.commit()
+    item = _read_item(db, row.store, current["item_id"])
+    item["draft"] = _read_draft(db, row.store, current["item_id"])
+    return {"ok": True, "item": item}
 
 
 # --------------------------------------------------------------------------
