@@ -88,10 +88,10 @@ const tone = (s: string) => (s === "done" ? "green" : s === "running" ? "blue" :
 type Tab = "catalog" | "opps" | "orders" | "data" | "match";
 const TABS: { key: Tab; label: string }[] = [
   { key: "catalog", label: "Catalog" },
-  { key: "opps", label: "Opportunities" },
   { key: "orders", label: "Orders" },
   { key: "data", label: "Data feed" },
   { key: "match", label: "Match report" },
+  { key: "opps", label: "Opportunities" },
 ];
 const SOURCE_LABEL: Record<string, string> = {
   csv_upload: "file upload",
