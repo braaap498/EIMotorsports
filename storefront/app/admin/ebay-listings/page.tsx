@@ -404,12 +404,10 @@ export default function EbayLiveListingsPage() {
                     <th className="w-16 px-3 py-2"></th>
                     <th className="px-3 py-2">Listing</th>
                     <th className="px-3 py-2">Store</th>
-                    <th className="px-3 py-2">SKU</th>
                     <th className="px-3 py-2">Custom label</th>
                     <th className="px-3 py-2">Price</th>
                     <th className="px-3 py-2">Quantity</th>
                     <th className="px-3 py-2">Status</th>
-                    <th className="px-3 py-2"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -444,29 +442,19 @@ export default function EbayLiveListingsPage() {
                         </td>
                         <td className="px-3 py-2">
                           <div className="max-w-xl">{it.title}</div>
-                          <a href={it.url} target="_blank" rel="noreferrer" className="text-xs text-blue-700 hover:underline">
+                          <a href={it.url} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline">
                             {it.item_id}
                           </a>
-                          <Link href={`/admin/products/${it.product_id}`} className="ml-3 text-xs text-blue-700 hover:underline">
-                            Product {it.product_id}
+                          <Link href={`/admin/products/${it.product_id}`} className="ml-3 text-blue-700 hover:underline">
+                            {it.sku ?? `Product ${it.product_id}`}
                           </Link>
                         </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-xs text-gray-700">{rowStore?.display_name || it.store}</td>
-                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{it.sku ?? "—"}</td>
-                        <td className="px-3 py-2 font-mono text-xs">{it.custom_label ?? "—"}</td>
+                        <td className="whitespace-nowrap px-3 py-2">{rowStore?.display_name || it.store}</td>
+                        <td className="px-3 py-2">{it.custom_label ?? "—"}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{money(it.price, it.currency)}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{it.quantity ?? "—"}</td>
                         <td className="px-3 py-2">
                           <Badge tone={it.active ? "green" : "gray"}>{it.status || "no status"}</Badge>
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-right">
-                          {canEdit ? (
-                            <Link href={editHref} className={`${btn2Cls} !px-3 !py-1`}>
-                              Edit
-                            </Link>
-                          ) : (
-                            <span className="text-xs text-gray-400">Not connected</span>
-                          )}
                         </td>
                       </ClickRow>
                     );
