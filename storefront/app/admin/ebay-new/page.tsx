@@ -1,6 +1,7 @@
 "use client";
 
 import ClearableInput from "../../../components/admin/ClearableInput";
+import StoreInput from "../../../components/admin/StoreInput";
 import { SortBar, SortTh, sortRows, useSort } from "../../../components/admin/SortHeader";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -381,13 +382,7 @@ export default function NewEbayListingsPage() {
       <div className="space-y-4 rounded-lg border border-gray-200 bg-white p-4">
         <label className="block max-w-sm text-sm">
           <span className="mb-1 block font-medium">eBay store name</span>
-          <input
-            className={inputCls}
-            value={store}
-            onChange={(e) => setStore(e.target.value)}
-            placeholder="eandimotorsports"
-            disabled={checking}
-          />
+          <StoreInput value={store} onChange={setStore} placeholder="eandimotorsports" disabled={checking} />
         </label>
         <div className="flex flex-wrap items-center gap-4">
         <button type="button" className={btnCls} onClick={() => void check()} disabled={checking}>
