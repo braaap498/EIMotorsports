@@ -282,9 +282,20 @@ def list_listings(
 # store, so ended / inactive ones are here too. "Active" means channel_listings.status is 'active' (any case); everything
 # else is "inactive". The raw status values and how many of each are returned so the screen can show them as they are.
 _ACTIVE = "lower(coalesce(cl.status, '')) = 'active'"
+# Several eBay listings can be linked to ONE product (merged duplicates), so the product's title/label would make them all
+# look the same. Each listing's own title and custom label come first, from what we saved about that item number
+# (uploaded report, then the eBay lookup, then the compat import); the product's own values are only the fallback.
+_LISTING_JOINS = f"""
+    join products p on p.id = cl.product_id
+    left join ebay_report_rows lr on lr.item_id = {_DIGITS}
+    left join ebay_api_details la on la.item_id = {_DIGITS}
+    left join ebay_compat_items lc on lc.item_id = {_DIGITS}
+"""
+_L_TITLE = "coalesce(nullif(btrim(lr.title), ''), nullif(btrim(la.title), ''), nullif(btrim(lc.title), ''), p.title)"
+_L_LABEL = "coalesce(nullif(btrim(lr.custom_label_sku), ''), nullif(btrim(la.custom_label_sku), ''), p.custom_label_sku)"
 _REPO_SORTS = {
     "newest": "cl.id desc",
-    "title": "lower(p.title), cl.id",
+    "title": f"lower({_L_TITLE}), cl.id",
     "price_low": "p.list_price asc nulls last, cl.id",
     "price_high": "p.list_price desc nulls last, cl.id",
 }
@@ -332,19 +343,25 @@ def repo_listings(
         where.append(f"not ({_ACTIVE})")
     for i, w in enumerate([w for w in re.split(r"\s+", q.strip()) if w][:6]):
         params[f"w{i}"] = f"%{w}%"
-        where.append(f"(p.title ilike :w{i} or {_DIGITS} ilike :w{i} or p.custom_label_sku ilike :w{i})")
+        where.append(f"(p.title ilike :w{i} or {_L_TITLE} ilike :w{i} or {_DIGITS} ilike :w{i} or p.custom_label_sku ilike :w{i} or {_L_LABEL} ilike :w{i})")
     clause = " and ".join(where)
     total = db.execute(
-        text(f"select count(*) from channel_listings cl join products p on p.id = cl.product_id where {clause}"), params
+        text(f"select count(*) from channel_listings cl {_LISTING_JOINS} where {clause}"), params
     ).scalar()
     rows = db.execute(
         text(
             f"""
             select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
-                   p.id as product_id, p.sku_display as sku, p.title, p.custom_label_sku, p.list_price, p.quantity_on_hand,
-                   (select ph.image_key from product_photos ph where ph.product_id = p.id
-                     order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as image_key
-            from channel_listings cl join products p on p.id = cl.product_id
+                   p.id as product_id, p.sku_display as sku, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
+                   p.list_price, p.quantity_on_hand,
+                   coalesce(
+                     (select ph.image_key from product_photos ph
+                       where split_part(ph.storage_path, '/', 1) = 'EBAY-' || {_DIGITS}
+                       order by ph.is_primary desc, ph.sort_order, ph.id limit 1),
+                     (select ph.image_key from product_photos ph where ph.product_id = p.id
+                       order by ph.is_primary desc, ph.sort_order, ph.id limit 1)
+                   ) as image_key
+            from channel_listings cl {_LISTING_JOINS}
             where {clause} order by {_REPO_SORTS[sort]} limit :n offset :o
             """
         ),
