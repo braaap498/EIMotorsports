@@ -47,6 +47,16 @@ const STATUS_LABEL: Record<string, string> = {
   error: "Failed",
 };
 
+// Marks where the typed words appear in a result, so it is clear WHY a part was found (it may be in the barcode, which is
+// not visible otherwise). Words match ignoring case; dashes and spaces in part numbers are ignored by the server too.
+function highlight(value: string | null | undefined, query: string) {
+  const v = value ?? "";
+  const words = query.trim().split(/\s+/).filter(Boolean).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!v || words.length === 0) return v;
+  const parts = v.split(new RegExp(`(${words.join("|")})`, "ig"));
+  return parts.map((t, i) => (i % 2 === 1 ? <mark key={i} className="bg-yellow-200">{t}</mark> : t));
+}
+
 export default function KitPartsPanel({
   productId,
   parts,
@@ -390,19 +400,23 @@ export default function KitPartsPanel({
                   <div className="max-h-96 overflow-auto rounded border">
                     <table className="w-full text-xs">
                       <thead className="sticky top-0 bg-gray-50 text-left text-gray-500">
-                        <tr><th className="p-1">SKU</th><th>Mfr #</th><th>Brand</th><th>Name</th><th>Cost</th><th>Stock</th><th>Qty</th><th /></tr>
+                        <tr><th className="p-1">SKU</th><th className="p-1">Mfr #</th><th className="p-1">Brand</th><th className="p-1">Name</th><th className="p-1">UPC</th><th className="p-1">Cost</th><th className="p-1">Stock</th><th className="p-1">Qty</th><th className="p-1" /></tr>
                       </thead>
                       <tbody>
                         {results.map((it) => (
-                          <tr key={it.id} className="border-t align-top">
-                            <td className="p-1 font-mono">{it.sku}</td><td>{it.mfr_number}</td><td>{it.manufacturer}</td><td>{it.name}</td>
-                            <td>{it.dealer_cost != null ? `$${it.dealer_cost.toFixed(2)}` : ""}</td>
-                            <td title={`ME ${it.qty_maine} · IN ${it.qty_indiana} · NV ${it.qty_nevada}`}>{it.in_stock_total}</td>
-                            <td><input type="number" min={1} className="w-14 rounded border px-1" value={addQty[it.id] ?? "1"} onChange={(e) => setAddQty((a) => ({ ...a, [it.id]: e.target.value }))} /></td>
-                            <td><button type="button" className="rounded bg-gray-900 px-2 py-1 text-white" onClick={() => addFromCatalog(it)}>Add</button></td>
+                          <tr key={it.id} className="border-t align-middle">
+                            <td className="p-1 font-mono">{highlight(it.sku, q)}</td>
+                            <td className="p-1">{highlight(it.mfr_number, q)}</td>
+                            <td className="p-1">{highlight(it.manufacturer, q)}</td>
+                            <td className="p-1">{highlight(it.name, q)}</td>
+                            <td className="p-1 font-mono">{highlight(it.upc, q)}</td>
+                            <td className="p-1">{it.dealer_cost != null ? `$${it.dealer_cost.toFixed(2)}` : ""}</td>
+                            <td className="p-1" title={`ME ${it.qty_maine} · IN ${it.qty_indiana} · NV ${it.qty_nevada}`}>{it.in_stock_total}</td>
+                            <td className="p-1"><input type="number" min={1} className="w-14 rounded border px-1 py-1" value={addQty[it.id] ?? "1"} onChange={(e) => setAddQty((a) => ({ ...a, [it.id]: e.target.value }))} /></td>
+                            <td className="p-1"><button type="button" className="rounded bg-gray-900 px-2 py-1 text-white" onClick={() => addFromCatalog(it)}>Add</button></td>
                           </tr>
                         ))}
-                        {results.length === 0 && <tr><td colSpan={8} className="p-2 text-gray-500">Nothing found. Try fewer words, “Contains”, or a different field.</td></tr>}
+                        {results.length === 0 && <tr><td colSpan={9} className="p-2 text-gray-500">Nothing found. Try fewer words, “Contains”, or a different field.</td></tr>}
                       </tbody>
                     </table>
                   </div>

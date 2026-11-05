@@ -162,6 +162,10 @@ export default function AdminShell({ children }: { children: ReactNode }) {
   const [attempt, setAttempt] = useState(0);
   const router = useRouter();
   const [backTo, setBackTo] = useState<string | null>(null);
+  // A distributor's own page already has a "← All distributors" link, so this Back link would be a second copy when you
+  // came from that list. It still shows when you came from anywhere else (an order screen, say), naming that page.
+  const hasOwnBackLink =
+    pathname.startsWith("/admin/distributors/") && (backTo ?? "").split("?")[0].replace(/\/+$/, "") === "/admin/distributors";
 
   // Keep the trail of pages visited, and work out where "Back" goes.
   useEffect(() => {
@@ -311,7 +315,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
             </Notice>
           ) : (
             <>
-              {backTo && (
+              {backTo && !hasOwnBackLink && (
                 <button
                   type="button"
                   onClick={() => router.back()}
