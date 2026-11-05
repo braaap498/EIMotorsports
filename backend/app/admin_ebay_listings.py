@@ -341,7 +341,7 @@ def repo_listings(
         text(
             f"""
             select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
-                   p.id as product_id, p.title, p.custom_label_sku, p.list_price, p.quantity_on_hand,
+                   p.id as product_id, p.sku_display as sku, p.title, p.custom_label_sku, p.list_price, p.quantity_on_hand,
                    (select ph.image_key from product_photos ph where ph.product_id = p.id
                      order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as image_key
             from channel_listings cl join products p on p.id = cl.product_id
@@ -357,6 +357,7 @@ def repo_listings(
         items.append(
             {
                 "store": d["store"],
+                "sku": d["sku"],
                 "item_id": d["item_id"],
                 "listing_id": d["listing_id"],
                 "title": d["title"] or "(no title)",
