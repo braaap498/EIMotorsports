@@ -72,6 +72,7 @@ export default function EbayLiveListingsPage() {
   const [error, setError] = useState("");
 
   const [showAdd, setShowAdd] = useState(false);
+  const [storesOpen, setStoresOpen] = useState(false);
   const [newStore, setNewStore] = useState("");
   const [newName, setNewName] = useState("");
   const [newSeller, setNewSeller] = useState("");
@@ -258,77 +259,115 @@ export default function EbayLiveListingsPage() {
 
       {/* ---- stores */}
       <div className="rounded border border-gray-200 bg-white p-4">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-sm font-semibold">Stores</h2>
-          <button type="button" className={btn2Cls} onClick={() => setShowAdd((v) => !v)}>
-            {showAdd ? "Close" : "Add store"}
-          </button>
-        </div>
-        {connMsg && (
-          <div className="mt-3">
-            <Notice kind={connMsg.kind}>{connMsg.text}</Notice>
-          </div>
-        )}
-        {diag && (
-          <div className="mt-3 space-y-1 rounded border border-gray-200 bg-gray-50 p-3 text-sm">
-            <div className="font-medium">Access check for {diag.store} (read only)</div>
-            {diag.checks.map((c) => (
-              <div key={c.name} className={c.ok ? "text-green-700" : "text-red-700"}>
-                {c.ok ? "✓" : "✗"} {c.name}: {c.note}
-                {c.status && !c.ok ? ` (HTTP ${c.status})` : ""}
+        <button
+          type="button"
+          className="flex w-full flex-wrap items-center justify-between gap-2 text-left"
+          onClick={() => setStoresOpen((v) => !v)}
+          aria-expanded={storesOpen}
+        >
+          <h2 className="text-sm font-semibold">
+            <span className="mr-2 inline-block w-3 text-gray-500">{storesOpen ? "▾" : "▸"}</span>Stores
+          </h2>
+          {!storesOpen && (
+            <span className="text-xs text-gray-500">
+              {stores.length} store{stores.length === 1 ? "" : "s"} · {stores.filter((s) => s.authorized).length} authorized ·{" "}
+              {stores.filter((s) => s.live_pushes_enabled).length} with live pushes on
+            </span>
+          )}
+        </button>
+        {storesOpen && (
+          <div className="mt-3 space-y-3">
+            <div>
+              <button type="button" className={btn2Cls} onClick={() => setShowAdd((v) => !v)}>
+                {showAdd ? "Close" : "Add store"}
+              </button>
+            </div>
+            {connMsg && <Notice kind={connMsg.kind}>{connMsg.text}</Notice>}
+            {diag && (
+              <div className="space-y-1 rounded border border-gray-200 bg-gray-50 p-3 text-sm">
+                <div className="font-medium">Access check for {diag.store} (read only)</div>
+                {diag.checks.map((c) => (
+                  <div key={c.name} className={c.ok ? "text-green-700" : "text-red-700"}>
+                    {c.ok ? "✓" : "✗"} {c.name}: {c.note}
+                    {c.status && !c.ok ? ` (HTTP ${c.status})` : ""}
+                  </div>
+                ))}
+                <div className="text-gray-600">
+                  {diag.scopes_missing.length === 0
+                    ? "All requested permissions were granted."
+                    : `Not granted: ${diag.scopes_missing.map((x) => x.split("/").pop()).join(", ")}`}
+                </div>
               </div>
-            ))}
-            <div className="text-gray-600">
-              {diag.scopes_missing.length === 0
-                ? "All requested permissions were granted."
-                : `Not granted: ${diag.scopes_missing.map((x) => x.split("/").pop()).join(", ")}`}
+            )}
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="text-xs text-gray-500">
+                  <tr>
+                    <th className="py-1 pr-6 font-normal">Store</th>
+                    <th className="py-1 pr-6 font-normal">eBay name</th>
+                    <th className="py-1 pr-6 font-normal">Linked</th>
+                    <th className="py-1 pr-6 font-normal">Access</th>
+                    <th className="py-1 pr-6 font-normal">Pushes</th>
+                    <th className="py-1 pr-6 font-normal">Approval ends</th>
+                    <th className="py-1 font-normal">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {stores.map((s) => (
+                    <tr key={s.store} className="align-middle">
+                      <td className="py-2 pr-6">
+                        <button type="button" className="text-left font-medium underline-offset-2 hover:underline" onClick={() => setStore(s.store)}>
+                          {s.display_name || s.store}
+                        </button>
+                      </td>
+                      <td className="py-2 pr-6 text-gray-500">{s.store}</td>
+                      <td className="py-2 pr-6 text-gray-500">{s.linked_count} linked to products</td>
+                      <td className="py-2 pr-6">
+                        <Badge tone={s.authorized ? "green" : "gray"}>{s.authorized ? "Authorized" : "Not authorized yet"}</Badge>
+                      </td>
+                      <td className="py-2 pr-6">
+                        <Badge tone={s.live_pushes_enabled ? "amber" : "gray"}>{s.live_pushes_enabled ? "Live pushes ON" : "Preview only"}</Badge>
+                      </td>
+                      <td className="py-2 pr-6 text-xs text-gray-500">
+                        {s.authorized && s.refresh_token_expires_at ? new Date(s.refresh_token_expires_at).toLocaleDateString() : "—"}
+                      </td>
+                      <td className="py-2">
+                        <span className="flex flex-wrap gap-2">
+                          <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void connect(s.store)}>
+                            {s.authorized ? "Reconnect" : "Connect"}
+                          </button>
+                          {s.authorized && (
+                            <>
+                              <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void testConn(s.store)}>
+                                Test
+                              </button>
+                              <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void setPushes(s.store, !s.live_pushes_enabled)}>
+                                {s.live_pushes_enabled ? "Turn pushes OFF" : "Turn pushes ON"}
+                              </button>
+                              <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void checkAccess(s.store)}>
+                                Check access
+                              </button>
+                              <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void disconnect(s.store)}>
+                                Disconnect
+                              </button>
+                            </>
+                          )}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                  {stores.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="py-2 text-gray-500">No stores yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
-        <ul className="mt-3 divide-y divide-gray-100 text-sm">
-          {stores.map((s) => (
-            <li key={s.store} className="flex flex-wrap items-center gap-2 py-2">
-              <button type="button" className="font-medium underline-offset-2 hover:underline" onClick={() => setStore(s.store)}>
-                {s.display_name || s.store}
-              </button>
-              <span className="text-gray-500">{s.store}</span>
-              <span className="text-gray-400">· {s.linked_count} linked to products</span>
-              <Badge tone={s.authorized ? "green" : "gray"}>{s.authorized ? "Authorized" : "Not authorized yet"}</Badge>
-              <Badge tone={s.live_pushes_enabled ? "amber" : "gray"}>
-                {s.live_pushes_enabled ? "Live pushes ON" : "Preview only"}
-              </Badge>
-              {s.authorized && s.refresh_token_expires_at && (
-                <span className="text-xs text-gray-500">
-                  approval ends {new Date(s.refresh_token_expires_at).toLocaleDateString()}
-                </span>
-              )}
-              <span className="ml-auto flex gap-2">
-                <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void connect(s.store)}>
-                  {s.authorized ? "Reconnect" : "Connect"}
-                </button>
-                {s.authorized && (
-                  <>
-                    <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void testConn(s.store)}>
-                      Test
-                    </button>
-                    <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void setPushes(s.store, !s.live_pushes_enabled)}>
-                      {s.live_pushes_enabled ? "Turn pushes OFF" : "Turn pushes ON"}
-                    </button>
-                    <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void checkAccess(s.store)}>
-                      Check access
-                    </button>
-                    <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void disconnect(s.store)}>
-                      Disconnect
-                    </button>
-                  </>
-                )}
-              </span>
-            </li>
-          ))}
-          {stores.length === 0 && <li className="py-2 text-gray-500">No stores yet.</li>}
-        </ul>
 
-        {showAdd && (
+        {storesOpen && showAdd && (
           <div className="mt-3 space-y-3 border-t border-gray-100 pt-3">
             <div className="grid gap-3 sm:grid-cols-3">
               <label className="block text-sm font-medium text-gray-700">

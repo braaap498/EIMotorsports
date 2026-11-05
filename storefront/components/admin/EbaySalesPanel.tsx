@@ -205,13 +205,17 @@ export default function EbaySalesPanel() {
 
   return (
     <div className="rounded border border-gray-200 bg-white p-4">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold">eBay sales</h2>
-        <button type="button" className={btn2Cls} onClick={() => setOpen((v) => !v)}>
-          {open ? "Hide" : "Show"}
-        </button>
-      </div>
-      {!open && <p className="mt-1 text-sm text-gray-600">Check each store for new sales, set parts aside, and keep eBay quantities in step.</p>}
+      <button
+        type="button"
+        className="flex w-full flex-wrap items-center justify-between gap-2 text-left"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <h2 className="text-sm font-semibold">
+          <span className="mr-2 inline-block w-3 text-gray-500">{open ? "▾" : "▸"}</span>eBay sales
+        </h2>
+        {!open && <span className="text-xs text-gray-500">Check each store for new sales, set parts aside, and keep eBay quantities in step.</span>}
+      </button>
 
       {open && (
         <div className="mt-3 space-y-4">
