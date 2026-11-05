@@ -129,8 +129,9 @@ export default function EbayLiveListingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stores]);
 
-  // Inactivate or Activate the ticked listings ON EBAY, one after another, using the same calls as the buttons on the edit screen
-  // (Inactivate = end the listing; Activate = relist it, which gives it a new item number). Each one is logged like a single push.
+  // Inactivate or Activate the ticked listings ON EBAY, one after another, with the same warnings and checks as the buttons on the
+  // edit screen. Inactivate = end the listing. Activate = relist it (preview first, then confirm, then send; eBay gives a new item number).
+  // Each one is logged like a single push.
   async function bulkSet(want: "inactive" | "active") {
     if (!repo || picked.size === 0) return;
     const st = stores.find((x) => x.store === repo.store);
@@ -139,55 +140,118 @@ export default function EbayLiveListingsPage() {
       return;
     }
     if (!st.live_pushes_enabled) {
-      setActMsg({ kind: "error", text: `Live pushes are OFF for ${repo.store}. Turn them on in the Stores box above first. Nothing was sent.` });
+      setActMsg({ kind: "error", text: `Live pushes are OFF for ${repo.store}, so nothing can go to eBay. Turn them on in the Stores box above. Nothing was sent.` });
       return;
     }
-    const chosen = repo.items.filter((x) => picked.has(x.listing_id));
-    const todo = chosen.filter((x) => (want === "inactive" ? x.active : !x.active));
-    const skipped = chosen.length - todo.length;
-    if (todo.length === 0) {
-      setActMsg({ kind: "error", text: `The ${chosen.length} selected listing${chosen.length === 1 ? " is" : "s are"} already ${want} in our records. Nothing was sent.` });
-      return;
-    }
+    const todo = repo.items.filter((x) => picked.has(x.listing_id) && (want === "inactive" ? x.active : !x.active));
     const n = todo.length;
-    const many = `${n} listing${n === 1 ? "" : "s"}`;
-    const skipNote = skipped ? `\n\n${skipped} selected ${skipped === 1 ? "is" : "are"} already ${want} and will be skipped.` : "";
-    const ask =
-      want === "inactive"
-        ? `Inactivate ${many} on eBay (${repo.store})?\n\nThis ENDS them on eBay. Buyers will no longer be able to buy them. You can bring them back later with Activate; eBay gives each one a new item number.${skipNote}\n\nContinue?`
-        : `Activate ${many} on eBay (${repo.store})?\n\nThis puts them LIVE on eBay. Buyers will be able to buy them, eBay gives each one a new item number, and eBay may charge its usual listing fees. Each one needs a quantity of 1 or more.${skipNote}\n\nContinue?`;
-    if (!window.confirm(ask)) return;
-    setBusy("status");
+    if (n === 0) return;
+    const one = n === 1;
+    const idList = (xs: { item_id: string }[]) => xs.slice(0, 10).map((x) => x.item_id).join(", ") + (xs.length > 10 ? ` and ${xs.length - 10} more` : "");
+    const store = repo.store;
     let done = 0;
     let streak = 0;
     let stopped = false;
     const failed: string[] = [];
-    for (let i = 0; i < n; i++) {
-      const it = todo[i];
-      setActMsg({ kind: "success", text: `Working… ${i + 1} of ${n} (item ${it.item_id}). Keep this page open.` });
-      try {
-        if (want === "inactive") {
-          await api("/ebay-edit/end", { method: "POST", body: { store: repo.store, item_id: it.item_id } });
-        } else {
-          const body = { store: repo.store, item_id: it.item_id, changes: {}, action: "relist" };
-          const pv = await api<{ fingerprint: string }>("/ebay-edit/preview", { method: "POST", body });
-          await api("/ebay-edit/push", { method: "POST", body: { ...body, fingerprint: pv.fingerprint } });
+    const warns: string[] = [];
+
+    if (want === "inactive") {
+      if (!window.confirm(`Inactivate will END ${one ? "this listing" : `these ${n} listings`} on eBay (${store}, item${one ? "" : "s"} ${idList(todo)}). Buyers will no longer be able to buy ${one ? "it" : "them"}. You can bring ${one ? "it" : "them"} back later with Activate.\n\nContinue?`)) return;
+      setBusy("status");
+      setActMsg(null);
+      for (let i = 0; i < n; i++) {
+        const it = todo[i];
+        setActMsg({ kind: "success", text: `Working… ${i + 1} of ${n} (item ${it.item_id}). Keep this page open.` });
+        try {
+          await api("/ebay-edit/end", { method: "POST", body: { store, item_id: it.item_id } });
+          done++;
+          streak = 0;
+        } catch (e) {
+          failed.push(`${it.item_id}: ${errMsg(e)}`);
+          if (++streak >= 3 && i < n - 1) {
+            stopped = true;
+            break;
+          }
         }
-        done++;
-        streak = 0;
-      } catch (e) {
-        failed.push(`${it.item_id}: ${errMsg(e)}`);
-        streak++;
-        if (streak >= 3 && i < n - 1) {
-          stopped = true;
-          break;
+      }
+    } else {
+      // step 1: preview every one (nothing is sent); step 2: show what will happen and ask; step 3: send the ones that previewed fine
+      type Diff = { field: string; before: string | null; after: string; note?: string };
+      const ready: { it: RepoItem; fingerprint: string; diff: Diff[] }[] = [];
+      setBusy("status");
+      setActMsg(null);
+      for (let i = 0; i < n; i++) {
+        const it = todo[i];
+        setActMsg({ kind: "success", text: `Checking… ${i + 1} of ${n} (item ${it.item_id}). Nothing is sent yet.` });
+        try {
+          const pv = await api<{ fingerprint: string; diff: Diff[]; live_pushes_enabled: boolean }>("/ebay-edit/preview", {
+            method: "POST",
+            body: { store, item_id: it.item_id, changes: {}, action: "relist" },
+          });
+          if (!pv.live_pushes_enabled) {
+            setActMsg({ kind: "error", text: `Live pushes are OFF for ${store}, so nothing can go to eBay. Turn them on in the Stores box above. Nothing was sent.` });
+            setBusy("");
+            return;
+          }
+          ready.push({ it, fingerprint: pv.fingerprint, diff: pv.diff });
+          streak = 0;
+        } catch (e) {
+          failed.push(`${it.item_id}: ${errMsg(e)}`);
+          if (++streak >= 3 && i < n - 1) {
+            stopped = true;
+            break;
+          }
+        }
+      }
+      if (ready.length === 0) {
+        setActMsg({ kind: "error", text: `None of the ${n} could be activated, so nothing was sent. ${failed.slice(0, 5).join(" · ")}${failed.length > 5 ? ` · and ${failed.length - 5} more` : ""}` });
+        setBusy("");
+        return;
+      }
+      const lines = ready
+        .slice(0, 8)
+        .map((r) => `Item ${r.it.item_id}\n` + r.diff.map((d) => `  ${d.field}: ${d.before ?? "—"} → ${d.after}`).join("\n"))
+        .join("\n\n");
+      const more = ready.length > 8 ? `\n\n…and ${ready.length - 8} more like these.` : "";
+      const bad = failed.length
+        ? `\n\nThese cannot be activated and will be skipped:\n${failed.slice(0, 5).join("\n")}${failed.length > 5 ? `\n…and ${failed.length - 5} more` : ""}`
+        : "";
+      const rn = ready.length;
+      if (
+        !window.confirm(
+          `Activate will make ${rn === 1 ? "this listing" : `these ${rn} listings`} LIVE on eBay (${store}). Buyers will be able to buy ${rn === 1 ? "it" : "them"}, and eBay will give ${rn === 1 ? "it" : "each"} a new item number.\n\n${lines}${more}${bad}\n\nContinue?`
+        )
+      ) {
+        setActMsg({ kind: "success", text: "Cancelled. Nothing was sent to eBay." });
+        setBusy("");
+        return;
+      }
+      streak = 0;
+      for (let i = 0; i < rn; i++) {
+        const r = ready[i];
+        setActMsg({ kind: "success", text: `Working… ${i + 1} of ${rn} (item ${r.it.item_id}). Keep this page open.` });
+        try {
+          const res = await api<{ warnings: { message: string }[] }>("/ebay-edit/push", {
+            method: "POST",
+            body: { store, item_id: r.it.item_id, changes: {}, action: "relist", fingerprint: r.fingerprint },
+          });
+          if (res.warnings?.length) warns.push(`${r.it.item_id}: ${res.warnings.map((w) => w.message).join("; ")}`);
+          done++;
+          streak = 0;
+        } catch (e) {
+          failed.push(`${r.it.item_id}: ${errMsg(e)}`);
+          if (++streak >= 3 && i < rn - 1) {
+            stopped = true;
+            break;
+          }
         }
       }
     }
-    const verb = want === "inactive" ? "ended" : "made live";
-    let text = `${done} of ${n} ${verb} on eBay.`;
-    if (skipped) text += ` ${skipped} skipped (already ${want}).`;
+
+    const total = want === "inactive" ? n : done + failed.length;
+    let text = `${done} of ${want === "inactive" ? n : total} ${want === "inactive" ? "ended" : "made live"} on eBay.`;
     if (failed.length) text += ` ${failed.length} failed: ${failed.slice(0, 5).join(" · ")}${failed.length > 5 ? ` · and ${failed.length - 5} more` : ""}.`;
+    if (warns.length) text += ` eBay warnings: ${warns.slice(0, 5).join(" · ")}${warns.length > 5 ? ` · and ${warns.length - 5} more` : ""}.`;
     if (stopped) text += " Stopped after 3 failures in a row; the rest were not tried.";
     setActMsg({ kind: failed.length ? "error" : "success", text });
     setBusy("");
@@ -325,6 +389,11 @@ export default function EbayLiveListingsPage() {
       setAdding(false);
     }
   }
+
+  // which bulk buttons make sense: Inactivate for ticked listings that are active, Activate for ticked listings that are not
+  const pickedItems = repo ? repo.items.filter((x) => picked.has(x.listing_id)) : [];
+  const nActivePicked = pickedItems.filter((x) => x.active).length;
+  const nInactivePicked = pickedItems.length - nActivePicked;
 
   return (
     <div className="space-y-5">
@@ -554,12 +623,16 @@ export default function EbayLiveListingsPage() {
           {picked.size > 0 && (
             <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
               <span className="font-medium">{picked.size} selected</span>
-              <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkSet("active")}>
-                Activate on eBay
-              </button>
-              <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkSet("inactive")}>
-                Inactivate on eBay
-              </button>
+              {nInactivePicked > 0 && (
+                <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkSet("active")}>
+                  Activate on eBay ({nInactivePicked})
+                </button>
+              )}
+              {nActivePicked > 0 && (
+                <button type="button" className={`${btn2Cls} text-red-700`} disabled={busy === "status"} onClick={() => void bulkSet("inactive")}>
+                  Inactivate on eBay ({nActivePicked})
+                </button>
+              )}
               <button type="button" className="text-xs underline" onClick={() => setPicked(new Set())}>
                 Clear
               </button>
