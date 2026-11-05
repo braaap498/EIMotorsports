@@ -51,6 +51,34 @@ type ListResp = {
   items: Item[];
 };
 
+type RepoItem = {
+  item_id: string;
+  listing_id: number;
+  title: string;
+  custom_label: string | null;
+  price: number | null;
+  currency: string;
+  quantity: number | null;
+  status: string | null;
+  active: boolean;
+  api_type: "trading" | "inventory" | null;
+  product_id: number;
+  image_url: string | null;
+  url: string;
+};
+type RepoResp = {
+  store: string;
+  seller: string;
+  known_store: boolean;
+  status: "all" | "active" | "inactive";
+  total: number;
+  counts: { all: number; active: number; inactive: number };
+  statuses: { status: string; count: number }[];
+  offset: number;
+  limit: number;
+  items: RepoItem[];
+};
+
 const PAGE_SIZE = 50;
 
 function money(v: string | number | null | undefined, cur?: string | null) {
@@ -73,6 +101,9 @@ export default function EbayLiveListingsPage() {
 
   const [showAdd, setShowAdd] = useState(false);
   const [storesOpen, setStoresOpen] = useState(false);
+  const [source, setSource] = useState<"db" | "ebay">("db"); // our database (all listings) or eBay's public search (active only)
+  const [statusF, setStatusF] = useState<"all" | "active" | "inactive">("all");
+  const [repo, setRepo] = useState<RepoResp | null>(null);
   const [newStore, setNewStore] = useState("");
   const [newName, setNewName] = useState("");
   const [newSeller, setNewSeller] = useState("");
@@ -105,15 +136,44 @@ export default function EbayLiveListingsPage() {
   useEffect(() => {
     if (restored.current) return;
     restored.current = true;
-    const saved = loadSaved<{ store: string; q: string; sort: string; offset: number }>("ebay-listings");
+    const saved = loadSaved<{ store: string; q: string; sort: string; offset: number; source?: "db" | "ebay"; statusF?: "all" | "active" | "inactive" }>("ebay-listings");
     if (saved) {
       setStore(saved.store);
       setQ(saved.q);
       setSort(saved.sort);
-      void load(saved.offset, saved);
+      const src = saved.source ?? "db";
+      const st = saved.statusF ?? "all";
+      setSource(src);
+      setStatusF(st);
+      if (src === "ebay") void load(saved.offset, saved);
+      else void loadRepo(saved.offset, { store: saved.store, q: saved.q, sort: saved.sort, statusF: st });
+    } else {
+      void loadRepo(0, { store: "", q: "", sort: "newest", statusF: "all" });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function loadRepo(offset: number, from?: { store: string; q: string; sort: string; statusF: "all" | "active" | "inactive" }) {
+    const useStore = from ? from.store : store;
+    const useQ = from ? from.q : q;
+    const useSort = from ? from.sort : sort;
+    const useStatus = from ? from.statusF : statusF;
+    setLoading(true);
+    setError("");
+    try {
+      // the database list sorts by title / price / newest; eBay's own "newest" and price orders map onto these
+      const params = new URLSearchParams({ q: useQ.trim(), sort: useSort, status: useStatus, offset: String(offset), limit: String(PAGE_SIZE) });
+      if (useStore.trim()) params.set("store", useStore.trim());
+      saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset, source: "db", statusF: useStatus });
+      setRepo(await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`));
+      setData(null);
+    } catch (e) {
+      setRepo(null);
+      setError(errMsg(e));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function load(offset: number, from?: { store: string; q: string; sort: string }) {
     const useStore = from ? from.store : store;
@@ -124,8 +184,9 @@ export default function EbayLiveListingsPage() {
     try {
       const params = new URLSearchParams({ q: useQ.trim(), sort: useSort, offset: String(offset), limit: String(PAGE_SIZE) });
       if (useStore.trim()) params.set("store", useStore.trim());
-      saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset });
+      saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset, source: "ebay" });
       setData(await api<ListResp>(`/ebay-listings/list?${params.toString()}`));
+      setRepo(null);
     } catch (e) {
       setData(null);
       setError(errMsg(e));
@@ -396,49 +457,162 @@ export default function EbayLiveListingsPage() {
       {/* ---- eBay sales: polling, set-aside, quantity sync */}
       <EbaySalesPanel />
 
-      {/* ---- search */}
+      {/* ---- store, source and search */}
       <form
         className="flex flex-wrap items-end gap-3"
         onSubmit={(e) => {
           e.preventDefault();
-          void load(0);
+          if (source === "db") void loadRepo(0);
+          else void load(0);
         }}
       >
         <label className="block w-64 text-sm font-medium text-gray-700">
-          <span className="mb-1 block">eBay store name</span>
-          <input
+          <span className="mb-1 block">Store</span>
+          <select
             className={inputCls}
-            list="ebay-store-names"
             value={store}
-            onChange={(e) => setStore(e.target.value)}
-            placeholder="eandimotorsports"
-          />
-          <datalist id="ebay-store-names">
+            onChange={(e) => {
+              setStore(e.target.value);
+              if (source === "db") void loadRepo(0, { store: e.target.value, q, sort, statusF });
+            }}
+          >
+            <option value="">(main store)</option>
             {stores.map((s) => (
-              <option key={s.store} value={s.store} />
+              <option key={s.store} value={s.store}>
+                {s.display_name || s.store}
+                {s.authorized ? "" : " (not connected)"}
+              </option>
             ))}
-          </datalist>
+          </select>
         </label>
+        <label className="block text-sm font-medium text-gray-700">
+          <span className="mb-1 block">Listings from</span>
+          <select
+            className={inputCls}
+            value={source}
+            onChange={(e) => {
+              const v = e.target.value as "db" | "ebay";
+              setSource(v);
+              setData(null);
+              setRepo(null);
+              if (v === "ebay" && sort === "title") setSort("newest");
+              if (v === "db") void loadRepo(0, { store, q, sort, statusF });
+            }}
+          >
+            <option value="db">Our database (all listings)</option>
+            <option value="ebay">eBay right now (active only)</option>
+          </select>
+        </label>
+        {source === "db" && (
+          <label className="block text-sm font-medium text-gray-700">
+            <span className="mb-1 block">Show</span>
+            <select
+              className={inputCls}
+              value={statusF}
+              onChange={(e) => {
+                const v = e.target.value as "all" | "active" | "inactive";
+                setStatusF(v);
+                void loadRepo(0, { store, q, sort, statusF: v });
+              }}
+            >
+              <option value="all">All{repo ? ` (${repo.counts.all})` : ""}</option>
+              <option value="active">Active{repo ? ` (${repo.counts.active})` : ""}</option>
+              <option value="inactive">Inactive{repo ? ` (${repo.counts.inactive})` : ""}</option>
+            </select>
+          </label>
+        )}
         <label className="block w-64 text-sm font-medium text-gray-700">
-          <span className="mb-1 block">Search titles (optional)</span>
+          <span className="mb-1 block">{source === "db" ? "Search title, item number or custom label" : "Search titles (optional)"}</span>
           <input className={inputCls} value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. Tusk 1.8 bar" />
         </label>
         <label className="block text-sm font-medium text-gray-700">
           <span className="mb-1 block">Order</span>
           <select className={inputCls} value={sort} onChange={(e) => setSort(e.target.value)}>
             <option value="newest">Newest first</option>
+            {source === "db" && <option value="title">Title, A to Z</option>}
             <option value="price_low">Price, low to high</option>
             <option value="price_high">Price, high to low</option>
           </select>
         </label>
         <button type="submit" className={btnCls} disabled={loading}>
-          {loading ? "Reading eBay…" : "Show listings"}
+          {loading ? "Reading…" : "Show listings"}
         </button>
       </form>
-      <p className="-mt-2 text-xs text-gray-500">Leave the store name empty for the main store.</p>
 
       {/* ---- results */}
-      {data && (
+      {/* ---- results from our database */}
+      {source === "db" && repo && (
+        <div className="space-y-3">
+          <Pager total={repo.total} limit={repo.limit} offset={repo.offset} onChange={(o) => void loadRepo(o)} />
+          <p className="text-sm text-gray-700">
+            <span className="font-medium">{repo.store}</span> in our database: {repo.counts.all} listing{repo.counts.all === 1 ? "" : "s"}, {repo.counts.active} active, {repo.counts.inactive} inactive.
+            {repo.statuses.length > 0 && (
+              <span className="ml-1 text-xs text-gray-500">
+                Statuses on file: {repo.statuses.map((x) => `${x.status} (${x.count})`).join(", ")}.
+              </span>
+            )}
+          </p>
+          {repo.items.length === 0 ? (
+            <Notice>No listings{statusF !== "all" ? ` marked ${statusF}` : ""}{q.trim() ? " match that search" : ""} for this store.</Notice>
+          ) : (
+            <div className="overflow-x-auto rounded border border-gray-200 bg-white">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+                  <tr>
+                    <th className="w-16 px-3 py-2"></th>
+                    <th className="px-3 py-2">Listing</th>
+                    <th className="px-3 py-2">Custom label</th>
+                    <th className="px-3 py-2">Price</th>
+                    <th className="px-3 py-2">Quantity</th>
+                    <th className="px-3 py-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {repo.items.map((it) => {
+                    const canEdit = stores.find((x) => x.store === repo.store)?.authorized;
+                    const editHref = `/admin/ebay-edit?store=${encodeURIComponent(repo.store)}&item=${it.item_id}`;
+                    return (
+                      <ClickRow key={it.listing_id} className="align-top" href={canEdit ? editHref : undefined}>
+                        <td className="px-3 py-2">
+                          {it.image_url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={it.image_url} alt="" className="h-12 w-12 rounded object-cover" />
+                          ) : (
+                            <div className="h-12 w-12 rounded bg-gray-100" />
+                          )}
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="max-w-xl">{it.title}</div>
+                          <a href={it.url} target="_blank" rel="noreferrer" className="text-xs text-blue-700 hover:underline">
+                            {it.item_id}
+                          </a>
+                          {canEdit && (
+                            <Link href={editHref} className="ml-3 text-xs font-medium text-blue-700 hover:underline">
+                              Edit
+                            </Link>
+                          )}
+                          <Link href={`/admin/products/${it.product_id}`} className="ml-3 text-xs text-blue-700 hover:underline">
+                            Product {it.product_id}
+                          </Link>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-xs">{it.custom_label ?? "—"}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">{money(it.price, it.currency)}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">{it.quantity ?? "—"}</td>
+                        <td className="px-3 py-2">
+                          <Badge tone={it.active ? "green" : "gray"}>{it.status || "no status"}</Badge>
+                        </td>
+                      </ClickRow>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <Pager total={repo.total} limit={repo.limit} offset={repo.offset} onChange={(o) => void loadRepo(o)} />
+        </div>
+      )}
+
+      {source === "ebay" && data && (
         <div className="space-y-3">
           <Pager total={data.total} limit={data.limit} offset={data.offset} onChange={(o) => void load(o)} />
           <p className="text-sm text-gray-700">

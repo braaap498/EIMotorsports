@@ -5,6 +5,7 @@ Mounted at /admin/ebay-listings/* (owner/admin only).
 
   GET  /stores              the eBay stores the site knows about (never returns any token)
   POST /stores              add a store
+  GET  /repo                one page of a store's listings from OUR database (all, active or inactive), shaped like /list
   GET  /list                one page of a store's live listings, newest first, with what the
                             website knows about each one
 
@@ -37,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.database import get_db
+from app.images import thumb_url
 from app.ebay_feedback import SEARCH_URL, FeedbackError, _open, _token, configured, seller_username
 
 log = logging.getLogger(__name__)
@@ -266,6 +268,110 @@ def list_listings(
         "known_store": who["known"],
         "total": min(total, MAX_RESULTS),
         "ebay_total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": items,
+    }
+
+
+# --------------------------------------------------------------------------
+# the store's listings from our own database (not eBay): channel_listings + products
+# --------------------------------------------------------------------------
+# Unlike /list (eBay's public search: active, buyable listings only) this shows every listing we have on file for the
+# store, so ended / inactive ones are here too. "Active" means channel_listings.status is 'active' (any case); everything
+# else is "inactive". The raw status values and how many of each are returned so the screen can show them as they are.
+_ACTIVE = "lower(coalesce(cl.status, '')) = 'active'"
+_REPO_SORTS = {
+    "newest": "cl.id desc",
+    "title": "lower(p.title), cl.id",
+    "price_low": "p.list_price asc nulls last, cl.id",
+    "price_high": "p.list_price desc nulls last, cl.id",
+}
+
+
+@router.get("/repo")
+def repo_listings(
+    store: Optional[str] = Query(None, description="eBay store; empty means the main store"),
+    status: str = Query("all", pattern="^(all|active|inactive)$"),
+    q: str = Query("", max_length=100),
+    sort: str = Query("newest", pattern="^(newest|title|price_low|price_high)$"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    who = _resolve(db, store)
+    base = ["lower(cl.store) = lower(:store)", f"{_DIGITS} <> ''"]
+    params: dict = {"store": who["store"], "n": limit, "o": offset}
+    # counts and raw statuses for the whole store (the search box does not change them)
+    counts = db.execute(
+        text(
+            f"select count(*) as total, count(*) filter (where {_ACTIVE}) as active "
+            f"from channel_listings cl where {' and '.join(base)}"
+        ),
+        params,
+    ).first()
+    raw = db.execute(
+        text(
+            f"select coalesce(nullif(btrim(cl.status), ''), '(none)') as status, count(*) as n from channel_listings cl "
+            f"where {' and '.join(base)} group by 1 order by n desc"
+        ),
+        params,
+    ).all()
+
+    where = list(base)
+    if status == "active":
+        where.append(_ACTIVE)
+    elif status == "inactive":
+        where.append(f"not ({_ACTIVE})")
+    for i, w in enumerate([w for w in re.split(r"\s+", q.strip()) if w][:6]):
+        params[f"w{i}"] = f"%{w}%"
+        where.append(f"(p.title ilike :w{i} or {_DIGITS} ilike :w{i} or p.custom_label_sku ilike :w{i})")
+    clause = " and ".join(where)
+    total = db.execute(
+        text(f"select count(*) from channel_listings cl join products p on p.id = cl.product_id where {clause}"), params
+    ).scalar()
+    rows = db.execute(
+        text(
+            f"""
+            select {_DIGITS} as item_id, cl.id as listing_id, cl.status, cl.api_type,
+                   p.id as product_id, p.title, p.custom_label_sku, p.list_price, p.quantity_on_hand,
+                   (select ph.image_key from product_photos ph where ph.product_id = p.id
+                     order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as image_key
+            from channel_listings cl join products p on p.id = cl.product_id
+            where {clause} order by {_REPO_SORTS[sort]} limit :n offset :o
+            """
+        ),
+        params,
+    ).all()
+    items = []
+    for r in rows:
+        d = dict(r._mapping)
+        key = d.pop("image_key", None)
+        items.append(
+            {
+                "item_id": d["item_id"],
+                "listing_id": d["listing_id"],
+                "title": d["title"] or "(no title)",
+                "custom_label": d["custom_label_sku"],
+                "price": float(d["list_price"]) if d["list_price"] is not None else None,
+                "currency": "USD",
+                "quantity": d["quantity_on_hand"],
+                "status": (d["status"] or "").strip() or None,
+                "active": (d["status"] or "").strip().lower() == "active",
+                "api_type": d["api_type"],
+                "product_id": d["product_id"],
+                "image_url": thumb_url(key) if key else None,
+                "url": f"https://www.ebay.com/itm/{d['item_id']}",
+            }
+        )
+    return {
+        "store": who["store"],
+        "seller": who["seller"],
+        "known_store": who["known"],
+        "status": status,
+        "total": total,
+        "counts": {"all": counts.total, "active": counts.active, "inactive": counts.total - counts.active},
+        "statuses": [{"status": r.status, "count": r.n} for r in raw],
         "offset": offset,
         "limit": limit,
         "items": items,
