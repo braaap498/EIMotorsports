@@ -153,7 +153,7 @@ const uomName = (code: string | null | undefined) => (code ? UOM_NAMES[code.trim
 export default function AutodistCatalog({ hasData, search }: { hasData: boolean; search?: { q: string; n: number } | null }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [showBrands, setShowBrands] = useState(false);
-  const [overviewOpen, setOverviewOpen] = useState(true);
+  const [overviewOpen, setOverviewOpen] = useState(false);
   const [brandQ, setBrandQ] = useState("");
   const [f, setF] = useState<Filters>(EMPTY);
   const [qInput, setQInput] = useState("");
