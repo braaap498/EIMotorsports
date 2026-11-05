@@ -1342,18 +1342,27 @@ from cand
 _LABEL_MATCH_SQL = """
 with prod as (
   select p.id, p.sku_display as sku, p.title, btrim(p.custom_label_sku) as label,
-         regexp_split_to_array(upper(btrim(p.custom_label_sku)), 'XX') as toks
+         regexp_split_to_array(btrim(p.custom_label_sku), 'xx', 'i') as toks
   from products p
   where p.id = any(cast(:ids as bigint[])) and nullif(btrim(p.custom_label_sku), '') is not null
+), tok as (
+  select prod.id, prod.sku, prod.title, prod.label, array_length(prod.toks, 1) as pieces, t.tok
+  from prod cross join lateral unnest(prod.toks) as t(tok)
+  where btrim(t.tok) <> ''
 )
-select prod.id, prod.sku, prod.title, prod.label, array_length(prod.toks, 1) as pieces,
-       s.sku as supplier_sku, s.manufacturer, s.name as supplier_name, s.effective_cost,
-       case when upper(s.sku) = t.tok then 'part number' else 'manufacturer number' end as via
-from prod
-cross join lateral unnest(prod.toks) as t(tok)
-join supplier_items s on s.supplier = :s and s.active
- and (upper(s.sku) = t.tok or (length(t.tok) >= 4 and s.mfr_number_norm = regexp_replace(t.tok, '[^A-Z0-9]', '', 'g')))
-order by prod.id, s.sku
+select tok.id, tok.sku, tok.title, tok.label, tok.pieces, s.sku as supplier_sku, s.manufacturer,
+       s.name as supplier_name, s.effective_cost, 'part number' as via
+from tok
+join supplier_items s on s.supplier = :s and s.active and s.sku in (tok.tok, upper(tok.tok))
+union all
+select tok.id, tok.sku, tok.title, tok.label, tok.pieces, s.sku, s.manufacturer,
+       s.name, s.effective_cost, 'manufacturer number'
+from tok
+join supplier_items s on s.supplier = :s and s.active and length(tok.tok) >= 4
+ and s.mfr_number_norm = upper(regexp_replace(tok.tok, '[^A-Za-z0-9]', '', 'g'))
+where not exists (select 1 from supplier_items x where x.supplier = :s and x.active and x.sku in (tok.tok, upper(tok.tok)))
+order by 1, 6
+limit 1000
 """
 
 
@@ -2144,11 +2153,12 @@ def _supplier_matches(db: Session, item: Optional[str], barcode: Optional[str], 
     if not found and mpn:
         found = [dict(r._mapping) for r in db.execute(text(f"select {cols} from supplier_items s where s.supplier = :s and s.active and s.mfr_number_norm = :m order by s.sku limit 8"), {"s": SUPPLIER, "m": mpn}).all()]
     if not found and label:
-        toks = [t.upper() for t in label_tokens(label)][:6]
+        toks = label_tokens(label)[:6]
         if toks:
+            both = sorted({t.strip() for t in toks} | {t.strip().upper() for t in toks})
             found = [dict(r._mapping) for r in db.execute(
-                text(f"select {cols} from supplier_items s where s.supplier = :s and s.active and upper(s.sku) = any(cast(:t as text[])) order by s.sku limit 8"),
-                {"s": SUPPLIER, "t": toks},
+                text(f"select {cols} from supplier_items s where s.supplier = :s and s.active and s.sku = any(cast(:t as text[])) order by s.sku limit 8"),
+                {"s": SUPPLIER, "t": both},
             ).all()]
             # A label with several pieces is a kit: never auto-pick one piece for it, let staff choose.
             if len(toks) > 1:
