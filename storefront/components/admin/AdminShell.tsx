@@ -24,7 +24,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/distributors", label: "Distributors", any: ["inventory.purchase"], match: ["/admin/distributors", "/admin/supplier"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
-  { href: "/admin/ebay-photos", label: "eBay", match: ["/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/ebay-listings"] },
+  { href: "/admin/ebay-photos", label: "Sales channels", match: ["/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/ebay-listings"] },
   { href: "/admin/analytics", label: "Analytics" },
   { href: "/admin/quickbooks", label: "QuickBooks" },
   { href: "/admin/users", label: "Team" },
@@ -52,6 +52,10 @@ const EBAY_TABS: Tab[] = [
   { href: "/admin/merge-link", label: "Merge and link products", match: ["/admin/merge-link", "/admin/cleanup", "/admin/ebay-new"] },
   { href: "/admin/ebay-listings", label: "Live listings" },
 ];
+
+// Sales channels: one tab per channel, each with its own sub-pages beneath. Add Amazon (or any other channel) here
+// with its own list of tabs, and it shows up next to eBay.
+const CHANNELS: { label: string; href: string; tabs: Tab[] }[] = [{ label: "eBay", href: "/admin/ebay-photos", tabs: EBAY_TABS }];
 
 // ---- "Back" link: remembers the admin pages visited in this tab, so a page you opened from a list
 // (a product, say) can take you straight back to that list. Clicking the menu starts a fresh trail.
@@ -324,10 +328,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
                   ← Back to {pageName(backTo)}
                 </button>
               )}
-              {[
-                { title: "Fitment", tabs: FITMENT_TABS },
-                { title: "eBay", tabs: EBAY_TABS },
-              ].map(
+              {[{ title: "Fitment", tabs: FITMENT_TABS }].map(
                 (g) =>
                   g.tabs.some((t) => tabOn(t, pathname)) && (
                     <div key={g.title}>
@@ -351,6 +352,47 @@ export default function AdminShell({ children }: { children: ReactNode }) {
                       </div>
                     </div>
                   )
+              )}
+              {CHANNELS.some((c) => c.tabs.some((t) => tabOn(t, pathname))) && (
+                <div>
+                  <h1 className="mb-3 text-2xl font-semibold">Sales channels</h1>
+                  <div className="mb-3 flex gap-1 overflow-x-auto border-b border-gray-200">
+                    {CHANNELS.map((c) => {
+                      const on = c.tabs.some((t) => tabOn(t, pathname));
+                      return (
+                        <Link
+                          key={c.label}
+                          href={c.href}
+                          onClick={markMenuClick}
+                          className={`-mb-px whitespace-nowrap border-b-2 px-4 py-2 text-sm font-medium ${
+                            on ? "border-black text-black" : "border-transparent text-gray-500 hover:text-gray-800"
+                          }`}
+                        >
+                          {c.label}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                  {CHANNELS.filter((c) => c.tabs.some((t) => tabOn(t, pathname))).map((c) => (
+                    <div key={c.label} className="mb-4 flex flex-wrap gap-2">
+                      {c.tabs.map((t) => {
+                        const on = tabOn(t, pathname);
+                        return (
+                          <Link
+                            key={t.href}
+                            href={t.href}
+                            onClick={markMenuClick}
+                            className={`whitespace-nowrap rounded-full border px-3 py-1 text-sm ${
+                              on ? "border-black bg-black text-white" : "border-gray-300 text-gray-600 hover:border-gray-500 hover:text-gray-900"
+                            }`}
+                          >
+                            {t.label}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
               )}
               {children}
             </>

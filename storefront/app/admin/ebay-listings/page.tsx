@@ -24,33 +24,6 @@ type Store = {
 };
 type StoresResp = { main_store: string; stores: Store[] };
 
-type Item = {
-  item_id: string;
-  title: string;
-  price: string | null;
-  currency: string | null;
-  image_url: string | null;
-  url: string;
-  linked: {
-    product_id: number;
-    product_title: string;
-    api_type: "trading" | "inventory";
-    store: string | null;
-    site_price: number | null;
-    site_stock: number | null;
-  } | null;
-};
-type ListResp = {
-  store: string;
-  seller: string;
-  known_store: boolean;
-  total: number;
-  ebay_total: number;
-  offset: number;
-  limit: number;
-  items: Item[];
-};
-
 type RepoItem = {
   item_id: string;
   listing_id: number;
@@ -80,7 +53,6 @@ type RepoResp = {
 };
 
 const PAGE_SIZE = 50;
-const MAIN = "eandimotorsports"; // opened first when it is in the list
 
 function money(v: string | number | null | undefined, cur?: string | null) {
   if (v === null || v === undefined || v === "") return "—";
@@ -96,13 +68,14 @@ export default function EbayLiveListingsPage() {
   const [store, setStore] = useState("");
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("newest");
-  const [data, setData] = useState<ListResp | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   const [showAdd, setShowAdd] = useState(false);
   const [storesOpen, setStoresOpen] = useState(false);
-  const [source, setSource] = useState<"db" | "ebay">("db"); // our database (all listings) or eBay's public search (active only)
+  const [picked, setPicked] = useState<Set<number>>(new Set()); // listings ticked on this page
+  const [actMsg, setActMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const [mainStore, setMainStore] = useState(""); // the store opened first on a first visit
   const [statusF, setStatusF] = useState<"all" | "active" | "inactive">("all");
   const [repo, setRepo] = useState<RepoResp | null>(null);
   const [newStore, setNewStore] = useState("");
@@ -122,6 +95,7 @@ export default function EbayLiveListingsPage() {
   async function loadStores() {
     try {
       const r = await api<StoresResp>("/ebay-listings/stores");
+      setMainStore(r.main_store);
       setStores(r.stores);
     } catch (e) {
       setError(errMsg(e));
@@ -138,25 +112,42 @@ export default function EbayLiveListingsPage() {
   useEffect(() => {
     if (restored.current || stores.length === 0) return;
     restored.current = true;
-    const saved = loadSaved<{ store: string; q: string; sort: string; offset: number; source?: "db" | "ebay"; statusF?: "all" | "active" | "inactive" }>("ebay-listings");
+    const saved = loadSaved<{ store: string; q: string; sort: string; offset: number; statusF?: "all" | "active" | "inactive" }>("ebay-listings");
     const names = stores.map((x) => x.store);
-    const first = names.includes(MAIN) ? MAIN : names[0];
+    const first = names.includes(mainStore) ? mainStore : names[0];
     if (saved && names.includes(saved.store)) {
       setStore(saved.store);
       setQ(saved.q);
       setSort(saved.sort);
-      const src = saved.source ?? "db";
       const st = saved.statusF ?? "all";
-      setSource(src);
       setStatusF(st);
-      if (src === "ebay") void load(saved.offset, saved);
-      else void loadRepo(saved.offset, { store: saved.store, q: saved.q, sort: saved.sort, statusF: st });
+      void loadRepo(saved.offset, { store: saved.store, q: saved.q, sort: saved.sort, statusF: st });
     } else {
       setStore(first);
       void loadRepo(0, { store: first, q: "", sort: "newest", statusF: "all" });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stores]);
+
+  async function markPicked(status: "active" | "ended") {
+    if (!repo || picked.size === 0) return;
+    const word = status === "active" ? "active" : "inactive";
+    if (!window.confirm(`Mark ${picked.size} listing${picked.size === 1 ? "" : "s"} ${word}?\n\nThis changes our database only. Nothing is changed on eBay.`)) return;
+    setBusy("status");
+    setActMsg(null);
+    try {
+      const r = await api<{ changed: number; asked: number }>("/ebay-listings/repo/status", {
+        method: "POST",
+        body: { store: repo.store, listing_ids: Array.from(picked), status },
+      });
+      setActMsg({ kind: "success", text: `${r.changed} of ${r.asked} marked ${word}${r.changed < r.asked ? " (the rest already were)" : ""}. Nothing was changed on eBay.` });
+      await loadRepo(repo.offset);
+    } catch (e) {
+      setActMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
 
   async function loadRepo(offset: number, from?: { store: string; q: string; sort: string; statusF: "all" | "active" | "inactive" }) {
     const useStore = from ? from.store : store;
@@ -165,35 +156,15 @@ export default function EbayLiveListingsPage() {
     const useStatus = from ? from.statusF : statusF;
     setLoading(true);
     setError("");
+    setPicked(new Set());
     try {
       // the database list sorts by title / price / newest; eBay's own "newest" and price orders map onto these
       const params = new URLSearchParams({ q: useQ.trim(), sort: useSort, status: useStatus, offset: String(offset), limit: String(PAGE_SIZE) });
       if (useStore.trim()) params.set("store", useStore.trim());
-      saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset, source: "db", statusF: useStatus });
+      saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset, statusF: useStatus });
       setRepo(await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`));
-      setData(null);
     } catch (e) {
       setRepo(null);
-      setError(errMsg(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function load(offset: number, from?: { store: string; q: string; sort: string }) {
-    const useStore = from ? from.store : store;
-    const useQ = from ? from.q : q;
-    const useSort = from ? from.sort : sort;
-    setLoading(true);
-    setError("");
-    try {
-      const params = new URLSearchParams({ q: useQ.trim(), sort: useSort, offset: String(offset), limit: String(PAGE_SIZE) });
-      if (useStore.trim()) params.set("store", useStore.trim());
-      saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset, source: "ebay" });
-      setData(await api<ListResp>(`/ebay-listings/list?${params.toString()}`));
-      setRepo(null);
-    } catch (e) {
-      setData(null);
       setError(errMsg(e));
     } finally {
       setLoading(false);
@@ -462,13 +433,12 @@ export default function EbayLiveListingsPage() {
       {/* ---- eBay sales: polling, set-aside, quantity sync */}
       <EbaySalesPanel />
 
-      {/* ---- store, source and search */}
+      {/* ---- store, status and search */}
       <form
         className="flex flex-wrap items-end gap-3"
         onSubmit={(e) => {
           e.preventDefault();
-          if (source === "db") void loadRepo(0);
-          else void load(0);
+          void loadRepo(0);
         }}
       >
         <label className="block w-64 text-sm font-medium text-gray-700">
@@ -478,7 +448,7 @@ export default function EbayLiveListingsPage() {
             value={store}
             onChange={(e) => {
               setStore(e.target.value);
-              if (source === "db") void loadRepo(0, { store: e.target.value, q, sort, statusF });
+              void loadRepo(0, { store: e.target.value, q, sort, statusF });
             }}
           >
             {stores.map((s) => (
@@ -490,50 +460,30 @@ export default function EbayLiveListingsPage() {
           </select>
         </label>
         <label className="block text-sm font-medium text-gray-700">
-          <span className="mb-1 block">Listings from</span>
+          <span className="mb-1 block">Show</span>
           <select
             className={inputCls}
-            value={source}
+            value={statusF}
             onChange={(e) => {
-              const v = e.target.value as "db" | "ebay";
-              setSource(v);
-              setData(null);
-              setRepo(null);
-              if (v === "ebay" && sort === "title") setSort("newest");
-              if (v === "db") void loadRepo(0, { store, q, sort, statusF });
+              const v = e.target.value as "all" | "active" | "inactive";
+              setStatusF(v);
+              void loadRepo(0, { store, q, sort, statusF: v });
             }}
           >
-            <option value="db">Our database (all listings)</option>
-            <option value="ebay">eBay right now (active only)</option>
+            <option value="active">Active{repo ? ` (${repo.counts.active})` : ""}</option>
+            <option value="inactive">Inactive{repo ? ` (${repo.counts.inactive})` : ""}</option>
+            <option value="all">Both{repo ? ` (${repo.counts.all})` : ""}</option>
           </select>
         </label>
-        {source === "db" && (
-          <label className="block text-sm font-medium text-gray-700">
-            <span className="mb-1 block">Show</span>
-            <select
-              className={inputCls}
-              value={statusF}
-              onChange={(e) => {
-                const v = e.target.value as "all" | "active" | "inactive";
-                setStatusF(v);
-                void loadRepo(0, { store, q, sort, statusF: v });
-              }}
-            >
-              <option value="active">Active{repo ? ` (${repo.counts.active})` : ""}</option>
-              <option value="inactive">Inactive{repo ? ` (${repo.counts.inactive})` : ""}</option>
-              <option value="all">All{repo ? ` (${repo.counts.all})` : ""}</option>
-            </select>
-          </label>
-        )}
         <label className="block w-64 text-sm font-medium text-gray-700">
-          <span className="mb-1 block">{source === "db" ? "Search title, item number or custom label" : "Search titles (optional)"}</span>
+          <span className="mb-1 block">Search title, item number or custom label</span>
           <input className={inputCls} value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. Tusk 1.8 bar" />
         </label>
         <label className="block text-sm font-medium text-gray-700">
           <span className="mb-1 block">Order</span>
           <select className={inputCls} value={sort} onChange={(e) => setSort(e.target.value)}>
             <option value="newest">Newest first</option>
-            {source === "db" && <option value="title">Title, A to Z</option>}
+            <option value="title">Title, A to Z</option>
             <option value="price_low">Price, low to high</option>
             <option value="price_high">Price, high to low</option>
           </select>
@@ -543,9 +493,8 @@ export default function EbayLiveListingsPage() {
         </button>
       </form>
 
-      {/* ---- results */}
-      {/* ---- results from our database */}
-      {source === "db" && repo && (
+      {/* ---- listings from our database */}
+      {repo && (
         <div className="space-y-3">
           <Pager total={repo.total} limit={repo.limit} offset={repo.offset} onChange={(o) => void loadRepo(o)} />
           <p className="text-sm text-gray-700">
@@ -556,6 +505,22 @@ export default function EbayLiveListingsPage() {
               </span>
             )}
           </p>
+          {actMsg && <Notice kind={actMsg.kind}>{actMsg.text}</Notice>}
+          {picked.size > 0 && (
+            <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+              <span className="font-medium">{picked.size} selected</span>
+              <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void markPicked("active")}>
+                Mark active
+              </button>
+              <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void markPicked("ended")}>
+                Mark inactive
+              </button>
+              <button type="button" className="text-xs underline" onClick={() => setPicked(new Set())}>
+                Clear
+              </button>
+              <span className="text-xs text-gray-500">Changes our database only, not eBay.</span>
+            </div>
+          )}
           {repo.items.length === 0 ? (
             <Notice>No listings{statusF !== "all" ? ` marked ${statusF}` : ""}{q.trim() ? " match that search" : ""} for this store.</Notice>
           ) : (
@@ -563,6 +528,14 @@ export default function EbayLiveListingsPage() {
               <table className="w-full text-left text-sm">
                 <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
+                    <th className="w-8 px-3 py-2">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all on this page"
+                        checked={repo.items.length > 0 && repo.items.every((x) => picked.has(x.listing_id))}
+                        onChange={(e) => setPicked(e.target.checked ? new Set(repo.items.map((x) => x.listing_id)) : new Set())}
+                      />
+                    </th>
                     <th className="w-16 px-3 py-2"></th>
                     <th className="px-3 py-2">Listing</th>
                     <th className="px-3 py-2">Custom label</th>
@@ -577,6 +550,21 @@ export default function EbayLiveListingsPage() {
                     const editHref = `/admin/ebay-edit?store=${encodeURIComponent(repo.store)}&item=${it.item_id}`;
                     return (
                       <ClickRow key={it.listing_id} className="align-top" href={canEdit ? editHref : undefined}>
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${it.item_id}`}
+                            checked={picked.has(it.listing_id)}
+                            onChange={(e) =>
+                              setPicked((cur) => {
+                                const n = new Set(cur);
+                                if (e.target.checked) n.add(it.listing_id);
+                                else n.delete(it.listing_id);
+                                return n;
+                              })
+                            }
+                          />
+                        </td>
                         <td className="px-3 py-2">
                           {it.image_url ? (
                             // eslint-disable-next-line @next/next/no-img-element
@@ -616,91 +604,6 @@ export default function EbayLiveListingsPage() {
         </div>
       )}
 
-      {source === "ebay" && data && (
-        <div className="space-y-3">
-          <Pager total={data.total} limit={data.limit} offset={data.offset} onChange={(o) => void load(o)} />
-          <p className="text-sm text-gray-700">
-            Reading <span className="font-medium">{data.seller}</span> on eBay
-            {data.ebay_total > data.total ? ` (eBay has ${data.ebay_total} but shows at most ${data.total} per search)` : ""}.
-          </p>
-          {!data.known_store && (
-            <Notice>{data.store} is not in the store list yet, so it can be read but not edited. Use Add store above.</Notice>
-          )}
-          {data.items.length === 0 ? (
-            <Notice>
-              eBay returned no listings for {data.seller}
-              {q.trim() ? " with that search" : ""}.
-            </Notice>
-          ) : (
-            <div className="overflow-x-auto rounded border border-gray-200 bg-white">
-              <table className="w-full text-left text-sm">
-                <thead className="bg-gray-50 text-xs uppercase text-gray-500">
-                  <tr>
-                    <th className="w-16 px-3 py-2"></th>
-                    <th className="px-3 py-2">Listing</th>
-                    <th className="px-3 py-2">eBay price</th>
-                    <th className="px-3 py-2">On the website</th>
-                    <th className="px-3 py-2">Site price / stock</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {data.items.map((it) => (
-                    <ClickRow
-                      key={it.item_id}
-                      className="align-top"
-                      href={stores.find((x) => x.store === data.store)?.authorized ? `/admin/ebay-edit?store=${encodeURIComponent(data.store)}&item=${it.item_id}` : undefined}
-                    >
-                      <td className="px-3 py-2">
-                        {it.image_url ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={it.image_url} alt="" className="h-12 w-12 rounded object-cover" />
-                        ) : (
-                          <div className="h-12 w-12 rounded bg-gray-100" />
-                        )}
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="max-w-xl">{it.title}</div>
-                        <a href={it.url} target="_blank" rel="noreferrer" className="text-xs text-blue-700 hover:underline">
-                          {it.item_id}
-                        </a>
-                        {stores.find((x) => x.store === data.store)?.authorized && (
-                          <Link
-                            href={`/admin/ebay-edit?store=${encodeURIComponent(data.store)}&item=${it.item_id}`}
-                            className="ml-3 text-xs font-medium text-blue-700 hover:underline"
-                          >
-                            Edit
-                          </Link>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 whitespace-nowrap">{money(it.price, it.currency)}</td>
-                      <td className="px-3 py-2">
-                        {it.linked ? (
-                          <div className="space-y-1">
-                            <Link href={`/admin/products/${it.linked.product_id}`} className="text-blue-700 hover:underline">
-                              Product {it.linked.product_id}
-                            </Link>
-                            <div>
-                              <Badge tone={it.linked.api_type === "inventory" ? "blue" : "gray"}>
-                                {it.linked.api_type === "inventory" ? "Newer API" : "Older API"}
-                              </Badge>
-                            </div>
-                          </div>
-                        ) : (
-                          <Badge tone="amber">Not a product yet</Badge>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 whitespace-nowrap">
-                        {it.linked ? `${money(it.linked.site_price)} / ${it.linked.site_stock ?? "—"}` : "—"}
-                      </td>
-                    </ClickRow>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <Pager total={data.total} limit={data.limit} offset={data.offset} onChange={(o) => void load(o)} />
-        </div>
-      )}
     </div>
   );
 }

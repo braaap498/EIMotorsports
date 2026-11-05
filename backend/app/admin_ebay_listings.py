@@ -5,6 +5,7 @@ Mounted at /admin/ebay-listings/* (owner/admin only).
 
   GET  /stores              the eBay stores the site knows about (never returns any token)
   POST /stores              add a store
+  POST /repo/status         mark chosen listings active or inactive in OUR database (does not call eBay)
   GET  /repo                one page of a store's listings from OUR database (all, active or inactive), shaped like /list
   GET  /list                one page of a store's live listings, newest first, with what the
                             website knows about each one
@@ -376,3 +377,36 @@ def repo_listings(
         "limit": limit,
         "items": items,
     }
+
+
+class RepoStatusIn(BaseModel):
+    store: str
+    listing_ids: list[int]
+    status: str  # "active" or "ended" (the screen's "inactive")
+
+
+@router.post("/repo/status")
+def repo_set_status(body: RepoStatusIn, db: Session = Depends(get_db)):
+    """The decision step: mark chosen listings active or inactive in our database, nothing more.
+    It changes channel_listings.status only (the words already in use: active / ended). No call goes to eBay;
+    the automatic check that will compare us with eBay comes later. Only listings of the named store are touched."""
+    if body.status not in ("active", "ended"):
+        raise HTTPException(400, "Status must be active or ended.")
+    ids = sorted({i for i in body.listing_ids if isinstance(i, int)})
+    if not ids:
+        raise HTTPException(400, "Pick at least one listing.")
+    if len(ids) > 200:
+        raise HTTPException(400, "Pick 200 listings or fewer at a time.")
+    who = _resolve(db, body.store)
+    marks = ", ".join(f":i{n}" for n in range(len(ids)))
+    params: dict = {f"i{n}": v for n, v in enumerate(ids)}
+    params.update({"store": who["store"], "st": body.status})
+    res = db.execute(
+        text(
+            f"update channel_listings set status = :st where lower(store) = lower(:store) and id in ({marks}) "
+            f"and lower(coalesce(status, '')) <> :st"
+        ),
+        params,
+    )
+    db.commit()
+    return {"store": who["store"], "status": body.status, "changed": res.rowcount, "asked": len(ids)}
