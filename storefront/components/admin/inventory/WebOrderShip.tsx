@@ -66,6 +66,7 @@ export default function WebOrderShip({ active }: { active: boolean }) {
   const [batchId, setBatchId] = useState(newId);
   const [perScan, setPerScan] = useState(1);
   const [flash, setFlash] = useState<Flash | null>(null);
+  const [drop, setDrop] = useState<{ order_number: string; id: number; po_number: number } | null>(null); // the drop ship PO just made for an order
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -292,6 +293,24 @@ export default function WebOrderShip({ active }: { active: boolean }) {
     }
   }
 
+  // Short on the shelf: make a drop ship purchase order to Automatic Distributors, shipping straight to this customer.
+  async function makeDropShipPo() {
+    if (!order) return;
+    setBusy(true);
+    setFlash(null);
+    try {
+      const po = await api<{ id: number; po_number: number }>("/purchase-orders/from-web-order", {
+        method: "POST",
+        body: { order_number: order.order_number },
+      });
+      setDrop({ order_number: order.order_number, id: po.id, po_number: po.po_number });
+    } catch (e) {
+      setFlash({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function cancelOrder() {
     if (!order) return;
     setBusy(true);
@@ -489,6 +508,27 @@ export default function WebOrderShip({ active }: { active: boolean }) {
               <div className="mt-1 font-normal text-red-700">
                 Decide whether to wait for stock (mark the part On order on the Stock tab) or cancel this order.
               </div>
+            </div>
+          )}
+
+          {stage === "pick" && order.items.some((i) => i.product_id != null && i.on_hand < i.ordered - i.shipped_before) && (
+            <div className="space-y-2 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm">
+              {drop && drop.order_number === order.order_number ? (
+                <div>
+                  Drop ship PO <b>{drop.po_number}</b> was made for this order. An owner or admin places it on{" "}
+                  <a className="underline" href={`/admin/distributors/autodist?po=${drop.id}`}>
+                    Distributors &gt; Automatic Distributors &gt; Orders
+                  </a>
+                  , where the address and parts are checked before it is sent.
+                </div>
+              ) : (
+                <>
+                  <div>Some parts are not on the shelf. Order them from Automatic Distributors to ship straight to this customer?</div>
+                  <button className={btn2Cls} disabled={busy} onClick={() => void makeDropShipPo()}>
+                    Make drop ship PO for the short parts
+                  </button>
+                </>
+              )}
             </div>
           )}
 

@@ -52,6 +52,8 @@ type PoDetail = {
   created_at: string;
   date: string;
   lines: PoLine[];
+  po_type?: "stock" | "drop_ship" | null;
+  supplier_order_number?: string | null;
   missing_part_numbers?: string[];
   renumbered?: boolean;
 };
@@ -68,6 +70,7 @@ type PoRow = {
   open_lines: number;
   status: "open" | "received" | "cancelled";
   issue_count: number;
+  po_type?: "stock" | "drop_ship" | null;
 };
 type Issue = {
   id: number;
@@ -418,6 +421,7 @@ function CreatePo({
   const [distId, setDistId] = useState<number | "">(dists.length === 1 ? dists[0].id : "");
   const [shipTo, setShipTo] = useState("");
   const [defaultShip, setDefaultShip] = useState("");
+  const [poType, setPoType] = useState<"stock" | "drop_ship">("stock");
   const [note, setNote] = useState("");
   const [expected, setExpected] = useState("");
   const [busy, setBusy] = useState(false);
@@ -449,6 +453,7 @@ function CreatePo({
         body: {
           distributor_id: distId,
           ship_to: shipTo.trim(),
+          po_type: poType,
           note: note.trim() || null,
           expected_date: expected || null,
           lines: lines.map((l) => ({
@@ -497,6 +502,37 @@ function CreatePo({
               </button>
             </div>
           )}
+        </div>
+
+        <div className="space-y-1">
+          <div className="font-medium">Type</div>
+          <div className="flex flex-wrap gap-4 text-sm">
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                name="po_type"
+                checked={poType === "stock"}
+                onChange={() => {
+                  setPoType("stock");
+                  setShipTo(defaultShip);
+                }}
+              />{" "}
+              Stock (buying inventory, ships to us)
+            </label>
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                name="po_type"
+                checked={poType === "drop_ship"}
+                onChange={() => {
+                  setPoType("drop_ship");
+                  setShipTo("");
+                }}
+              />{" "}
+              Drop ship (ships straight to a customer)
+            </label>
+          </div>
+          {poType === "drop_ship" && <div className="text-sm text-gray-600">Type the customer’s name and address in Ship To below. Make one PO per customer address.</div>}
         </div>
 
         <div className="space-y-2">
@@ -548,7 +584,7 @@ function CreatePo({
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block font-medium text-gray-700">
             <span className="mb-1 block">Ship To</span>
-            <textarea className={inp} rows={4} value={shipTo} placeholder="Type a ship-to address" onChange={(e) => setShipTo(e.target.value)} />
+            <textarea className={inp} rows={4} value={shipTo} placeholder={poType === "drop_ship" ? "Customer name and address" : "Type a ship-to address"} onChange={(e) => setShipTo(e.target.value)} />
             <span className="mt-1 flex gap-3 text-sm font-normal">
               <button type="button" className="underline" onClick={() => setShipTo("")}>
                 Clear
@@ -695,7 +731,10 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
           <tbody className="divide-y divide-gray-100">
             {data.items.map((r) => (
               <ClickRow key={r.id} onOpen={() => view(r.id)}>
-                <td className="px-3 py-2 font-semibold">{r.po_number}</td>
+                <td className="px-3 py-2 font-semibold">
+                  {r.po_number}
+                  {r.po_type === "drop_ship" && <span className="ml-2 font-normal"><Badge tone="blue">drop ship</Badge></span>}
+                </td>
                 <td className="whitespace-nowrap px-3 py-2">{new Date(r.created_at).toLocaleDateString()}</td>
                 <td className="px-3 py-2">{r.vendor_name}</td>
                 <td className="whitespace-nowrap px-3 py-2">
@@ -770,6 +809,8 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
               <div>
                 <div className="text-sm font-semibold uppercase text-gray-500">Ship to</div>
                 <div className="whitespace-pre-line text-gray-600">{open.ship_to}</div>
+                {open.po_type === "drop_ship" && <div className="mt-1"><Badge tone="blue">drop ship</Badge></div>}
+                {open.supplier_order_number && <div className="mt-1 text-sm text-gray-600">Distributor order {open.supplier_order_number}</div>}
               </div>
             </div>
             <div className="text-gray-600">

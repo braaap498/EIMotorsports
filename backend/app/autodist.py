@@ -12,6 +12,8 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /api/order/quote        price and shipping options for an order (creates nothing)
   POST /api/order/place        places an order (confirm required; real orders also need AUTOMATIC_DIST_ALLOW_LIVE_ORDERS)
   GET  /api/orders             the orders placed from this screen
+  GET  /api/pos                open purchase orders to Automatic Distributors that can be ordered from here
+  GET  /api/pos/{id}           one of them: lines matched to Automatic Distributors part numbers, ship-to split into fields
   GET  /opportunities          ranked lists of the parts most worth selling (margin, stock, our own sales)
   GET  /ftp/status             is the Automatic Distributors FTP login set up on the server (nothing is contacted)
   POST /ftp/check              log in to the Automatic Distributors FTP server, list the folders, preview the inventory file
@@ -1795,6 +1797,7 @@ class OrderIn(BaseModel):
     promo_code: str = Field("", max_length=40)
     signature_required: bool = False
     backorder: bool = False
+    po_id: Optional[int] = None  # the purchase order this order comes from; it is marked sent once the order is placed
     confirm: bool = False
 
 
@@ -2008,7 +2011,10 @@ def api_order_place(body: OrderIn, db: Session = Depends(get_db), user: AuthUser
         saved = False
         log.exception("autodist order %s placed but not saved", result["order_number"])
     log.info("autodist order placed on %s server: PO %s -> order %s", mode, po, result["order_number"] or "(none)")
-    return {"server": url, "mode": mode, "placed": bool(result["order_number"]), "saved": saved, **result}
+    po_updated = None
+    if body.po_id and result["order_number"]:
+        po_updated = _mark_po_placed(db, body.po_id, po, result["order_number"])
+    return {"server": url, "mode": mode, "placed": bool(result["order_number"]), "saved": saved, "po_updated": po_updated, **result}
 
 
 @router.get("/api/orders")
@@ -2026,6 +2032,152 @@ def api_orders(db: Session = Depends(get_db)):
         db.rollback()
         return {"table_missing": True, "orders": []}
     return {"table_missing": False, "orders": [dict(r._mapping) for r in rows]}
+
+
+# --------------------------------------------------------------------------
+# our purchase orders to this distributor (so an order starts from a PO)
+# --------------------------------------------------------------------------
+# Only open POs whose vendor is Automatic Distributors are offered, and not ones already placed through the API.
+# Each PO has a type (stock or drop ship); a drop ship PO's ship-to is the customer. The PO tables belong to
+# app/admin_purchase_orders.py; this only reads them, and writes back the order number once an order is placed.
+_PO_VENDOR = "(h.vendor_name ilike '%automatic dist%' or h.vendor_name ilike '%autodist%')"
+
+
+def _po_columns(db: Session) -> set[str]:
+    rows = db.execute(
+        text("select column_name from information_schema.columns where table_schema = current_schema() and table_name = 'po_headers'")
+    ).all()
+    return {r[0] for r in rows}
+
+
+def _parse_ship_to(txt: Optional[str]) -> dict:
+    """Best effort: a PO's ship-to is free text (name, street, 'City, ST 12345'). Anything not recognised is left blank to type in."""
+    lines = [l.strip() for l in (txt or "").splitlines() if l.strip()]
+    out: dict = {}
+    for l in list(lines):
+        m = re.match(r"(?i)^(?:phone|tel|ph)[:.\s]+(.+)$", l)
+        if m:
+            out["phone"] = m.group(1).strip()
+            lines.remove(l)
+    if lines and re.fullmatch(r"(?i)(usa|us|u\.s\.a?\.?|united states( of america)?)", lines[-1]):
+        lines.pop()
+    if lines:
+        m = re.match(r"^(.*?),?\s+([A-Za-z]{2})\.?\s+(\d{5}(?:-\d{4})?)$", lines[-1])
+        if m:
+            out.update({"city": m.group(1).strip(), "state": m.group(2).upper(), "zipCode": m.group(3)})
+            lines.pop()
+    if lines:
+        out["name"] = lines[0]
+        for key, val in zip(("addressLine1", "addressLine2", "addressLine3"), lines[1:4]):
+            out[key] = val
+    return out
+
+
+@router.get("/api/pos")
+def api_pos(db: Session = Depends(get_db)):
+    """Open purchase orders to Automatic Distributors that have not been placed through the API yet."""
+    cols = _po_columns(db)
+    type_sel = "coalesce(h.po_type, 'stock')" if "po_type" in cols else "'stock'"
+    url, _key = _api_settings()
+    mode = _api_mode(url)
+    sql = (
+        f"select h.id, h.po_number, h.vendor_name, h.sent_at, h.created_at, {type_sel} as po_type, "
+        f"(select count(*) from po_lines l where l.po_id = h.id and l.received_at is null) as open_lines "
+        f"from po_headers h where h.status = 'open' and {_PO_VENDOR} %s order by h.po_number desc limit 100"
+    )
+    placed = (
+        "and not exists (select 1 from supplier_orders o where o.supplier = :s and o.mode = :m "
+        "and o.po_number = cast(h.po_number as text) and o.order_number <> '')"
+    )
+    try:
+        rows = db.execute(text(sql % placed), {"s": SUPPLIER, "m": mode}).all()
+    except Exception:
+        db.rollback()  # the orders table is not there yet: show every open PO
+        rows = db.execute(text(sql % ""), {}).all()
+    return {"mode": mode, "items": [dict(r._mapping) for r in rows]}
+
+
+def _supplier_matches(db: Session, item: Optional[str], barcode: Optional[str]) -> tuple[list[dict], Optional[str]]:
+    """Automatic Distributors parts that could be this PO line: by barcode first, then part number (the same rule as the match report)."""
+    upc = re.sub(r"\D", "", barcode or "").lstrip("0")
+    mpn = re.sub(r"[^A-Za-z0-9]", "", item or "").upper()
+    cols = "s.sku, s.manufacturer, s.name, (s.qty_indiana + s.qty_nevada) as stock, s.effective_cost as cost"
+    found: list[dict] = []
+    if len(upc) >= 8:
+        found = [dict(r._mapping) for r in db.execute(text(f"select {cols} from supplier_items s where s.supplier = :s and s.active and s.upc_norm = :u order by s.sku limit 8"), {"s": SUPPLIER, "u": upc}).all()]
+    if not found and mpn:
+        found = [dict(r._mapping) for r in db.execute(text(f"select {cols} from supplier_items s where s.supplier = :s and s.active and s.mfr_number_norm = :m order by s.sku limit 8"), {"s": SUPPLIER, "m": mpn}).all()]
+    pick = found[0]["sku"] if len(found) == 1 else None
+    return found, pick
+
+
+@router.get("/api/pos/{po_id}")
+def api_po(po_id: int, db: Session = Depends(get_db)):
+    """One PO ready to order from: its open lines matched to Automatic Distributors part numbers, and its ship-to split into fields."""
+    cols = _po_columns(db)
+    type_sel = "coalesce(h.po_type, 'stock')" if "po_type" in cols else "'stock'"
+    src_sel = "h.source" if "source" in cols else "null"
+    h = db.execute(
+        text(f"select h.id, h.po_number, h.vendor_name, h.ship_to, h.note, h.sent_at, h.status, {type_sel} as po_type, {src_sel} as source from po_headers h where h.id = :i"),
+        {"i": po_id},
+    ).first()
+    if not h:
+        raise HTTPException(404, "That purchase order does not exist.")
+    if h.status != "open":
+        raise HTTPException(409, f"PO {h.po_number} is {h.status}, so it cannot be ordered.")
+    rows = db.execute(
+        text(
+            "select l.id, l.item, l.description, l.quantity, l.rate, p.barcode from po_lines l "
+            "left join products p on p.id = l.product_id where l.po_id = :i and l.received_at is null order by l.id"
+        ),
+        {"i": po_id},
+    ).all()
+    lines = []
+    for r in rows:
+        cands, pick = _supplier_matches(db, r.item, r.barcode)
+        lines.append(
+            {
+                "line_id": r.id,
+                "item": r.item,
+                "description": r.description,
+                "quantity": r.quantity,
+                "rate": float(r.rate) if r.rate is not None else None,
+                "number": pick or "",
+                "candidates": cands,
+            }
+        )
+    return {
+        "id": h.id,
+        "po_number": h.po_number,
+        "po_type": h.po_type,
+        "source": h.source,
+        "vendor_name": h.vendor_name,
+        "note": h.note,
+        "sent_at": h.sent_at,
+        "ship_to_text": h.ship_to,
+        "ship_to": _parse_ship_to(h.ship_to),
+        "lines": lines,
+    }
+
+
+def _mark_po_placed(db: Session, po_id: int, po_number: str, order_number: str) -> bool:
+    """After an order is placed: mark the PO sent and keep the distributor's order number on it."""
+    try:
+        sets = "sent_at = coalesce(sent_at, now()), updated_at = now()"
+        params: dict = {"i": po_id, "pn": po_number}
+        if "supplier_order_number" in _po_columns(db):
+            sets += ", supplier_order_number = :o"
+            params["o"] = order_number
+        got = db.execute(
+            text(f"update po_headers set {sets} where id = :i and cast(po_number as text) = :pn and status <> 'cancelled' returning id"),
+            params,
+        ).first()
+        db.commit()
+        return got is not None
+    except Exception:
+        db.rollback()
+        log.exception("autodist order placed but PO %s could not be updated", po_number)
+        return False
 
 
 # --------------------------------------------------------------------------

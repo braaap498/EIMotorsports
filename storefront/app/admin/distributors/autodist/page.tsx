@@ -135,6 +135,7 @@ function AutodistInner() {
   const [apiRes, setApiRes] = useState<ApiAvail | null>(null);
   const [apiErr, setApiErr] = useState<string | null>(null);
   const [findReq, setFindReq] = useState<{ q: string; n: number } | null>(null);
+  const [openPo, setOpenPo] = useState<number | null>(null); // /admin/distributors/autodist?po=ID opens that purchase order on the Orders tab
 
   function pick(k: Tab) {
     setTab(k);
@@ -160,6 +161,15 @@ function AutodistInner() {
       setMsg({ kind: "error", text: errMsg(e) });
     }
   }
+
+  useEffect(() => {
+    const id = parseInt(new URLSearchParams(window.location.search).get("po") ?? "", 10);
+    if (Number.isFinite(id)) {
+      setOpenPo(id);
+      setTab("orders");
+      setOpened((o) => ({ ...o, orders: true }));
+    }
+  }, []);
 
   useEffect(() => {
     void refresh();
@@ -421,7 +431,7 @@ function AutodistInner() {
 
       {opened.orders && (
         <div className={tab === "orders" ? "" : "hidden"}>
-          <AutodistOrders status={apiStatus} />
+          <AutodistOrders status={apiStatus} openPo={openPo} />
         </div>
       )}
 

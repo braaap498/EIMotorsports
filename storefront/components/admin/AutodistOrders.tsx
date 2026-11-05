@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Notice, btnCls, btn2Cls, inputCls } from "./ui";
 
@@ -26,6 +26,7 @@ type Placed = {
   mode: "live" | "test";
   placed: boolean;
   saved: boolean;
+  po_updated?: boolean | null;
   order_number: string;
   message: string | null;
   po: string | null;
@@ -36,15 +37,33 @@ type Placed = {
 };
 type PastOrder = { id: number; mode: string; po_number: string; order_number: string; message: string | null; invoice_amount: string | null; created_at: string; created_by: string | null };
 type Status = { configured: boolean; server: string; mode: "live" | "test" };
+type PoRow = { id: number; po_number: number; vendor_name: string; sent_at: string | null; po_type: "stock" | "drop_ship"; open_lines: number };
+type Cand = { sku: string; manufacturer: string | null; name: string | null; stock: number | null; cost: string | number | null };
+type PoFull = {
+  id: number;
+  po_number: number;
+  po_type: "stock" | "drop_ship";
+  note: string | null;
+  source?: string | null;
+  sent_at: string | null;
+  ship_to_text: string | null;
+  ship_to: Record<string, string>;
+  lines: { line_id: number; item: string | null; description: string | null; quantity: number; rate: number | null; number: string; candidates: Cand[] }[];
+};
 
 const money = (v: string | number | null | undefined) => (v == null || v === "" || isNaN(Number(v)) ? "—" : `$${Number(v).toFixed(2)}`);
 const emptyAddr = { name: "", contact: "", addressLine1: "", addressLine2: "", city: "", state: "", zipCode: "", countryCode: "US", phone: "", classification: "" };
 
-export default function AutodistOrders({ status }: { status: Status | null }) {
+export default function AutodistOrders({ status, openPo }: { status: Status | null; openPo?: number | null }) {
   const [po, setPo] = useState("");
   const [comment, setComment] = useState("");
   const [addr, setAddr] = useState({ ...emptyAddr });
-  const [lines, setLines] = useState([{ number: "", quantity: "1" }]);
+  const [lines, setLines] = useState<{ number: string; quantity: string; label?: string; cands?: Cand[] }[]>([{ number: "", quantity: "1" }]);
+  const [pos, setPos] = useState<PoRow[] | null>(null);
+  const [poId, setPoId] = useState<number | "">("");
+  const [poInfo, setPoInfo] = useState<PoFull | null>(null);
+  const [chk, setChk] = useState({ addr: false, parts: false, total: false }); // the "I checked it" boxes; cleared whenever the order changes
+  const openedPo = useRef(false);
   const [method, setMethod] = useState("");
   const [carrier, setCarrier] = useState("");
   const [acct, setAcct] = useState("");
@@ -69,6 +88,7 @@ export default function AutodistOrders({ status }: { status: Status | null }) {
     promo_code: promo.trim(),
     signature_required: signature,
     backorder,
+    po_id: poId === "" ? null : poId,
     confirm,
   });
   // the quote only goes stale when something that can change the price changes (not the PO number, comment or shipping method)
@@ -84,9 +104,55 @@ export default function AutodistOrders({ status }: { status: Status | null }) {
       setPast([]);
     }
   }
+  async function loadPos() {
+    try {
+      setPos((await api<{ items: PoRow[] }>("/autodist/api/pos")).items);
+    } catch {
+      setPos([]);
+    }
+  }
   useEffect(() => {
     void loadPast();
+    void loadPos();
   }, []);
+
+  useEffect(() => {
+    if (openPo != null && pos != null && !openedPo.current) {
+      openedPo.current = true;
+      void pickPo(String(openPo));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openPo, pos]);
+
+  async function pickPo(v: string) {
+    setQuote(null);
+    setPlaced(null);
+    setErr(null);
+    if (!v) {
+      setPoId("");
+      setPoInfo(null);
+      setPo("");
+      setComment("");
+      setAddr({ ...emptyAddr });
+      setLines([{ number: "", quantity: "1" }]);
+      return;
+    }
+    setBusy("po");
+    try {
+      const p = await api<PoFull>(`/autodist/api/pos/${v}`);
+      setPoId(p.id);
+      setPoInfo(p);
+      setPo(String(p.po_number));
+      setComment(p.note ?? "");
+      setAddr({ ...emptyAddr, ...p.ship_to });
+      setMethod("");
+      setLines(p.lines.map((l) => ({ number: l.number, quantity: String(l.quantity), label: l.item || l.description || "", cands: l.candidates })));
+    } catch (e) {
+      setErr(errMsg(e));
+    } finally {
+      setBusy("");
+    }
+  }
 
   async function getQuote() {
     setBusy("quote");
@@ -120,6 +186,9 @@ export default function AutodistOrders({ status }: { status: Status | null }) {
       setPlaced(r);
       setQuote(null);
       void loadPast();
+      void loadPos();
+      setPoId("");
+      setPoInfo(null);
     } catch (e) {
       setErr(errMsg(e));
     } finally {
@@ -134,7 +203,16 @@ export default function AutodistOrders({ status }: { status: Status | null }) {
       {el}
     </label>
   );
+  useEffect(() => {
+    setChk({ addr: false, parts: false, total: false });
+  }, [keyNow, poId]);
+  const reviewed = chk.addr && chk.parts && chk.total;
+  const sourceLabel = poInfo?.source?.startsWith("web:") ? `Website order ${poInfo.source.slice(4)}` : poInfo?.source?.startsWith("ebay:") ? `eBay order ${poInfo.source.slice(5)}` : null;
+  const need: [string, string][] = [["name", "name"], ["addressLine1", "street"], ["city", "city"], ["state", "state"], ["zipCode", "ZIP"]];
+  const addrMissing = need.filter(([k]) => !(addr as Record<string, string>)[k]?.trim()).map(([, l]) => l);
+  const poCost = poInfo ? poInfo.lines.reduce((n, l) => n + (l.rate ?? 0) * l.quantity, 0) : null;
   const t = quote?.q.totals;
+  const unmatched = poInfo ? lines.filter((l) => !l.number.trim()).length : 0; // PO lines with no Automatic Distributors part number would be left off the order
   const ready = status?.configured && lines.some((l) => l.number.trim());
 
   return (
@@ -152,15 +230,38 @@ export default function AutodistOrders({ status }: { status: Status | null }) {
         <Notice kind="info">This is the live server. Placing a real order is switched off unless AUTOMATIC_DIST_ALLOW_LIVE_ORDERS=yes is set in Render. Practice on the test server first.</Notice>
       )}
 
+      <div className="space-y-2 rounded border border-gray-200 bg-white p-4">
+        <label className="flex flex-col gap-0.5 text-xs text-gray-600">
+          Start from a purchase order to Automatic Distributors
+          <select className={`${inputCls} !w-auto min-w-[22rem]`} value={poId} disabled={busy !== ""} onChange={(e) => void pickPo(e.target.value)}>
+            <option value="">{pos && pos.length === 0 ? "No open purchase orders to Automatic Distributors" : "Or type an order by hand…"}</option>
+            {(pos ?? []).map((p) => (
+              <option key={p.id} value={p.id}>
+                PO {p.po_number} · {p.po_type === "drop_ship" ? "Drop ship" : "Stock"} · {p.open_lines} line{p.open_lines === 1 ? "" : "s"}
+                {p.sent_at ? " · marked sent" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        {poInfo && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+            <Badge tone={poInfo.po_type === "drop_ship" ? "blue" : "gray"}>{poInfo.po_type === "drop_ship" ? "Drop ship: ships to the customer" : "Stock: ships to us"}</Badge>
+            {poInfo.sent_at && <span className="text-amber-700">This PO is already marked sent ({new Date(poInfo.sent_at).toLocaleDateString()}). Check it was not ordered another way.</span>}
+            {poInfo.ship_to_text && !addr.addressLine1 && <span className="text-amber-700">The PO’s ship-to could not be split into fields. Fill them in on the right.</span>}
+          </div>
+        )}
+      </div>
+
       <div className="grid gap-4 rounded border border-gray-200 bg-white p-4 md:grid-cols-2">
         <div className="space-y-2">
           <div className="font-medium">Order</div>
-          {field("PO number (required to place)", <input className={inputCls} value={po} onChange={(e) => setPo(e.target.value)} />)}
+          {field("PO number (required to place)", <input className={inputCls} value={po} disabled={poId !== ""} onChange={(e) => setPo(e.target.value)} />)}
           {field("Comment", <input className={inputCls} value={comment} onChange={(e) => setComment(e.target.value)} />)}
           <div className="space-y-1">
             <div className="text-xs text-gray-600">Parts</div>
             {lines.map((l, i) => (
-              <div key={i} className="flex gap-2">
+              <div key={i} className="space-y-0.5">
+              <div className="flex gap-2">
                 <input className={inputCls} placeholder="Part number" value={l.number} onChange={(e) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, number: e.target.value } : x)))} />
                 <input className={`${inputCls} !w-20`} inputMode="numeric" value={l.quantity} onChange={(e) => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, quantity: e.target.value } : x)))} />
                 {lines.length > 1 && (
@@ -168,6 +269,25 @@ export default function AutodistOrders({ status }: { status: Status | null }) {
                     Remove
                   </button>
                 )}
+              </div>
+              {l.label && <div className="text-xs text-gray-500">On the PO: {l.label}</div>}
+              {l.cands && l.cands.length > 0 && !l.number.trim() && (
+                <div className="flex flex-wrap items-center gap-1 text-xs">
+                  <span className="text-amber-700">More than one match, pick one:</span>
+                  {l.cands.map((c) => (
+                    <button
+                      key={c.sku}
+                      type="button"
+                      className="rounded border border-gray-300 bg-white px-2 py-0.5 hover:bg-gray-100"
+                      onClick={() => setLines((ls) => ls.map((x, j) => (j === i ? { ...x, number: c.sku } : x)))}
+                    >
+                      {c.sku}
+                      {c.manufacturer ? ` · ${c.manufacturer}` : ""} · {c.stock ?? 0} in stock
+                    </button>
+                  ))}
+                </div>
+              )}
+              {l.cands && l.cands.length === 0 && !l.number.trim() && <div className="text-xs text-amber-700">No Automatic Distributors part matched this line. Type the part number.</div>}
               </div>
             ))}
             <button type="button" className={btn2Cls} onClick={() => setLines((ls) => [...ls, { number: "", quantity: "1" }])}>
@@ -221,11 +341,17 @@ export default function AutodistOrders({ status }: { status: Status | null }) {
         <button type="button" className={btnCls} disabled={busy !== "" || !ready} onClick={() => void getQuote()}>
           {busy === "quote" ? "Getting quote…" : "Get quote"}
         </button>
-        <button type="button" className={btnCls} disabled={busy !== "" || !fresh || !po.trim()} onClick={() => void place()}>
+        <button type="button" className={btnCls} disabled={busy !== "" || !fresh || !po.trim() || unmatched > 0 || !reviewed} onClick={() => void place()}>
           {busy === "place" ? "Placing…" : "Place order"}
         </button>
         {quote && !fresh && <span className="text-xs text-amber-700">You changed the order after the quote. Get a new quote before placing.</span>}
         {quote && fresh && !po.trim() && <span className="text-xs text-amber-700">Enter a PO number to place.</span>}
+        {quote && fresh && po.trim() && unmatched === 0 && !reviewed && <span className="text-xs text-amber-700">Tick the three checks under the quote to place.</span>}
+        {unmatched > 0 && (
+          <span className="text-xs text-amber-700">
+            {unmatched} PO line{unmatched === 1 ? " has" : "s have"} no Automatic Distributors part number. Pick or type one, or fix the PO, before placing.
+          </span>
+        )}
       </div>
 
       {err && <Notice kind="error">{err}</Notice>}
@@ -271,6 +397,79 @@ export default function AutodistOrders({ status }: { status: Status | null }) {
         </div>
       )}
 
+      {quote && fresh && t && (
+        <div className="space-y-2 rounded border-2 border-blue-200 bg-white p-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2 font-medium">
+            Check before placing
+            {poInfo && <Badge tone={poInfo.po_type === "drop_ship" ? "blue" : "gray"}>{poInfo.po_type === "drop_ship" ? "Drop ship" : "Stock"}</Badge>}
+            {sourceLabel && <span className="font-normal text-gray-600">for {sourceLabel}</span>}
+            <span className="font-normal text-gray-600">· PO {po || "(none)"}</span>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-0.5">
+              <div className="text-gray-500">Ships to</div>
+              <div>{addr.name}</div>
+              {addr.contact && <div>Attn: {addr.contact}</div>}
+              <div>{[addr.addressLine1, addr.addressLine2].filter(Boolean).join(", ")}</div>
+              <div>
+                {addr.city}, {addr.state} {addr.zipCode} {addr.countryCode}
+              </div>
+              {addr.phone && <div>{addr.phone}</div>}
+              {method && <div className="text-gray-600">Shipping: {method}</div>}
+              {addrMissing.length > 0 && <div className="text-red-700">Missing: {addrMissing.join(", ")}</div>}
+            </div>
+            <div>
+              <table className="w-full text-left">
+                <thead className="text-gray-500">
+                  <tr>
+                    <th className="py-0.5 pr-3">Part</th>
+                    <th className="py-0.5 pr-3">Qty</th>
+                    <th className="py-0.5">In stock</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lines
+                    .filter((l) => l.number.trim())
+                    .map((l, i) => {
+                      const q = Math.max(1, parseInt(l.quantity, 10) || 1);
+                      const c = l.cands?.find((x) => x.sku === l.number.trim());
+                      const low = c != null && (c.stock ?? 0) < q;
+                      return (
+                        <tr key={i}>
+                          <td className="py-0.5 pr-3">
+                            {l.number}
+                            {l.label ? <span className="text-gray-500"> · {l.label}</span> : null}
+                          </td>
+                          <td className="py-0.5 pr-3">{q}</td>
+                          <td className={`py-0.5 ${low ? "font-medium text-red-700" : ""}`}>{c ? `${c.stock ?? 0}${low ? " (not enough)" : ""}` : "—"}</td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+              <div className="pt-1 text-gray-600">
+                Quote parts total {money(t.sales_amount)}
+                {poCost != null && ` · PO cost ${money(poCost)}`}
+                {poCost != null && t.sales_amount != null && Math.abs(Number(t.sales_amount) - poCost) > Math.max(1, poCost * 0.02) && (
+                  <span className="text-amber-700"> · these differ, check the prices</span>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-4 pt-1">
+            <label className="flex items-center gap-1">
+              <input type="checkbox" checked={chk.addr} disabled={addrMissing.length > 0} onChange={(e) => setChk((c) => ({ ...c, addr: e.target.checked }))} /> Address is correct
+            </label>
+            <label className="flex items-center gap-1">
+              <input type="checkbox" checked={chk.parts} onChange={(e) => setChk((c) => ({ ...c, parts: e.target.checked }))} /> Parts and quantities are correct
+            </label>
+            <label className="flex items-center gap-1">
+              <input type="checkbox" checked={chk.total} onChange={(e) => setChk((c) => ({ ...c, total: e.target.checked }))} /> Prices and shipping are OK
+            </label>
+          </div>
+        </div>
+      )}
+
       {placed && (
         <div className="space-y-2 rounded border border-gray-200 bg-white p-3 text-xs">
           <div className="flex flex-wrap items-center gap-2">
@@ -281,6 +480,8 @@ export default function AutodistOrders({ status }: { status: Status | null }) {
             <span>{money(placed.invoice_amount)}</span>
           </div>
           {placed.message && <div>{placed.message}</div>}
+          {placed.po_updated === true && <div className="text-green-700">The purchase order is marked sent and now shows this order number.</div>}
+          {placed.po_updated === false && <Notice kind="error">The order went through, but the purchase order could not be updated. Mark PO {placed.po || po} sent by hand and note order {placed.order_number}.</Notice>}
           {!placed.saved && <Notice kind="error">The order went through but could not be saved here. Write down order number {placed.order_number}.</Notice>}
           <table className="w-full text-left">
             <thead className="text-gray-500">

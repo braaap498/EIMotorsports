@@ -17,6 +17,9 @@ Mounted at /admin/purchase-orders/* (owner / admin, plus staff holding "inventor
   GET    /purchase-orders/issues           POs with receiving problems (short, over, or not on the PO), searchable
   GET    /purchase-orders/{id}/export?format=pdf|xlsx     download it again, any time
 
+A PO has a type: "stock" (buying inventory, received into stock) or "drop_ship" (ships straight to a customer). The type
+is chosen when it is made. Rows made before the type existed count as stock.
+
 The "Cost" on a PO line is what you pay the distributor. It starts from the product's cost (admin only, never shown
 to customers) and can be changed per PO line.
 
@@ -118,6 +121,15 @@ def _free_number(db: Session) -> int:
     so a number is never reused or skipped. The lock keeps two people creating a PO at once from getting the same number."""
     db.execute(text("select pg_advisory_xact_lock(7001)"))
     return int(db.execute(text("select coalesce(max(po_number), 0) + 1 from po_headers")).scalar())
+
+
+def _po_cols(db: Session) -> set[str]:
+    """Which optional columns po_headers has yet (po_type, supplier_order_number: sql/po_supplier_fields.sql), so the screen
+    keeps working before that script has been run."""
+    rows = db.execute(
+        text("select column_name from information_schema.columns where table_schema = current_schema() and table_name = 'po_headers'")
+    ).all()
+    return {r[0] for r in rows}
 
 
 def _release_parts(db: Session, product_ids) -> None:
@@ -281,15 +293,21 @@ class PoIn(BaseModel):
     ship_to: Optional[str] = Field(None, max_length=400)   # empty text = no ship-to; missing = the default address
     note: Optional[str] = Field(None, max_length=300)
     expected_date: Optional[date] = None   # when the parts are expected; sets the backorder date on each part
+    po_type: str = Field("stock", pattern="^(stock|drop_ship)$")   # stock = buying inventory; drop_ship = ships straight to a customer
+    source: Optional[str] = Field(None, max_length=60)             # e.g. "web:1042" when made from a website order
     lines: list[PoLineIn] = Field(..., min_length=1, max_length=200)
 
 
 def _po_detail(db: Session, po_id: int) -> dict:
+    cols = _po_cols(db)
+    extra = (", coalesce(po_type, 'stock') as po_type" if "po_type" in cols else ", 'stock' as po_type") + (
+        ", supplier_order_number" if "supplier_order_number" in cols else ", null as supplier_order_number"
+    ) + (", source" if "source" in cols else ", null as source")
     h = db.execute(
         text(
             "select id, po_number, distributor_id, vendor_name, vendor_address, ship_to, note, total_cents, "
-            "       created_by, created_at, sent_at, updated_at, status, received_at, cancelled_at, cancelled_by "
-            "from po_headers where id = :id"
+            "       created_by, created_at, sent_at, updated_at, status, received_at, cancelled_at, cancelled_by" + extra +
+            " from po_headers where id = :id"
         ),
         {"id": po_id},
     ).first()
@@ -359,12 +377,22 @@ def create_po(body: PoIn, db: Session = Depends(get_db), user: AuthUser = Depend
             )
         rows, kit_notes = expand_rows(db, rows, dist.id)  # a kit becomes one line per piece
         total = po_total(rows)
+        cols = _po_cols(db)
+        has_type = "po_type" in cols
+        has_source = "source" in cols and bool(body.source)
         header = db.execute(
             text(
-                "insert into po_headers (po_number, distributor_id, vendor_name, vendor_address, ship_to, note, total_cents, created_by) "
-                "values (:pn, :d, :vn, :va, :st, :note, :tc, :by) returning id, po_number"
+                "insert into po_headers (po_number, distributor_id, vendor_name, vendor_address, ship_to, note, total_cents, created_by"
+                + (", po_type" if has_type else "")
+                + (", source" if has_source else "")
+                + ") values (:pn, :d, :vn, :va, :st, :note, :tc, :by"
+                + (", :pt" if has_type else "")
+                + (", :src" if has_source else "")
+                + ") returning id, po_number"
             ),
             {
+                **({"pt": body.po_type} if has_type else {}),
+                **({"src": body.source} if has_source else {}),
                 "pn": _free_number(db),
                 "d": dist.id,
                 "vn": dist.name,
@@ -385,15 +413,17 @@ def create_po(body: PoIn, db: Session = Depends(get_db), user: AuthUser = Depend
                  "q": r["quantity"], "rate": r["rate"],
                  "kp": r.get("kit_product_id"), "kq": r.get("kit_qty"), "pk": r.get("per_kit")},
             )
-        # Backordered is ticked by default for every part on the new PO (it can be un-ticked on the Stock tab).
-        db.execute(
-            text(
-                "update products set on_order = true, updated_at = now()"
-                + (", expected_date = :d" if body.expected_date else "")
-                + " where id = any(cast(:ids as bigint[]))"
-            ),
-            {"ids": ids, **({"d": body.expected_date} if body.expected_date else {})},
-        )
+        # Backordered is ticked by default for every part on a new STOCK PO (it can be un-ticked on the Stock tab).
+        # A drop ship PO never marks parts Backordered: nothing is coming to our shelf, so the website must not say so.
+        if body.po_type != "drop_ship":
+            db.execute(
+                text(
+                    "update products set on_order = true, updated_at = now()"
+                    + (", expected_date = :d" if body.expected_date else "")
+                    + " where id = any(cast(:ids as bigint[]))"
+                ),
+                {"ids": ids, **({"d": body.expected_date} if body.expected_date else {})},
+            )
         db.commit()
     except HTTPException:
         raise
@@ -405,6 +435,81 @@ def create_po(body: PoIn, db: Session = Depends(get_db), user: AuthUser = Depend
     po = _po_detail(db, header.id)
     po["missing_part_numbers"] = [r["description"] for r in rows if not r["item"]]
     po["kit_notes"] = kit_notes
+    return po
+
+
+class FromWebOrderIn(BaseModel):
+    order_number: str = Field(..., min_length=1, max_length=40)
+    all_lines: bool = False   # false = only the lines the shelf cannot cover; true = every line on the order
+
+
+def _po_ship_to(addr: dict) -> str:
+    """A website order's address as the PO's ship-to text (the Automatic Distributors screen reads it back into fields)."""
+    parts = [
+        (addr.get("full_name") or "").strip(),
+        (addr.get("line1") or "").strip(),
+        (addr.get("line2") or "").strip(),
+        f"{(addr.get('city') or '').strip()}, {(addr.get('region') or '').strip()} {(addr.get('postal_code') or '').strip()}".strip(", "),
+    ]
+    if (addr.get("phone") or "").strip():
+        parts.append("Phone: " + addr["phone"].strip())
+    return "\n".join(p for p in parts if p)
+
+
+@router.post("/from-web-order", status_code=201)
+@needs("inventory.purchase", "inventory.ship")
+def po_from_web_order(body: FromWebOrderIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Make a DROP SHIP purchase order to Automatic Distributors for the parts a website order is short of.
+    It ships straight to the customer, so the PO's ship-to is the customer's address."""
+    cols = _po_cols(db)
+    if not {"po_type", "source"} <= cols:
+        raise HTTPException(503, "Run sql/po_supplier_fields.sql in Supabase first (it adds the PO type and source).")
+    o = db.execute(
+        text("select id, order_number, status, shipping_address from orders where order_number = :n"), {"n": body.order_number.strip()}
+    ).first()
+    if not o:
+        raise HTTPException(404, "No website order with that number.")
+    if o.status in ("cancelled", "shipped"):
+        raise HTTPException(409, f"Order {o.order_number} is {o.status}.")
+    src = f"web:{o.order_number}"
+    dup = db.execute(
+        text("select po_number from po_headers where source = :s and status <> 'cancelled' order by id desc limit 1"), {"s": src}
+    ).scalar()
+    if dup:
+        raise HTTPException(409, f"PO {dup} was already made for order {o.order_number}. Cancel it first if you need a new one.")
+    dists = db.execute(
+        text("select id from po_distributors where name ilike '%automatic dist%' or name ilike '%autodist%' order by id")
+    ).all()
+    if len(dists) != 1:
+        raise HTTPException(
+            409,
+            "Add one distributor named Automatic Distributors on the Distributors page first." if not dists
+            else "More than one distributor looks like Automatic Distributors. Keep one, or rename the others.",
+        )
+    items = db.execute(
+        text("select product_id, title, quantity from order_items where order_id = :o and product_id is not null order by id"), {"o": o.id}
+    ).all()
+    from app.stock import order_shortfalls
+
+    short = {r.product_id for r in order_shortfalls(db, [o.id]) if r.short and r.short > 0}
+    picked = [i for i in items if body.all_lines or i.product_id in short]
+    if not picked:
+        raise HTTPException(409, "Nothing on this order is short of stock. (Only paid orders waiting to be picked are checked.) Use \"every line\" to order it all anyway.")
+    addr = o.shipping_address or {}
+    if not all((addr.get(k) or "").strip() for k in ("full_name", "line1", "city", "region", "postal_code")):
+        raise HTTPException(409, "That order's shipping address is incomplete.")
+    po = create_po(
+        PoIn(
+            distributor_id=dists[0].id,
+            ship_to=_po_ship_to(addr),
+            note=f"Drop ship for website order {o.order_number}",
+            po_type="drop_ship",
+            source=src,
+            lines=[PoLineIn(product_id=i.product_id, quantity=i.quantity) for i in picked],
+        ),
+        db=db,
+        user=user,
+    )
     return po
 
 
@@ -434,10 +539,11 @@ def list_pos(
         )
     where = ("where " + " and ".join(conds)) if conds else ""
     total = db.execute(text(f"select count(*) from po_headers h {where}"), params).scalar()
+    type_sel = "coalesce(h.po_type, 'stock')" if "po_type" in _po_cols(db) else "'stock'"
     rows = db.execute(
         text(
             f"""
-            select h.id, h.po_number, h.vendor_name, h.total_cents, h.created_by, h.created_at, h.sent_at, h.status,
+            select h.id, h.po_number, h.vendor_name, h.total_cents, h.created_by, h.created_at, h.sent_at, h.status, {type_sel} as po_type,
                    (select count(*) from po_receiving_issues i where i.po_id = h.id) as issue_count,
                    (select count(*) from po_lines l where l.po_id = h.id) as line_count,
                    (select count(*) from po_lines l where l.po_id = h.id and l.received_at is null) as open_lines
