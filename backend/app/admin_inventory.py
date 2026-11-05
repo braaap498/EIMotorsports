@@ -482,12 +482,28 @@ def _po_search_conds(q: Optional[str], params: dict) -> list[str]:
     return conds
 
 
+def _refuse_drop_ship(db: Session, po_id: int) -> None:
+    """A drop ship PO ships straight to a customer, so its parts never reach our shelf and must never be received into stock."""
+    from app.admin_purchase_orders import _po_cols
+
+    if "po_type" not in _po_cols(db):
+        return
+    t = db.execute(text("select coalesce(po_type, 'stock') from po_headers where id = :id"), {"id": po_id}).scalar()
+    if t == "drop_ship":
+        db.rollback()
+        raise HTTPException(409, "That is a drop ship purchase order. Its parts ship straight to the customer, so they are not received into stock.")
+
+
 @router.get("/receiving/pos")
 @needs("inventory.receive")
 def receiving_pos(q: Optional[str] = Query(None, max_length=100), db: Session = Depends(get_db)):
     """Purchase orders that were sent to the distributor and still have parts to receive. Oldest first."""
     params: dict = {}
     conds = ["h.status = 'open'", "h.sent_at is not null"] + _po_search_conds(q, params)
+    from app.admin_purchase_orders import _po_cols
+
+    if "po_type" in _po_cols(db):
+        conds.append("coalesce(h.po_type, 'stock') <> 'drop_ship'")   # drop ship POs never arrive on our shelf
     rows = db.execute(
         text(
             f"""
@@ -517,6 +533,7 @@ def _receiving_detail(db: Session, po_id: int) -> dict:
     ).first()
     if not h:
         raise HTTPException(404, "That purchase order doesn't exist.")
+    _refuse_drop_ship(db, po_id)
     rows = db.execute(
         text(
             "select l.id, l.product_id, l.item, l.description, l.quantity, l.received_at, l.received_qty, "
@@ -622,6 +639,7 @@ def receive_po_line(
         if not h:
             db.rollback()
             raise HTTPException(404, "That purchase order doesn't exist.")
+        _refuse_drop_ship(db, po_id)
         if h.status == "cancelled":
             db.rollback()
             raise HTTPException(409, f"Purchase order {h.po_number} was cancelled. Nothing was received.")
@@ -795,6 +813,7 @@ def receive_po_extras(
         if not h:
             db.rollback()
             raise HTTPException(404, "That purchase order doesn't exist.")
+        _refuse_drop_ship(db, po_id)
         if h.status == "cancelled":
             db.rollback()
             raise HTTPException(409, f"Purchase order {h.po_number} was cancelled. Nothing was received.")

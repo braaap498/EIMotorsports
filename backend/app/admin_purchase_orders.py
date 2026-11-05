@@ -441,6 +441,7 @@ def create_po(body: PoIn, db: Session = Depends(get_db), user: AuthUser = Depend
 class FromWebOrderIn(BaseModel):
     order_number: str = Field(..., min_length=1, max_length=40)
     all_lines: bool = False   # false = only the lines the shelf cannot cover; true = every line on the order
+    product_ids: Optional[list[int]] = Field(None, max_length=200)   # the lines staff chose (overrides the two above)
 
 
 def _po_ship_to(addr: dict) -> str:
@@ -492,9 +493,15 @@ def po_from_web_order(body: FromWebOrderIn, db: Session = Depends(get_db), user:
     from app.stock import order_shortfalls
 
     short = {r.product_id for r in order_shortfalls(db, [o.id]) if r.short and r.short > 0}
-    picked = [i for i in items if body.all_lines or i.product_id in short]
+    if body.product_ids:
+        chosen = set(body.product_ids)
+        picked = [i for i in items if i.product_id in chosen]
+        if not picked:
+            raise HTTPException(409, "None of the chosen parts are on that order.")
+    else:
+        picked = [i for i in items if body.all_lines or i.product_id in short]
     if not picked:
-        raise HTTPException(409, "Nothing on this order is short of stock. (Only paid orders waiting to be picked are checked.) Use \"every line\" to order it all anyway.")
+        raise HTTPException(409, "Nothing on this order is short of stock. (Only paid orders waiting to be picked are checked.) Choose the parts to drop ship.")
     addr = o.shipping_address or {}
     if not all((addr.get(k) or "").strip() for k in ("full_name", "line1", "city", "region", "postal_code")):
         raise HTTPException(409, "That order's shipping address is incomplete.")
@@ -511,6 +518,179 @@ def po_from_web_order(body: FromWebOrderIn, db: Session = Depends(get_db), user:
         user=user,
     )
     return po
+
+
+# --------------------------------------------------------------------------
+# DROP SHIP FROM AN EBAY ORDER
+# The eBay import never stores buyer names or street addresses (only state and ZIP). So the full ship-to is fetched
+# from eBay on demand, for ONE order, when staff press the button, and is written onto the PO only.
+# --------------------------------------------------------------------------
+class EbayDropIn(BaseModel):
+    order: str = Field(..., min_length=3, max_length=40)           # the eBay order number
+    product_ids: Optional[list[int]] = Field(None, max_length=200)  # the parts staff chose; empty = every matched line
+
+
+def _ebay_text(el, path: str) -> str:
+    from app.ebay_edit import NS
+
+    return (el.findtext("/".join(NS + p for p in path.split("/"))) or "").strip()
+
+
+def _ebay_buyer_address(db: Session, store: str, order_id: str) -> dict:
+    """Ask eBay for ONE order's ship-to. Returns the fields plus 'gsp' (Global Shipping Program) and 'country'."""
+    from app.ebay_edit import NS, _failed, _first_message, _trading
+
+    root = _trading(
+        db, store, "GetOrders",
+        f"<OrderIDArray><OrderID>{order_id}</OrderID></OrderIDArray><OrderRole>Seller</OrderRole>",
+    )
+    if _failed(root):
+        raise HTTPException(502, _first_message(root))
+    found = None
+    for o in root.findall(f"{NS}OrderArray/{NS}Order"):
+        if _ebay_text(o, "OrderID") == order_id:
+            found = o
+            break
+    if found is None:
+        raise HTTPException(404, "eBay did not return that order.")
+    service = _ebay_text(found, "ShippingServiceSelected/ShippingService")
+    # Global Shipping Program: eBay marks the order multi-leg (seller ships to an eBay hub, which forwards it abroad).
+    gsp = (
+        _ebay_text(found, "IsMultilegShipping").lower() == "true"
+        or found.find(f"{NS}MultiLegShippingDetails") is not None
+        or "global" in service.lower()
+    )
+    phone = _ebay_text(found, "ShippingAddress/Phone")
+    if phone.lower().startswith("invalid") or not any(c.isdigit() for c in phone):
+        phone = ""
+    return {
+        "gsp": gsp,
+        "service": service,
+        "full_name": _ebay_text(found, "ShippingAddress/Name"),
+        "line1": _ebay_text(found, "ShippingAddress/Street1"),
+        "line2": _ebay_text(found, "ShippingAddress/Street2"),
+        "city": _ebay_text(found, "ShippingAddress/CityName"),
+        "region": _ebay_text(found, "ShippingAddress/StateOrProvince"),
+        "postal_code": _ebay_text(found, "ShippingAddress/PostalCode"),
+        "country": _ebay_text(found, "ShippingAddress/Country"),
+        "phone": phone,
+    }
+
+
+def _ebay_order_and_lines(db: Session, order: str):
+    o = db.execute(
+        text(
+            "select id, store, ebay_order_id, ebay_status, cancelled, shipped_at_ebay from ebay_orders "
+            "where lower(ebay_order_id) = lower(:o) order by id desc limit 1"
+        ),
+        {"o": order.strip()},
+    ).first()
+    if not o:
+        raise HTTPException(404, "That eBay order isn't in the system yet. Run a check on the eBay Sales page, then try again.")
+    lines = db.execute(
+        text(
+            f"""
+            select l.id, l.product_id, coalesce(l.title, p.title) as title, l.quantity, l.state,
+                   p.sku_display as sku, coalesce(p.quantity_on_hand, 0) as on_hand, {set_aside_sql('p')} as reserved
+            from ebay_order_lines l left join products p on p.id = l.product_id
+            where l.order_pk = :o order by l.id
+            """
+        ),
+        {"o": o.id},
+    ).all()
+    return o, lines
+
+
+@router.get("/ebay-order")
+@needs("inventory.purchase", "inventory.ship")
+def ebay_order_lookup(order: str = Query(..., min_length=3, max_length=40), db: Session = Depends(get_db)):
+    """What staff see before making a drop ship PO from an eBay order: its lines, shelf counts and any warnings.
+    The buyer's address is NOT fetched here (nothing is stored or sent until the PO is made)."""
+    o, lines = _ebay_order_and_lines(db, order)
+    existing = db.execute(
+        text("select po_number from po_headers where source = :s and status <> 'cancelled' order by id desc limit 1"),
+        {"s": f"ebay:{o.ebay_order_id}"},
+    ).scalar() if "source" in _po_cols(db) else None
+    warnings = []
+    if o.cancelled:
+        warnings.append("This eBay order is cancelled.")
+    elif o.shipped_at_ebay:
+        warnings.append("eBay shows this order as already shipped.")
+    return {
+        "order": o.ebay_order_id,
+        "store": o.store,
+        "status": o.ebay_status,
+        "blocked": bool(o.cancelled or o.shipped_at_ebay),
+        "existing_po": existing,
+        "warnings": warnings,
+        "lines": [
+            {
+                "product_id": l.product_id, "sku": l.sku, "title": l.title, "quantity": l.quantity,
+                "on_hand": l.on_hand, "available": max(0, int(l.on_hand or 0) - int(l.reserved or 0)),
+                "short": l.product_id is not None and int(l.on_hand or 0) < int(l.quantity or 0),
+                "matched": l.product_id is not None,
+            }
+            for l in lines
+        ],
+    }
+
+
+@router.post("/from-ebay-order", status_code=201)
+@needs("inventory.purchase", "inventory.ship")
+def po_from_ebay_order(body: EbayDropIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Make a DROP SHIP purchase order to Automatic Distributors from an eBay order, shipping to the eBay buyer.
+    The buyer's address is fetched from eBay now and written onto the PO only. Global Shipping Program orders are refused."""
+    cols = _po_cols(db)
+    if not {"po_type", "source"} <= cols:
+        raise HTTPException(503, "Run sql/po_supplier_fields.sql in Supabase first (it adds the PO type and source).")
+    o, lines = _ebay_order_and_lines(db, body.order)
+    if o.cancelled:
+        raise HTTPException(409, f"eBay order {o.ebay_order_id} is cancelled.")
+    if o.shipped_at_ebay:
+        raise HTTPException(409, f"eBay shows order {o.ebay_order_id} as already shipped.")
+    src = f"ebay:{o.ebay_order_id}"
+    dup = db.execute(
+        text("select po_number from po_headers where source = :s and status <> 'cancelled' order by id desc limit 1"), {"s": src}
+    ).scalar()
+    if dup:
+        raise HTTPException(409, f"PO {dup} was already made for eBay order {o.ebay_order_id}. Cancel it first if you need a new one.")
+    dists = db.execute(
+        text("select id from po_distributors where name ilike '%automatic dist%' or name ilike '%autodist%' order by id")
+    ).all()
+    if len(dists) != 1:
+        raise HTTPException(
+            409,
+            "Add one distributor named Automatic Distributors on the Distributors page first." if not dists
+            else "More than one distributor looks like Automatic Distributors. Keep one, or rename the others.",
+        )
+    chosen = set(body.product_ids or [])
+    picked = [l for l in lines if l.product_id is not None and (not chosen or l.product_id in chosen)]
+    if not picked:
+        raise HTTPException(409, "None of the chosen lines are matched to a product. Link the listing to a product first.")
+    addr = _ebay_buyer_address(db, o.store, o.ebay_order_id)
+    if addr["gsp"]:
+        raise HTTPException(
+            409,
+            "This is a Global Shipping Program order. eBay sends it through its own hub, so the address eBay gives is the "
+            "hub's, not the buyer's. Do not drop ship it: ship it from stock, or handle it by hand.",
+        )
+    if not all((addr.get(k) or "").strip() for k in ("full_name", "line1", "city", "region", "postal_code")):
+        raise HTTPException(409, "eBay did not return a complete ship-to address for that order.")
+    merged: dict[int, int] = {}
+    for l in picked:
+        merged[l.product_id] = merged.get(l.product_id, 0) + int(l.quantity or 1)
+    return create_po(
+        PoIn(
+            distributor_id=dists[0].id,
+            ship_to=_po_ship_to(addr),
+            note=f"Drop ship for eBay order {o.ebay_order_id}",
+            po_type="drop_ship",
+            source=src,
+            lines=[PoLineIn(product_id=pid, quantity=q) for pid, q in merged.items()],
+        ),
+        db=db,
+        user=user,
+    )
 
 
 @router.get("")

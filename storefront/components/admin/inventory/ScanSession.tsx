@@ -6,6 +6,7 @@ import { Notice, btnCls, btn2Cls, inputCls, Field } from "../ui";
 import { useAccess } from "../AdminAccess";
 import ScanBox from "./ScanBox";
 import UnknownCode from "./UnknownCode";
+import EbayDropShip from "./EbayDropShip";
 import { beep, lookupCode, newId, useLines } from "./shared";
 
 type Flash = { kind: "success" | "error" | "info"; text: string };
@@ -127,6 +128,8 @@ export default function ScanSession({ mode, active }: { mode: "receive" | "ship-
           </label>
         </div>
       </div>
+
+      {!receive && can("inventory.purchase") && <EbayDropShip initialOrder={reference} />}
 
       {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
       {unknown && (

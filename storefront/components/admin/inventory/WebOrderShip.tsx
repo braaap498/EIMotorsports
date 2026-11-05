@@ -68,6 +68,7 @@ export default function WebOrderShip({ active }: { active: boolean }) {
   const [flash, setFlash] = useState<Flash | null>(null);
   const [drop, setDrop] = useState<{ order_number: string; id: number; po_number: number } | null>(null); // the drop ship PO just made for an order
   const [confirming, setConfirming] = useState(false);
+  const [dropSel, setDropSel] = useState<Record<number, boolean>>({}); // parts ticked for drop shipping (default: the short ones)
   const [busy, setBusy] = useState(false);
 
   // short pick
@@ -96,6 +97,7 @@ export default function WebOrderShip({ active }: { active: boolean }) {
   useEffect(loadList, [loadList]);
 
   function resetPanels() {
+    setDropSel({});
     setShortFor(null);
     setCancelling(false);
     setCancelReason("");
@@ -293,15 +295,24 @@ export default function WebOrderShip({ active }: { active: boolean }) {
     }
   }
 
-  // Short on the shelf: make a drop ship purchase order to Automatic Distributors, shipping straight to this customer.
+  // Staff decide, order by order: drop ship from Automatic Distributors (straight to the customer) or use our own stock.
+  // Short parts are ticked by default, but any part not yet picked can be ticked.
+  const dropCandidates = order ? order.items.filter((i) => i.product_id != null && left(i) > 0) : [];
+  const isDropOn = (i: Item) => dropSel[i.item_id] ?? i.on_hand < i.ordered - i.shipped_before;
+
   async function makeDropShipPo() {
     if (!order) return;
+    const ids = dropCandidates.filter(isDropOn).map((i) => i.product_id as number);
+    if (ids.length === 0) {
+      setFlash({ kind: "error", text: "Tick at least one part to drop ship." });
+      return;
+    }
     setBusy(true);
     setFlash(null);
     try {
       const po = await api<{ id: number; po_number: number }>("/purchase-orders/from-web-order", {
         method: "POST",
-        body: { order_number: order.order_number },
+        body: { order_number: order.order_number, product_ids: ids },
       });
       setDrop({ order_number: order.order_number, id: po.id, po_number: po.po_number });
     } catch (e) {
@@ -511,7 +522,7 @@ export default function WebOrderShip({ active }: { active: boolean }) {
             </div>
           )}
 
-          {stage === "pick" && order.items.some((i) => i.product_id != null && i.on_hand < i.ordered - i.shipped_before) && (
+          {stage === "pick" && dropCandidates.length > 0 && (
             <div className="space-y-2 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm">
               {drop && drop.order_number === order.order_number ? (
                 <div>
@@ -523,9 +534,30 @@ export default function WebOrderShip({ active }: { active: boolean }) {
                 </div>
               ) : (
                 <>
-                  <div>Some parts are not on the shelf. Order them from Automatic Distributors to ship straight to this customer?</div>
+                  <div className="font-medium">Drop ship or use our stock?</div>
+                  <div className="text-gray-700">
+                    To order parts from Automatic Distributors shipping straight to this customer, tick them below. Otherwise
+                    leave this alone and pick from the shelf (or wait for stock). Parts that are short are ticked for you.
+                  </div>
+                  <ul className="space-y-1">
+                    {dropCandidates.map((i) => (
+                      <li key={i.item_id}>
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={isDropOn(i)}
+                            onChange={(e) => setDropSel((d) => ({ ...d, [i.item_id]: e.target.checked }))}
+                          />
+                          <span>
+                            {i.sku ?? i.title} × {i.ordered - i.shipped_before}
+                            <span className="text-gray-500"> · shelf count {i.on_hand}</span>
+                          </span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
                   <button className={btn2Cls} disabled={busy} onClick={() => void makeDropShipPo()}>
-                    Make drop ship PO for the short parts
+                    Make drop ship PO for the ticked parts
                   </button>
                 </>
               )}
