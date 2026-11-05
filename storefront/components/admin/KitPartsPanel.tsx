@@ -276,37 +276,42 @@ export default function KitPartsPanel({
 
       {/* the pieces */}
       {parts.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b text-left text-xs text-gray-500">
-                <th className="py-1 pr-2">Vendor</th><th className="pr-2">Part #</th><th className="pr-2">Description</th>
-                <th className="pr-2">Cost</th><th className="pr-2">Qty per kit</th><th />
-              </tr>
-            </thead>
-            <tbody>
-              {parts.map((p, i) => (
-                <tr key={p.key} className="border-b align-top">
-                  <td className="py-1 pr-2 text-xs">{p.vendor ?? vendors.find((v) => v.id === p.distributor_id)?.name ?? ""}</td>
-                  <td className="pr-2 font-mono">{p.part_number}</td>
-                  <td className="pr-2 text-xs">{p.description}</td>
-                  <td className="pr-2 text-xs">{p.unit_cost != null ? `$${Number(p.unit_cost).toFixed(2)}` : ""}</td>
-                  <td className="pr-2">
-                    <input
-                      type="number" min={1} max={1000} disabled={disabled} className={`${inputCls} w-20`} value={p.quantity}
-                      onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, quantity: Math.max(1, Math.min(1000, Number(e.target.value) || 1)) } : x)))}
-                    />
-                  </td>
-                  <td className="whitespace-nowrap text-xs">
+        <ul className="space-y-2">
+          {parts.map((p, i) => {
+            const vendorName = (p.vendor ?? vendors.find((v) => v.id === p.distributor_id)?.name ?? "").replace(/\s*[-–]\s*catalog\s*$/i, "");
+            return (
+              <li key={p.key} className="rounded border border-gray-200 bg-white p-3">
+                <div className="grid items-center gap-x-5 gap-y-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-baseline gap-x-2">
+                      <span className="break-all font-mono text-sm font-semibold">{p.part_number}</span>
+                      {vendorName && <span className="text-xs text-gray-500">{vendorName}</span>}
+                    </div>
+                    {p.description && <div className="break-words text-xs text-gray-700">{p.description}</div>}
+                  </div>
+                  <div className="flex items-center gap-5 text-sm">
+                    <div>
+                      <div className="text-[11px] uppercase text-gray-500">Cost</div>
+                      <div>{p.unit_cost != null ? `$${Number(p.unit_cost).toFixed(2)}` : "—"}</div>
+                    </div>
+                    <label>
+                      <span className="block text-[11px] uppercase text-gray-500">Qty per kit</span>
+                      <input
+                        type="number" min={1} max={1000} disabled={disabled} className={inputCls} style={{ width: 84 }} value={p.quantity}
+                        onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, quantity: Math.max(1, Math.min(1000, Number(e.target.value) || 1)) } : x)))}
+                      />
+                    </label>
+                  </div>
+                  <div className="flex items-center gap-1 text-xs">
                     <button type="button" className="px-1" disabled={disabled || i === 0} onClick={() => move(i, -1)} aria-label="Move up">↑</button>
                     <button type="button" className="px-1" disabled={disabled || i === parts.length - 1} onClick={() => move(i, 1)} aria-label="Move down">↓</button>
                     <button type="button" className="px-1 text-red-700 underline" disabled={disabled} onClick={() => edit(parts.filter((x) => x !== p))}>Remove</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       )}
       <div className="rounded bg-gray-50 p-2 text-sm">
         <span className="text-xs text-gray-500">Custom label {dirty ? "after saving" : "now"}: </span>
@@ -322,7 +327,7 @@ export default function KitPartsPanel({
               Vendor
               <select className={`${inputCls} block`} value={vendorId} onChange={(e) => { setVendorId(e.target.value ? Number(e.target.value) : ""); setResults(null); }}>
                 <option value="">(choose)</option>
-                {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}{v.has_catalog ? " – catalog" : ""}</option>)}
+                {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}{v.has_catalog ? "" : " (no catalog)"}</option>)}
               </select>
             </label>
           </div>
