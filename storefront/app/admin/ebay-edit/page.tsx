@@ -33,6 +33,20 @@ type Item = {
   photos_editable: boolean;
   editable: boolean;
   not_editable_reason: string | null;
+  ended: boolean; // not live on eBay right now
+  relistable: boolean; // ended, and eBay can bring it back
+  draft?: { changes: DraftChanges; updated_by: string | null; updated_at: string | null } | null; // edits saved on the website
+};
+// What is saved on the website for a listing (same shape as what is sent to eBay, plus a small picture for the screen).
+type DraftChanges = {
+  title?: string;
+  description?: string;
+  price?: string;
+  quantity?: number;
+  sku?: string;
+  variations?: { sku: string; price?: string; quantity?: number }[];
+  photos?: { url?: string; key?: string; thumb?: string }[];
+  item_specifics?: { name: string; values: string[] }[];
 };
 type Diff = { field: string; before: string | null; after: string; note?: string };
 type Preview = {
@@ -64,6 +78,9 @@ const specSig = (list: { name: string; value: string }[]) =>
 
 const norm = (s: string) => s.replace(/\r\n/g, "\n").trim();
 const photoId = (p: PhotoEdit) => (p.url ? p.url : "key:" + p.key);
+// One string that stands for everything on the form, so "has anything changed since it was saved" is a comparison.
+const sigOf = (v: { title: string; description: string; price: string; qty: string; sku: string; vars: Record<string, VarEdit>; photos: PhotoEdit[]; specs: SpecEdit[] }) =>
+  JSON.stringify([v.title, norm(v.description), v.price, v.qty, v.sku, Object.keys(v.vars).sort().map((k) => [k, v.vars[k].price, v.vars[k].qty]), v.photos.map(photoId), specSig(v.specs)]);
 
 // Does the visual editor keep this description as it is? It only keeps simple formatting (bold, lists,
 // headings, links, tables); styles, images and the like would be dropped. Read in an inert document,
@@ -127,29 +144,44 @@ export default function EbayEditPage() {
   const [libResults, setLibResults] = useState<Found[] | null>(null);
   const [photoMsg, setPhotoMsg] = useState("");
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const [preview, setPreview] = useState<Preview | null>(null);
+  const [baseSig, setBaseSig] = useState(""); // the form as last saved (or as eBay has it), to tell what is unsaved
   const [log, setLog] = useState<LogRow[]>([]);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [differences, setDifferences] = useState<string[]>([]);
   const [busy, setBusy] = useState("");
   const started = useRef(false);
 
+  // Show a listing on the form: what eBay has, with any edits saved on the website laid over it.
   function fill(i: Item) {
+    const d = i.draft?.changes;
+    const vTitle = d?.title ?? i.title;
+    const vDesc = d?.description ?? i.description;
+    const vPrice = d?.price ?? i.price ?? "";
+    const vQty = d?.quantity !== undefined && d?.quantity !== null ? String(d.quantity) : String(i.quantity_available);
+    const vSku = d?.sku ?? i.sku;
+    const vVars: Record<string, VarEdit> = Object.fromEntries(i.variations.map((v) => [v.sku, { price: v.price ?? "", qty: String(v.quantity_available) }]));
+    (d?.variations ?? []).forEach((x) => {
+      if (vVars[x.sku]) vVars[x.sku] = { price: x.price ?? vVars[x.sku].price, qty: x.quantity !== undefined && x.quantity !== null ? String(x.quantity) : vVars[x.sku].qty };
+    });
+    const vPhotos: PhotoEdit[] = d?.photos
+      ? d.photos.map((p, n) => (p.url ? { id: `e${n}`, thumb: p.url, url: p.url } : { id: "k:" + p.key, thumb: p.thumb ?? "", key: p.key }))
+      : i.photos.map((p, n) => ({ id: `e${n}`, thumb: p.url, url: p.url }));
+    const vSpecs: SpecEdit[] = (d?.item_specifics ?? i.item_specifics).map((x, n) => ({ id: `s${n}`, name: x.name, value: x.values.join("; ") }));
     setItem(i);
-    setTitle(i.title);
-    setDescription(i.description);
-    setPrice(i.price ?? "");
-    setQty(String(i.quantity_available));
-    setSku(i.sku);
-    setVars(Object.fromEntries(i.variations.map((v) => [v.sku, { price: v.price ?? "", qty: String(v.quantity_available) }])));
-    setPhotos(i.photos.map((p, n) => ({ id: `e${n}`, thumb: p.url, url: p.url })));
-    const l = losesFormatting(i.description);
+    setTitle(vTitle);
+    setDescription(vDesc);
+    setPrice(vPrice);
+    setQty(vQty);
+    setSku(vSku);
+    setVars(vVars);
+    setPhotos(vPhotos);
+    const l = losesFormatting(vDesc);
     setLossy(l);
-    setLossInfo(l ? lossDetail(i.description) : []);
-    setSpecs(i.item_specifics.map((x, n) => ({ id: `s${n}`, name: x.name, value: x.values.join("; ") })));
+    setLossInfo(l ? lossDetail(vDesc) : []);
+    setSpecs(vSpecs);
     setHtmlMode(l); // a description with styling opens as HTML so nothing is lost by accident
     setPhotoMsg("");
-    setPreview(null);
+    setBaseSig(sigOf({ title: vTitle, description: vDesc, price: vPrice, qty: vQty, sku: vSku, vars: vVars, photos: vPhotos, specs: vSpecs }));
   }
 
   async function loadLog(s: string, id: string) {
@@ -224,20 +256,40 @@ export default function EbayEditPage() {
         ? item.variations.some((v) => (vars[v.sku]?.price ?? "") !== (v.price ?? "") || vars[v.sku]?.qty !== String(v.quantity_available))
         : price !== (item.price ?? "") || qty !== String(item.quantity_available) || sku !== item.sku));
 
-  const touch = () => {
-    setPreview(null);
-    setDifferences([]);
-  };
+  const touch = () => setDifferences([]);
 
-  async function doPreview() {
-    if (!item) return;
-    setBusy("preview");
+  const unsaved = !!item && baseSig !== sigOf({ title, description, price, qty, sku, vars, photos, specs });
+
+  // Everything on the form, for saving on the website (the whole state, so it comes back exactly as left).
+  function draftChanges() {
+    if (!item) return {};
+    const d: Record<string, unknown> = { title, description };
+    if (item.has_variations) {
+      d.variations = item.variations.map((v) => ({ sku: v.sku, price: vars[v.sku]?.price ?? "", quantity: Number(vars[v.sku]?.qty ?? v.quantity_available) }));
+    } else {
+      Object.assign(d, { price, sku });
+      if (qty.trim() !== "") d.quantity = Number(qty);
+    }
+    if (item.photos_editable) d.photos = photos.map((p) => (p.url ? { url: p.url, thumb: p.thumb } : { key: p.key, thumb: p.thumb }));
+    if (item.specifics_editable) d.item_specifics = specs.filter((x) => x.name.trim() || x.value.trim()).map((x) => ({ name: x.name, values: splitValues(x.value) }));
+    return d;
+  }
+
+  async function persistDraft(): Promise<Item | null> {
+    if (!item) return null;
+    const r = await api<{ draft: Item["draft"] }>("/ebay-edit/draft", { method: "PUT", body: { store, item_id: item.item_id, changes: draftChanges() } });
+    const next = { ...item, draft: r.draft };
+    setItem(next);
+    setBaseSig(sigOf({ title, description, price, qty, sku, vars, photos, specs }));
+    return next;
+  }
+
+  async function saveChanges() {
+    setBusy("save");
     setMsg(null);
-    setPreview(null);
-    setDifferences([]);
     try {
-      setPreview(await api<Preview>("/ebay-edit/preview", { method: "POST", body: { store, item_id: item.item_id, changes: changes() } }));
-      void loadLog(store, item.item_id);
+      await persistDraft();
+      setMsg({ kind: "success", text: "Saved on the website. Nothing has been sent to eBay." });
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -245,27 +297,81 @@ export default function EbayEditPage() {
     }
   }
 
-  async function doPush() {
-    if (!item || !preview) return;
-    const list = preview.diff.map((d) => `${d.field}: ${d.before ?? "—"} → ${d.after}`).join("\n");
-    if (!window.confirm(`Send this to eBay (${store}) for item ${item.item_id}?\n\n${list}\n\nThis changes the live listing.`)) return;
-    setBusy("push");
+  function cancelChanges() {
+    if (!item) return;
+    fill(item); // back to what was last saved (or what eBay has, if nothing was saved)
+    setMsg(null);
+  }
+
+  async function discardSaved() {
+    if (!item || !window.confirm("Throw away the edits saved on the website for this listing? The form goes back to what eBay has.")) return;
+    setBusy("discard");
     setMsg(null);
     try {
+      await api(`/ebay-edit/draft?store=${encodeURIComponent(store)}&item_id=${encodeURIComponent(item.item_id)}`, { method: "DELETE" });
+      fill({ ...item, draft: null });
+      setMsg({ kind: "success", text: "Saved edits discarded." });
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  // Activate: bring an ended listing back on eBay, or publish edits to a live one. The edits are saved first, so nothing is
+  // lost if eBay says no; the exact request is checked (a dry run) and read out before anything is sent.
+  async function activate() {
+    if (!item) return;
+    const relist = item.ended;
+    const warn = relist
+      ? `Activate will make this a LIVE listing on eBay (${store}). Buyers will be able to buy it, and eBay will give it a new item number.`
+      : `Activate will publish these changes to the LIVE eBay listing (${store}, item ${item.item_id}). Buyers will see them straight away.`;
+    setBusy("activate");
+    setMsg(null);
+    try {
+      if (unsaved) await persistDraft();
+      const body = { store, item_id: item.item_id, changes: changes(), action: relist ? "relist" : "revise" };
+      const pv = await api<Preview>("/ebay-edit/preview", { method: "POST", body });
+      if (!pv.live_pushes_enabled) {
+        setMsg({ kind: "error", text: `Live pushes are OFF for ${store}, so nothing can go to eBay. Turn them on in the Stores box on Live listings. Your edits are saved.` });
+        return;
+      }
+      const list = pv.diff.map((d) => `${d.field}: ${d.before ?? "—"} → ${d.after}`).join("\n");
+      if (!window.confirm(`${warn}\n\n${list}\n\nContinue?`)) return;
       const r = await api<{ item: Item; warnings: { message: string }[]; differences: string[]; notes?: string[] }>("/ebay-edit/push", {
         method: "POST",
-        body: { store, item_id: item.item_id, changes: changes(), fingerprint: preview.fingerprint },
+        body: { ...body, fingerprint: pv.fingerprint },
       });
+      if (r.item.item_id !== item.item_id) window.history.replaceState(null, "", `/admin/ebay-edit?store=${encodeURIComponent(store)}&item=${r.item.item_id}`);
       fill(r.item);
       setDifferences(r.differences);
       setMsg({
         kind: "success",
-        text: `Sent. eBay accepted the change.${r.warnings.length ? " eBay warnings: " + r.warnings.map((w) => w.message).join("; ") : ""}${r.notes && r.notes.length ? " " + r.notes.join(" ") : ""}`,
+        text: `${relist ? `Live on eBay again as item ${r.item.item_id}.` : "Published. eBay accepted the change."}${r.warnings.length ? " eBay warnings: " + r.warnings.map((w) => w.message).join("; ") : ""}${r.notes && r.notes.length ? " " + r.notes.join(" ") : ""}`,
       });
-      void loadLog(store, item.item_id);
+      void loadLog(store, r.item.item_id);
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
       void loadLog(store, item.item_id);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  // Inactive: end the live listing on eBay.
+  async function makeInactive() {
+    if (!item) return;
+    if (!window.confirm(`Inactive will END this listing on eBay (${store}, item ${item.item_id}). Buyers will no longer be able to buy it. You can bring it back later with Activate.\n\nContinue?`)) return;
+    setBusy("end");
+    setMsg(null);
+    try {
+      if (unsaved) await persistDraft();
+      const r = await api<{ item: Item }>("/ebay-edit/end", { method: "POST", body: { store, item_id: item.item_id } });
+      fill(r.item);
+      setMsg({ kind: "success", text: "The listing was ended on eBay." });
+      void loadLog(store, item.item_id);
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
     } finally {
       setBusy("");
     }
@@ -308,7 +414,7 @@ export default function EbayEditPage() {
         added.push({ key: r.key, thumb: r.thumb });
       }
       addKeys(added);
-      setPhotoMsg("Added to the list below. Nothing goes to eBay until you preview and send.");
+      setPhotoMsg("Added to the list below. Nothing goes to eBay until you press Activate.");
     } catch (e) {
       if (added.length) addKeys(added);
       setPhotoMsg(errMsg(e));
@@ -348,8 +454,41 @@ export default function EbayEditPage() {
 
   const off = !item?.editable;
 
+  // The same controls at the top and the bottom of the page.
+  const bar = item ? (
+    <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2">
+      {unsaved && (
+        <>
+          <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => void saveChanges()}>
+            {busy === "save" ? "Saving…" : "Save changes"}
+          </button>
+          <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={cancelChanges}>
+            Cancel changes
+          </button>
+        </>
+      )}
+      {(item.ended ? item.relistable : dirty) && (
+        <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => void activate()}>
+          {busy === "activate" ? "Working…" : "Activate"}
+        </button>
+      )}
+      {!item.ended && item.editable && (
+        <button type="button" className={`${btn2Cls} text-red-700`} disabled={busy !== ""} onClick={() => void makeInactive()}>
+          {busy === "end" ? "Working…" : "Inactive"}
+        </button>
+      )}
+      <span className="text-xs text-gray-500">
+        {item.ended
+          ? "Not live on eBay. Activate puts it live."
+          : dirty
+            ? "Save keeps edits on the website only. Activate publishes them to eBay."
+            : "Live on eBay."}
+      </span>
+    </div>
+  ) : null;
+
   return (
-    <div className="max-w-4xl space-y-5">
+    <div className="w-full space-y-5">
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">Edit eBay listing</h1>
         <Link href="/admin/ebay-listings" className={btn2Cls}>
@@ -392,6 +531,19 @@ export default function EbayEditPage() {
             </div>
           </div>
 
+          {bar}
+          {item.draft && (
+            <Notice>
+              This listing has edits saved on the website
+              {item.draft.updated_at ? ` (${new Date(item.draft.updated_at).toLocaleString()})` : ""} that are not on eBay.{" "}
+              <button type="button" className="underline" disabled={busy !== ""} onClick={() => void discardSaved()}>
+                Discard saved edits
+              </button>
+            </Notice>
+          )}
+          {item.ended && item.relistable && (
+            <Notice>This listing is not live on eBay ({item.status}). Edit it here, then press Activate to bring it back; eBay gives a relisted item a new number.</Notice>
+          )}
           {!item.editable && <Notice kind="error">{item.not_editable_reason}</Notice>}
           {item.quantity_sold > 0 && (
             <p className="text-xs text-gray-600">Something has already sold, so eBay will not allow the title to be changed.</p>
@@ -592,16 +744,6 @@ export default function EbayEditPage() {
                 />
               )}
             </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <button type="button" className={btnCls} disabled={off || !dirty || busy !== ""} onClick={() => void doPreview()}>
-                {busy === "preview" ? "Checking…" : "Preview what would be sent"}
-              </button>
-              <button type="button" className={btn2Cls} disabled={busy !== "" || !dirty} onClick={() => fill(item)}>
-                Reset
-              </button>
-              <span className="text-xs text-gray-500">A preview never sends anything to eBay.</span>
-            </div>
           </div>
 
           <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
@@ -710,50 +852,7 @@ export default function EbayEditPage() {
             )}
           </details>
 
-          {preview && (
-            <div className="space-y-3 rounded border border-amber-300 bg-amber-50 p-4">
-              <h2 className="text-sm font-semibold">This is exactly what would be sent</h2>
-              <table className="w-full text-left text-sm">
-                <thead className="text-xs uppercase text-gray-500">
-                  <tr>
-                    <th className="py-1 pr-3">Field</th>
-                    <th className="py-1 pr-3">On eBay now</th>
-                    <th className="py-1">Would become</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {preview.diff.map((d) => (
-                    <tr key={d.field} className="align-top">
-                      <td className="py-1 pr-3 font-medium">{d.field}</td>
-                      <td className="py-1 pr-3">{d.before ?? "—"}</td>
-                      <td className="py-1">
-                        {d.after}
-                        {d.note && <div className="text-xs text-gray-500">{d.note}</div>}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <details className="text-xs">
-                <summary className="cursor-pointer text-gray-600">
-                  The request{preview.calls.length > 1 ? "s" : ""} themselves ({preview.calls.map((c) => c.call).join(", then ")})
-                </summary>
-                {preview.calls.map((c, i) => (
-                  <pre key={i} className="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded bg-white p-2">
-                    {c.xml}
-                  </pre>
-                ))}
-              </details>
-              <div className="flex flex-wrap items-center gap-3">
-                <button type="button" className={btnCls} disabled={!preview.live_pushes_enabled || busy !== ""} onClick={() => void doPush()}>
-                  {busy === "push" ? "Sending…" : "Send to eBay"}
-                </button>
-                {!preview.live_pushes_enabled && (
-                  <span className="text-sm text-gray-700">Live pushes are OFF for {store}. Turn them on in the Stores box on Live listings to send.</span>
-                )}
-              </div>
-            </div>
-          )}
+          {bar}
 
           <div className="rounded border border-gray-200 bg-white p-4">
             <h2 className="text-sm font-semibold">Recent activity on this listing</h2>
@@ -770,6 +869,7 @@ export default function EbayEditPage() {
                         <td className="whitespace-nowrap py-1.5 pr-4">
                           <Badge tone={l.dry_run ? "gray" : l.ok ? "green" : "amber"}>{l.dry_run ? "Preview" : l.ok ? "Sent" : "Failed"}</Badge>
                         </td>
+                        <td className="whitespace-nowrap py-1.5 pr-4 text-gray-600">{l.action.replace(/_/g, " ").replace(" fixed price item", "")}</td>
                         <td className="whitespace-nowrap py-1.5 pr-4 text-gray-600">{l.user_name ?? l.user_email ?? ""}</td>
                         <td className="py-1.5 text-red-700">{l.error ?? ""}</td>
                       </tr>
