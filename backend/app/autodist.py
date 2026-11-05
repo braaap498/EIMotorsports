@@ -9,6 +9,9 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /import/finish          check the whole file arrived, then retire parts that left the feed
   GET  /api/status             is the ordering API set up, and which server (live or test) it points at
   POST /api/avail              live availability and our price for one part from the ordering API
+  POST /api/order/quote        price and shipping options for an order (creates nothing)
+  POST /api/order/place        places an order (confirm required; real orders also need AUTOMATIC_DIST_ALLOW_LIVE_ORDERS)
+  GET  /api/orders             the orders placed from this screen
   GET  /opportunities          ranked lists of the parts most worth selling (margin, stock, our own sales)
   GET  /ftp/status             is the Automatic Distributors FTP login set up on the server (nothing is contacted)
   POST /ftp/check              log in to the Automatic Distributors FTP server, list the folders, preview the inventory file
@@ -1655,7 +1658,7 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
 
 
 # --------------------------------------------------------------------------
-# the ordering API (live availability now; quotes and orders later)
+# the ordering API (live availability, quotes and orders)
 # --------------------------------------------------------------------------
 # Settings come from Render, never from the browser: AUTOMATIC_DIST_API_KEY (sent as the Authorization header,
 # exactly as issued) and AUTOMATIC_DIST_API_URL. With no URL set the live server is used; Automatic Distributors'
@@ -1751,6 +1754,278 @@ def api_avail(
         "warehouses": rows,
         "total": sum(int(r["quantity"] or 0) for r in rows),
     }
+
+
+# --------------------------------------------------------------------------
+# orders: quote (POST /order/calculate) and place (POST /order/create)
+# --------------------------------------------------------------------------
+# A quote creates nothing. Placing an order is guarded three ways: the browser must send confirm=true, a real (live
+# server) order is refused unless AUTOMATIC_DIST_ALLOW_LIVE_ORDERS=yes is set in Render, and the same PO number is never
+# sent twice to the same server. Every placed order is written to supplier_orders (sql/autodist_orders.sql).
+ORDER_CARRIERS = ("UPS", "FEDEX")
+
+
+class OrderAddress(BaseModel):
+    name: str = Field("", max_length=100)
+    contact: str = Field("", max_length=100)
+    addressLine1: str = Field("", max_length=100)
+    addressLine2: str = Field("", max_length=100)
+    addressLine3: str = Field("", max_length=100)
+    city: str = Field("", max_length=60)
+    state: str = Field("", max_length=30)
+    zipCode: str = Field("", max_length=20)
+    countryCode: str = Field("US", max_length=3)
+    phone: str = Field("", max_length=30)
+    classification: str = Field("", max_length=30)
+
+
+class OrderLine(BaseModel):
+    number: str = Field(..., min_length=1, max_length=60)
+    quantity: int = Field(..., ge=1, le=100000)
+
+
+class OrderIn(BaseModel):
+    po_number: str = Field("", max_length=40)
+    comment: str = Field("", max_length=200)
+    shipping_method: str = Field("", max_length=60)
+    ship_to: OrderAddress
+    items: list[OrderLine] = Field(..., min_length=1, max_length=100)
+    carrier: str = Field("", max_length=10)  # UPS or FEDEX: bill shipping to our own carrier account
+    carrier_account: str = Field("", max_length=40)
+    promo_code: str = Field("", max_length=40)
+    signature_required: bool = False
+    backorder: bool = False
+    confirm: bool = False
+
+
+def _order_payload(b: OrderIn) -> dict:
+    """Build the OrderReq the API expects, with plain-English errors for anything missing."""
+    keys = ("name", "contact", "addressLine1", "addressLine2", "addressLine3", "city", "state", "zipCode", "countryCode", "phone", "classification")
+    addr = {k: (getattr(b.ship_to, k) or "").strip() for k in keys}
+    labels = (("name", "name"), ("addressLine1", "street address"), ("city", "city"), ("state", "state"), ("zipCode", "ZIP code"))
+    missing = [label for k, label in labels if not addr[k]]
+    if missing:
+        raise HTTPException(422, "The ship-to address is missing: " + ", ".join(missing) + ".")
+    addr["countryCode"] = addr["countryCode"] or "US"
+    addr = {k: v for k, v in addr.items() if v}
+    items = []
+    for it in b.items:
+        sku = it.number.strip()
+        if not sku:
+            raise HTTPException(422, "Every line needs a part number.")
+        items.append({"number": sku, "quantity": it.quantity})
+    payload: dict = {
+        "PONumber": b.po_number.strip(),
+        "placeOrderOnBackorder": b.backorder,
+        "comment": b.comment.strip(),
+        "header": {"shippingMethod": b.shipping_method.strip(), "shippingAddress": addr},
+        "items": items,
+        "signatureRequired": b.signature_required,
+    }
+    if b.promo_code.strip():
+        payload["promoCode"] = b.promo_code.strip()
+    carrier, acct = b.carrier.strip().upper(), b.carrier_account.strip()
+    if carrier or acct:
+        if carrier not in ORDER_CARRIERS:
+            raise HTTPException(422, "Our own carrier account must be UPS or FEDEX.")
+        if carrier == "UPS" and not re.fullmatch(r"[A-Za-z0-9]{6,}", acct):
+            raise HTTPException(422, "A UPS account number is at least 6 letters or digits.")
+        if carrier == "FEDEX" and not re.fullmatch(r"[0-9]{9,}", acct):
+            raise HTTPException(422, "A FedEx account number is at least 9 digits.")
+        payload["shippingAccount"] = {"carrier": carrier, "number": acct}
+    return payload
+
+
+def _api_post(path: str, body: dict, may_have_happened: bool = False):
+    """POST JSON. Raises HTTPException in plain English; the key is never put in a message."""
+    url, key = _api_settings()
+    if not key:
+        raise HTTPException(400, "The API key is not set. Add AUTOMATIC_DIST_API_KEY in the Render environment.")
+    req = urllib.request.Request(
+        url + path,
+        data=json.dumps(body).encode("utf-8"),
+        method="POST",
+        headers={"Authorization": key, "Accept": "application/json", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace") or "null")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            raw = e.read().decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(raw)
+                detail = str(parsed.get("message") or parsed.get("error") or raw) if isinstance(parsed, dict) else raw
+            except Exception:
+                detail = raw
+        except Exception:
+            pass
+        detail = detail.strip()[:300]
+        if e.code in (401, 403):
+            raise HTTPException(502, f"The {_api_mode(url)} server refused the API key. Check AUTOMATIC_DIST_API_KEY, and that it belongs to that server.")
+        if e.code == 429:
+            raise HTTPException(429, "Too many requests to Automatic Distributors; wait a moment and try again.")
+        raise HTTPException(502, f"Automatic Distributors answered with an error ({e.code}). {detail}".strip())
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        log.warning("autodist api unreachable: %s", e)
+        if may_have_happened:
+            raise HTTPException(
+                504,
+                "No answer came back, so the order MAY have been placed. Do not send it again until you have checked "
+                "with Automatic Distributors (or the Orders list below).",
+            )
+        raise HTTPException(502, "Could not reach the Automatic Distributors API. Try again in a moment.")
+
+
+def _order_totals(t: Optional[dict]) -> dict:
+    t = t or {}
+    return {
+        "message": t.get("message"),
+        "done": t.get("done"),
+        "sales_amount": t.get("salesAmount"),
+        "sales_tax": t.get("salesTaxAmount"),
+        "excise": t.get("federalExciseAmount"),
+        "special_charge": t.get("totalSpecialCharge"),
+        "container_charge": t.get("totContnChrg"),
+        "trade_discount": t.get("tradeDiscountAmount"),
+        "order_value": t.get("totalOrderValue"),
+        "invoice_total": t.get("totalInvoiceAmount"),
+        "weight": t.get("totalOrderWeight"),
+        "dim_weight": t.get("totalOrderDimWeight"),
+        "shipping_options": [
+            {"name": o.get("name"), "carrier_code": o.get("carrierCode"), "date": o.get("date"), "cost": o.get("cost")}
+            for o in (t.get("shippingOptions") or [])
+            if isinstance(o, dict)
+        ],
+    }
+
+
+@router.post("/api/order/quote")
+def api_order_quote(body: OrderIn):
+    """Price and shipping options for an order. Creates nothing."""
+    data = _api_post("/order/calculate", _order_payload(body))
+    if not isinstance(data, dict):
+        raise HTTPException(502, "The API sent something unexpected.")
+    url, _key = _api_settings()
+    return {"server": url, "mode": _api_mode(url), "totals": _order_totals(data.get("total") if isinstance(data.get("total"), dict) else data)}
+
+
+def _order_result(data: dict) -> dict:
+    h = data.get("header") or {}
+    lines = []
+    for i in (data.get("details") or {}).get("item") or []:
+        w = str(i.get("warehouseId") or "")
+        lines.append(
+            {
+                "number": i.get("itemNumber"),
+                "description": i.get("description"),
+                "ordered": i.get("orderQty"),
+                "shipped": i.get("shipQty"),
+                "backordered": i.get("backOrdQty"),
+                "price": i.get("actualSellPrice"),
+                "amount": i.get("lineAmount"),
+                "warehouse": API_WAREHOUSES.get(w),  # Maine (1) is never shown
+            }
+        )
+    related = []
+    for r in data.get("relatedOrders") or []:
+        rh = r.get("header") or {}
+        related.append(
+            {
+                "order_number": rh.get("orderNumber"),
+                "parent": rh.get("parentOrderNumber"),
+                "po": rh.get("poNumber"),
+                "pro_number": rh.get("proNumber"),
+                "status": rh.get("orderStatus"),
+                "carrier": rh.get("carrierCode"),
+                "invoice_number": rh.get("invoiceNumber"),
+                "invoice_date": rh.get("invoiceDate"),
+                "invoice_amount": rh.get("invoiceAmount"),
+                "order_value": rh.get("totalOrderValue"),
+            }
+        )
+    return {
+        "order_number": h.get("orderNumber") or "",
+        "completion_code": h.get("completionCode"),
+        "message": h.get("message"),
+        "po": h.get("ponumber"),
+        "invoice_amount": h.get("invoiceAmount"),
+        "lines": lines,
+        "totals": _order_totals(data.get("total")),
+        "related": related,
+    }
+
+
+@router.post("/api/order/place")
+def api_order_place(body: OrderIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """PLACES A REAL ORDER on whichever server is configured. Needs confirm=true; live orders also need the Render switch."""
+    if not body.confirm:
+        raise HTTPException(400, "Not placed: the order has to be confirmed first.")
+    po = body.po_number.strip()
+    if not po:
+        raise HTTPException(422, "Enter a PO number before placing the order.")
+    url, _key = _api_settings()
+    mode = _api_mode(url)
+    if mode == "live" and os.environ.get("AUTOMATIC_DIST_ALLOW_LIVE_ORDERS", "").strip().lower() not in ("1", "true", "yes"):
+        raise HTTPException(
+            403,
+            "Real orders are switched off. Point AUTOMATIC_DIST_API_URL at the test server to practice, or set "
+            "AUTOMATIC_DIST_ALLOW_LIVE_ORDERS=yes in Render when you are ready for real ones.",
+        )
+    payload = _order_payload(body)
+    try:
+        dup = db.execute(
+            text("select order_number from supplier_orders where supplier = :s and mode = :m and po_number = :p and order_number <> '' limit 1"),
+            {"s": SUPPLIER, "m": mode, "p": po},
+        ).scalar()
+    except Exception:
+        db.rollback()
+        raise HTTPException(503, "Not placed: the orders table is missing. Run sql/autodist_orders.sql in Supabase, then try again.")
+    if dup:
+        raise HTTPException(409, f"Not placed: PO {po} was already sent to the {mode} server as order {dup}. Use a new PO number.")
+
+    data = _api_post("/order/create", payload, may_have_happened=True)
+    if not isinstance(data, dict):
+        raise HTTPException(502, "The API answered, but not in a form I understand. Check with Automatic Distributors before sending again.")
+    result = _order_result(data)
+    saved = True
+    try:
+        db.execute(
+            text(
+                "insert into supplier_orders (supplier, mode, po_number, order_number, message, invoice_amount, request, response, created_by) "
+                "values (:s, :m, :p, :o, :msg, :inv, cast(:rq as jsonb), cast(:rs as jsonb), :u)"
+            ),
+            {
+                "s": SUPPLIER, "m": mode, "p": po, "o": result["order_number"], "msg": (result["message"] or "")[:300],
+                "inv": str(result["invoice_amount"] or ""), "rq": json.dumps(payload), "rs": json.dumps(data),
+                "u": user.email or user.user_id,
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        saved = False
+        log.exception("autodist order %s placed but not saved", result["order_number"])
+    log.info("autodist order placed on %s server: PO %s -> order %s", mode, po, result["order_number"] or "(none)")
+    return {"server": url, "mode": mode, "placed": bool(result["order_number"]), "saved": saved, **result}
+
+
+@router.get("/api/orders")
+def api_orders(db: Session = Depends(get_db)):
+    """The orders placed from this screen, newest first."""
+    try:
+        rows = db.execute(
+            text(
+                "select id, mode, po_number, order_number, message, invoice_amount, created_at, created_by "
+                "from supplier_orders where supplier = :s order by id desc limit 50"
+            ),
+            {"s": SUPPLIER},
+        ).all()
+    except Exception:
+        db.rollback()
+        return {"table_missing": True, "orders": []}
+    return {"table_missing": False, "orders": [dict(r._mapping) for r in rows]}
 
 
 # --------------------------------------------------------------------------

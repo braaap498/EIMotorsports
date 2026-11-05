@@ -7,6 +7,7 @@ import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../../components
 import { useAccess } from "../../../../components/admin/AdminAccess";
 import AutodistCatalog from "../../../../components/admin/AutodistCatalog";
 import AutodistOpportunities from "../../../../components/admin/AutodistOpportunities";
+import AutodistOrders from "../../../../components/admin/AutodistOrders";
 
 // Automatic Distributors supplier data (owners and admins only). Licensed data: dealer cost and stock
 // are for this screen only and must never be shown on the public store.
@@ -84,10 +85,11 @@ const n = (x: number) => x.toLocaleString("en-US");
 const money = (v: string | null) => (v == null ? "—" : `$${Number(v).toFixed(2)}`);
 const tone = (s: string) => (s === "done" ? "green" : s === "running" ? "blue" : "amber");
 
-type Tab = "catalog" | "opps" | "data" | "match";
+type Tab = "catalog" | "opps" | "orders" | "data" | "match";
 const TABS: { key: Tab; label: string }[] = [
   { key: "catalog", label: "Catalog" },
   { key: "opps", label: "Opportunities" },
+  { key: "orders", label: "Orders" },
   { key: "data", label: "Data feed" },
   { key: "match", label: "Match report" },
 ];
@@ -414,6 +416,12 @@ function AutodistInner() {
       {opened.opps && (
         <div className={tab === "opps" ? "" : "hidden"}>
           <AutodistOpportunities hasData={!!counts?.active} onFind={findInCatalog} />
+        </div>
+      )}
+
+      {opened.orders && (
+        <div className={tab === "orders" ? "" : "hidden"}>
+          <AutodistOrders status={apiStatus} />
         </div>
       )}
 
