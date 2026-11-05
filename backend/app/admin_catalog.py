@@ -22,7 +22,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -500,6 +500,7 @@ class ProductFields(BaseModel):
 class ProductCreate(ProductFields):
     # Pieces of a kit, picked from a vendor's catalog. When given, the custom label is built from them.
     kit_parts: Optional[list[KitPartIn]] = None
+    kit_label_by: str = Field("mfr", pattern="^(mfr|sku)$")  # new label: Autodist parts as manufacturer # or vendor SKU
 
 
 # sku (our EI-0000001 number) is never typed in: the database hands out the next number to a new product.
@@ -673,6 +674,7 @@ def create_product(body: ProductCreate, db: Session = Depends(get_db), user: Aut
     fields = body.model_dump(exclude_unset=True)
     kit_parts = body.kit_parts or []
     fields.pop("kit_parts", None)
+    label_by = fields.pop("kit_label_by", "mfr")
     if not fields.get("title"):
         raise HTTPException(400, "A title is required")
     if "ebay_item_id" in fields:
@@ -693,7 +695,7 @@ def create_product(body: ProductCreate, db: Session = Depends(get_db), user: Aut
     if kit_parts:
         if not has_perm(user, "products.edit_details") and not has_perm(user, "products.create"):
             conflict(db, "You don't have permission to set kit parts.")
-        cls = replace_parts(db, new_id, kit_parts)["cls"]  # builds and stores the custom label
+        cls = replace_parts(db, new_id, kit_parts, label_by)["cls"]  # builds and stores the custom label
     finish(db, refresh=True)
     return {"id": new_id, "slug": fields["slug"], "custom_label_sku": cls}
 

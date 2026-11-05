@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import DescriptionEditor from "./DescriptionEditor";
 import FitmentPanel from "./FitmentPanel";
-import KitPartsPanel, { type KitPart } from "./KitPartsPanel";
+import KitPartsPanel, { type KitPart, type LabelBy } from "./KitPartsPanel";
 import PhotosPanel, { type Photo } from "./PhotosPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
 import { useAccess } from "./AdminAccess";
@@ -130,6 +130,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [photosDirty, setPhotosDirty] = useState(false); // unsaved main-photo / order changes in the photos panel
   const [similar, setSimilar] = useState<SimilarMatch[]>([]);
+  const [labelBy, setLabelBy] = useState<LabelBy>("mfr"); // Autodist parts in a new label: manufacturer # or vendor SKU
   const [kitParts, setKitParts] = useState<KitPart[]>([]); // pieces bought from a vendor that make up this product
   const [inHouseSku, setInHouseSku] = useState(""); // our EI- number; set by the database, never typed in
   const [loading, setLoading] = useState(!!productId);
@@ -238,6 +239,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
         const body = kitParts.length
           ? {
               ...payload,
+              kit_label_by: labelBy,
               kit_parts: kitParts.map((p) => ({
                 distributor_id: p.distributor_id,
                 supplier_item_id: p.supplier_item_id,
@@ -428,6 +430,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
           productId={productId}
           parts={kitParts}
           onChange={setKitParts}
+          labelBy={labelBy}
+          onLabelByChange={setLabelBy}
           disabled={!mayDetails}
           cardCls={card}
           currentCls={productId ? String(baseline?.custom_label_sku ?? "") : vals.custom_label_sku ?? ""}

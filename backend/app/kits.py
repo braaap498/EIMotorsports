@@ -8,7 +8,8 @@ kept in product_kit_parts (vendor, vendor part number, quantity). The CLS is bui
 
     182884xx182951xxNB9512     = three pieces, each written once, in the order they were added, joined by "xx"
     a piece with quantity 2    = still written once (the quantity lives in product_kit_parts, not in the label)
-    Automatic Distributors     = the label uses the MANUFACTURER number (mfr_number), not the Autodist SKU. The
+    Automatic Distributors     = the label uses the MANUFACTURER number (mfr_number) by default, or the Autodist SKU when
+                                 the person picks that (label_by). The
                                  Autodist SKU stays in product_kit_parts.part_number because that is what goes on the PO.
 
 Saving the pieces builds products.custom_label_sku ONLY when the product has no label yet. A product that already
@@ -290,8 +291,12 @@ class KitPartIn(BaseModel):
     quantity: int = Field(1, ge=1, le=1000)
 
 
+LABEL_BY = "^(mfr|sku)$"  # what an Automatic Distributors part is written as in a NEW label: manufacturer number or vendor SKU
+
+
 class PartsIn(BaseModel):
     parts: list[KitPartIn] = Field(default_factory=list, max_length=25)
+    label_by: str = Field("mfr", pattern=LABEL_BY)
 
 
 def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]:
@@ -313,7 +318,7 @@ def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]
     return out
 
 
-def replace_parts(db: Session, product_id: int, parts: list[KitPartIn]) -> dict:
+def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by: str = "mfr") -> dict:
     """Replaces the pieces. Builds products.custom_label_sku only when the product has none yet: an existing
     label is never changed here (it can be edited by hand on the product, which then goes to every listing).
     No commit (the caller commits).
@@ -336,7 +341,8 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn]) -> dict:
             if not it:
                 raise HTTPException(400, "A piece points at a catalog part that is no longer in the catalog. Pick it again.")
             number = it.sku  # the Autodist SKU is what goes on the purchase order
-            label = label_token_for(it.mfr_number or "")  # the label uses the manufacturer number
+            # the label uses the manufacturer number (default) or the vendor SKU, as chosen; no manufacturer number -> the SKU
+            label = label_token_for(it.mfr_number or "") if label_by != "sku" else ""
             desc = desc or " ".join(x for x in (it.manufacturer, it.name) if x)[:250]
             cost = float(it.dealer_cost) if it.dealer_cost is not None else cost
         if not number:
@@ -408,7 +414,7 @@ def get_kit(product_id: int, db: Session = Depends(get_db), user: AuthUser = Dep
 def put_parts(product_id: int, body: PartsIn, db: Session = Depends(get_db)):
     if not db.execute(text("select 1 from products where id = :p"), {"p": product_id}).first():
         raise HTTPException(404, "Product not found")
-    res = replace_parts(db, product_id, body.parts)
+    res = replace_parts(db, product_id, body.parts, body.label_by)
     db.commit()
     listings = _linked_listings(db, product_id)
     return {

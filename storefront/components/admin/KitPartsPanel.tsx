@@ -30,11 +30,12 @@ type SyncResult = { store: string; item_id: string; status: string; detail: stri
 const JOIN = "xx";
 // Same rule as the server (app/kits.py build_cls); the server is the one that decides.
 // Each part once, in the order added, however many are in the kit.
-export function previewCls(parts: KitPart[]): string {
+export type LabelBy = "mfr" | "sku";
+export function previewCls(parts: KitPart[], labelBy: LabelBy = "mfr"): string {
   const seen = new Set<string>();
   const tokens: string[] = [];
   parts.forEach((p) => {
-    const t = (p.label_part || p.part_number).trim().replace(/[^A-Za-z0-9\-_.]/g, "");
+    const t = (labelBy === "sku" ? p.part_number : p.label_part || p.part_number).trim().replace(/[^A-Za-z0-9\-_.]/g, "");
     if (t && !seen.has(t.toLowerCase())) {
       seen.add(t.toLowerCase());
       tokens.push(t);
@@ -72,6 +73,8 @@ export default function KitPartsPanel({
   cardCls,
   onSaved,
   currentCls,
+  labelBy,
+  onLabelByChange,
 }: {
   productId?: number;
   parts: KitPart[];
@@ -81,6 +84,9 @@ export default function KitPartsPanel({
   onSaved?: (cls: string | null) => void;
   // the product's label as it is now (typed or saved). While there is one, adding parts never changes it.
   currentCls?: string | null;
+  // how Automatic Distributors parts are written in a NEW label (it is only built when there is none yet)
+  labelBy: LabelBy;
+  onLabelByChange: (v: LabelBy) => void;
 }) {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [vendorId, setVendorId] = useState<number | "">("");
@@ -142,7 +148,7 @@ export default function KitPartsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [productId]);
 
-  const built = useMemo(() => previewCls(parts), [parts]);
+  const built = useMemo(() => previewCls(parts, labelBy), [parts, labelBy]);
   const keptCls = (currentCls ?? savedCls ?? "").trim();
   const cls = keptCls || built; // an existing label is never replaced by the parts
   const edit = (next: KitPart[]) => {
@@ -266,7 +272,7 @@ export default function KitPartsPanel({
     try {
       const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number }>(
         `/kits/${productId}/parts`,
-        { method: "PUT", body: { parts: payloadParts() } }
+        { method: "PUT", body: { parts: payloadParts(), label_by: labelBy } }
       );
       setDirty(false);
       setSavedCls(r.cls);
@@ -346,6 +352,17 @@ export default function KitPartsPanel({
         <span className="font-mono">{cls || "(none yet)"}</span>
         {cls.length > 50 && <span className="ml-2 text-xs text-red-700">{cls.length} characters: eBay allows 50</span>}
       </div>
+
+      {parts.some((p) => p.supplier_item_id) && (
+        <label className="flex flex-wrap items-center gap-2 text-xs">
+          Write Automatic Distributors parts in the label as
+          <select className={inputCls} style={{ width: "auto" }} value={labelBy} disabled={disabled || !!keptCls} onChange={(e) => onLabelByChange(e.target.value as LabelBy)}>
+            <option value="mfr">Manufacturer # (default)</option>
+            <option value="sku">Vendor SKU</option>
+          </select>
+          {keptCls && <span className="text-gray-500">(this product already has a label, so this is not used)</span>}
+        </label>
+      )}
 
       {/* adding pieces */}
       {!disabled && (
