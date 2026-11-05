@@ -27,7 +27,7 @@ export default function EbayConnectPage() {
       setError(
         p.get("error")
           ? "eBay did not approve the request."
-          : "This page is where eBay sends you after approval. Start from the Connect button on Live listings."
+          : "This page is where eBay sends you after approval. Start from the Connect button on Store API → Stores."
       );
       return;
     }
@@ -54,8 +54,8 @@ export default function EbayConnectPage() {
       )}
       {state === "error" && <Notice kind="error">{error}</Notice>}
       {state !== "working" && (
-        <Link href="/admin/ebay-listings" className={btnCls}>
-          Back to Live listings
+        <Link href="/admin/ebay-stores" className={btnCls}>
+          Back to Stores
         </Link>
       )}
     </div>

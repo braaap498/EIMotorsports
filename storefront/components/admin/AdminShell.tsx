@@ -24,7 +24,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/distributors", label: "Distributors", any: ["inventory.purchase"], match: ["/admin/distributors", "/admin/supplier"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
-  { href: "/admin/ebay-photos", label: "Sales channels", match: ["/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/ebay-listings"] },
+  { href: "/admin/ebay-listings", label: "Sales channels", match: ["/admin/ebay-listings", "/admin/ebay-edit", "/admin/ebay-sales", "/admin/ebay-stores", "/admin/ebay-connect", "/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new"] },
   { href: "/admin/analytics", label: "Analytics" },
   { href: "/admin/quickbooks", label: "QuickBooks" },
   { href: "/admin/users", label: "Team" },
@@ -43,19 +43,26 @@ const FITMENT_TABS: Tab[] = [
   { href: "/admin/fitment", label: "Types & makes" },
 ];
 
-// Sub-pages shown as tabs under the eBay button, in the order they are meant to be run.
+// Store API: the setup and import pages, shown as a second row of tabs when the Store API tab is open.
 // (The old /admin/cleanup and /admin/ebay-new addresses still work and light up the merge-and-link tab.)
-const EBAY_TABS: Tab[] = [
+const STORE_API_TABS: Tab[] = [
+  { href: "/admin/ebay-stores", label: "Stores", match: ["/admin/ebay-stores", "/admin/ebay-connect"] },
   { href: "/admin/ebay-photos", label: "eBay photo import" },
   { href: "/admin/ebay-compat", label: "eBay compatibility import" },
   { href: "/admin/ebay-import", label: "eBay listing import" },
   { href: "/admin/merge-link", label: "Merge and link products", match: ["/admin/merge-link", "/admin/cleanup", "/admin/ebay-new"] },
-  { href: "/admin/ebay-listings", label: "Live listings" },
+];
+
+// Sub-pages shown as tabs under the eBay button: Listings and Sales on the left, then Store API.
+const EBAY_TABS: Tab[] = [
+  { href: "/admin/ebay-listings", label: "Listings", match: ["/admin/ebay-listings", "/admin/ebay-edit"] },
+  { href: "/admin/ebay-sales", label: "Sales" },
+  { href: "/admin/ebay-stores", label: "Store API", match: STORE_API_TABS.flatMap((t) => t.match ?? [t.href]) },
 ];
 
 // Sales channels: one tab per channel, each with its own sub-pages beneath. Add Amazon (or any other channel) here
 // with its own list of tabs, and it shows up next to eBay.
-const CHANNELS: { label: string; href: string; tabs: Tab[] }[] = [{ label: "eBay", href: "/admin/ebay-photos", tabs: EBAY_TABS }];
+const CHANNELS: { label: string; href: string; tabs: Tab[] }[] = [{ label: "eBay", href: "/admin/ebay-listings", tabs: EBAY_TABS }];
 
 // ---- "Back" link: remembers the admin pages visited in this tab, so a page you opened from a list
 // (a product, say) can take you straight back to that list. Clicking the menu starts a fresh trail.
@@ -64,11 +71,11 @@ const MENU_KEY = "adminFromMenu";
 
 function pageName(full: string): string {
   const path = full.split("?")[0].replace(/\/+$/, "");
-  const exact = [...NAV, ...EBAY_TABS, ...FITMENT_TABS].find((n) => n.href === path);
+  const exact = [...NAV, ...EBAY_TABS, ...STORE_API_TABS, ...FITMENT_TABS].find((n) => n.href === path);
   if (exact) return exact.label;
   if (/^\/admin\/products\/new$/.test(path)) return "New product";
   if (/^\/admin\/products\/[^/]+$/.test(path)) return "Product";
-  const parent = [...NAV, ...EBAY_TABS, ...FITMENT_TABS]
+  const parent = [...NAV, ...EBAY_TABS, ...STORE_API_TABS, ...FITMENT_TABS]
     .filter((n) => n.href !== "/admin" && path.startsWith(n.href + "/"))
     .sort((a, b) => b.href.length - a.href.length)[0];
   return parent ? parent.label : "the previous page";
@@ -392,6 +399,25 @@ export default function AdminShell({ children }: { children: ReactNode }) {
                       })}
                     </div>
                   ))}
+                  {STORE_API_TABS.some((t) => tabOn(t, pathname)) && (
+                    <div className="mb-4 flex flex-wrap gap-2 border-t border-gray-100 pt-3">
+                      {STORE_API_TABS.map((t) => {
+                        const on = tabOn(t, pathname);
+                        return (
+                          <Link
+                            key={t.href}
+                            href={t.href}
+                            onClick={markMenuClick}
+                            className={`whitespace-nowrap rounded border px-3 py-1 text-sm ${
+                              on ? "border-black bg-gray-900 text-white" : "border-gray-300 text-gray-600 hover:border-gray-500 hover:text-gray-900"
+                            }`}
+                          >
+                            {t.label}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
               {children}

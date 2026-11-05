@@ -333,7 +333,7 @@ export default function EbayEditPage() {
       const body = { store, item_id: item.item_id, changes: changes(), action: relist ? "relist" : "revise" };
       const pv = await api<Preview>("/ebay-edit/preview", { method: "POST", body });
       if (!pv.live_pushes_enabled) {
-        setMsg({ kind: "error", text: `Live pushes are OFF for ${store}, so nothing can go to eBay. Turn them on in the Stores box on Live listings. Your edits are saved.` });
+        setMsg({ kind: "error", text: `Live pushes are OFF for ${store}, so nothing can go to eBay. Turn them on in Store API → Stores. Your edits are saved.` });
         return;
       }
       const list = pv.diff.map((d) => `${d.field}: ${d.before ?? "—"} → ${d.after}`).join("\n");
@@ -492,7 +492,7 @@ export default function EbayEditPage() {
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">Edit eBay listing</h1>
         <Link href="/admin/ebay-listings" className={btn2Cls}>
-          Back to Live listings
+          Back to Listings
         </Link>
       </div>
 
@@ -509,7 +509,7 @@ export default function EbayEditPage() {
       )}
       {busy === "load" && <p className="text-sm text-gray-600">Reading the listing from eBay…</p>}
 
-      {!item && busy !== "load" && !msg && <Notice>Open this page from the Edit link on a listing in Live listings.</Notice>}
+      {!item && busy !== "load" && !msg && <Notice>Open this page from the Edit link on a listing in Listings.</Notice>}
 
       {item && (
         <>

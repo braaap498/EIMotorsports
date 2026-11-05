@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import ClickRow from "../../../components/admin/ClickRow";
-import EbaySalesPanel from "../../../components/admin/EbaySalesPanel";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
@@ -71,27 +70,12 @@ export default function EbayLiveListingsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const [showAdd, setShowAdd] = useState(false);
-  const [storesOpen, setStoresOpen] = useState(false);
   const [picked, setPicked] = useState<Set<number>>(new Set()); // listings ticked on this page
   const [actMsg, setActMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [mainStore, setMainStore] = useState(""); // the store opened first on a first visit
   const [statusF, setStatusF] = useState<"all" | "active" | "inactive">("all");
   const [repo, setRepo] = useState<RepoResp | null>(null);
-  const [newStore, setNewStore] = useState("");
-  const [newName, setNewName] = useState("");
-  const [newSeller, setNewSeller] = useState("");
-  const [addMsg, setAddMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
-  const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState("");
-  const [diag, setDiag] = useState<{
-    store: string;
-    scopes_granted: string[];
-    scopes_missing: string[];
-    checks: { name: string; ok: boolean; status: number | null; note: string }[];
-  } | null>(null);
-  const [connMsg, setConnMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
-
   async function loadStores() {
     try {
       const r = await api<StoresResp>("/ebay-listings/stores");
@@ -136,11 +120,11 @@ export default function EbayLiveListingsPage() {
     if (!repo || picked.size === 0) return;
     const st = stores.find((x) => x.store === repo.store);
     if (!st?.authorized) {
-      setActMsg({ kind: "error", text: `${repo.store} is not connected to eBay yet, so nothing can be changed there. Nothing was sent.` });
+      setActMsg({ kind: "error", text: `${repo.store} is not connected to eBay yet (connect it in Store API → Stores), so nothing can be changed there. Nothing was sent.` });
       return;
     }
     if (!st.live_pushes_enabled) {
-      setActMsg({ kind: "error", text: `Live pushes are OFF for ${repo.store}, so nothing can go to eBay. Turn them on in the Stores box above. Nothing was sent.` });
+      setActMsg({ kind: "error", text: `Live pushes are OFF for ${repo.store}, so nothing can go to eBay. Turn them on in Store API → Stores. Nothing was sent.` });
       return;
     }
     const todo = repo.items.filter((x) => picked.has(x.listing_id) && (want === "inactive" ? x.active : !x.active));
@@ -189,7 +173,7 @@ export default function EbayLiveListingsPage() {
             body: { store, item_id: it.item_id, changes: {}, action: "relist" },
           });
           if (!pv.live_pushes_enabled) {
-            setActMsg({ kind: "error", text: `Live pushes are OFF for ${store}, so nothing can go to eBay. Turn them on in the Stores box above. Nothing was sent.` });
+            setActMsg({ kind: "error", text: `Live pushes are OFF for ${store}, so nothing can go to eBay. Turn them on in Store API → Stores. Nothing was sent.` });
             setBusy("");
             return;
           }
@@ -280,116 +264,6 @@ export default function EbayLiveListingsPage() {
     }
   }
 
-  async function connect(s: string) {
-    setBusy(s);
-    setConnMsg(null);
-    try {
-      const r = await api<{ url: string }>("/ebay-connect/start", { method: "POST", body: { store: s } });
-      window.location.href = r.url; // eBay's approval page; it sends the person back to /admin/ebay-connect
-    } catch (e) {
-      setConnMsg({ kind: "error", text: errMsg(e) });
-      setBusy("");
-    }
-  }
-
-  async function disconnect(s: string) {
-    if (!window.confirm(`Disconnect ${s}? Its saved eBay key is deleted and it must be approved again to edit.`)) return;
-    setBusy(s);
-    setConnMsg(null);
-    try {
-      await api("/ebay-connect/disconnect", { method: "POST", body: { store: s } });
-      setConnMsg({ kind: "success", text: `${s} was disconnected.` });
-      await loadStores();
-    } catch (e) {
-      setConnMsg({ kind: "error", text: errMsg(e) });
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function testConn(s: string) {
-    setBusy(s);
-    setConnMsg(null);
-    try {
-      const r = await api<{
-        ok: boolean;
-        ebay_username: string;
-        expected_username: string;
-        selling_limit: { quantity?: number; amount?: { value?: string } } | null;
-        selling_limit_error: string | null;
-      }>("/ebay-connect/test", { method: "POST", body: { store: s } });
-      const fmt = (v: unknown) => {
-        const n = Number(v);
-        return v === undefined || v === null || v === "" || Number.isNaN(n)
-          ? "?"
-          : n.toLocaleString("en-US", { maximumFractionDigits: 2 });
-      };
-      const lim = r.selling_limit
-        ? ` Selling limit: ${fmt(r.selling_limit.quantity)} items / $${fmt(r.selling_limit.amount?.value)}.`
-        : " eBay reported no selling limit.";
-      setConnMsg({
-        kind: r.ok ? "success" : "error",
-        text: r.ok
-          ? `${s}: connection works, signed in as ${r.ebay_username}.${lim}${r.selling_limit_error ? ` (Limit check failed: ${r.selling_limit_error})` : ""}`
-          : `${s}: the key belongs to ${r.ebay_username}, but ${r.expected_username} was expected.`,
-      });
-    } catch (e) {
-      setConnMsg({ kind: "error", text: `${s}: ${errMsg(e)}` });
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function setPushes(s: string, enabled: boolean) {
-    const q = enabled
-      ? `Turn live pushes ON for ${s}? After this, "Send to eBay" on the edit page changes real listings on that store.`
-      : `Turn live pushes OFF for ${s}? Previews still work; nothing can be sent.`;
-    if (!window.confirm(q)) return;
-    setBusy(s);
-    setConnMsg(null);
-    try {
-      await api("/ebay-edit/live-pushes", { method: "PUT", body: { store: s, enabled } });
-      await loadStores();
-    } catch (e) {
-      setConnMsg({ kind: "error", text: errMsg(e) });
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function checkAccess(s: string) {
-    setBusy(s);
-    setConnMsg(null);
-    setDiag(null);
-    try {
-      setDiag(await api("/ebay-connect/check", { method: "POST", body: { store: s } }));
-    } catch (e) {
-      setConnMsg({ kind: "error", text: `${s}: ${errMsg(e)}` });
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function addStore() {
-    setAdding(true);
-    setAddMsg(null);
-    try {
-      await api("/ebay-listings/stores", {
-        method: "POST",
-        body: { store: newStore.trim(), display_name: newName.trim() || null, seller_username: newSeller.trim() || null },
-      });
-      setAddMsg({ kind: "success", text: `${newStore.trim()} was added.` });
-      setNewStore("");
-      setNewName("");
-      setNewSeller("");
-      await loadStores();
-    } catch (e) {
-      setAddMsg({ kind: "error", text: errMsg(e) });
-    } finally {
-      setAdding(false);
-    }
-  }
-
   // which bulk buttons make sense: Inactivate for ticked listings that are active, Activate for ticked listings that are not
   const pickedItems = repo ? repo.items.filter((x) => picked.has(x.listing_id)) : [];
   const nActivePicked = pickedItems.filter((x) => x.active).length;
@@ -398,154 +272,16 @@ export default function EbayLiveListingsPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-semibold">Live listings</h1>
+        <h1 className="text-2xl font-semibold">Listings</h1>
         <p className="mt-1 max-w-3xl text-sm text-gray-600">
-          Shows a store&rsquo;s live eBay listings and which ones are products on the website. This screen only reads;
-          nothing here changes eBay. Until a store&rsquo;s owner authorizes the app, eBay&rsquo;s public view is all
-          that can be seen, so listings that are out of stock or ended do not appear yet.
+          Shows a store&rsquo;s eBay listings and which ones are products on the website. Opening a listing to edit it, or using
+          Activate / Inactivate here, changes the real listing on eBay (only when live pushes are ON for that store). Stores
+          are connected under Store API &rarr; Stores. Until a store&rsquo;s owner authorizes the app, eBay&rsquo;s public view
+          is all that can be seen, so listings that are out of stock or ended do not appear yet.
         </p>
       </div>
 
       {error && <Notice kind="error">{error}</Notice>}
-
-      {/* ---- stores */}
-      <div className="rounded border border-gray-200 bg-white p-4">
-        <button
-          type="button"
-          className="flex w-full flex-wrap items-center justify-between gap-2 text-left"
-          onClick={() => setStoresOpen((v) => !v)}
-          aria-expanded={storesOpen}
-        >
-          <h2 className="text-sm font-semibold">
-            <span className="mr-2 inline-block w-3 text-gray-500">{storesOpen ? "▾" : "▸"}</span>Stores
-          </h2>
-          {!storesOpen && (
-            <span className="text-xs text-gray-500">
-              {stores.length} store{stores.length === 1 ? "" : "s"} · {stores.filter((s) => s.authorized).length} authorized ·{" "}
-              {stores.filter((s) => s.live_pushes_enabled).length} with live pushes on
-            </span>
-          )}
-        </button>
-        {storesOpen && (
-          <div className="mt-3 space-y-3">
-            <div>
-              <button type="button" className={btn2Cls} onClick={() => setShowAdd((v) => !v)}>
-                {showAdd ? "Close" : "Add store"}
-              </button>
-            </div>
-            {connMsg && <Notice kind={connMsg.kind}>{connMsg.text}</Notice>}
-            {diag && (
-              <div className="space-y-1 rounded border border-gray-200 bg-gray-50 p-3 text-sm">
-                <div className="font-medium">Access check for {diag.store} (read only)</div>
-                {diag.checks.map((c) => (
-                  <div key={c.name} className={c.ok ? "text-green-700" : "text-red-700"}>
-                    {c.ok ? "✓" : "✗"} {c.name}: {c.note}
-                    {c.status && !c.ok ? ` (HTTP ${c.status})` : ""}
-                  </div>
-                ))}
-                <div className="text-gray-600">
-                  {diag.scopes_missing.length === 0
-                    ? "All requested permissions were granted."
-                    : `Not granted: ${diag.scopes_missing.map((x) => x.split("/").pop()).join(", ")}`}
-                </div>
-              </div>
-            )}
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
-                <thead className="text-xs text-gray-500">
-                  <tr>
-                    <th className="py-1 pr-6 font-normal">Store</th>
-                    <th className="py-1 pr-6 font-normal">eBay name</th>
-                    <th className="py-1 pr-6 font-normal">Linked</th>
-                    <th className="py-1 pr-6 font-normal">Access</th>
-                    <th className="py-1 pr-6 font-normal">Pushes</th>
-                    <th className="py-1 pr-6 font-normal">Approval ends</th>
-                    <th className="py-1 font-normal">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {stores.map((s) => (
-                    <tr key={s.store} className="align-middle">
-                      <td className="py-2 pr-6">
-                        <button type="button" className="text-left font-medium underline-offset-2 hover:underline" onClick={() => setStore(s.store)}>
-                          {s.display_name || s.store}
-                        </button>
-                      </td>
-                      <td className="py-2 pr-6 text-gray-500">{s.store}</td>
-                      <td className="py-2 pr-6 text-gray-500">{s.linked_count} linked to products</td>
-                      <td className="py-2 pr-6">
-                        <Badge tone={s.authorized ? "green" : "gray"}>{s.authorized ? "Authorized" : "Not authorized yet"}</Badge>
-                      </td>
-                      <td className="py-2 pr-6">
-                        <Badge tone={s.live_pushes_enabled ? "amber" : "gray"}>{s.live_pushes_enabled ? "Live pushes ON" : "Preview only"}</Badge>
-                      </td>
-                      <td className="py-2 pr-6 text-xs text-gray-500">
-                        {s.authorized && s.refresh_token_expires_at ? new Date(s.refresh_token_expires_at).toLocaleDateString() : "—"}
-                      </td>
-                      <td className="py-2">
-                        <span className="flex flex-wrap gap-2">
-                          <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void connect(s.store)}>
-                            {s.authorized ? "Reconnect" : "Connect"}
-                          </button>
-                          {s.authorized && (
-                            <>
-                              <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void testConn(s.store)}>
-                                Test
-                              </button>
-                              <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void setPushes(s.store, !s.live_pushes_enabled)}>
-                                {s.live_pushes_enabled ? "Turn pushes OFF" : "Turn pushes ON"}
-                              </button>
-                              <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void checkAccess(s.store)}>
-                                Check access
-                              </button>
-                              <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void disconnect(s.store)}>
-                                Disconnect
-                              </button>
-                            </>
-                          )}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                  {stores.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="py-2 text-gray-500">No stores yet.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {storesOpen && showAdd && (
-          <div className="mt-3 space-y-3 border-t border-gray-100 pt-3">
-            <div className="grid gap-3 sm:grid-cols-3">
-              <label className="block text-sm font-medium text-gray-700">
-                <span className="mb-1 block">Store name</span>
-                <input className={inputCls} value={newStore} onChange={(e) => setNewStore(e.target.value)} placeholder="genuine-oem-parts" />
-              </label>
-              <label className="block text-sm font-medium text-gray-700">
-                <span className="mb-1 block">Display name (optional)</span>
-                <input className={inputCls} value={newName} onChange={(e) => setNewName(e.target.value)} />
-              </label>
-              <label className="block text-sm font-medium text-gray-700">
-                <span className="mb-1 block">eBay user name (only if different)</span>
-                <input className={inputCls} value={newSeller} onChange={(e) => setNewSeller(e.target.value)} />
-              </label>
-            </div>
-            <div className="flex items-center gap-3">
-              <button type="button" className={btnCls} disabled={adding || !newStore.trim()} onClick={() => void addStore()}>
-                {adding ? "Adding…" : "Add store"}
-              </button>
-              {addMsg && <span className={`text-sm ${addMsg.kind === "error" ? "text-red-700" : "text-green-700"}`}>{addMsg.text}</span>}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* ---- eBay sales: polling, set-aside, quantity sync */}
-      <EbaySalesPanel />
 
       {/* ---- store, status and search */}
       <form
