@@ -10,6 +10,8 @@ export type KitPart = {
   vendor?: string;
   supplier_item_id: number | null;
   part_number: string;
+  // what goes in the custom label: the manufacturer number for Autodist parts (part_number stays the vendor SKU, which the PO needs)
+  label_part?: string | null;
   description: string;
   unit_cost: number | null;
   quantity: number;
@@ -27,11 +29,16 @@ type SyncResult = { store: string; item_id: string; status: string; detail: stri
 
 const JOIN = "xx";
 // Same rule as the server (app/kits.py build_cls); the server is the one that decides.
+// Each part once, in the order added, however many are in the kit.
 export function previewCls(parts: KitPart[]): string {
+  const seen = new Set<string>();
   const tokens: string[] = [];
   parts.forEach((p) => {
-    const t = p.part_number.trim();
-    if (t) for (let i = 0; i < p.quantity; i++) tokens.push(t);
+    const t = (p.label_part || p.part_number).trim().replace(/[^A-Za-z0-9\-_.]/g, "");
+    if (t && !seen.has(t.toLowerCase())) {
+      seen.add(t.toLowerCase());
+      tokens.push(t);
+    }
   });
   return tokens.join(JOIN);
 }
@@ -64,6 +71,7 @@ export default function KitPartsPanel({
   disabled,
   cardCls,
   onSaved,
+  currentCls,
 }: {
   productId?: number;
   parts: KitPart[];
@@ -71,6 +79,8 @@ export default function KitPartsPanel({
   disabled?: boolean;
   cardCls: string;
   onSaved?: (cls: string | null) => void;
+  // the product's label as it is now (typed or saved). While there is one, adding parts never changes it.
+  currentCls?: string | null;
 }) {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [vendorId, setVendorId] = useState<number | "">("");
@@ -132,7 +142,9 @@ export default function KitPartsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [productId]);
 
-  const cls = useMemo(() => previewCls(parts), [parts]);
+  const built = useMemo(() => previewCls(parts), [parts]);
+  const keptCls = (currentCls ?? savedCls ?? "").trim();
+  const cls = keptCls || built; // an existing label is never replaced by the parts
   const edit = (next: KitPart[]) => {
     setDirty(true);
     onChange(next);
@@ -182,6 +194,7 @@ export default function KitPartsPanel({
         vendor: vendor?.name,
         supplier_item_id: it.id,
         part_number: it.sku,
+        label_part: it.mfr_number || it.sku,
         description: [it.manufacturer, it.name].filter(Boolean).join(" ").slice(0, 250),
         unit_cost: it.dealer_cost ?? null,
         quantity: qty,
@@ -251,14 +264,18 @@ export default function KitPartsPanel({
     setMsg(null);
     setResults2(null);
     try {
-      const r = await api<{ cls: string | null; duplicates: { sku: string; title: string }[]; listings_to_update: number }>(
+      const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number }>(
         `/kits/${productId}/parts`,
         { method: "PUT", body: { parts: payloadParts() } }
       );
       setDirty(false);
       setSavedCls(r.cls);
       onSaved?.(r.cls);
-      let text = r.cls ? `Saved. Custom label is now ${r.cls}.` : "Saved (no pieces, so the custom label was left as it was).";
+      let text = !r.cls
+        ? "Saved (no custom label yet)."
+        : r.cls_changed
+          ? `Saved. Custom label created: ${r.cls}.`
+          : `Saved. The custom label stays ${r.cls} (it was not changed; edit the label box above to change it).`;
       if (r.duplicates.length) text += ` Warning: ${r.duplicates.map((d) => d.sku).join(", ")} already use the same label.`;
       setMsg({ kind: "success", text });
       if (r.cls && r.listings_to_update > 0) {
@@ -279,9 +296,10 @@ export default function KitPartsPanel({
     <section className={cardCls}>
       <h2 className="text-lg font-semibold">Kit parts &amp; custom label (CLS)</h2>
       <p className="text-xs text-gray-500">
-        If this product is made of parts bought from a vendor, add them here. The custom label is built from the vendor part
+        If this product is made of parts bought from a vendor, add them here. The custom label is built from the part
         numbers, is the same on every eBay listing of this product, and the parts are what goes on the purchase order when this
-        product is ordered. Leave empty if it is a single part.
+        product is ordered. Autodist parts use the manufacturer number in the label, each part once, in the order added. A label
+        that already exists is never changed by adding parts; edit it in the label box above. Leave empty if it is a single part.
       </p>
 
       {/* the pieces */}
@@ -324,8 +342,8 @@ export default function KitPartsPanel({
         </ul>
       )}
       <div className="rounded bg-gray-50 p-2 text-sm">
-        <span className="text-xs text-gray-500">Custom label {dirty ? "after saving" : "now"}: </span>
-        <span className="font-mono">{cls || savedCls || "(none yet)"}</span>
+        <span className="text-xs text-gray-500">{keptCls ? "Custom label (kept as is): " : `Custom label ${dirty ? "after saving" : "now"}: `}</span>
+        <span className="font-mono">{cls || "(none yet)"}</span>
         {cls.length > 50 && <span className="ml-2 text-xs text-red-700">{cls.length} characters: eBay allows 50</span>}
       </div>
 

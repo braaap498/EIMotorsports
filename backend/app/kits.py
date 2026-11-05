@@ -6,11 +6,14 @@ Mounted at /admin/kits/* .
 A store product (EI-xxxxxxx) can be a KIT: a few vendor parts bought separately and sold together. The pieces are
 kept in product_kit_parts (vendor, vendor part number, quantity). The CLS is built from them:
 
-    182884xx182951xxNB9512     = three pieces, each written as the vendor's part number, joined by "xx"
-    a piece used twice         = its number written twice (so the label can always be read back the same way)
+    182884xx182951xxNB9512     = three pieces, each written once, in the order they were added, joined by "xx"
+    a piece with quantity 2    = still written once (the quantity lives in product_kit_parts, not in the label)
+    Automatic Distributors     = the label uses the MANUFACTURER number (mfr_number), not the Autodist SKU. The
+                                 Autodist SKU stays in product_kit_parts.part_number because that is what goes on the PO.
 
-Saving the pieces rewrites products.custom_label_sku. Every eBay listing linked to the product (channel_listings)
-must carry the same label, so a change is then sent to each listing with the SAME safe path the Live listings
+Saving the pieces builds products.custom_label_sku ONLY when the product has no label yet. A product that already
+has one keeps it exactly as it is (edit the label itself to change it). Every eBay listing linked to the product
+(channel_listings) must carry the same label, so a changed label is sent to each listing with the SAME safe path the Live listings
 editor uses (app/ebay_edit.py): the store's live-push switch must be ON, and only admins can send. Anything that
 could not be sent is reported back per listing, never hidden.
 
@@ -18,7 +21,7 @@ could not be sent is reported back per listing, never hidden.
   GET  /kits/catalog                    search the vendor catalog (many ways, see catalog_search)
   GET  /kits/catalog/brands             brands in the catalog, for the brand filter
   GET  /kits/{product_id}               the pieces, the CLS, and the linked eBay listings
-  PUT  /kits/{product_id}/parts         replace the pieces; rebuilds the CLS (does NOT talk to eBay)
+  PUT  /kits/{product_id}/parts         replace the pieces; builds the CLS only if there is none yet (does NOT talk to eBay)
   POST /kits/{product_id}/sync          send the CLS to every linked eBay listing (admins; needs the store's switch ON)
 
 Also used by other modules:
@@ -51,21 +54,33 @@ _DIGITS = "regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g')"
 # --------------------------------------------------------------------------
 # the CLS itself (one place; change the rule here)
 # --------------------------------------------------------------------------
+def label_token_for(number: str) -> str:
+    """A vendor/manufacturer number as it is written in a label: spaces and other odd characters dropped
+    (the Autodist matcher ignores them anyway)."""
+    return re.sub(r"[^A-Za-z0-9\-_.]", "", (number or "").strip())
+
+
 def build_cls(parts: list[dict]) -> str:
-    """Pieces in order -> '182884xx182951xxNB9512'. A piece with quantity 2 is written twice."""
+    """Pieces in the order they were added -> '182884xx182951xxNB9512'.
+    Each piece appears once however many are in the kit (and however many times it was added).
+    A piece's label text is p['label'] when given (Autodist pieces: the manufacturer number), else its part number."""
     tokens: list[str] = []
+    seen: set[str] = set()
     for p in parts:
-        tok = (p.get("part_number") or "").strip()
+        tok = (p.get("label") or p.get("part_number") or "").strip()
         if not tok:
             raise HTTPException(400, "Every piece needs a part number.")
         if not TOKEN_RE.fullmatch(tok):
             raise HTTPException(400, f"Part number '{tok}' has characters that cannot go in a custom label (use letters, digits, - _ .).")
         if CLS_JOIN in tok.lower():
-            raise HTTPException(400, f"Part number '{tok}' contains '{CLS_JOIN}', which is the separator in the custom label, so it cannot be used.")
-        tokens += [tok] * int(p.get("quantity") or 1)
+            raise HTTPException(400, f"Part number '{tok}' contains '{CLS_JOIN}', which is the separator in the custom label, so it cannot be used. Type the label yourself in the custom label box instead.")
+        if tok.lower() in seen:
+            continue
+        seen.add(tok.lower())
+        tokens.append(tok)
     cls = CLS_JOIN.join(tokens)
     if len(cls) > CLS_MAX:
-        raise HTTPException(400, f"That kit's custom label would be {len(cls)} characters; eBay allows {CLS_MAX}. Use fewer pieces or lower quantities.")
+        raise HTTPException(400, f"That kit's custom label would be {len(cls)} characters; eBay allows {CLS_MAX}. Use fewer pieces, or type a shorter label yourself.")
     return cls
 
 
@@ -283,7 +298,9 @@ def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]
     rows = db.execute(
         text(
             "select k.id, k.distributor_id, d.name as vendor, k.supplier_item_id, k.part_number, k.description, "
-            "k.unit_cost, k.quantity, k.sort_order from product_kit_parts k "
+            "k.unit_cost, k.quantity, k.sort_order, "
+            "coalesce(nullif(btrim(si.mfr_number), ''), k.part_number) as label_part from product_kit_parts k "
+            "left join supplier_items si on si.id = k.supplier_item_id "
             "left join po_distributors d on d.id = k.distributor_id where k.product_id = :p order by k.sort_order, k.id"
         ),
         {"p": product_id},
@@ -297,32 +314,35 @@ def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]
 
 
 def replace_parts(db: Session, product_id: int, parts: list[KitPartIn]) -> dict:
-    """Replaces the pieces and rebuilds products.custom_label_sku. No commit (the caller commits).
-    With no pieces the old label is left alone: a product that is not a kit keeps whatever label it has."""
+    """Replaces the pieces. Builds products.custom_label_sku only when the product has none yet: an existing
+    label is never changed here (it can be edited by hand on the product, which then goes to every listing).
+    No commit (the caller commits).
+    Returns {cls: the label the product has now (or None), cls_changed: True when this call set it, duplicates}."""
     db.execute(text("delete from product_kit_parts where product_id = :p"), {"p": product_id})
     if not parts:
-        return {"cls": None, "duplicates": []}
+        return {"cls": _product_cls(db, product_id), "cls_changed": False, "duplicates": []}
     dists = {r.id: r.name for r in db.execute(text("select id, name from po_distributors")).all()}
     clean: list[dict] = []
     for i, p in enumerate(parts):
         if p.distributor_id not in dists:
             raise HTTPException(400, "One of the pieces has a vendor that no longer exists. Pick the vendor again.")
         number, desc, cost = (p.part_number or "").strip(), (p.description or "").strip() or None, p.unit_cost
+        label = ""
         if p.supplier_item_id:
             it = db.execute(
-                text("select sku, name, manufacturer, dealer_cost from supplier_items where id = :i and supplier = :s"),
+                text("select sku, mfr_number, name, manufacturer, dealer_cost from supplier_items where id = :i and supplier = :s"),
                 {"i": p.supplier_item_id, "s": SUPPLIER},
             ).first()
             if not it:
                 raise HTTPException(400, "A piece points at a catalog part that is no longer in the catalog. Pick it again.")
-            number = it.sku
+            number = it.sku  # the Autodist SKU is what goes on the purchase order
+            label = label_token_for(it.mfr_number or "")  # the label uses the manufacturer number
             desc = desc or " ".join(x for x in (it.manufacturer, it.name) if x)[:250]
             cost = float(it.dealer_cost) if it.dealer_cost is not None else cost
         if not number:
             raise HTTPException(400, "Every piece needs a part number.")
         clean.append({"distributor_id": p.distributor_id, "supplier_item_id": p.supplier_item_id, "part_number": number,
-                      "description": desc, "unit_cost": cost, "quantity": p.quantity, "sort_order": i})
-    cls = build_cls(clean)
+                      "label": label or number, "description": desc, "unit_cost": cost, "quantity": p.quantity, "sort_order": i})
     for c in clean:
         db.execute(
             text(
@@ -332,6 +352,10 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn]) -> dict:
             {"p": product_id, "d": c["distributor_id"], "si": c["supplier_item_id"], "pn": c["part_number"],
              "desc": c["description"], "uc": c["unit_cost"], "q": c["quantity"], "so": c["sort_order"]},
         )
+    existing = _product_cls(db, product_id)
+    if existing:
+        return {"cls": existing, "cls_changed": False, "duplicates": []}
+    cls = build_cls(clean)
     try:
         db.execute(
             text("update products set custom_label_sku = :c, updated_at = now() where id = :p"), {"c": cls, "p": product_id}
@@ -343,7 +367,7 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn]) -> dict:
         text("select id, sku_display as sku, title from products where custom_label_sku = :c and id <> :p limit 5"),
         {"c": cls, "p": product_id},
     ).all()
-    return {"cls": cls, "duplicates": [dict(d._mapping) for d in dups]}
+    return {"cls": cls, "cls_changed": True, "duplicates": [dict(d._mapping) for d in dups]}
 
 
 def _linked_listings(db: Session, product_id: int) -> list[dict]:
@@ -387,7 +411,13 @@ def put_parts(product_id: int, body: PartsIn, db: Session = Depends(get_db)):
     res = replace_parts(db, product_id, body.parts)
     db.commit()
     listings = _linked_listings(db, product_id)
-    return {"cls": res["cls"], "duplicates": res["duplicates"], "listings_to_update": len(listings) if res["cls"] else 0}
+    return {
+        "cls": res["cls"],
+        "cls_changed": res["cls_changed"],
+        "duplicates": res["duplicates"],
+        # only a label that was just created needs sending; an unchanged one is already on the listings
+        "listings_to_update": len(listings) if res["cls_changed"] else 0,
+    }
 
 
 # --------------------------------------------------------------------------

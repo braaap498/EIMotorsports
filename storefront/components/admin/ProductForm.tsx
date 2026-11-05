@@ -37,7 +37,7 @@ const BASIC: FieldDef[] = [
   { key: "title", label: "Title", kind: "text", wide: true },
   { key: "ebay_item_id", label: "eBay item ID (optional)", kind: "text" },
   { key: "manufacturer_part_number", label: "Manufacturer part #", kind: "text" },
-  { key: "custom_label_sku", label: "eBay custom label (CLS) – built from the kit parts below; edit here to override", kind: "text" },
+  { key: "custom_label_sku", label: "eBay custom label (CLS) – created from the parts below the first time; after that only changes when you edit it here", kind: "text" },
   { key: "part_type", label: "Part type", kind: "text" },
   { key: "condition", label: "Condition", kind: "text" },
 ];
@@ -430,6 +430,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
           onChange={setKitParts}
           disabled={!mayDetails}
           cardCls={card}
+          currentCls={productId ? String(baseline?.custom_label_sku ?? "") : vals.custom_label_sku ?? ""}
           onSaved={(c) => {
             if (c == null) return;
             set("custom_label_sku", c);
