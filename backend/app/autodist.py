@@ -1339,6 +1339,29 @@ from cand
 """
 
 
+_LABEL_MATCH_SQL = """
+with prod as (
+  select p.id, p.sku_display as sku, p.title, btrim(p.custom_label_sku) as label,
+         regexp_split_to_array(upper(btrim(p.custom_label_sku)), 'XX') as toks
+  from products p
+  where p.id = any(cast(:ids as bigint[])) and nullif(btrim(p.custom_label_sku), '') is not null
+)
+select prod.id, prod.sku, prod.title, prod.label, array_length(prod.toks, 1) as pieces,
+       s.sku as supplier_sku, s.manufacturer, s.name as supplier_name, s.effective_cost,
+       case when upper(s.sku) = t.tok then 'part number' else 'manufacturer number' end as via
+from prod
+cross join lateral unnest(prod.toks) as t(tok)
+join supplier_items s on s.supplier = :s and s.active
+ and (upper(s.sku) = t.tok or (length(t.tok) >= 4 and s.mfr_number_norm = regexp_replace(t.tok, '[^A-Z0-9]', '', 'g')))
+order by prod.id, s.sku
+"""
+
+
+def label_tokens(label: Optional[str]) -> list[str]:
+    """A custom label SKU as its pieces: '182884xx182951' -> ['182884', '182951']."""
+    return [t for t in re.split(r"xx", (label or "").strip(), flags=re.I) if t.strip()]
+
+
 @router.get("/match-report")
 def match_report(db: Session = Depends(get_db)):
     """Counts, plus the part-number-only matches to look at. Nothing is saved or changed."""
@@ -1367,7 +1390,20 @@ def match_report(db: Session = Depends(get_db)):
             {"s": SUPPLIER, "ids": review_ids},
         ).all()
         review = [dict(f._mapping) for f in found]
-    return {"total_products": len(rows), "counts": counts, "review": review, "review_limited": len(review_ids) == 300}
+    # Products with no barcode or part-number match: try the eBay custom label SKU. A label is the distributor's part
+    # numbers joined by "xx" (see kits.py), e.g. 182884xx182951; a single-part label is just the number.
+    none_ids = [r.id for r in rows if r.kind == "none"]
+    label_rows: list[dict] = []
+    label_products = 0
+    if none_ids:
+        found = db.execute(text(_LABEL_MATCH_SQL), {"s": SUPPLIER, "ids": none_ids}).all()
+        label_rows = [dict(f._mapping) for f in found]
+        label_products = len({f["id"] for f in label_rows})
+    counts["label"] = label_products
+    return {
+        "total_products": len(rows), "counts": counts, "review": review, "review_limited": len(review_ids) == 300,
+        "label_review": label_rows[:400], "label_limited": len(label_rows) > 400,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -2097,8 +2133,8 @@ def api_pos(db: Session = Depends(get_db)):
     return {"mode": mode, "items": [dict(r._mapping) for r in rows]}
 
 
-def _supplier_matches(db: Session, item: Optional[str], barcode: Optional[str]) -> tuple[list[dict], Optional[str]]:
-    """Automatic Distributors parts that could be this PO line: by barcode first, then part number (the same rule as the match report)."""
+def _supplier_matches(db: Session, item: Optional[str], barcode: Optional[str], label: Optional[str] = None) -> tuple[list[dict], Optional[str]]:
+    """Automatic Distributors parts that could be this PO line: by barcode first, then part number, then the eBay custom label SKU (the same rule as the match report)."""
     upc = re.sub(r"\D", "", barcode or "").lstrip("0")
     mpn = re.sub(r"[^A-Za-z0-9]", "", item or "").upper()
     cols = "s.sku, s.manufacturer, s.name, (s.qty_indiana + s.qty_nevada) as stock, s.effective_cost as cost"
@@ -2107,6 +2143,16 @@ def _supplier_matches(db: Session, item: Optional[str], barcode: Optional[str]) 
         found = [dict(r._mapping) for r in db.execute(text(f"select {cols} from supplier_items s where s.supplier = :s and s.active and s.upc_norm = :u order by s.sku limit 8"), {"s": SUPPLIER, "u": upc}).all()]
     if not found and mpn:
         found = [dict(r._mapping) for r in db.execute(text(f"select {cols} from supplier_items s where s.supplier = :s and s.active and s.mfr_number_norm = :m order by s.sku limit 8"), {"s": SUPPLIER, "m": mpn}).all()]
+    if not found and label:
+        toks = [t.upper() for t in label_tokens(label)][:6]
+        if toks:
+            found = [dict(r._mapping) for r in db.execute(
+                text(f"select {cols} from supplier_items s where s.supplier = :s and s.active and upper(s.sku) = any(cast(:t as text[])) order by s.sku limit 8"),
+                {"s": SUPPLIER, "t": toks},
+            ).all()]
+            # A label with several pieces is a kit: never auto-pick one piece for it, let staff choose.
+            if len(toks) > 1:
+                return found, None
     pick = found[0]["sku"] if len(found) == 1 else None
     return found, pick
 
@@ -2127,14 +2173,14 @@ def api_po(po_id: int, db: Session = Depends(get_db)):
         raise HTTPException(409, f"PO {h.po_number} is {h.status}, so it cannot be ordered.")
     rows = db.execute(
         text(
-            "select l.id, l.item, l.description, l.quantity, l.rate, p.barcode from po_lines l "
+            "select l.id, l.item, l.description, l.quantity, l.rate, p.barcode, p.custom_label_sku from po_lines l "
             "left join products p on p.id = l.product_id where l.po_id = :i and l.received_at is null order by l.id"
         ),
         {"i": po_id},
     ).all()
     lines = []
     for r in rows:
-        cands, pick = _supplier_matches(db, r.item, r.barcode)
+        cands, pick = _supplier_matches(db, r.item, r.barcode, r.custom_label_sku)
         lines.append(
             {
                 "line_id": r.id,

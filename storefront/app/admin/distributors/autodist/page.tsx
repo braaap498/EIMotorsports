@@ -28,9 +28,11 @@ type Run = {
 };
 type Match = {
   total_products: number;
-  counts: { upc: number; upc_many: number; mpn: number; mpn_many: number; none: number };
+  counts: { upc: number; upc_many: number; mpn: number; mpn_many: number; none: number; label?: number };
   review: { id: number; sku: string; title: string; supplier_sku: string; manufacturer: string | null; supplier_name: string | null; dealer_cost: string | null }[];
   review_limited: boolean;
+  label_review?: { id: number; sku: string; title: string; label: string; pieces: number; supplier_sku: string; manufacturer: string | null; supplier_name: string | null; effective_cost: string | null; via: string }[];
+  label_limited?: boolean;
 };
 type FtpStatus = { configured: boolean; host: string; user: string | null; inventory_file: string | null; tls: boolean };
 type FtpCheck = {
@@ -705,7 +707,8 @@ function AutodistInner() {
               <span><b>{n(match.counts.upc)}</b> match by barcode</span>
               <span><b>{n(match.counts.mpn)}</b> by part number only</span>
               <span><b>{n(match.counts.mpn_many)}</b> part number fits several</span>
-              <span><b>{n(match.counts.none)}</b> no match</span>
+              <span><b>{n(match.counts.label ?? 0)}</b> of the unmatched fit by custom label</span>
+              <span><b>{n(match.counts.none)}</b> no barcode or part number match</span>
               <span className="text-gray-500">of {n(match.total_products)} products</span>
             </div>
             {match.review.length > 0 && (
@@ -733,6 +736,44 @@ function AutodistInner() {
                   </tbody>
                 </table>
                 {match.review_limited && <p className="mt-1 text-xs text-gray-500">Showing the first 300 products that need checking.</p>}
+              </div>
+            )}
+            {(match.label_review?.length ?? 0) > 0 && (
+              <div className="overflow-x-auto">
+                <h3 className="mb-1 mt-3 text-sm font-semibold">Matched by custom label SKU (no barcode or part number match)</h3>
+                <p className="mb-1 text-xs text-gray-500">
+                  Each piece of the label is looked up as an Automatic Distributors part number (or manufacturer number). A label with
+                  several pieces is a kit: its pieces are listed and none is picked for you on an order.
+                </p>
+                <table className="w-full text-left text-xs">
+                  <thead className="uppercase text-gray-500">
+                    <tr>
+                      <th className="py-1 pr-3">Our part</th>
+                      <th className="py-1 pr-3">Custom label</th>
+                      <th className="py-1 pr-3">Automatic Distributors part</th>
+                      <th className="py-1">Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {match.label_review!.map((r, i) => (
+                      <tr key={`${r.id}-${r.supplier_sku}-${i}`} className="align-top">
+                        <td className="py-1 pr-3">
+                          <span className="font-medium">{r.sku}</span> {r.title}
+                        </td>
+                        <td className="py-1 pr-3">
+                          {r.label}
+                          {r.pieces > 1 ? ` (${r.pieces} pieces)` : ""}
+                        </td>
+                        <td className="py-1 pr-3">
+                          <span className="font-medium">{r.manufacturer}</span> {r.supplier_sku} {r.supplier_name}
+                          {r.via === "manufacturer number" ? <span className="text-amber-700"> · by manufacturer number, check the brand</span> : null}
+                        </td>
+                        <td className="py-1">{money(r.effective_cost)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {match.label_limited && <p className="mt-1 text-xs text-gray-500">Showing the first 400 rows.</p>}
               </div>
             )}
           </>
