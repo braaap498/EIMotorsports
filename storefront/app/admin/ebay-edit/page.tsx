@@ -358,10 +358,10 @@ export default function EbayEditPage() {
     }
   }
 
-  // Inactive: end the live listing on eBay.
+  // Inactivate: end the live listing on eBay.
   async function makeInactive() {
     if (!item) return;
-    if (!window.confirm(`Inactive will END this listing on eBay (${store}, item ${item.item_id}). Buyers will no longer be able to buy it. You can bring it back later with Activate.\n\nContinue?`)) return;
+    if (!window.confirm(`Inactivate will END this listing on eBay (${store}, item ${item.item_id}). Buyers will no longer be able to buy it. You can bring it back later with Activate.\n\nContinue?`)) return;
     setBusy("end");
     setMsg(null);
     try {
@@ -474,7 +474,7 @@ export default function EbayEditPage() {
       )}
       {!item.ended && item.editable && (
         <button type="button" className={`${btn2Cls} text-red-700`} disabled={busy !== ""} onClick={() => void makeInactive()}>
-          {busy === "end" ? "Working…" : "Inactive"}
+          {busy === "end" ? "Working…" : "Inactivate"}
         </button>
       )}
       <span className="text-xs text-gray-500">
