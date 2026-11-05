@@ -11,7 +11,9 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /api/avail              live availability and our price for one part from the ordering API
   POST /api/order/quote        price and shipping options for an order (creates nothing)
   POST /api/order/place        places an order (confirm required; real orders also need AUTOMATIC_DIST_ALLOW_LIVE_ORDERS)
-  GET  /api/orders             the orders placed from this screen
+  GET  /api/orders             the orders placed from this screen, with their status and tracking numbers
+  POST /api/orders/{id}/tracking   ask Automatic Distributors for this order's status and tracking now
+  POST /api/orders/refresh-tracking  the same for every recent order that is not finished (runs from a button)
   GET  /api/pos                open purchase orders to Automatic Distributors that can be ordered from here
   GET  /api/pos/{id}           one of them: lines matched to Automatic Distributors part numbers, ship-to split into fields
   GET  /opportunities          ranked lists of the parts most worth selling (margin, stock, our own sales)
@@ -1726,7 +1728,7 @@ def _api_mode(url: str) -> str:
     return "test" if host.startswith("test") else "live"
 
 
-def _api_get(path: str, params: Optional[dict] = None):
+def _api_get(path: str, params: Optional[dict] = None, not_found: Optional[str] = None):
     """GET a JSON endpoint. Raises HTTPException with a plain-English message; the key is never put in a message."""
     url, key = _api_settings()
     if not key:
@@ -1744,7 +1746,7 @@ def _api_get(path: str, params: Optional[dict] = None):
         except Exception:
             pass
         if e.code == 404:
-            raise HTTPException(404, "Automatic Distributors does not know that part number." + (f" ({detail})" if detail else ""))
+            raise HTTPException(404, (not_found or "Automatic Distributors does not know that part number.") + (f" ({detail})" if detail else ""))
         if e.code == 422:
             raise HTTPException(422, "That part is restricted for our account." + (f" ({detail})" if detail else ""))
         if e.code == 429:
@@ -2064,19 +2066,134 @@ def api_order_place(body: OrderIn, db: Session = Depends(get_db), user: AuthUser
 
 @router.get("/api/orders")
 def api_orders(db: Session = Depends(get_db)):
-    """The orders placed from this screen, newest first."""
+    """The orders placed from this screen, newest first, with status and tracking once they have been checked."""
+    base = "id, mode, po_number, order_number, message, invoice_amount, created_at, created_by"
+    try:
+        try:
+            rows = db.execute(
+                text(f"select {base}, status, tracking, tracking_checked_at from supplier_orders where supplier = :s order by id desc limit 50"),
+                {"s": SUPPLIER},
+            ).all()
+            tracking_missing = False
+        except Exception:
+            db.rollback()  # the tracking columns are not there yet (sql/autodist_tracking.sql)
+            rows = db.execute(
+                text(f"select {base} from supplier_orders where supplier = :s order by id desc limit 50"), {"s": SUPPLIER}
+            ).all()
+            tracking_missing = True
+    except Exception:
+        db.rollback()
+        return {"table_missing": True, "tracking_missing": False, "orders": []}
+    out = []
+    for r in rows:
+        d = dict(r._mapping)
+        d.setdefault("status", None)
+        d.setdefault("tracking_checked_at", None)
+        d["tracking"] = d.get("tracking") or []
+        out.append(d)
+    return {"table_missing": False, "tracking_missing": tracking_missing, "orders": out}
+
+
+# --------------------------------------------------------------------------
+# tracking: GET /order/number/{order} -> status + tracking / pro numbers
+# --------------------------------------------------------------------------
+# Automatic Distributors splits trackingNumber (parcel) from proNumber (freight) and may split one order into related
+# orders, each with its own. The reply is read tolerantly (any header-like block that carries a number), de-duplicated,
+# and stored on supplier_orders.tracking as a list of {number, kind, carrier, order_number, status}. Nothing here changes
+# an order. Checking is by button, one call per order, so it stays well inside the API's rate limit.
+TRACK_BATCH = 25
+TRACK_WINDOW_DAYS = 60
+
+
+def _collect_tracking(data) -> list[dict]:
+    found: list[dict] = []
+    seen: set[tuple] = set()
+
+    def add(h: dict) -> None:
+        carrier, status, onum = h.get("carrierCode"), h.get("orderStatus"), h.get("orderNumber")
+        for key, kind in (("trackingNumber", "tracking"), ("trackingNumbers", "tracking"), ("proNumber", "pro")):
+            raw = h.get(key)
+            for v in raw if isinstance(raw, list) else [raw]:
+                v = str(v or "").strip()
+                if v and (v, kind) not in seen:
+                    seen.add((v, kind))
+                    found.append({"number": v[:60], "kind": kind, "carrier": carrier, "order_number": onum, "status": status})
+
+    def walk(o) -> None:
+        if isinstance(o, dict):
+            if any(k in o for k in ("trackingNumber", "trackingNumbers", "proNumber")):
+                add(o)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(data)
+    return found
+
+
+def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict:
+    data = _api_get(
+        "/order/number/" + urllib.parse.quote(order_number, safe=""),
+        not_found="Automatic Distributors does not have this order on the server the app points at (a test order only exists on the test server).",
+    )
+    if not isinstance(data, dict):
+        raise HTTPException(502, "The API sent something unexpected for that order.")
+    head = data.get("header") or {}
+    status = str(head.get("orderStatus") or "").strip() or None
+    items = _collect_tracking(data)
+    try:
+        db.execute(
+            text("update supplier_orders set status = :st, tracking = cast(:t as jsonb), tracking_checked_at = now() where id = :i"),
+            {"st": status, "t": json.dumps(items), "i": row_id},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(503, "The tracking columns are missing. Run sql/autodist_tracking.sql in Supabase, then try again.")
+    return {"order_number": order_number, "status": status, "tracking": items}
+
+
+@router.post("/api/orders/refresh-tracking")
+def api_orders_refresh_tracking(db: Session = Depends(get_db)):
+    """Status and tracking for recent orders on the server we point at that are not finished. Oldest-checked first."""
+    url, _key = _api_settings()
+    mode = _api_mode(url)
     try:
         rows = db.execute(
             text(
-                "select id, mode, po_number, order_number, message, invoice_amount, created_at, created_by "
-                "from supplier_orders where supplier = :s order by id desc limit 50"
+                "select id, order_number from supplier_orders where supplier = :s and mode = :m and order_number <> '' "
+                "and created_at > now() - make_interval(days => :d) "
+                "and coalesce(lower(status), '') not similar to '%(cancel|deliver|complete)%' "
+                "order by tracking_checked_at asc nulls first, id desc limit :n"
             ),
-            {"s": SUPPLIER},
+            {"s": SUPPLIER, "m": mode, "d": TRACK_WINDOW_DAYS, "n": TRACK_BATCH},
         ).all()
     except Exception:
         db.rollback()
-        return {"table_missing": True, "orders": []}
-    return {"table_missing": False, "orders": [dict(r._mapping) for r in rows]}
+        raise HTTPException(503, "The tracking columns are missing. Run sql/autodist_tracking.sql in Supabase, then try again.")
+    checked, with_tracking, problems = 0, 0, []
+    for r in rows:
+        try:
+            res = _refresh_order_tracking(db, r.id, r.order_number)
+            checked += 1
+            with_tracking += 1 if res["tracking"] else 0
+        except HTTPException as e:
+            problems.append(f"{r.order_number}: {e.detail}")
+            if e.status_code in (429, 503):  # rate limited, or the columns are missing: stop instead of hammering
+                break
+    return {"mode": mode, "checked": checked, "with_tracking": with_tracking, "problems": problems}
+
+
+@router.post("/api/orders/{order_id}/tracking")
+def api_order_tracking(order_id: int, db: Session = Depends(get_db)):
+    row = db.execute(
+        text("select id, order_number from supplier_orders where supplier = :s and id = :i"), {"s": SUPPLIER, "i": order_id}
+    ).first()
+    if not row or not row.order_number:
+        raise HTTPException(404, "That order is not in the list, or it has no order number yet.")
+    return _refresh_order_tracking(db, row.id, row.order_number)
 
 
 # --------------------------------------------------------------------------

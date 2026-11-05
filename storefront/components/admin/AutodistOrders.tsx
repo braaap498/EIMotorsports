@@ -35,7 +35,21 @@ type Placed = {
   totals: Totals;
   related: { order_number: string; po: string; status: string; carrier: string; pro_number: string; invoice_number: string; invoice_amount: string }[];
 };
-type PastOrder = { id: number; mode: string; po_number: string; order_number: string; message: string | null; invoice_amount: string | null; created_at: string; created_by: string | null };
+type TrackItem = { number: string; kind: "tracking" | "pro"; carrier: string | null; order_number: string | null; status: string | null };
+type PastOrder = {
+  id: number; mode: string; po_number: string; order_number: string; message: string | null; invoice_amount: string | null; created_at: string; created_by: string | null;
+  status: string | null; tracking: TrackItem[]; tracking_checked_at: string | null;
+};
+
+// A link to the carrier's own tracking page when the number is clearly UPS or FedEx; otherwise the number alone.
+function trackUrl(t: TrackItem): string | null {
+  if (t.kind !== "tracking") return null;
+  const n = t.number.replace(/\s/g, "");
+  const c = (t.carrier ?? "").toUpperCase();
+  if (/^1Z[0-9A-Z]{16}$/i.test(n) || c.includes("UPS")) return `https://www.ups.com/track?tracknum=${encodeURIComponent(n)}`;
+  if (c.includes("FED") || c.includes("FDX")) return `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(n)}`;
+  return null;
+}
 type Status = { configured: boolean; server: string; mode: "live" | "test" };
 type PoRow = { id: number; po_number: number; vendor_name: string; sent_at: string | null; po_type: "stock" | "drop_ship"; open_lines: number };
 type Cand = { sku: string; manufacturer: string | null; name: string | null; stock: number | null; cost: string | number | null };
@@ -76,6 +90,9 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
   const [placed, setPlaced] = useState<Placed | null>(null);
   const [past, setPast] = useState<PastOrder[] | null>(null);
   const [tableMissing, setTableMissing] = useState(false);
+  const [trackingMissing, setTrackingMissing] = useState(false);
+  const [trackBusy, setTrackBusy] = useState<number | "all" | null>(null);
+  const [trackMsg, setTrackMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   const body = (confirm: boolean) => ({
     po_number: po.trim(),
@@ -97,11 +114,31 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
 
   async function loadPast() {
     try {
-      const r = await api<{ table_missing: boolean; orders: PastOrder[] }>("/autodist/api/orders");
+      const r = await api<{ table_missing: boolean; tracking_missing?: boolean; orders: PastOrder[] }>("/autodist/api/orders");
       setPast(r.orders);
       setTableMissing(r.table_missing);
+      setTrackingMissing(!!r.tracking_missing);
     } catch {
       setPast([]);
+    }
+  }
+  async function checkTracking(id: number | "all") {
+    setTrackBusy(id);
+    setTrackMsg(null);
+    try {
+      if (id === "all") {
+        const r = await api<{ checked: number; with_tracking: number; problems: string[] }>("/autodist/api/orders/refresh-tracking", { method: "POST" });
+        const base = `Checked ${r.checked} order${r.checked === 1 ? "" : "s"}; ${r.with_tracking} have tracking.`;
+        setTrackMsg(r.problems.length ? { kind: "error", text: `${base} Problems: ${r.problems.join(" | ")}` } : { kind: "success", text: base });
+      } else {
+        const r = await api<{ tracking: TrackItem[] }>(`/autodist/api/orders/${id}/tracking`, { method: "POST" });
+        setTrackMsg({ kind: "success", text: r.tracking.length ? "Tracking updated." : "Checked: no tracking numbers yet." });
+      }
+      await loadPast();
+    } catch (e) {
+      setTrackMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setTrackBusy(null);
     }
   }
   async function loadPos() {
@@ -517,7 +554,16 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
       )}
 
       <div className="space-y-1">
-        <div className="font-medium">Orders placed from here</div>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="font-medium">Orders placed from here</div>
+          {past && past.length > 0 && !trackingMissing && (
+            <button type="button" className="text-xs underline" disabled={trackBusy !== null} onClick={() => void checkTracking("all")}>
+              {trackBusy === "all" ? "Checking…" : "Check tracking for recent orders"}
+            </button>
+          )}
+        </div>
+        {trackingMissing && !tableMissing && <Notice kind="info">Run sql/autodist_tracking.sql in Supabase to turn on status and tracking numbers.</Notice>}
+        {trackMsg && <Notice kind={trackMsg.kind}>{trackMsg.text}</Notice>}
         {tableMissing && <Notice kind="info">Run sql/autodist_orders.sql in Supabase before placing orders; it keeps the list below.</Notice>}
         {past && past.length === 0 && !tableMissing && <div className="text-xs text-gray-500">None yet.</div>}
         {past && past.length > 0 && (
@@ -529,6 +575,8 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
                 <th className="py-0.5 pr-3">PO</th>
                 <th className="py-0.5 pr-3">Order</th>
                 <th className="py-0.5 pr-3">Total</th>
+                <th className="py-0.5 pr-3">Status</th>
+                <th className="py-0.5 pr-3">Tracking</th>
                 <th className="py-0.5">Message</th>
               </tr>
             </thead>
@@ -540,6 +588,25 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
                   <td className="py-0.5 pr-3">{o.po_number}</td>
                   <td className="py-0.5 pr-3">{o.order_number || "—"}</td>
                   <td className="py-0.5 pr-3">{money(o.invoice_amount)}</td>
+                  <td className="py-0.5 pr-3">{o.status || "—"}</td>
+                  <td className="py-0.5 pr-3">
+                    {o.tracking.map((t) => {
+                      const url = trackUrl(t);
+                      return (
+                        <div key={`${t.kind}-${t.number}`} className="font-mono">
+                          {url ? <a className="underline" href={url} target="_blank" rel="noreferrer">{t.number}</a> : t.number}
+                          {t.kind === "pro" && <span className="ml-1 font-sans text-gray-500">(freight PRO)</span>}
+                          {t.carrier && <span className="ml-1 font-sans text-gray-500">{t.carrier}</span>}
+                        </div>
+                      );
+                    })}
+                    {o.order_number && !trackingMissing && (
+                      <button type="button" className="underline" disabled={trackBusy !== null} onClick={() => void checkTracking(o.id)}>
+                        {trackBusy === o.id ? "Checking…" : o.tracking_checked_at ? "Recheck" : o.tracking.length ? "" : "Check"}
+                      </button>
+                    )}
+                    {o.tracking_checked_at && o.tracking.length === 0 && <span className="ml-1 text-gray-500">none yet</span>}
+                  </td>
                   <td className="py-0.5">{o.message}</td>
                 </tr>
               ))}
