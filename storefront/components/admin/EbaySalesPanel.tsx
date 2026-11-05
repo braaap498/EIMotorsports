@@ -74,7 +74,6 @@ function ago(iso: string | null) {
 }
 
 export default function EbaySalesPanel() {
-  const [open, setOpen] = useState(false);
   const [stores, setStores] = useState<StoreSettings[]>([]);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -116,15 +115,14 @@ export default function EbaySalesPanel() {
   }, [offset, fStore, fState, q, sort.key, sort.dir]);
 
   useEffect(() => {
-    if (!open) return;
     void loadSettings();
     const t = setInterval(() => void loadSettings(), 30000);
     return () => clearInterval(t);
-  }, [open, loadSettings]);
+  }, [loadSettings]);
 
   useEffect(() => {
-    if (open) void loadLines();
-  }, [open, loadLines]);
+    void loadLines();
+  }, [loadLines]);
 
   async function save(store: string, body: Record<string, unknown>) {
     setBusy(store);
@@ -205,19 +203,10 @@ export default function EbaySalesPanel() {
 
   return (
     <div className="rounded border border-gray-200 bg-white p-4">
-      <button
-        type="button"
-        className="flex w-full flex-wrap items-center justify-between gap-2 text-left"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-      >
-        <h2 className="text-sm font-semibold">
-          <span className="mr-2 inline-block w-3 text-gray-500">{open ? "▾" : "▸"}</span>eBay sales
-        </h2>
-        {!open && <span className="text-xs text-gray-500">Check each store for new sales, set parts aside, and keep eBay quantities in step.</span>}
-      </button>
+      <h2 className="text-sm font-semibold">eBay sales</h2>
+      <p className="mt-1 text-xs text-gray-500">Check each store for new sales, set parts aside, and keep eBay quantities in step.</p>
 
-      {open && (
+      {(
         <div className="mt-3 space-y-4">
           {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
 
