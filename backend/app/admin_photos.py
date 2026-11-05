@@ -214,6 +214,9 @@ def arrange_photos(product_id: int, body: PhotoArrangement, db: Session = Depend
     ]
     wanted = [i for i in dict.fromkeys(body.photo_ids) if i in existing]
     final = wanted + [i for i in existing if i not in wanted]
+    # Clear the old main first, so two photos are never "main" at the same moment (a one-main-per-product rule in the
+    # database would otherwise reject the save halfway through).
+    db.execute(text("update product_photos set is_primary = false where product_id = :p"), {"p": product_id})
     for position, pid in enumerate(final):
         db.execute(
             text("update product_photos set is_primary = :m, sort_order = :o where id = :id and product_id = :p"),
