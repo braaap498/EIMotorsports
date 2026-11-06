@@ -434,11 +434,11 @@ export default function EbayListingImportPage() {
 
       {fillLeft !== null && fillLeft > 0 && (
         <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
-          <h3 className="text-base font-semibold">Fill missing prices and labels</h3>
+          <h3 className="text-base font-semibold">Fill missing prices, labels and quantities</h3>
           <p className="max-w-3xl text-sm text-gray-600">
-            {n(fillLeft)} active listings are linked to a product that has no price, and no report or eBay answer is saved for them. This asks eBay about
-            each one (one lookup per listing, the same daily allowance as the other imports) and saves the price and custom label it returns. The Listings tab then shows
-            them. Nothing is changed on eBay and no product is edited. If eBay&rsquo;s daily limit is reached it stops and keeps what it has; start it again later.
+            {n(fillLeft)} active listings are linked to a product that has no price or has stock 0, and no report or eBay answer is saved for them. This asks eBay about
+            each one (one lookup per listing, the same daily allowance as the other imports) and saves the price, custom label and available quantity it returns. The Listings tab then shows
+            them; a quantity from eBay is marked (eBay). Nothing is changed on eBay, and no product or stock count is edited. If eBay&rsquo;s daily limit is reached it stops and keeps what it has; start it again later.
           </p>
           <div className="flex flex-wrap gap-3">
             <button type="button" className={btn2Cls} disabled={filling || running} onClick={() => void fillBlank(5, false)}>

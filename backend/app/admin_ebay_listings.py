@@ -296,6 +296,10 @@ _L_TITLE = "coalesce(nullif(btrim(lr.title), ''), nullif(btrim(la.title), ''), n
 _L_LABEL = "coalesce(nullif(btrim(lr.custom_label_sku), ''), nullif(btrim(la.custom_label_sku), ''), p.custom_label_sku)"
 # The product's price when it has one; otherwise the price saved for this exact item number (report, then eBay lookup).
 _L_PRICE = "coalesce(p.list_price, lr.price, la.price)"
+# Quantity: our stock on hand. When that is empty or 0 and eBay's available quantity was saved for this exact item number
+# (report, then eBay lookup) and is above 0, that is shown instead and marked as coming from eBay. Stock is never changed.
+_L_EBAY_QTY = "cast(coalesce(lr.quantity, la.quantity) as integer)"
+_L_QTY_FROM_EBAY = f"(coalesce(p.quantity_on_hand, 0) = 0 and coalesce({_L_EBAY_QTY}, 0) > 0)"
 # Photo order for a row: the listing's own saved set (ebay_listings.photos, filled by the photo import's "listing
 # originals" run and by merges), then photos saved under its own item number, then the product's main photo.
 _REPO_SORTS = {
@@ -359,6 +363,8 @@ def repo_listings(
             select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
                    p.id as product_id, p.sku_display as sku, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
                    {_L_PRICE} as list_price, p.quantity_on_hand,
+                   case when {_L_QTY_FROM_EBAY} then {_L_EBAY_QTY} else p.quantity_on_hand end as quantity_shown,
+                   {_L_QTY_FROM_EBAY} as qty_from_ebay,
                    (select count(*) from channel_listings x where x.product_id = p.id) as product_listings,
                    case
                      when exists (select 1 from channel_listings x where x.product_id = p.id
@@ -402,7 +408,8 @@ def repo_listings(
                 "custom_label": d["custom_label_sku"],
                 "price": float(d["list_price"]) if d["list_price"] is not None else None,
                 "currency": "USD",
-                "quantity": d["quantity_on_hand"],
+                "quantity": d["quantity_shown"],
+                "quantity_from_ebay": bool(d["qty_from_ebay"]),
                 "status": (d["status"] or "").strip() or None,
                 "active": (d["status"] or "").strip().lower() == "active",
                 "api_type": d["api_type"],

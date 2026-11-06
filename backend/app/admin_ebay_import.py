@@ -533,10 +533,11 @@ def run_api(body: RunIn, db: Session = Depends(get_db), user: AuthUser = Depends
 
 
 # ------------------------------------------------------------------ fill blank price / label on listings already imported
-# Some products were created with no price and no custom label (their listing had no report row and no eBay answer
-# saved when they were made). This asks eBay about those active listings and saves the answer in ebay_api_details,
-# the same place the straight-from-eBay import saves it. It changes nothing on eBay and nothing on the products: the
-# Listings tab shows a saved price/label when the product has none.
+# Some products were created with no price, no custom label and stock 0 (their listing had no report row and no eBay
+# answer saved when they were made). This asks eBay about those active listings and saves the answer (price, label and
+# the quantity eBay shows as available) in ebay_api_details, the same place the straight-from-eBay import saves it. It
+# changes nothing on eBay and nothing on the products: the Listings tab shows a saved price/label when the product has
+# none, and eBay's quantity (marked as such) when stock on hand is 0.
 _ITEM_DIGITS = "regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g')"
 _BLANKS = f"""
 select {_ITEM_DIGITS} as item, cl.store
@@ -544,16 +545,20 @@ from channel_listings cl
 join products p on p.id = cl.product_id
 where lower(coalesce(cl.status, '')) = 'active'
   and {_ITEM_DIGITS} <> ''
-  and p.list_price is null
-  and not exists (select 1 from ebay_report_rows r where r.item_id = {_ITEM_DIGITS} and r.price is not null)
   and not exists (select 1 from ebay_api_details a where a.item_id = {_ITEM_DIGITS})
+  and (
+        (p.list_price is null
+         and not exists (select 1 from ebay_report_rows r where r.item_id = {_ITEM_DIGITS} and r.price is not null))
+     or (coalesce(p.quantity_on_hand, 0) = 0
+         and not exists (select 1 from ebay_report_rows r where r.item_id = {_ITEM_DIGITS} and r.quantity is not null))
+  )
 order by cl.id desc
 """
 
 
 @router.get("/blank-details")
 def blank_details(db: Session = Depends(get_db)):
-    """How many active listings have a product with no price and no saved answer from a report or eBay."""
+    """How many active listings have a product with no price, or with stock 0, and no saved answer from a report or eBay."""
     return {"to_ask": len(db.execute(text(_BLANKS)).all())}
 
 

@@ -33,6 +33,7 @@ type RepoItem = {
   price: number | null;
   currency: string;
   quantity: number | null;
+  quantity_from_ebay?: boolean; // true when our stock is 0 and this number is what eBay shows as available
   status: string | null;
   active: boolean;
   api_type: "trading" | "inventory" | null;
@@ -547,7 +548,10 @@ export default function EbayLiveListingsPage() {
                         <td className="whitespace-nowrap px-3 py-2">{rowStore?.display_name || it.store}</td>
                         <td className="px-3 py-2">{it.custom_label ?? "—"}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{money(it.price, it.currency)}</td>
-                        <td className="px-3 py-2 whitespace-nowrap">{it.quantity ?? "—"}</td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {it.quantity ?? "—"}
+                          {it.quantity_from_ebay && <span className="ml-1 text-xs text-gray-500" title="Our stock on hand is 0; this is the quantity eBay shows as available">(eBay)</span>}
+                        </td>
                         <td className="px-3 py-2">
                           <Badge tone={it.active ? "green" : "gray"}>{it.status || "no status"}</Badge>
                         </td>
