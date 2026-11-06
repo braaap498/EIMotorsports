@@ -54,6 +54,27 @@ type RepoResp = {
   items: RepoItem[];
 };
 
+type SyncRow = {
+  store: string;
+  connected: boolean;
+  status: string | null;
+  finished_at: string | null;
+  marked_active: number | null;
+  marked_ended: number | null;
+  message: string | null;
+  running: boolean;
+};
+type SyncResp = { ready: boolean; stores: SyncRow[] };
+
+function ago(iso: string | null): string {
+  if (!iso) return "never";
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 2) return "just now";
+  if (mins < 90) return `${mins} minutes ago`;
+  const h = Math.round(mins / 60);
+  return h < 48 ? `${h} hours ago` : `${Math.round(h / 24)} days ago`;
+}
+
 const PAGE_SIZE = 50;
 const ALL = "__all__"; // the "All stores" choice in the store drop-down
 
@@ -80,6 +101,9 @@ export default function EbayLiveListingsPage() {
   const [statusF, setStatusF] = useState<"all" | "active" | "inactive">("all");
   const [repo, setRepo] = useState<RepoResp | null>(null);
   const [busy, setBusy] = useState("");
+  const [sync, setSync] = useState<SyncRow[]>([]);
+  const live = useRef({ picked: 0, busy: "", offset: 0 });
+  live.current = { picked: picked.size, busy, offset: repo?.offset ?? 0 };
   async function loadStores() {
     try {
       const r = await api<StoresResp>("/ebay-listings/stores");
@@ -93,6 +117,39 @@ export default function EbayLiveListingsPage() {
   useEffect(() => {
     void loadStores();
   }, []);
+
+  // Statuses are kept true by a check against eBay that runs in the background on the server. Opening this tab only asks
+  // whether one is due (the answer comes back at once); the list above never waits for it. While one runs, ask how it is
+  // doing every few seconds, and when it changed anything show the fresh statuses (unless something is ticked or running).
+  const syncAsked = useRef(false);
+  useEffect(() => {
+    if (syncAsked.current || stores.length === 0) return;
+    syncAsked.current = true;
+    api<SyncResp>("/ebay-listings/status-sync/start", { method: "POST", body: {} })
+      .then((r) => setSync(r.stores))
+      .catch(() => {
+        /* a convenience: the list works without it */
+      });
+  }, [stores]);
+
+  const syncRunning = sync.some((x) => x.running);
+  useEffect(() => {
+    if (!syncRunning) return;
+    const t = setInterval(() => {
+      api<SyncResp>("/ebay-listings/status-sync")
+        .then((r) => {
+          const before = sync.filter((x) => x.running).map((x) => x.store);
+          const finished = r.stores.filter((x) => before.includes(x.store) && !x.running);
+          setSync(r.stores);
+          const changed = finished.some((x) => (x.marked_active ?? 0) + (x.marked_ended ?? 0) > 0);
+          const l = live.current;
+          if (changed && l.picked === 0 && l.busy === "") void loadRepo(l.offset);
+        })
+        .catch(() => {});
+    }, 5000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncRunning]);
 
   // Coming back from another admin page: put the store, search and page back and show the same listings.
   // Waits for the store list, because the dropdown can only hold a store that exists; a first visit opens the first store.
@@ -367,6 +424,26 @@ export default function EbayLiveListingsPage() {
               </span>
             )}
           </p>
+          {(() => {
+            const rel = sync.filter((x) => (allMode || store === ALL ? true : x.store.toLowerCase() === (repo.store || store).toLowerCase()));
+            if (rel.length === 0) return null;
+            const running = rel.some((x) => x.running);
+            const failed = rel.filter((x) => !x.running && x.connected && x.status === "failed");
+            const idle = rel.filter((x) => !x.connected);
+            const done = rel.filter((x) => x.connected && x.finished_at);
+            const oldest = done.length ? done.map((x) => x.finished_at as string).sort()[0] : null;
+            return (
+              <p className="text-xs text-gray-500">
+                {running
+                  ? "Checking statuses with eBay in the background…"
+                  : oldest
+                    ? `Statuses last checked with eBay ${ago(oldest)}.`
+                    : "Statuses have not been checked with eBay yet."}
+                {failed.length > 0 && ` The last check of ${failed.map((x) => x.store).join(", ")} did not finish (${failed[0].message ?? "unknown reason"}).`}
+                {idle.length > 0 && ` Not connected, so not checked: ${idle.map((x) => x.store).join(", ")}.`}
+              </p>
+            );
+          })()}
           {actMsg && <Notice kind={actMsg.kind}>{actMsg.text}</Notice>}
           {picked.size > 0 && (
             <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">

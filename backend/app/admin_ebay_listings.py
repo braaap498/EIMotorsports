@@ -27,6 +27,7 @@ its own eBay user name; if it does not, the store name itself is used as the use
 import logging
 import os
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -38,7 +39,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
-from app.database import get_db
+from app.database import get_db, get_engine
 from app.images import thumb_url
 from app.ebay_feedback import SEARCH_URL, FeedbackError, _open, _token, configured, seller_username
 
@@ -455,3 +456,239 @@ def repo_set_status(body: RepoStatusIn, db: Session = Depends(get_db)):
     )
     db.commit()
     return {"store": who["store"], "status": body.status, "changed": res.rowcount, "asked": len(ids)}
+
+
+# --------------------------------------------------------------------------
+# keeping channel_listings.status true: a background check against eBay
+# --------------------------------------------------------------------------
+# The Listings tab shows the status saved in OUR database. This brings it in line with eBay without slowing the page:
+# opening the tab only asks "is a check due?" (POST /status-sync/start returns at once); if the last check of a store is
+# older than STATUS_SYNC_HOURS the check runs in the background and the page keeps its own pace.
+#
+# One check of one store (needs the store connected to eBay):
+#   1. read the store's whole list of LIVE listings from eBay (GetMyeBaySelling, 200 per request) and mark those active;
+#   2. listings our database does not call ended, that eBay did not list as live, are asked about one by one
+#      (GetItem, at most STATUS_SYNC_MAX_CHECKS per run). Marked ended only when eBay itself says Completed/Ended,
+#      marked active if eBay says Active. If eBay will not say, nothing changes and it is not asked again for 14 days.
+# Nothing is ever marked ended from a missing list entry alone, and a failed or half-read list changes nothing it
+# did not see. Progress and the last result are kept in ebay_status_sync (one row per store).
+STATUS_SYNC_PAGE = 200
+
+
+def _sync_hours() -> float:
+    try:
+        return max(0.1, float(os.environ.get("STATUS_SYNC_HOURS") or 6))
+    except ValueError:
+        return 6.0
+
+
+def _sync_max_checks() -> int:
+    try:
+        return max(0, int(os.environ.get("STATUS_SYNC_MAX_CHECKS") or 400))
+    except ValueError:
+        return 400
+
+
+def _sync_tables_ready(db: Session) -> bool:
+    ok = db.execute(
+        text("select to_regclass('ebay_status_sync') is not null and to_regclass('ebay_status_checked') is not null")
+    ).scalar()
+    db.commit()
+    return bool(ok)
+
+
+def _sync_beat(store: str, **vals):
+    """Saves progress (and shows the run is alive)."""
+    sets = ", ".join(f"{k} = :{k}" for k in vals)
+    with get_engine().begin() as c:
+        c.execute(
+            text(f"update ebay_status_sync set {sets}{', ' if sets else ''}updated_at = now() where store = :store"),
+            {**vals, "store": store},
+        )
+
+
+def _live_item_ids(db: Session, store: str) -> set:
+    """Every item number eBay lists as live for the store. Raises if eBay cannot be read completely."""
+    from app.ebay_edit import NS, _failed, _first_message, _trading
+
+    ids: set = set()
+    page, pages = 1, 1
+    while page <= pages:
+        root = _trading(
+            db,
+            store,
+            "GetMyeBaySelling",
+            "<ActiveList><Include>true</Include><Pagination>"
+            f"<EntriesPerPage>{STATUS_SYNC_PAGE}</EntriesPerPage><PageNumber>{page}</PageNumber>"
+            "</Pagination></ActiveList>",
+        )
+        if _failed(root):
+            raise RuntimeError(_first_message(root))
+        lst = root.find(f"{NS}ActiveList")
+        if lst is None:
+            raise RuntimeError("eBay's answer had no list of live listings in it.")
+        tp = (lst.findtext(f"{NS}PaginationResult/{NS}TotalNumberOfPages") or "1").strip()
+        pages = int(tp) if tp.isdigit() else 1
+        for it in lst.findall(f"{NS}ItemArray/{NS}Item"):
+            v = (it.findtext(f"{NS}ItemID") or "").strip()
+            if v.isdigit():
+                ids.add(v)
+        _sync_beat(store, message=f"Reading eBay's live listings… page {page} of {pages}", active_found=len(ids))
+        page += 1
+        time.sleep(0.2)
+    return ids
+
+
+def _item_status(db: Session, store: str, item: str) -> Optional[str]:
+    """eBay's own word for one listing: 'active', 'ended', or None when eBay will not say."""
+    from app.ebay_edit import NS, _failed, _trading
+
+    root = _trading(
+        db,
+        store,
+        "GetItem",
+        f"<ItemID>{item}</ItemID><OutputSelector>ItemID</OutputSelector><OutputSelector>SellingStatus</OutputSelector>",
+    )
+    if _failed(root):
+        return None
+    st = (root.findtext(f"{NS}Item/{NS}SellingStatus/{NS}ListingStatus") or "").strip().lower()
+    if st == "active":
+        return "active"
+    if st in ("completed", "ended"):
+        return "ended"
+    return None
+
+
+def _set_status(store: str, items: list, status: str) -> int:
+    n = 0
+    with get_engine().begin() as c:
+        for i in range(0, len(items), 1000):
+            n += (
+                c.execute(
+                    text(
+                        "update channel_listings set status = :st where lower(store) = lower(:s) "
+                        "and regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = any(cast(:ids as text[])) "
+                        "and lower(coalesce(status, '')) <> :st"
+                    ),
+                    {"st": status, "s": store, "ids": items[i : i + 1000]},
+                ).rowcount
+                or 0
+            )
+    return n
+
+
+def _sync_store(store: str):
+    db = Session(get_engine())
+    try:
+        live = _live_item_ids(db, store)
+        marked_active = _set_status(store, sorted(live), "active")
+        _sync_beat(store, marked_active=marked_active, message="Checking listings eBay did not list as live…")
+
+        with get_engine().connect() as c:
+            todo = [
+                r[0]
+                for r in c.execute(
+                    text(
+                        "select regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item "
+                        "from channel_listings cl where lower(cl.store) = lower(:s) "
+                        "and lower(coalesce(cl.status, '')) <> 'ended' "
+                        "and regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') ~ '^[0-9]{9,15}$' "
+                        "and not exists (select 1 from ebay_status_checked k "
+                        "  where k.item_number = regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') "
+                        "  and k.checked_at > now() - interval '14 days') "
+                        "order by cl.id"
+                    ),
+                    {"s": store},
+                )
+            ]
+        todo = [i for i in dict.fromkeys(todo) if i not in live]
+        left = max(0, len(todo) - _sync_max_checks())
+        marked_ended = unsure = 0
+        for n, item in enumerate(todo[: _sync_max_checks()], 1):
+            word = _item_status(db, store, item)
+            with get_engine().begin() as c:
+                c.execute(
+                    text(
+                        "insert into ebay_status_checked (item_number, result, checked_at) values (:i, :r, now()) "
+                        "on conflict (item_number) do update set result = :r, checked_at = now()"
+                    ),
+                    {"i": item, "r": word or "unknown"},
+                )
+            if word == "ended":
+                marked_ended += _set_status(store, [item], "ended")
+            elif word == "active":
+                marked_active += _set_status(store, [item], "active")
+            else:
+                unsure += 1
+            if n % 20 == 0:
+                _sync_beat(store, marked_active=marked_active, marked_ended=marked_ended,
+                           message=f"Checking listings eBay did not list as live… {n} of {min(len(todo), _sync_max_checks())}")
+        bits = [f"{len(live)} live on eBay", f"{marked_active} set to active", f"{marked_ended} set to ended"]
+        if unsure:
+            bits.append(f"{unsure} eBay would not say (left as they are)")
+        if left:
+            bits.append(f"{left} more will be checked on the next run")
+        _sync_beat(
+            store, status="done", marked_active=marked_active, marked_ended=marked_ended,
+            active_found=len(live), message="; ".join(bits) + ".",
+        )
+        with get_engine().begin() as c:
+            c.execute(text("update ebay_status_sync set finished_at = now() where store = :s"), {"s": store})
+    except Exception as e:
+        log.exception("status sync for %s failed", store)
+        msg = getattr(e, "detail", None) or str(e) or "failed"
+        _sync_beat(store, status="failed", message=f"Could not finish: {str(msg)[:300]}")
+    finally:
+        db.close()
+
+
+def _sync_rows(db: Session) -> list:
+    rows = db.execute(
+        text(
+            """
+            select a.store, (a.refresh_token_enc is not null) as connected,
+                   s.status, s.finished_at, s.active_found, s.marked_active, s.marked_ended, s.message,
+                   coalesce(s.status = 'running' and s.updated_at > now() - interval '15 minutes', false) as running
+            from ebay_accounts a left join ebay_status_sync s on s.store = a.store
+            order by a.store
+            """
+        )
+    ).all()
+    return [dict(r._mapping) for r in rows]
+
+
+@router.get("/status-sync")
+def status_sync_info(db: Session = Depends(get_db)):
+    if not _sync_tables_ready(db):
+        return {"ready": False, "stores": []}
+    return {"ready": True, "stores": _sync_rows(db)}
+
+
+@router.post("/status-sync/start")
+def status_sync_start(db: Session = Depends(get_db)):
+    """Called when the Listings tab opens. Returns at once. For every connected store whose last check is older than
+    STATUS_SYNC_HOURS (or never happened), and which is not already being checked, starts the check in the background."""
+    if not _sync_tables_ready(db):
+        return {"ready": False, "stores": []}
+    hours = _sync_hours()
+    for r in db.execute(text("select store from ebay_accounts where refresh_token_enc is not null")).all():
+        db.execute(
+            text("insert into ebay_status_sync (store, status) values (:s, 'idle') on conflict (store) do nothing"),
+            {"s": r.store},
+        )
+        claimed = db.execute(
+            text(
+                "update ebay_status_sync set status = 'running', started_at = now(), updated_at = now(), "
+                "message = 'Starting…', marked_active = 0, marked_ended = 0, active_found = 0 "
+                "where store = :s "
+                "and (status <> 'running' or updated_at < now() - interval '15 minutes') "
+                "and (finished_at is null or finished_at < now() - make_interval(secs => :secs)) "
+                "and (status <> 'failed' or updated_at < now() - interval '30 minutes') "
+                "returning store"
+            ),
+            {"s": r.store, "secs": hours * 3600},
+        ).first()
+        db.commit()
+        if claimed:
+            threading.Thread(target=_sync_store, args=(r.store,), daemon=True, name=f"status-sync-{r.store}").start()
+    return {"ready": True, "stores": _sync_rows(db)}
