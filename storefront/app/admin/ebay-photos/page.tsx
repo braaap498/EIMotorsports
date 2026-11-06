@@ -11,7 +11,7 @@ import StoreInput from "../../../components/admin/StoreInput";
 type Job = {
   id: number;
   store: string;
-  mode: "new_only" | "all_missing";
+  mode: "new_only" | "all_missing" | "listing_originals";
   status: "running" | "stopping" | "done" | "stopped" | "paused" | "failed";
   running: boolean;
   listings_found: number;
@@ -44,6 +44,7 @@ type LabelsResp = {
 const MODE_NAME: Record<Job["mode"], string> = {
   new_only: "Listings that are not products yet",
   all_missing: "Any missing photo for all listings",
+  listing_originals: "Each merged listing's own photos",
 };
 const STATUS_TEXT: Record<Job["status"], string> = {
   running: "Running",
@@ -67,6 +68,7 @@ const STATUS_TONE: Record<Job["status"], "green" | "gray" | "amber"> = {
 export default function EbayPhotoImportPage() {
   const [store, setStore] = useState("");
   const [labelsStore, setLabelsStore] = useState("");
+  const [onlyProduct, setOnlyProduct] = useState("");
 
   // Remember the store names when you leave this page and come back (this browser tab only).
   const [storesRestored, setStoresRestored] = useState(false);
@@ -116,7 +118,11 @@ export default function EbayPhotoImportPage() {
     setStarting(true);
     setError("");
     try {
-      const j = await api<Job>("/ebay-photos/import", { method: "POST", body: { store: store.trim(), mode } });
+      const pid = mode === "listing_originals" ? parseInt(onlyProduct.trim(), 10) : NaN;
+      const j = await api<Job>("/ebay-photos/import", {
+        method: "POST",
+        body: { store: store.trim(), mode, ...(Number.isFinite(pid) ? { product_id: pid } : {}) },
+      });
       setJob(j);
     } catch (e) {
       setError(errMsg(e));
@@ -185,6 +191,37 @@ export default function EbayPhotoImportPage() {
           The second button does everything the first does, and also checks listings that are already linked to a
           product and adds any photo eBay has that the product does not. It takes longer: every listing needs its own
           eBay lookup. If eBay&rsquo;s daily limit is reached the import pauses; start it again later and it carries on.
+        </p>
+      </div>
+
+      <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+        <div>
+          <h2 className="text-base font-semibold">Give each merged listing its own photos</h2>
+          <p className="mt-1 max-w-3xl text-sm text-gray-600">
+            Listings merged into one product all show that product&rsquo;s photos. This reads each of those listings
+            from eBay and saves the photos it has there on the listing itself. Photos a listing already has are
+            skipped, so nothing is added twice. A saved set that is only a copy of the product&rsquo;s photos is
+            replaced with what eBay shows for that item. Sets saved by a merge are only ever added to. Ended listings
+            and listings with variations are not shown by eBay&rsquo;s public lookup and are left as they are.
+          </p>
+        </div>
+        <label className="block max-w-xs text-sm">
+          <span className="mb-1 block font-medium">Only this product number (optional)</span>
+          <input
+            className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+            inputMode="numeric"
+            placeholder="e.g. 23, to try one product first"
+            value={onlyProduct}
+            onChange={(e) => setOnlyProduct(e.target.value.replace(/[^0-9]/g, ""))}
+            disabled={running}
+          />
+        </label>
+        <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start("listing_originals")}>
+          Save each merged listing&rsquo;s own photos
+        </button>
+        <p className="max-w-3xl text-xs text-gray-500">
+          Uses the store name above. Photos are saved to the listing only, not to the product&rsquo;s gallery. If eBay&rsquo;s
+          daily limit is reached it pauses; start it again later and it carries on.
         </p>
       </div>
 

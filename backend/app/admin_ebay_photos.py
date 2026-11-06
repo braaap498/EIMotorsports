@@ -29,6 +29,15 @@ What a job does (the same steps you ran by hand for the 102 genuine-oem-parts li
                       merged in from another listing, or was re-encoded by eBay is not added twice).
                       A product's main listing is checked before the listings merged into it.
 
+  mode "listing_originals"  gives each eBay listing its OWN photo set, saved in ebay_listings.photos (one entry
+                      per photo: image_key, source_url, storage_path, is_primary, sort_order). Listings merged into one
+                      product all share that product's gallery, so this is where each listing keeps the pictures it
+                      had on eBay. Photos a listing already has (same eBay image id, same stored picture, or one that
+                      looks the same) are skipped, never added twice. A saved set that is only a copy of the
+                      product's current photos (rows from the "backfill") is replaced by what eBay shows for that
+                      item. Nothing is ever taken away from sets that came from a merge. Listings are recorded in
+                      ebay_listing_photo_checked, so a stopped or paused run carries on where it left off.
+
 Progress lives in the database (ebay_photo_jobs), because the server's disk is not kept. A job
 that stops at eBay's lookup limit is "paused"; start it again later and it carries on, because
 finished listings are skipped. If the server restarts mid-job the job shows as "failed
@@ -74,7 +83,7 @@ PAGE = 200
 MAX_PAGES = 50  # eBay returns at most 10,000 results (50 x 200)
 STALE_MINUTES = 10  # a "running" job with no sign of life for this long was cut off by a restart
 SELLER_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
-MODES = {"new_only", "all_missing"}
+MODES = {"new_only", "all_missing", "listing_originals"}
 
 
 def _max_calls() -> int:
@@ -619,10 +628,266 @@ def _missing_for_product(job: _Job, calls: _Calls, item: str, product_id: int):
         job.c["photos_added"] += 1
 
 
+# ------------------------------------------- each listing's own original photos
+_DIG = "regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g')"
+_NEEDS_TABLE = (
+    "The listing-photo run needs one small table first. Run the SQL for it in the Supabase SQL editor "
+    "(ebay_listing_photo_checked), then start the run again."
+)
+
+
+def _original_candidates(store_key: str, product_id: Optional[int]) -> list[tuple[str, int]]:
+    """Listings still to do: ones that share a product with other listings (merged) or already have a saved
+    ebay_listings row. A listing that is alone on its product already has its own photos on that product."""
+    with get_engine().connect() as c:
+        rows = c.execute(
+            text(
+                f"""
+                select {_DIG} as item, min(cl.product_id) as product_id, min(cl.id) as first_id
+                from channel_listings cl
+                left join ebay_listings el on el.ebay_item_id = {_DIG}
+                where lower(cl.store) = lower(:st) and cl.product_id is not null and {_DIG} <> ''
+                  and (el.ebay_item_id is not null
+                       or (select count(*) from channel_listings x where x.product_id = cl.product_id) > 1)
+                  and not exists (select 1 from ebay_listing_photo_checked k where k.item_number = {_DIG})
+                  and (cast(:pid as bigint) is null or cl.product_id = cast(:pid as bigint))
+                group by 1
+                order by first_id
+                """
+            ),
+            {"st": store_key, "pid": product_id},
+        ).all()
+    return [(r[0], r[1]) for r in rows]
+
+
+def _mark_checked(item: str, result: str):
+    with get_engine().begin() as c:
+        c.execute(
+            text(
+                "insert into ebay_listing_photo_checked (item_number, result, checked_at) values (:i, :r, now()) "
+                "on conflict (item_number) do update set result = :r, checked_at = now()"
+            ),
+            {"i": item, "r": result},
+        )
+
+
+def _as_list(v) -> list:
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return []
+    return v if isinstance(v, list) else []
+
+
+def _originals_for(job: _Job, calls: _Calls, item: str, product_id: int, store_key: str, tally: dict):
+    """One listing: saves the photos it has on eBay into its own ebay_listings row, skipping the ones it has."""
+    with get_engine().connect() as c:
+        row = c.execute(
+            text("select photos, source from ebay_listings where ebay_item_id = :i"), {"i": item}
+        ).first()
+        pkeys = {
+            r[0]
+            for r in c.execute(
+                text("select image_key from product_photos where product_id = :p and image_key is not null"),
+                {"p": product_id},
+            )
+        }
+    existing = [e for e in _as_list(row[0]) if isinstance(e, dict) and e.get("image_key")] if row else []
+    ekeys = {e["image_key"] for e in existing}
+    # a "backfill" set that is nothing but the product's current photos is a copy, not the listing's own
+    suspect = bool(row) and (row[1] or "") == "backfill" and bool(existing) and ekeys <= pkeys
+
+    urls = _ebay_photos(item, calls)
+    if not urls:  # ended, removed, or a multi-variation listing: eBay's public lookup will not show it
+        tally["no_ebay"] += 1
+        job.c["no_photos"] += 1
+        _mark_checked(item, "no_ebay_photos")
+        return
+
+    final = [] if suspect else [dict(e) for e in existing]
+    have_ids = {photo_key(e["source_url"]) for e in final if e.get("source_url")}
+    have_keys = {e["image_key"] for e in final}
+    storage_has = pkeys | ekeys  # already uploaded: no need to send these again
+    prints: Optional[list[int]] = None
+    added, problem = 0, None
+    for url in urls:
+        if photo_key(url) in have_ids:
+            continue
+        try:
+            p = photo_store.process_image(_download(url))
+            if p.key in have_keys:
+                have_ids.add(photo_key(url))
+                continue
+            if prints is None:
+                prints = _stored_fingerprints(have_keys)
+            mine = _dhash(p.thumb)
+            if any(_looks_same(mine, q) for q in prints):  # same picture, saved a different way
+                continue
+            if p.key not in storage_has:
+                photo_store.upload(p)
+        except Exception as e:
+            if _fatal_storage(e):
+                raise
+            problem = str(e)
+            break
+        final.append(
+            {
+                "image_key": p.key,
+                "source_url": url,
+                "storage_path": photo_store.full_path(p.key),
+                "is_primary": False,
+                "sort_order": 0,
+            }
+        )
+        have_keys.add(p.key)
+        have_ids.add(photo_key(url))
+        prints.append(mine)
+        added += 1
+    if problem:  # never a partial set: nothing is written and the listing is tried again next time
+        job.fail(item, problem)
+        return
+    if not final:
+        job.fail(item, "no photo could be stored")
+        return
+
+    for n, e in enumerate(final):
+        e["sort_order"] = n
+        if suspect:
+            e["is_primary"] = n == 0
+    if not any(e.get("is_primary") is True for e in final):
+        final[0]["is_primary"] = True
+
+    if row and [e["image_key"] for e in final] == [e["image_key"] for e in existing]:
+        tally["unchanged"] += 1
+        _mark_checked(item, "unchanged")
+        return
+
+    ph = json.dumps(final)
+    with get_engine().begin() as c:
+        if row:
+            c.execute(
+                text("update ebay_listings set photos = cast(:ph as jsonb), updated_at = now() where ebay_item_id = :i"),
+                {"ph": ph, "i": item},
+            )
+        else:
+            # Everything hinges on the eBay item number. When it IS the product's own item number, the product
+            # is this listing's original, so its description, price, specifics and fitment are this listing's own
+            # and are copied. For any other listing (merged in later) only facts we have are saved: the item
+            # number, store, linked product, the title and label saved for this exact item number (report, then
+            # eBay lookup) and its photos. The rest stays empty rather than guessed.
+            c.execute(
+                text(
+                    """
+                    insert into ebay_listings
+                      (ebay_item_id, store, product_id, original_product_id, custom_label_sku, sku, title,
+                       list_price, quantity_on_hand, condition, description, item_specifics,
+                       fitment_vehicle_ids, photos, product_data, merge_log_id, source)
+                    select :i, :st, p.id,
+                           case when o.own then p.id end,
+                           coalesce(nullif(btrim((select r.custom_label_sku from ebay_report_rows r where r.item_id = :i limit 1)), ''),
+                                    nullif(btrim((select a.custom_label_sku from ebay_api_details a where a.item_id = :i limit 1)), ''),
+                                    case when o.own then p.custom_label_sku end),
+                           p.sku_display,
+                           coalesce(nullif(btrim((select r.title from ebay_report_rows r where r.item_id = :i limit 1)), ''),
+                                    nullif(btrim((select a.title from ebay_api_details a where a.item_id = :i limit 1)), ''),
+                                    nullif(btrim((select m.title from ebay_compat_items m where m.item_id = :i limit 1)), ''),
+                                    case when o.own then p.title end),
+                           case when o.own then p.list_price end,
+                           case when o.own then p.quantity_on_hand end,
+                           case when o.own then to_jsonb(p)->>'condition' end,
+                           case when o.own then to_jsonb(p)->>'description' end,
+                           case when o.own then (select coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb)
+                                                   from product_item_specifics s where s.product_id = p.id)
+                                else '[]'::jsonb end,
+                           case when o.own then (select coalesce(array_agg(pf.vehicle_id order by pf.vehicle_id), '{}'::bigint[])
+                                                   from product_fitment pf where pf.product_id = p.id)
+                                else '{}'::bigint[] end,
+                           cast(:ph as jsonb),
+                           case when o.own then to_jsonb(p) else '{}'::jsonb end,
+                           null, 'backfill'
+                    from products p
+                    cross join lateral (
+                      select regexp_replace(coalesce(cast(p.ebay_item_id as text), ''), '[^0-9]', '', 'g') = :i as own) o
+                    where p.id = :pid
+                    on conflict (ebay_item_id) do update set photos = excluded.photos, updated_at = now()
+                    """
+                ),
+                {"i": item, "st": store_key, "ph": ph, "pid": product_id},
+            )
+    job.c["photos_added"] += added
+    if not row:
+        tally["created"] += 1
+    elif suspect:
+        tally["replaced"] += 1
+    else:
+        tally["added_to"] += 1
+    _mark_checked(item, "saved")
+
+
+def _originals_message(tally: dict, left: int = 0) -> str:
+    bits = [
+        f"{tally['replaced']} copied sets replaced with the listing's own photos",
+        f"{tally['created']} listing rows created",
+        f"{tally['added_to']} sets got extra photos",
+        f"{tally['unchanged']} already complete",
+        f"{tally['no_ebay']} not shown by eBay's public lookup (ended, removed or multi-variation)",
+    ]
+    return "; ".join(bits) + "."
+
+
+def _work_originals(job: _Job, calls: _Calls, store_key: str, product_id: Optional[int]):
+    cands = _original_candidates(store_key, product_id)
+    job.c["items_total"] = len(cands)
+    tally = {"replaced": 0, "created": 0, "added_to": 0, "unchanged": 0, "no_ebay": 0}
+    if not cands:
+        job.message = "Nothing left to do: every merged listing has been checked."
+        job.save(calls, "done")
+        return
+    stopped = False
+    for n, (item, pid) in enumerate(cands, 1):
+        if job.stop_requested():
+            stopped = True
+            break
+        try:
+            _originals_for(job, calls, item, pid, store_key, tally)
+        except (RateLimited, FeedbackError):
+            raise
+        except Exception as e:  # one bad listing must not stop the rest
+            if _fatal_storage(e):
+                raise
+            log.exception("listing photos: item %s failed", item)
+            job.fail(item, str(e))
+        job.c["items_done"] = n
+        if n % 10 == 0:
+            job.message = f"Working… {_originals_message(tally)}"
+            job.save(calls)
+    job.message = _originals_message(tally)
+    job.save(calls, "stopped" if stopped else "done")
+
+
+def _run_originals(job_id: int, store_key: str, product_id: Optional[int]):
+    job = _Job(job_id)
+    calls = _Calls(_max_calls())
+    try:
+        _work_originals(job, calls, store_key, product_id)
+    except RateLimited as e:
+        job.message = f"Paused: {e} Start it again later and it carries on where it stopped."
+        job.save(calls, "paused")
+    except (FeedbackError, photo_store.StorageError) as e:
+        job.message = str(e)
+        job.save(calls, "failed")
+    except Exception:
+        log.exception("listing photo run crashed")
+        job.message = "Something unexpected went wrong. The details are in the API log."
+        job.save(calls, "failed")
+
+
 # --------------------------------------------------------------------- routes
 class ImportIn(BaseModel):
     store: str = ""
     mode: str
+    product_id: Optional[int] = None  # listing_originals only: do just this product's listings (a test run)
 
 
 def _job_json(row) -> dict:
@@ -646,17 +911,33 @@ def start_import(body: ImportIn, db: Session = Depends(get_db), user: AuthUser =
     if running:
         db.commit()
         raise HTTPException(409, "An import is already running. Wait for it to finish or stop it first.")
-    job_id = db.execute(
-        text(
-            "insert into ebay_photo_jobs (store, mode, started_by, message) "
-            "values (:s, :m, :u, 'Starting…') returning id"
-        ),
-        {"s": store, "m": body.mode, "u": user.email or str(user.user_id)},
-    ).scalar()
-    db.commit()
-    threading.Thread(
-        target=_run, args=(job_id, store, body.mode == "all_missing", store_key), daemon=True, name=f"ebay-photos-{job_id}"
-    ).start()
+    originals = body.mode == "listing_originals"
+    if originals and not db.execute(text("select to_regclass('ebay_listing_photo_checked')")).scalar():
+        db.commit()
+        raise HTTPException(503, _NEEDS_TABLE)
+    try:
+        job_id = db.execute(
+            text(
+                "insert into ebay_photo_jobs (store, mode, started_by, message) "
+                "values (:s, :m, :u, 'Starting…') returning id"
+            ),
+            {"s": store, "m": body.mode, "u": user.email or str(user.user_id)},
+        ).scalar()
+        db.commit()
+    except Exception:
+        db.rollback()
+        if originals:
+            log.exception("could not record the listing photo run")
+            raise HTTPException(503, "The jobs table does not accept this run type yet. " + _NEEDS_TABLE)
+        raise
+    if originals:
+        threading.Thread(
+            target=_run_originals, args=(job_id, store_key, body.product_id), daemon=True, name=f"ebay-photos-{job_id}"
+        ).start()
+    else:
+        threading.Thread(
+            target=_run, args=(job_id, store, body.mode == "all_missing", store_key), daemon=True, name=f"ebay-photos-{job_id}"
+        ).start()
     log.info("eBay photo import %s started for %s (%s) by %s", job_id, store, body.mode, user.email)
     row = db.execute(text("select * from ebay_photo_jobs where id = :i"), {"i": job_id}).first()
     return _job_json(row)

@@ -38,6 +38,7 @@ type RepoItem = {
   api_type: "trading" | "inventory" | null;
   product_id: number;
   image_url: string | null;
+  is_product_source: boolean;
   url: string;
 };
 type RepoResp = {
@@ -448,6 +449,11 @@ export default function EbayLiveListingsPage() {
                           <Link href={`/admin/products/${it.product_id}`} className="ml-3 text-blue-700 hover:underline">
                             {it.sku ?? `Product ${it.product_id}`}
                           </Link>
+                          {it.is_product_source && (
+                            <span className="ml-3" title="The product's photo gallery is taken from this listing">
+                              <Badge tone="gray">Product photos</Badge>
+                            </span>
+                          )}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2">{rowStore?.display_name || it.store}</td>
                         <td className="px-3 py-2">{it.custom_label ?? "—"}</td>

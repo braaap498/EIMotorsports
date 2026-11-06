@@ -293,6 +293,8 @@ _LISTING_JOINS = f"""
 """
 _L_TITLE = "coalesce(nullif(btrim(lr.title), ''), nullif(btrim(la.title), ''), nullif(btrim(lc.title), ''), p.title)"
 _L_LABEL = "coalesce(nullif(btrim(lr.custom_label_sku), ''), nullif(btrim(la.custom_label_sku), ''), p.custom_label_sku)"
+# Photo order for a row: the listing's own saved set (ebay_listings.photos, filled by the photo import's "listing
+# originals" run and by merges), then photos saved under its own item number, then the product's main photo.
 _REPO_SORTS = {
     "newest": "cl.id desc",
     "title": f"lower({_L_TITLE}), cl.id",
@@ -354,7 +356,23 @@ def repo_listings(
             select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
                    p.id as product_id, p.sku_display as sku, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
                    p.list_price, p.quantity_on_hand,
+                   (select count(*) from channel_listings x where x.product_id = p.id) as product_listings,
+                   case
+                     when exists (select 1 from channel_listings x where x.product_id = p.id
+                                    and regexp_replace(cast(x.external_id as text), '[^0-9]', '', 'g')
+                                      = nullif(regexp_replace(coalesce(cast(p.ebay_item_id as text), ''), '[^0-9]', '', 'g'), ''))
+                       then {_DIGITS} = nullif(regexp_replace(coalesce(cast(p.ebay_item_id as text), ''), '[^0-9]', '', 'g'), '')
+                     else cl.id = (select min(x.id) from channel_listings x where x.product_id = p.id)
+                   end as is_product_source,
                    coalesce(
+                     (select e->>'image_key'
+                        from ebay_listings el,
+                             jsonb_array_elements(case when jsonb_typeof(el.photos) = 'array' then el.photos else '[]'::jsonb end)
+                               with ordinality as t(e, n)
+                       where el.ebay_item_id = {_DIGITS} and coalesce(e->>'image_key', '') <> ''
+                       order by (coalesce(e->>'is_primary', '') = 'true') desc,
+                                case when (e->>'sort_order') ~ '^[0-9]+$' then (e->>'sort_order')::int else 0 end, n
+                       limit 1),
                      (select ph.image_key from product_photos ph
                        where split_part(ph.storage_path, '/', 1) = 'EBAY-' || {_DIGITS}
                        order by ph.is_primary desc, ph.sort_order, ph.id limit 1),
@@ -387,6 +405,8 @@ def repo_listings(
                 "api_type": d["api_type"],
                 "product_id": d["product_id"],
                 "image_url": thumb_url(key) if key else None,
+                # for a merged product (more than one listing), the one listing its gallery is taken from
+                "is_product_source": bool(d["is_product_source"]) and (d["product_listings"] or 0) > 1,
                 "url": f"https://www.ebay.com/itm/{d['item_id']}",
             }
         )
