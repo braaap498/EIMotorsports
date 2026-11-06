@@ -650,6 +650,31 @@ def run_due() -> int:
     return n
 
 
+_alias_cleanup_day = None
+
+
+def _cleanup_aliases_daily() -> None:
+    """Once a day, from 08:00 UTC (3-4 a.m. in Charlotte), forget the old item numbers a relist replaced more than
+    6 months ago (cleanup_ebay_item_aliases in ebay_item_aliases.sql holds the 6 months). If the server was asleep at
+    that hour it simply runs the first time the timer wakes afterwards; running twice in a day does no harm."""
+    global _alias_cleanup_day
+    now = datetime.now(timezone.utc)
+    if now.hour < 8 or _alias_cleanup_day == now.date():
+        return
+    _alias_cleanup_day = now.date()  # set first, so a failure is tried again tomorrow and not every 30 seconds
+    db = _session_factory()()
+    try:
+        removed = db.execute(text("select cleanup_ebay_item_aliases()")).scalar()
+        db.commit()
+        if removed:
+            log.info("removed %s old eBay item numbers replaced more than 6 months ago", removed)
+    except Exception:
+        db.rollback()
+        log.warning("old item number cleanup did not run (has ebay_item_aliases.sql been run?)")
+    finally:
+        db.close()
+
+
 def _loop() -> None:
     time.sleep(20)
     while True:
@@ -657,6 +682,10 @@ def _loop() -> None:
             run_due()
         except Exception:
             log.exception("eBay sales loop")
+        try:
+            _cleanup_aliases_daily()
+        except Exception:
+            log.exception("old item number cleanup")
         time.sleep(30)
 
 
