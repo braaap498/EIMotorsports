@@ -62,6 +62,7 @@ public_router = APIRouter(tags=["ebay-sales-public"])
 OVERLAP = timedelta(minutes=15)
 FIRST_LOOKBACK_DAYS = 3
 MAX_WINDOW_DAYS = 89           # eBay will not look further back than 90 days
+MAX_CALL_DAYS = 29             # eBay's GetOrders refuses a ModTime window over 30 days; longer look-backs are split
 QTY_PER_RUN = 20               # listings updated on eBay per check (each one is two eBay calls)
 QTY_MAX_ATTEMPTS = 5
 DIGITS = "regexp_replace(cast(external_id as text), '[^0-9]', '', 'g')"
@@ -161,6 +162,17 @@ def _parse_orders(root: ET.Element) -> list[dict]:
 
 
 def _fetch_orders(db: Session, store: str, since: datetime, until: datetime):
+    """All orders changed between `since` and `until`. eBay's GetOrders refuses a time window longer than 30 days
+    (error 406), so a longer look-back (the 90-day import, or a check after the server slept a long time) is asked
+    for in pieces of at most MAX_CALL_DAYS days."""
+    start = since
+    while start < until:
+        end = min(start + timedelta(days=MAX_CALL_DAYS), until)
+        yield from _fetch_orders_window(db, store, start, end)
+        start = end
+
+
+def _fetch_orders_window(db: Session, store: str, since: datetime, until: datetime):
     page = 1
     while True:
         inner = (

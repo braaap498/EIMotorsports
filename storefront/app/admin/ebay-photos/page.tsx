@@ -69,6 +69,9 @@ export default function EbayPhotoImportPage() {
   const [store, setStore] = useState("");
   const [labelsStore, setLabelsStore] = useState("");
   const [onlyProduct, setOnlyProduct] = useState("");
+  const [lookupItem, setLookupItem] = useState("");
+  const [lookupMsg, setLookupMsg] = useState("");
+  const [looking, setLooking] = useState(false);
 
   // Remember the store names when you leave this page and come back (this browser tab only).
   const [storesRestored, setStoresRestored] = useState(false);
@@ -118,16 +121,36 @@ export default function EbayPhotoImportPage() {
     setStarting(true);
     setError("");
     try {
-      const pid = mode === "listing_originals" ? parseInt(onlyProduct.trim(), 10) : NaN;
+      const typed = mode === "listing_originals" ? onlyProduct.trim() : "";
+      const isItem = /^\d{9,15}$/.test(typed); // an eBay item number is long; a product number is short
+      const pid = typed && !isItem ? parseInt(typed, 10) : NaN;
       const j = await api<Job>("/ebay-photos/import", {
         method: "POST",
-        body: { store: store.trim(), mode, ...(Number.isFinite(pid) ? { product_id: pid } : {}), ...(exact ? { exact: true } : {}) },
+        body: { store: store.trim(), mode, ...(Number.isFinite(pid) ? { product_id: pid } : {}), ...(isItem ? { item_id: typed } : {}), ...(exact ? { exact: true } : {}) },
       });
       setJob(j);
     } catch (e) {
       setError(errMsg(e));
     } finally {
       setStarting(false);
+    }
+  }
+
+  async function findProduct() {
+    setLookupMsg("");
+    setLooking(true);
+    try {
+      const r = await api<{ product_id: number; title: string | null; listings: number }>(
+        `/ebay-photos/product-for-item?item_id=${encodeURIComponent(lookupItem.trim())}`,
+      );
+      setOnlyProduct(String(r.product_id));
+      setLookupMsg(
+        `Product ${r.product_id}${r.title ? `: ${r.title}` : ""} (${r.listings} listing${r.listings === 1 ? "" : "s"}). Its number is now in the box above.`,
+      );
+    } catch (e) {
+      setLookupMsg(errMsg(e));
+    } finally {
+      setLooking(false);
     }
   }
 
@@ -205,17 +228,39 @@ export default function EbayPhotoImportPage() {
             and listings with variations are not shown by eBay&rsquo;s public lookup and are left as they are.
           </p>
         </div>
-        <label className="block max-w-xs text-sm">
-          <span className="mb-1 block font-medium">Only this product number (optional)</span>
+        <label className="block max-w-md text-sm">
+          <span className="mb-1 block font-medium">Only this product number or eBay item number (optional)</span>
           <input
             className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
             inputMode="numeric"
-            placeholder="e.g. 23, to try one product first"
+            placeholder="e.g. 23 (product) or 177464505625 (eBay item)"
             value={onlyProduct}
             onChange={(e) => setOnlyProduct(e.target.value.replace(/[^0-9]/g, ""))}
             disabled={running}
           />
         </label>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="block max-w-xs text-sm">
+            <span className="mb-1 block font-medium">Don&rsquo;t know the product number? Type the eBay item number</span>
+            <input
+              className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
+              inputMode="numeric"
+              placeholder="e.g. 177464505625"
+              value={lookupItem}
+              onChange={(e) => setLookupItem(e.target.value.replace(/[^0-9]/g, ""))}
+              disabled={running}
+            />
+          </label>
+          <button
+            type="button"
+            className={btn2Cls}
+            disabled={running || looking || !/^\d{9,15}$/.test(lookupItem)}
+            onClick={() => void findProduct()}
+          >
+            {looking ? "Looking…" : "Find product number"}
+          </button>
+        </div>
+        {lookupMsg && <p className="max-w-3xl text-xs text-gray-600">{lookupMsg}</p>}
         <div className="flex flex-wrap gap-3">
           <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start("listing_originals")}>
             Save each merged listing&rsquo;s own photos
