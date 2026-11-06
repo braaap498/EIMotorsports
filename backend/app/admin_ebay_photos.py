@@ -672,6 +672,42 @@ def _mark_checked(item: str, result: str):
         )
 
 
+_INSERT_LISTING_SQL = """
+insert into ebay_listings
+  (ebay_item_id, store, product_id, original_product_id, custom_label_sku, sku, title,
+   list_price, quantity_on_hand, condition, description, item_specifics,
+   fitment_vehicle_ids, photos, product_data, merge_log_id, source)
+select :i, :st, p.id,
+       case when o.own then p.id end,
+       coalesce(nullif(btrim((select r.custom_label_sku from ebay_report_rows r where r.item_id = :i limit 1)), ''),
+                nullif(btrim((select a.custom_label_sku from ebay_api_details a where a.item_id = :i limit 1)), ''),
+                case when o.own then p.custom_label_sku end),
+       p.sku_display,
+       coalesce(nullif(btrim((select r.title from ebay_report_rows r where r.item_id = :i limit 1)), ''),
+                nullif(btrim((select a.title from ebay_api_details a where a.item_id = :i limit 1)), ''),
+                nullif(btrim((select m.title from ebay_compat_items m where m.item_id = :i limit 1)), ''),
+                case when o.own then p.title end),
+       case when o.own then p.list_price end,
+       case when o.own then p.quantity_on_hand end,
+       case when o.own then to_jsonb(p)->>'condition' end,
+       case when o.own then to_jsonb(p)->>'description' end,
+       case when o.own then (select coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb)
+                               from product_item_specifics s where s.product_id = p.id)
+            else '[]'::jsonb end,
+       case when o.own then (select coalesce(array_agg(pf.vehicle_id order by pf.vehicle_id), '{}'::bigint[])
+                               from product_fitment pf where pf.product_id = p.id)
+            else '{}'::bigint[] end,
+       cast(:ph as jsonb),
+       case when o.own then to_jsonb(p) else '{}'::jsonb end,
+       null, 'backfill'
+from products p
+cross join lateral (
+  select regexp_replace(coalesce(cast(p.ebay_item_id as text), ''), '[^0-9]', '', 'g') = :i as own) o
+where p.id = :pid
+on conflict (ebay_item_id) do update set photos = excluded.photos, updated_at = now()
+"""
+
+
 def _as_list(v) -> list:
     if isinstance(v, str):
         try:
@@ -777,45 +813,7 @@ def _originals_for(job: _Job, calls: _Calls, item: str, product_id: int, store_k
             # and are copied. For any other listing (merged in later) only facts we have are saved: the item
             # number, store, linked product, the title and label saved for this exact item number (report, then
             # eBay lookup) and its photos. The rest stays empty rather than guessed.
-            c.execute(
-                text(
-                    """
-                    insert into ebay_listings
-                      (ebay_item_id, store, product_id, original_product_id, custom_label_sku, sku, title,
-                       list_price, quantity_on_hand, condition, description, item_specifics,
-                       fitment_vehicle_ids, photos, product_data, merge_log_id, source)
-                    select :i, :st, p.id,
-                           case when o.own then p.id end,
-                           coalesce(nullif(btrim((select r.custom_label_sku from ebay_report_rows r where r.item_id = :i limit 1)), ''),
-                                    nullif(btrim((select a.custom_label_sku from ebay_api_details a where a.item_id = :i limit 1)), ''),
-                                    case when o.own then p.custom_label_sku end),
-                           p.sku_display,
-                           coalesce(nullif(btrim((select r.title from ebay_report_rows r where r.item_id = :i limit 1)), ''),
-                                    nullif(btrim((select a.title from ebay_api_details a where a.item_id = :i limit 1)), ''),
-                                    nullif(btrim((select m.title from ebay_compat_items m where m.item_id = :i limit 1)), ''),
-                                    case when o.own then p.title end),
-                           case when o.own then p.list_price end,
-                           case when o.own then p.quantity_on_hand end,
-                           case when o.own then to_jsonb(p)->>'condition' end,
-                           case when o.own then to_jsonb(p)->>'description' end,
-                           case when o.own then (select coalesce(jsonb_agg(to_jsonb(s)), '[]'::jsonb)
-                                                   from product_item_specifics s where s.product_id = p.id)
-                                else '[]'::jsonb end,
-                           case when o.own then (select coalesce(array_agg(pf.vehicle_id order by pf.vehicle_id), '{}'::bigint[])
-                                                   from product_fitment pf where pf.product_id = p.id)
-                                else '{}'::bigint[] end,
-                           cast(:ph as jsonb),
-                           case when o.own then to_jsonb(p) else '{}'::jsonb end,
-                           null, 'backfill'
-                    from products p
-                    cross join lateral (
-                      select regexp_replace(coalesce(cast(p.ebay_item_id as text), ''), '[^0-9]', '', 'g') = :i as own) o
-                    where p.id = :pid
-                    on conflict (ebay_item_id) do update set photos = excluded.photos, updated_at = now()
-                    """
-                ),
-                {"i": item, "st": store_key, "ph": ph, "pid": product_id},
-            )
+            c.execute(text(_INSERT_LISTING_SQL), {"i": item, "st": store_key, "ph": ph, "pid": product_id})
     job.c["photos_added"] += added
     if not row:
         tally["created"] += 1
@@ -869,20 +867,24 @@ def _work_originals(job: _Job, calls: _Calls, store_key: str, product_id: Option
 
 # ------------------------- make a listing's saved photos exactly what eBay has (fixes wrong/extra photos)
 def _exact_candidates(store_key: str, product_id: Optional[int]) -> list[tuple[str, int]]:
-    """Saved listing rows (ebay_listings) of this store not yet made exact."""
+    """Listings of this store to make exact: merged ones, ones that already have a saved row, or (when a product
+    number is typed) every listing of that product. Ended listings count; listings with no saved row get one."""
     with get_engine().connect() as c:
         rows = c.execute(
             text(
                 f"""
-                select el.ebay_item_id as item, el.product_id
-                from ebay_listings el
-                where exists (select 1 from channel_listings cl
-                              where {_DIG} = el.ebay_item_id and lower(cl.store) = lower(:st))
-                  and el.product_id is not null
+                select {_DIG} as item, min(cl.product_id) as product_id
+                from channel_listings cl
+                left join ebay_listings el on el.ebay_item_id = {_DIG}
+                where lower(cl.store) = lower(:st) and cl.product_id is not null and {_DIG} <> ''
+                  and (cast(:pid as bigint) is not null
+                       or el.ebay_item_id is not null
+                       or (select count(*) from channel_listings x where x.product_id = cl.product_id) > 1)
                   and not exists (select 1 from ebay_listing_photo_checked k
-                                  where k.item_number = el.ebay_item_id and k.result = 'exact')
-                  and (cast(:pid as bigint) is null or el.product_id = cast(:pid as bigint))
-                order by el.ebay_item_id
+                                  where k.item_number = {_DIG} and k.result = 'exact')
+                  and (cast(:pid as bigint) is null or cl.product_id = cast(:pid as bigint))
+                group by 1
+                order by 1
                 """
             ),
             {"st": store_key, "pid": product_id},
@@ -895,7 +897,7 @@ def _sort_no(e: dict) -> int:
     return v if isinstance(v, int) else 0
 
 
-def _exact_for(job: _Job, item: str, store_key: str, tally: dict):
+def _exact_for(job: _Job, item: str, product_id: int, store_key: str, tally: dict):
     """Replace one listing's saved photo set with exactly what eBay shows for it, in eBay's order.
 
     Reads through the connected seller account (the same read the edit screen uses), so ended listings work too.
@@ -943,27 +945,33 @@ def _exact_for(job: _Job, item: str, store_key: str, tally: dict):
     if old_keys == [e["image_key"] for e in final] and old_primary == final[0]["image_key"]:
         tally["unchanged"] += 1
     else:
+        ph = json.dumps(final)
         with get_engine().begin() as c:
-            c.execute(
-                text("update ebay_listings set photos = cast(:ph as jsonb), updated_at = now() where ebay_item_id = :i"),
-                {"ph": json.dumps(final), "i": item},
-            )
-        tally["fixed"] += 1
-        tally["dropped"] += len([k for k in old_keys if k not in have])
+            if row:
+                c.execute(
+                    text("update ebay_listings set photos = cast(:ph as jsonb), updated_at = now() where ebay_item_id = :i"),
+                    {"ph": ph, "i": item},
+                )
+                tally["fixed"] += 1
+                tally["dropped"] += len([k for k in old_keys if k not in have])
+            else:  # no saved row yet (typical for ended listings): create it with eBay's photos
+                c.execute(text(_INSERT_LISTING_SQL), {"i": item, "st": store_key, "ph": ph, "pid": product_id})
+                tally["created"] += 1
     _mark_checked(item, "exact")
 
 
 def _work_exact(job: _Job, calls: _Calls, store_key: str, product_id: Optional[int]):
     cands = _exact_candidates(store_key, product_id)
     job.c["items_total"] = len(cands)
-    tally = {"fixed": 0, "unchanged": 0, "no_photos": 0, "dropped": 0}
+    tally = {"fixed": 0, "created": 0, "unchanged": 0, "no_photos": 0, "dropped": 0}
     if not cands:
-        job.message = "Nothing left to do: every saved listing has been made to match eBay."
+        job.message = "Nothing left to do: every merged or saved listing of this store has been made to match eBay (or none matched the product number)."
         job.save(calls, "done")
         return
 
     def msg() -> str:
         return (
+            f"{tally['created']} listings had no saved photos and got eBay's set; "
             f"{tally['fixed']} saved photo sets rewritten to match eBay ({tally['dropped']} photos that eBay does not "
             f"show on that listing taken off the set); {tally['unchanged']} already matched; "
             f"{tally['no_photos']} had no photos on eBay."
@@ -975,7 +983,7 @@ def _work_exact(job: _Job, calls: _Calls, store_key: str, product_id: Optional[i
             stopped = True
             break
         try:
-            _exact_for(job, item, store_key, tally)
+            _exact_for(job, item, _pid, store_key, tally)
             bad_in_a_row = 0
         except Exception as e:  # one bad listing must not stop the rest
             if _fatal_storage(e):
