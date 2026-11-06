@@ -380,25 +380,27 @@ export default function EbayListingImportPage() {
         )}
       </div>
 
-      <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
-        <h3 className="text-base font-semibold">3. Import</h3>
-        <div className="flex flex-wrap gap-3">
-          <button type="button" className={btn2Cls} disabled={running} onClick={() => void runImport(5, false)}>
-            Import 5 as a test
-          </button>
-          <button type="button" className={btnCls} disabled={running} onClick={() => void runImport(200, true)}>
-            {running ? "Importing…" : preview ? `Import all ${n(preview.ready)} ready listings` : "Import all ready listings"}
-          </button>
-          {running && (
-            <button type="button" className={btn2Cls} onClick={() => { stopRef.current = true; }}>
-              Stop after this batch
+      {(running || (preview && preview.ready > 0)) && (
+        <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+          <h3 className="text-base font-semibold">3. Import</h3>
+          <div className="flex flex-wrap gap-3">
+            <button type="button" className={btn2Cls} disabled={running} onClick={() => void runImport(5, false)}>
+              Import 5 as a test
             </button>
-          )}
+            <button type="button" className={btnCls} disabled={running} onClick={() => void runImport(200, true)}>
+              {running ? "Importing…" : preview ? `Import all ${n(preview.ready)} ready listings` : "Import all ready listings"}
+            </button>
+            {running && (
+              <button type="button" className={btn2Cls} onClick={() => { stopRef.current = true; }}>
+                Stop after this batch
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-gray-500">
+            Safe to repeat: listings that are already on the website are skipped. Run the 5-listing test first and open one of the new listings to check it.
+          </p>
         </div>
-        <p className="text-xs text-gray-500">
-          Safe to repeat: listings that are already on the website are skipped. Run the 5-listing test first and open one of the new listings to check it.
-        </p>
-      </div>
+      )}
         </>
       )}
 
