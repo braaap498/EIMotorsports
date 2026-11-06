@@ -2,11 +2,11 @@
 
 import EbaySalesPanel from "../../../components/admin/EbaySalesPanel";
 
-/* eBay sales: polling, set-aside and quantity sync. Moved here from the Live listings page; the panel is unchanged. */
-export default function EbaySalesPage() {
+/* eBay orders: the list of recent orders. (Checking stores for new orders lives on Store API > Stores.) */
+export default function EbayOrdersPage() {
   return (
     <div className="space-y-5">
-      <h1 className="text-2xl font-semibold">Sales</h1>
+      <h1 className="text-2xl font-semibold">Orders</h1>
       <EbaySalesPanel />
     </div>
   );

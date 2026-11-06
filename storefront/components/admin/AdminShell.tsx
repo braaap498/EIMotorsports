@@ -53,10 +53,10 @@ const STORE_API_TABS: Tab[] = [
   { href: "/admin/merge-link", label: "Merge and link products", match: ["/admin/merge-link", "/admin/cleanup", "/admin/ebay-new"] },
 ];
 
-// Sub-pages shown as tabs under the eBay button: Listings and Sales on the left, then Store API.
+// Sub-pages shown as tabs under the eBay button: Listings and Orders on the left, then Store API.
 const EBAY_TABS: Tab[] = [
   { href: "/admin/ebay-listings", label: "Listings", match: ["/admin/ebay-listings", "/admin/ebay-edit"] },
-  { href: "/admin/ebay-sales", label: "Sales" },
+  { href: "/admin/ebay-sales", label: "Orders" },
   { href: "/admin/ebay-stores", label: "Store API", match: STORE_API_TABS.flatMap((t) => t.match ?? [t.href]) },
 ];
 

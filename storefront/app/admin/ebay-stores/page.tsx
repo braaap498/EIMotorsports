@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
+import EbayOrderCheck from "../../../components/admin/EbayOrderCheck";
 
 /* eBay stores: add a store, connect (authorize) it, test the connection, and switch live pushes on or off.
    Moved here from the Live listings page; works the same. */
@@ -290,6 +291,8 @@ export default function EbayStoresPage() {
           </div>
         )}
       </div>
+
+      <EbayOrderCheck />
     </div>
   );
 }
