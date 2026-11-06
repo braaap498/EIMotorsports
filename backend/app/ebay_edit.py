@@ -839,10 +839,11 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
         warnings += [e for e in errs if e["severity"] == "Warning"]
         new_id = (root.findtext(f"{NS}ItemID") or "").strip() if body.action == "relist" else ""
     live_id = current["item_id"]
+    move_notes: list[str] = []
     if body.action == "relist":
         if not new_id or not ITEM_RE.fullmatch(new_id):
             raise HTTPException(502, "eBay accepted the relist but did not say the new item number. Look at the store on eBay and re-import the listings.")
-        _move_listing(db, row.store, current["item_id"], new_id)
+        move_notes = _move_listing(db, row.store, current["item_id"], new_id)
         live_id = new_id
     else:
         db.execute(
@@ -855,14 +856,14 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
         db.commit()
     _drop_draft(db, row.store, current["item_id"])  # what was saved is on eBay now
     fresh = _read_item(db, row.store, live_id)
-    notes: list[str] = []
+    notes: list[str] = list(move_notes)
     if body.changes.photos is not None:
         try:
-            notes = _record_photo_urls(db, row.store, live_id, body.changes.photos, fresh)
+            notes += _record_photo_urls(db, row.store, live_id, body.changes.photos, fresh)
         except Exception:  # eBay already has the change; a bookkeeping problem must not look like a failed push
             log.exception("could not record photo addresses for %s", current["item_id"])
             db.rollback()
-            notes = ["The change is on eBay, but the photo addresses could not be recorded on the website."]
+            notes.append("The change is on eBay, but the photo addresses could not be recorded on the website.")
     return {"ok": True, "warnings": warnings, "item": fresh, "differences": _differences(fresh, body.changes), "notes": notes}
 
 
@@ -874,29 +875,86 @@ def _drop_draft(db: Session, store: str, item_id: str) -> None:
         db.rollback()
 
 
-def _move_listing(db: Session, store: str, old_id: str, new_id: str) -> None:
-    """After a relist the listing has a new item number: point our record at it and mark it active.
-    The column may hold a number or text with a prefix; the new value is written the way the old one was."""
+def _move_listing(db: Session, store: str, old_id: str, new_id: str) -> list[str]:
+    """After a relist the listing has a new item number. Point everything that held the old number at the new one:
+    the store link (channel_listings), the saved listing record (ebay_listings), the product's own eBay item
+    number, and any quantity update still waiting for the old number. The old number is kept in ebay_item_aliases
+    so orders placed on it (late orders, returns, a 90-day re-import) still find their product; the maintenance
+    step in ebay_item_aliases.sql removes those rows after 6 months. Returns plain-language notes for anything
+    that could not be moved. The column may hold a number or text with a prefix; the new value is written the
+    way the old one was."""
+    notes: list[str] = []
     row = db.execute(
         text(
-            "select id, cast(external_id as text) as ext from channel_listings "
+            "select id, cast(external_id as text) as ext, product_id from channel_listings "
             "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i and store = :s"
         ),
         {"i": old_id, "s": store},
     ).all()
-    if not row:
-        return
-    kind = db.execute(
-        text("select data_type from information_schema.columns where table_name = 'channel_listings' and column_name = 'external_id'")
-    ).scalar()
-    cast = "bigint" if kind in ("bigint", "integer", "smallint", "numeric") else "text"
-    for r in row:
-        value = re.sub(r"\d+$", new_id, r.ext or "")
-        db.execute(
-            text(f"update channel_listings set external_id = cast(:v as {cast}), status = 'active', last_pushed_at = now() where id = :id"),
-            {"v": value, "id": r.id},
+    product_id = next((r.product_id for r in row if r.product_id), None)
+    if row:
+        kind = db.execute(
+            text("select data_type from information_schema.columns where table_name = 'channel_listings' and column_name = 'external_id'")
+        ).scalar()
+        cast = "bigint" if kind in ("bigint", "integer", "smallint", "numeric") else "text"
+        for r in row:
+            value = re.sub(r"\d+$", new_id, r.ext or "")
+            db.execute(
+                text(f"update channel_listings set external_id = cast(:v as {cast}), status = 'active', last_pushed_at = now() where id = :id"),
+                {"v": value, "id": r.id},
+            )
+        db.commit()
+    else:
+        notes.append(
+            f"The relist worked, but no product was linked to the old item number {old_id}, so that link was not moved. "
+            "Link the new listing to its product on the Link new eBay listings page."
+        )
+
+    # Each step below stands alone: if one cannot be done the others still are, and the relist itself is never undone.
+    def step(label: str, sql: str, params: dict) -> int:
+        try:
+            with db.begin_nested():
+                return db.execute(text(sql), params).rowcount or 0
+        except Exception:
+            log.exception("relist %s -> %s: could not update %s", old_id, new_id, label)
+            notes.append(f"The listing is live as {new_id}, but its {label} could not be moved from the old number; check it on the website.")
+            return -1
+
+    saved = db.execute(
+        text("select product_id from ebay_listings where ebay_item_id = :o and store = :s limit 1"), {"o": old_id, "s": store}
+    ).first()
+    if product_id is None and saved is not None:
+        product_id = saved.product_id
+    if saved is not None:
+        n = step(
+            "saved listing record",
+            "update ebay_listings set ebay_item_id = :n, updated_at = now() "
+            "where ebay_item_id = :o and store = :s and not exists (select 1 from ebay_listings where ebay_item_id = :n)",
+            {"o": old_id, "n": new_id, "s": store},
+        )
+        if n == 0:
+            notes.append(f"A saved listing record already exists for {new_id}, so the one under {old_id} was left as it was.")
+    step(
+        "product's eBay item number",
+        "update products set ebay_item_id = regexp_replace(cast(ebay_item_id as text), '[0-9]+', :n) "
+        "where regexp_replace(coalesce(cast(ebay_item_id as text), ''), '[^0-9]', '', 'g') = :o",
+        {"o": old_id, "n": new_id},
+    )
+    step(
+        "waiting quantity update",
+        "update ebay_qty_queue set ebay_item_id = :n where store = :s and ebay_item_id = :o and status = 'pending'",
+        {"o": old_id, "n": new_id, "s": store},
+    )
+    if product_id is not None:
+        step(
+            "old-number record",
+            "insert into ebay_item_aliases (old_item_id, new_item_id, store, product_id) values (:o, :n, :s, :p) "
+            "on conflict (old_item_id) do update set new_item_id = excluded.new_item_id, store = excluded.store, "
+            "product_id = excluded.product_id, replaced_at = now()",
+            {"o": old_id, "n": new_id, "s": store, "p": product_id},
         )
     db.commit()
+    return notes
 
 
 class DraftIn(BaseModel):

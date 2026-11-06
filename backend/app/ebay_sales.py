@@ -211,7 +211,18 @@ def _match_product(db: Session, item_id: str) -> Optional[int]:
         ),
         {"i": item_id},
     ).first()
-    return r.id if r else None
+    if r:
+        return r.id
+    # last resort: an item number replaced by a relist still belongs to the same product
+    try:
+        with db.begin_nested():
+            a = db.execute(
+                text("select product_id from ebay_item_aliases where old_item_id = :i and product_id is not null limit 1"),
+                {"i": item_id},
+            ).first()
+        return a.product_id if a else None
+    except Exception:  # the table comes from ebay_item_aliases.sql; until it exists, matching works as before
+        return None
 
 
 def _channel_id(db: Session) -> Optional[int]:
