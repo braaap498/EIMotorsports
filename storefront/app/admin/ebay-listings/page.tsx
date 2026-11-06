@@ -102,6 +102,7 @@ export default function EbayLiveListingsPage() {
   const [repo, setRepo] = useState<RepoResp | null>(null);
   const [busy, setBusy] = useState("");
   const [sync, setSync] = useState<SyncRow[]>([]);
+  const [syncNote, setSyncNote] = useState(""); // set when a background check finished and changed statuses
   const live = useRef({ picked: 0, busy: "", offset: 0 });
   live.current = { picked: picked.size, busy, offset: repo?.offset ?? 0 };
   async function loadStores() {
@@ -132,23 +133,32 @@ export default function EbayLiveListingsPage() {
       });
   }, [stores]);
 
+  // While a check runs, ask how it is doing every few seconds so the "checking…" line stays true. This NEVER reloads the
+  // list or clears ticked rows: new statuses show the next time the list is read (arriving on this tab, coming back from a
+  // listing, Show listings, or going to another page). When a check finishes with changes a quiet note says so.
+  // `wasRunning` always holds the stores that were running at the last answer (a plain copy captured when the timer was
+  // made would go stale and fire again on every tick).
   const syncRunning = sync.some((x) => x.running);
+  const wasRunning = useRef<string[]>([]);
+  useEffect(() => {
+    wasRunning.current = sync.filter((x) => x.running).map((x) => x.store);
+  }, [sync]);
   useEffect(() => {
     if (!syncRunning) return;
     const t = setInterval(() => {
       api<SyncResp>("/ebay-listings/status-sync")
         .then((r) => {
-          const before = sync.filter((x) => x.running).map((x) => x.store);
-          const finished = r.stores.filter((x) => before.includes(x.store) && !x.running);
+          const finished = r.stores.filter((x) => wasRunning.current.includes(x.store) && !x.running);
           setSync(r.stores);
-          const changed = finished.some((x) => (x.marked_active ?? 0) + (x.marked_ended ?? 0) > 0);
-          const l = live.current;
-          if (changed && l.picked === 0 && l.busy === "") void loadRepo(l.offset);
+          const ended = finished.reduce((n, x) => n + (x.marked_ended ?? 0), 0);
+          const madeActive = finished.reduce((n, x) => n + (x.marked_active ?? 0), 0);
+          if (ended + madeActive > 0) {
+            setSyncNote(`The eBay check finished: ${ended} listing${ended === 1 ? "" : "s"} ended, ${madeActive} marked active. Press Show listings to see the latest.`);
+          }
         })
         .catch(() => {});
     }, 5000);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncRunning]);
 
   // Coming back from another admin page: put the store, search and page back and show the same listings.
@@ -314,6 +324,7 @@ export default function EbayLiveListingsPage() {
     const useStatus = from ? from.statusF : statusF;
     setLoading(true);
     setError("");
+    setSyncNote("");
     setPicked(new Set());
     try {
       // the database list sorts by title / price / newest; eBay's own "newest" and price orders map onto these
@@ -444,6 +455,7 @@ export default function EbayLiveListingsPage() {
               </p>
             );
           })()}
+          {syncNote && <p className="text-xs font-medium text-amber-700">{syncNote}</p>}
           {actMsg && <Notice kind={actMsg.kind}>{actMsg.text}</Notice>}
           {picked.size > 0 && (
             <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
