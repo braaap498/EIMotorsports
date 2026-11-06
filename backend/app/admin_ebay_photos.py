@@ -73,6 +73,7 @@ from app.config import get_settings
 from app.database import get_db, get_engine
 from app.ebay_feedback import SEARCH_URL, FeedbackError, _token, configured, seller_username
 from app.admin_ebay_listings import _resolve
+from app.ebay_edit import _read_item
 
 log = logging.getLogger(__name__)
 
@@ -866,11 +867,141 @@ def _work_originals(job: _Job, calls: _Calls, store_key: str, product_id: Option
     job.save(calls, "stopped" if stopped else "done")
 
 
-def _run_originals(job_id: int, store_key: str, product_id: Optional[int]):
+# ------------------------- make a listing's saved photos exactly what eBay has (fixes wrong/extra photos)
+def _exact_candidates(store_key: str, product_id: Optional[int]) -> list[tuple[str, int]]:
+    """Saved listing rows (ebay_listings) of this store not yet made exact."""
+    with get_engine().connect() as c:
+        rows = c.execute(
+            text(
+                f"""
+                select el.ebay_item_id as item, el.product_id
+                from ebay_listings el
+                where exists (select 1 from channel_listings cl
+                              where {_DIG} = el.ebay_item_id and lower(cl.store) = lower(:st))
+                  and el.product_id is not null
+                  and not exists (select 1 from ebay_listing_photo_checked k
+                                  where k.item_number = el.ebay_item_id and k.result = 'exact')
+                  and (cast(:pid as bigint) is null or el.product_id = cast(:pid as bigint))
+                order by el.ebay_item_id
+                """
+            ),
+            {"st": store_key, "pid": product_id},
+        ).all()
+    return [(str(r[0]), r[1]) for r in rows]
+
+
+def _sort_no(e: dict) -> int:
+    v = e.get("sort_order")
+    return v if isinstance(v, int) else 0
+
+
+def _exact_for(job: _Job, item: str, store_key: str, tally: dict):
+    """Replace one listing's saved photo set with exactly what eBay shows for it, in eBay's order.
+
+    Reads through the connected seller account (the same read the edit screen uses), so ended listings work too.
+    Only the listing's saved list changes; no stored picture file is ever deleted."""
+    with Session(get_engine()) as db:
+        data = _read_item(db, store_key, item)
+    urls: list[str] = []
+    seen: set[str] = set()
+    for p in data.get("photos") or []:
+        u = (p.get("url") or "").strip()
+        if u and photo_key(u) not in seen:
+            seen.add(photo_key(u))
+            urls.append(u)
+    if not urls:
+        tally["no_photos"] += 1
+        _mark_checked(item, "exact_no_photos")
+        return
+    with get_engine().connect() as c:
+        row = c.execute(text("select photos from ebay_listings where ebay_item_id = :i"), {"i": item}).first()
+    old = [e for e in _as_list(row[0] if row else None) if isinstance(e, dict) and e.get("image_key")]
+    old.sort(key=_sort_no)
+    by_id = {photo_key(e["source_url"]): e for e in old if e.get("source_url")}
+    final: list[dict] = []
+    have: set[str] = set()
+    for url in urls:
+        e = by_id.get(photo_key(url))
+        if e is not None:  # eBay's picture is one we already stored for this listing
+            key, path = e["image_key"], e.get("storage_path") or photo_store.full_path(e["image_key"])
+        else:
+            p = photo_store.process_image(_download(url))
+            photo_store.upload(p)
+            key, path = p.key, photo_store.full_path(p.key)
+        if key in have:
+            continue
+        have.add(key)
+        final.append({"image_key": key, "source_url": url, "storage_path": path, "is_primary": False, "sort_order": 0})
+    if not final:
+        job.fail(item, "no photo could be stored")
+        return
+    for n, e in enumerate(final):
+        e["sort_order"] = n
+        e["is_primary"] = n == 0
+    old_keys = [e["image_key"] for e in old]
+    old_primary = next((e["image_key"] for e in old if e.get("is_primary") is True), None)
+    if old_keys == [e["image_key"] for e in final] and old_primary == final[0]["image_key"]:
+        tally["unchanged"] += 1
+    else:
+        with get_engine().begin() as c:
+            c.execute(
+                text("update ebay_listings set photos = cast(:ph as jsonb), updated_at = now() where ebay_item_id = :i"),
+                {"ph": json.dumps(final), "i": item},
+            )
+        tally["fixed"] += 1
+        tally["dropped"] += len([k for k in old_keys if k not in have])
+    _mark_checked(item, "exact")
+
+
+def _work_exact(job: _Job, calls: _Calls, store_key: str, product_id: Optional[int]):
+    cands = _exact_candidates(store_key, product_id)
+    job.c["items_total"] = len(cands)
+    tally = {"fixed": 0, "unchanged": 0, "no_photos": 0, "dropped": 0}
+    if not cands:
+        job.message = "Nothing left to do: every saved listing has been made to match eBay."
+        job.save(calls, "done")
+        return
+
+    def msg() -> str:
+        return (
+            f"{tally['fixed']} saved photo sets rewritten to match eBay ({tally['dropped']} photos that eBay does not "
+            f"show on that listing taken off the set); {tally['unchanged']} already matched; "
+            f"{tally['no_photos']} had no photos on eBay."
+        )
+
+    stopped, bad_in_a_row = False, 0
+    for n, (item, _pid) in enumerate(cands, 1):
+        if job.stop_requested():
+            stopped = True
+            break
+        try:
+            _exact_for(job, item, store_key, tally)
+            bad_in_a_row = 0
+        except Exception as e:  # one bad listing must not stop the rest
+            if _fatal_storage(e):
+                raise
+            log.exception("exact listing photos: item %s failed", item)
+            why = getattr(e, "detail", None) or str(e)
+            job.fail(item, str(why))
+            bad_in_a_row += 1
+            if bad_in_a_row >= 5:
+                job.message = f"Stopped after 5 failures in a row ({why}). {msg()}"
+                job.save(calls, "failed")
+                return
+        job.c["items_done"] = n
+        if n % 10 == 0:
+            job.message = f"Working… {msg()}"
+            job.save(calls)
+        time.sleep(0.2)
+    job.message = msg()
+    job.save(calls, "stopped" if stopped else "done")
+
+
+def _run_originals(job_id: int, store_key: str, product_id: Optional[int], exact: bool = False):
     job = _Job(job_id)
     calls = _Calls(_max_calls())
     try:
-        _work_originals(job, calls, store_key, product_id)
+        (_work_exact if exact else _work_originals)(job, calls, store_key, product_id)
     except RateLimited as e:
         job.message = f"Paused: {e} Start it again later and it carries on where it stopped."
         job.save(calls, "paused")
@@ -888,6 +1019,7 @@ class ImportIn(BaseModel):
     store: str = ""
     mode: str
     product_id: Optional[int] = None  # listing_originals only: do just this product's listings (a test run)
+    exact: bool = False  # listing_originals only: make each saved set exactly eBay's (removes wrong photos)
 
 
 def _job_json(row) -> dict:
@@ -932,7 +1064,7 @@ def start_import(body: ImportIn, db: Session = Depends(get_db), user: AuthUser =
         raise
     if originals:
         threading.Thread(
-            target=_run_originals, args=(job_id, store_key, body.product_id), daemon=True, name=f"ebay-photos-{job_id}"
+            target=_run_originals, args=(job_id, store_key, body.product_id, body.exact), daemon=True, name=f"ebay-photos-{job_id}"
         ).start()
     else:
         threading.Thread(

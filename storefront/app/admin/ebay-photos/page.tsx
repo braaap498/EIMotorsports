@@ -114,14 +114,14 @@ export default function EbayPhotoImportPage() {
     return () => clearInterval(t);
   }, [running]);
 
-  async function start(mode: Job["mode"]) {
+  async function start(mode: Job["mode"], exact = false) {
     setStarting(true);
     setError("");
     try {
       const pid = mode === "listing_originals" ? parseInt(onlyProduct.trim(), 10) : NaN;
       const j = await api<Job>("/ebay-photos/import", {
         method: "POST",
-        body: { store: store.trim(), mode, ...(Number.isFinite(pid) ? { product_id: pid } : {}) },
+        body: { store: store.trim(), mode, ...(Number.isFinite(pid) ? { product_id: pid } : {}), ...(exact ? { exact: true } : {}) },
       });
       setJob(j);
     } catch (e) {
@@ -219,6 +219,14 @@ export default function EbayPhotoImportPage() {
         <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start("listing_originals")}>
           Save each merged listing&rsquo;s own photos
         </button>
+        <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start("listing_originals", true)}>
+          Make each listing&rsquo;s photos match eBay exactly
+        </button>
+        <p className="max-w-3xl text-xs text-gray-500">
+          Replaces a listing&rsquo;s saved photos with exactly what eBay has, in eBay&rsquo;s order, so a photo that
+          belongs to another listing is taken off and the right one becomes the main photo. Works for ended listings.
+          Needs the store connected under Connect eBay. Picture files are not deleted.
+        </p>
         <p className="max-w-3xl text-xs text-gray-500">
           Uses the store name above. Photos are saved to the listing only, not to the product&rsquo;s gallery. If eBay&rsquo;s
           daily limit is reached it pauses; start it again later and it carries on.
