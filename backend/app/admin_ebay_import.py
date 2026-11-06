@@ -530,3 +530,83 @@ def run_api(body: RunIn, db: Session = Depends(get_db), user: AuthUser = Depends
         "rate_limited": rate_limited, "remaining_to_ask": still_fetch,
         "remaining_to_create": max(0, len(ready) - out["created"] - len(out["problems"])),
     }
+
+
+# ------------------------------------------------------------------ fill blank price / label on listings already imported
+# Some products were created with no price and no custom label (their listing had no report row and no eBay answer
+# saved when they were made). This asks eBay about those active listings and saves the answer in ebay_api_details,
+# the same place the straight-from-eBay import saves it. It changes nothing on eBay and nothing on the products: the
+# Listings tab shows a saved price/label when the product has none.
+_ITEM_DIGITS = "regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g')"
+_BLANKS = f"""
+select {_ITEM_DIGITS} as item, cl.store
+from channel_listings cl
+join products p on p.id = cl.product_id
+where lower(coalesce(cl.status, '')) = 'active'
+  and {_ITEM_DIGITS} <> ''
+  and p.list_price is null
+  and not exists (select 1 from ebay_report_rows r where r.item_id = {_ITEM_DIGITS} and r.price is not null)
+  and not exists (select 1 from ebay_api_details a where a.item_id = {_ITEM_DIGITS})
+order by cl.id desc
+"""
+
+
+@router.get("/blank-details")
+def blank_details(db: Session = Depends(get_db)):
+    """How many active listings have a product with no price and no saved answer from a report or eBay."""
+    return {"to_ask": len(db.execute(text(_BLANKS)).all())}
+
+
+@router.post("/fill-blank")
+def fill_blank(body: RunIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    limit = max(1, min(int(body.limit), FETCH_MAX))
+    stores = _authorized_stores(db)
+    if not stores:
+        raise HTTPException(409, "No eBay store has been approved yet, so eBay cannot be asked. Connect a store on the Live listings tab.")
+    rows = db.execute(text(_BLANKS)).all()
+    db.rollback()  # reads only so far
+    by_name = {st.store.lower(): st for st in stores}
+    filled = skipped = errors = 0
+    error_sample: list[str] = []
+    rate_limited: Optional[str] = None
+    for n, r in enumerate(rows[:limit], 1):
+        # the listing's own store first; the others only if that one does not own it
+        own = by_name.get((r.store or "").lower())
+        order = [own] + [x for x in stores if x is not own] if own else stores
+        try:
+            d = _fetch_details(db, order, r.item)
+        except RateLimited as e:
+            rate_limited = str(e)
+            break
+        if d["state"] == "error":
+            errors += 1
+            if len(error_sample) < 10:
+                error_sample.append(f"{r.item}: {d['reason']}")
+            if errors >= 5 and filled + skipped == 0:
+                break  # nothing is working (approval expired, eBay down): stop instead of burning calls
+            continue
+        if d["state"] == "skipped":
+            skipped += 1
+            db.execute(text("insert into ebay_api_details (item_id, status, reason) values (:i, 'skipped', :r) "
+                            "on conflict (item_id) do update set status = 'skipped', reason = excluded.reason, fetched_at = now()"),
+                       {"i": r.item, "r": d["reason"]})
+        else:
+            filled += 1
+            db.execute(
+                text("insert into ebay_api_details (item_id, status, store, title, custom_label_sku, price, quantity, ebay_category) "
+                     "values (:i, 'ok', :s, :t, :l, :p, :q, :c) "
+                     "on conflict (item_id) do update set status = 'ok', reason = null, store = excluded.store, "
+                     "title = excluded.title, custom_label_sku = excluded.custom_label_sku, price = excluded.price, "
+                     "quantity = excluded.quantity, ebay_category = excluded.ebay_category, fetched_at = now()"),
+                {"i": r.item, "s": d["store"], "t": d["title"], "l": d["label"], "p": d["price"], "q": d["qty"], "c": d["category"]},
+            )
+        if n % 10 == 0:
+            db.commit()
+    db.commit()
+    left = len(db.execute(text(_BLANKS)).all())
+    db.rollback()
+    return {
+        "filled": filled, "skipped": skipped, "errors": errors, "error_sample": error_sample,
+        "rate_limited": rate_limited, "remaining": left,
+    }
+

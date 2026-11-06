@@ -83,6 +83,9 @@ export default function EbayListingImportPage() {
   const [ebayState, setEbayState] = useState<EbayState | null>(null);
   const [error, setError] = useState("");
   const stopRef = useRef(false);
+  const [fillLeft, setFillLeft] = useState<number | null>(null);
+  const [filling, setFilling] = useState(false);
+  const [fillTotals, setFillTotals] = useState({ filled: 0, skipped: 0, notes: [] as string[] });
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function loadState() {
@@ -184,6 +187,46 @@ export default function EbayListingImportPage() {
     } finally {
       setRunning(false);
       await loadPreview();
+    }
+  }
+
+  async function loadFillLeft() {
+    try {
+      const r = await api<{ to_ask: number }>("/ebay-import/blank-details");
+      setFillLeft(r.to_ask);
+    } catch {
+      /* a convenience: the rest of the page works without it */
+    }
+  }
+
+  useEffect(() => {
+    void loadFillLeft();
+  }, []);
+
+  async function fillBlank(limit: number, all: boolean) {
+    setFilling(true);
+    stopRef.current = false;
+    setError("");
+    setFillTotals({ filled: 0, skipped: 0, notes: [] });
+    try {
+      for (;;) {
+        const r = await api<{ filled: number; skipped: number; errors: number; error_sample: string[]; rate_limited: string | null; remaining: number }>(
+          "/ebay-import/fill-blank",
+          { method: "POST", body: { limit } },
+        );
+        setFillTotals((t) => ({
+          filled: t.filled + r.filled,
+          skipped: t.skipped + r.skipped,
+          notes: [...t.notes, ...(r.rate_limited ? [r.rate_limited + " Start it again later; what was done is saved."] : []), ...r.error_sample].slice(0, 20),
+        }));
+        setFillLeft(r.remaining);
+        if (!all || stopRef.current || r.rate_limited || r.remaining === 0 || (r.filled === 0 && r.skipped === 0)) break;
+      }
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setFilling(false);
+      await loadFillLeft();
     }
   }
 
@@ -386,6 +429,40 @@ export default function EbayListingImportPage() {
             )}
           </div>
           <p className="text-xs text-gray-500">Safe to repeat. Run the 5-listing test first and open one of the new listings to check it. Avoid running the compatibility or photo import at the same time.</p>
+        </div>
+      )}
+
+      {fillLeft !== null && fillLeft > 0 && (
+        <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+          <h3 className="text-base font-semibold">Fill missing prices and labels</h3>
+          <p className="max-w-3xl text-sm text-gray-600">
+            {n(fillLeft)} active listings are linked to a product that has no price, and no report or eBay answer is saved for them. This asks eBay about
+            each one (one lookup per listing, the same daily allowance as the other imports) and saves the price and custom label it returns. The Listings tab then shows
+            them. Nothing is changed on eBay and no product is edited. If eBay&rsquo;s daily limit is reached it stops and keeps what it has; start it again later.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <button type="button" className={btn2Cls} disabled={filling || running} onClick={() => void fillBlank(5, false)}>
+              Try 5 as a test
+            </button>
+            <button type="button" className={btnCls} disabled={filling || running} onClick={() => void fillBlank(40, true)}>
+              {filling ? "Asking eBay…" : `Fill all ${n(fillLeft)}`}
+            </button>
+            {filling && (
+              <button type="button" className={btn2Cls} onClick={() => { stopRef.current = true; }}>
+                Stop after this batch
+              </button>
+            )}
+          </div>
+          {(fillTotals.filled > 0 || fillTotals.skipped > 0) && (
+            <p className="text-sm text-gray-700">
+              Saved {n(fillTotals.filled)} answers from eBay{fillTotals.skipped > 0 && `; ${n(fillTotals.skipped)} could not be read (ended, not found or not on a connected store)`}.
+            </p>
+          )}
+          {fillTotals.notes.length > 0 && (
+            <Notice kind="error">
+              <ul className="list-disc pl-5 text-xs">{fillTotals.notes.map((x, i) => <li key={i}>{x}</li>)}</ul>
+            </Notice>
+          )}
         </div>
       )}
 

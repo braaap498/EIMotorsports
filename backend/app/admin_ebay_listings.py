@@ -294,13 +294,15 @@ _LISTING_JOINS = f"""
 """
 _L_TITLE = "coalesce(nullif(btrim(lr.title), ''), nullif(btrim(la.title), ''), nullif(btrim(lc.title), ''), p.title)"
 _L_LABEL = "coalesce(nullif(btrim(lr.custom_label_sku), ''), nullif(btrim(la.custom_label_sku), ''), p.custom_label_sku)"
+# The product's price when it has one; otherwise the price saved for this exact item number (report, then eBay lookup).
+_L_PRICE = "coalesce(p.list_price, lr.price, la.price)"
 # Photo order for a row: the listing's own saved set (ebay_listings.photos, filled by the photo import's "listing
 # originals" run and by merges), then photos saved under its own item number, then the product's main photo.
 _REPO_SORTS = {
     "newest": "cl.id desc",
     "title": f"lower({_L_TITLE}), cl.id",
-    "price_low": "p.list_price asc nulls last, cl.id",
-    "price_high": "p.list_price desc nulls last, cl.id",
+    "price_low": f"{_L_PRICE} asc nulls last, cl.id",
+    "price_high": f"{_L_PRICE} desc nulls last, cl.id",
 }
 
 
@@ -356,7 +358,7 @@ def repo_listings(
             f"""
             select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
                    p.id as product_id, p.sku_display as sku, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
-                   p.list_price, p.quantity_on_hand,
+                   {_L_PRICE} as list_price, p.quantity_on_hand,
                    (select count(*) from channel_listings x where x.product_id = p.id) as product_listings,
                    case
                      when exists (select 1 from channel_listings x where x.product_id = p.id
