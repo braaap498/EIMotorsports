@@ -637,7 +637,7 @@ _NEEDS_TABLE = (
 )
 
 
-def _original_candidates(store_key: str, product_id: Optional[int]) -> list[tuple[str, int]]:
+def _original_candidates(store_key: str, product_id: Optional[int], item_id: Optional[str] = None) -> list[tuple[str, int]]:
     """Listings still to do: ones that share a product with other listings (merged) or already have a saved
     ebay_listings row. A listing that is alone on its product already has its own photos on that product."""
     with get_engine().connect() as c:
@@ -652,11 +652,12 @@ def _original_candidates(store_key: str, product_id: Optional[int]) -> list[tupl
                        or (select count(*) from channel_listings x where x.product_id = cl.product_id) > 1)
                   and not exists (select 1 from ebay_listing_photo_checked k where k.item_number = {_DIG})
                   and (cast(:pid as bigint) is null or cl.product_id = cast(:pid as bigint))
+                  and (cast(:item as text) is null or {_DIG} = cast(:item as text))
                 group by 1
                 order by first_id
                 """
             ),
-            {"st": store_key, "pid": product_id},
+            {"st": store_key, "pid": product_id, "item": item_id},
         ).all()
     return [(r[0], r[1]) for r in rows]
 
@@ -835,8 +836,8 @@ def _originals_message(tally: dict, left: int = 0) -> str:
     return "; ".join(bits) + "."
 
 
-def _work_originals(job: _Job, calls: _Calls, store_key: str, product_id: Optional[int]):
-    cands = _original_candidates(store_key, product_id)
+def _work_originals(job: _Job, calls: _Calls, store_key: str, product_id: Optional[int], item_id: Optional[str] = None):
+    cands = _original_candidates(store_key, product_id, item_id)
     job.c["items_total"] = len(cands)
     tally = {"replaced": 0, "created": 0, "added_to": 0, "unchanged": 0, "no_ebay": 0}
     if not cands:
@@ -866,7 +867,7 @@ def _work_originals(job: _Job, calls: _Calls, store_key: str, product_id: Option
 
 
 # ------------------------- make a listing's saved photos exactly what eBay has (fixes wrong/extra photos)
-def _exact_candidates(store_key: str, product_id: Optional[int]) -> list[tuple[str, int]]:
+def _exact_candidates(store_key: str, product_id: Optional[int], item_id: Optional[str] = None) -> list[tuple[str, int]]:
     """Listings of this store to make exact: merged ones, ones that already have a saved row, or (when a product
     number is typed) every listing of that product. Ended listings count; listings with no saved row get one."""
     with get_engine().connect() as c:
@@ -877,17 +878,19 @@ def _exact_candidates(store_key: str, product_id: Optional[int]) -> list[tuple[s
                 from channel_listings cl
                 left join ebay_listings el on el.ebay_item_id = {_DIG}
                 where lower(cl.store) = lower(:st) and cl.product_id is not null and {_DIG} <> ''
-                  and (cast(:pid as bigint) is not null
+                  and (cast(:pid as bigint) is not null or cast(:item as text) is not null
                        or el.ebay_item_id is not null
                        or (select count(*) from channel_listings x where x.product_id = cl.product_id) > 1)
-                  and not exists (select 1 from ebay_listing_photo_checked k
-                                  where k.item_number = {_DIG} and k.result = 'exact')
+                  and (cast(:pid as bigint) is not null or cast(:item as text) is not null
+                       or not exists (select 1 from ebay_listing_photo_checked k
+                                      where k.item_number = {_DIG} and k.result = 'exact'))
                   and (cast(:pid as bigint) is null or cl.product_id = cast(:pid as bigint))
+                  and (cast(:item as text) is null or {_DIG} = cast(:item as text))
                 group by 1
                 order by 1
                 """
             ),
-            {"st": store_key, "pid": product_id},
+            {"st": store_key, "pid": product_id, "item": item_id},
         ).all()
     return [(str(r[0]), r[1]) for r in rows]
 
@@ -960,12 +963,34 @@ def _exact_for(job: _Job, item: str, product_id: int, store_key: str, tally: dic
     _mark_checked(item, "exact")
 
 
-def _work_exact(job: _Job, calls: _Calls, store_key: str, product_id: Optional[int]):
-    cands = _exact_candidates(store_key, product_id)
+def _why_none(store_key: str, item_id: str) -> str:
+    with get_engine().connect() as c:
+        r = c.execute(
+            text(f"select cl.store, cl.product_id from channel_listings cl where {_DIG} = :i limit 1"), {"i": item_id}
+        ).first()
+    if r is None:
+        return f"eBay item {item_id} is not in your linked listings at all, so there is nothing to fix. Check the number."
+    if lower_store_differs(r[0], store_key):
+        return f"eBay item {item_id} is filed under the store '{r[0]}', not '{store_key}'. Put that store name in the box above."
+    if r[1] is None:
+        return f"eBay item {item_id} is not linked to a product yet, so it was skipped. Link it first."
+    return f"Nothing found for eBay item {item_id}."
+
+
+def lower_store_differs(a, b) -> bool:
+    return (a or "").strip().lower() != (b or "").strip().lower()
+
+
+def _work_exact(job: _Job, calls: _Calls, store_key: str, product_id: Optional[int], item_id: Optional[str] = None):
+    cands = _exact_candidates(store_key, product_id, item_id)
     job.c["items_total"] = len(cands)
     tally = {"fixed": 0, "created": 0, "unchanged": 0, "no_photos": 0, "dropped": 0}
     if not cands:
-        job.message = "Nothing left to do: every merged or saved listing of this store has been made to match eBay (or none matched the product number)."
+        job.message = (
+            _why_none(store_key, item_id)
+            if item_id
+            else "Nothing left to do: every merged or saved listing of this store has been made to match eBay (or none matched the product number)."
+        )
         job.save(calls, "done")
         return
 
@@ -1005,11 +1030,11 @@ def _work_exact(job: _Job, calls: _Calls, store_key: str, product_id: Optional[i
     job.save(calls, "stopped" if stopped else "done")
 
 
-def _run_originals(job_id: int, store_key: str, product_id: Optional[int], exact: bool = False):
+def _run_originals(job_id: int, store_key: str, product_id: Optional[int], exact: bool = False, item_id: Optional[str] = None):
     job = _Job(job_id)
     calls = _Calls(_max_calls())
     try:
-        (_work_exact if exact else _work_originals)(job, calls, store_key, product_id)
+        (_work_exact if exact else _work_originals)(job, calls, store_key, product_id, item_id)
     except RateLimited as e:
         job.message = f"Paused: {e} Start it again later and it carries on where it stopped."
         job.save(calls, "paused")
@@ -1027,6 +1052,7 @@ class ImportIn(BaseModel):
     store: str = ""
     mode: str
     product_id: Optional[int] = None  # listing_originals only: do just this product's listings (a test run)
+    item_id: Optional[str] = None  # listing_originals only: do just this one eBay item number
     exact: bool = False  # listing_originals only: make each saved set exactly eBay's (removes wrong photos)
 
 
@@ -1052,6 +1078,11 @@ def start_import(body: ImportIn, db: Session = Depends(get_db), user: AuthUser =
         db.commit()
         raise HTTPException(409, "An import is already running. Wait for it to finish or stop it first.")
     originals = body.mode == "listing_originals"
+    item_id = (body.item_id or "").strip() or None
+    if body.product_id is not None and body.product_id >= 100_000_000 and not item_id:
+        item_id, body.product_id = str(body.product_id), None  # an eBay item number typed as a product number
+    if item_id and not re.fullmatch(r"\d{9,15}", item_id):
+        raise HTTPException(400, "That does not look like an eBay item number.")
     if originals and not db.execute(text("select to_regclass('ebay_listing_photo_checked')")).scalar():
         db.commit()
         raise HTTPException(503, _NEEDS_TABLE)
@@ -1072,7 +1103,7 @@ def start_import(body: ImportIn, db: Session = Depends(get_db), user: AuthUser =
         raise
     if originals:
         threading.Thread(
-            target=_run_originals, args=(job_id, store_key, body.product_id, body.exact), daemon=True, name=f"ebay-photos-{job_id}"
+            target=_run_originals, args=(job_id, store_key, body.product_id, body.exact, item_id), daemon=True, name=f"ebay-photos-{job_id}"
         ).start()
     else:
         threading.Thread(
@@ -1096,6 +1127,34 @@ def stop(db: Session = Depends(get_db)):
     db.execute(text("update ebay_photo_jobs set status = 'stopping', updated_at = now() where status = 'running'"))
     db.commit()
     return status(db)
+
+
+@router.get("/product-for-item")
+def product_for_item(item_id: str, db: Session = Depends(get_db)):
+    """The product number (products.id) an eBay item number is linked to, for the photo run's product box."""
+    item = (item_id or "").strip()
+    if not re.fullmatch(r"\d{9,15}", item):
+        raise HTTPException(400, "That does not look like an eBay item number.")
+    count = "(select count(*) from channel_listings x where x.product_id = p.id)"
+    row = db.execute(
+        text(
+            f"select p.id, p.title, cl.store, {count} as listings "
+            "from channel_listings cl join products p on p.id = cl.product_id "
+            "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i order by cl.id limit 1"
+        ),
+        {"i": item},
+    ).first()
+    if row is None:  # the product's own main listing
+        row = db.execute(
+            text(
+                f"select p.id, p.title, null as store, {count} as listings from products p "
+                "where regexp_replace(cast(p.ebay_item_id as text), '[^0-9]', '', 'g') = :i limit 1"
+            ),
+            {"i": item},
+        ).first()
+    if row is None:
+        raise HTTPException(404, "No product is linked to that eBay item number.")
+    return {"product_id": row.id, "title": row.title, "store": row.store, "listings": row.listings}
 
 
 # ------------------------------------------------------- custom labels (CSV)
