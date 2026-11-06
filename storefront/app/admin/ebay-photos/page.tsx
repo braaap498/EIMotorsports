@@ -216,12 +216,14 @@ export default function EbayPhotoImportPage() {
             disabled={running}
           />
         </label>
-        <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start("listing_originals")}>
-          Save each merged listing&rsquo;s own photos
-        </button>
-        <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start("listing_originals", true)}>
-          Make each listing&rsquo;s photos match eBay exactly
-        </button>
+        <div className="flex flex-wrap gap-3">
+          <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start("listing_originals")}>
+            Save each merged listing&rsquo;s own photos
+          </button>
+          <button type="button" className={btnCls} disabled={running || starting} onClick={() => void start("listing_originals", true)}>
+            Make each listing&rsquo;s photos match eBay exactly
+          </button>
+        </div>
         <p className="max-w-3xl text-xs text-gray-500">
           Replaces a listing&rsquo;s saved photos with exactly what eBay has, in eBay&rsquo;s order, so a photo that
           belongs to another listing is taken off and the right one becomes the main photo. Works for ended listings.
