@@ -105,6 +105,7 @@ export default function EbayLiveListingsPage() {
   const reqSeq = useRef(0); // only the newest list request may update the screen (typing fast sends several)
   const lastQ = useRef(""); // the search text the list on screen was read with
   const [busy, setBusy] = useState("");
+  const [zeroMap, setZeroMap] = useState<Record<string, number>>({}); // "store|item" -> days at quantity 0 (listings Set 0 Qty put there)
   const [sync, setSync] = useState<SyncRow[]>([]);
   const [syncNote, setSyncNote] = useState(""); // set when a background check finished and changed statuses
   const live = useRef({ picked: 0, busy: "", offset: 0 });
@@ -334,7 +335,7 @@ export default function EbayLiveListingsPage() {
   // is on) and keeps its item number, photos and history. Bring it back by raising the quantity. One at a time, each one logged.
   async function bulkZero() {
     if (!repo || picked.size === 0) return;
-    const todo = repo.items.filter((x) => picked.has(x.listing_id) && x.active);
+    const todo = repo.items.filter((x) => picked.has(x.listing_id) && x.active && !isZero(x));
     const n = todo.length;
     if (n === 0) return;
     const names = todo.map((x) => x.store).filter((v, i, a) => a.indexOf(v) === i);
@@ -386,6 +387,64 @@ export default function EbayLiveListingsPage() {
     await loadRepo(repo.offset);
   }
 
+  // Take the ticked listings OFF quantity 0 on eBay: each gets the website's stock on hand, or 1 when keepAlive is true
+  // (a quantity of 1 on eBay restarts its zero-days count). A part with no stock on hand is left at 0 and reported.
+  async function bulkRestore(keepAlive: boolean) {
+    if (!repo || picked.size === 0) return;
+    const todo = repo.items.filter((x) => picked.has(x.listing_id) && x.active && isZero(x));
+    const n = todo.length;
+    if (n === 0) return;
+    const names = todo.map((x) => x.store).filter((v, i, a) => a.indexOf(v) === i);
+    const stFor = (nm: string) => stores.find((x) => x.store.toLowerCase() === nm.toLowerCase());
+    const pushesOff = names.filter((nm) => !stFor(nm)?.live_pushes_enabled);
+    if (pushesOff.length) {
+      setActMsg({ kind: "error", text: `Live pushes are OFF for ${pushesOff.join(", ")}, so nothing can go to eBay. Turn them on in Store API → Stores. Nothing was sent.` });
+      return;
+    }
+    const one = n === 1;
+    const what = keepAlive ? "quantity 1" : "the stock on hand shown on the website";
+    if (!window.confirm(`This will put ${one ? "this listing" : `these ${n} listings`} back on sale on eBay at ${what}.${keepAlive ? "\n\nBuyers can buy the part while it is at 1, so only do this for a part you could ship." : "\n\nA part with no stock on hand is left at 0."}\n\nContinue?`)) return;
+    setBusy("status");
+    setActMsg(null);
+    let done = 0;
+    let streak = 0;
+    let stopped = false;
+    const failed: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const it = todo[i];
+      setActMsg({ kind: "success", text: `Working… ${i + 1} of ${n} (item ${it.item_id}). Keep this page open.` });
+      try {
+        await api("/ebay-edit/restore-qty", { method: "POST", body: { store: it.store, item_id: it.item_id, ...(keepAlive ? { qty: 1 } : {}) } });
+        done++;
+        streak = 0;
+      } catch (e) {
+        failed.push(`${it.item_id}: ${errMsg(e)}`);
+        if (++streak >= 3 && i < n - 1) {
+          stopped = true;
+          break;
+        }
+      }
+    }
+    let text = `${done} of ${n} put back on sale on eBay.`;
+    if (failed.length) text += ` ${failed.length} not changed: ${failed.slice(0, 5).join(" · ")}${failed.length > 5 ? ` · and ${failed.length - 5} more` : ""}.`;
+    if (stopped) text += " Stopped after 3 failures in a row; the rest were not tried.";
+    setActMsg({ kind: failed.length ? "error" : "success", text });
+    setBusy("");
+    await loadRepo(repo.offset);
+  }
+
+  async function loadZero() {
+    try {
+      const z = await api<{ items: { store: string; item_id: string; days_at_zero: number }[] }>("/ebay-edit/zero/status");
+      const m: Record<string, number> = {};
+      for (const x of z.items) m[`${x.store.toLowerCase()}|${x.item_id}`] = x.days_at_zero;
+      setZeroMap(m);
+    } catch {
+      /* the badge is a convenience; the list still works without it */
+    }
+  }
+  const isZero = (x: { store: string; item_id: string }) => `${x.store.toLowerCase()}|${x.item_id}` in zeroMap;
+
   async function loadRepo(offset: number, from?: { store: string; q: string; sort: string; statusF: "all" | "active" | "inactive" }) {
     const useStore = from ? from.store : store;
     const useQ = from ? from.q : q;
@@ -404,7 +463,10 @@ export default function EbayLiveListingsPage() {
       else if (useStore.trim()) params.set("store", useStore.trim());
       saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset, statusF: useStatus });
       const r = await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`);
-      if (myReq === reqSeq.current) setRepo(r);
+      if (myReq === reqSeq.current) {
+        setRepo(r);
+        void loadZero();
+      }
     } catch (e) {
       if (myReq === reqSeq.current) {
         setRepo(null);
@@ -420,6 +482,8 @@ export default function EbayLiveListingsPage() {
   // which bulk buttons make sense: Inactivate for ticked listings that are active, Activate for ticked listings that are not
   const pickedItems = repo ? repo.items.filter((x) => picked.has(x.listing_id)) : [];
   const nActivePicked = pickedItems.filter((x) => x.active).length;
+  const nZeroPicked = pickedItems.filter((x) => x.active && isZero(x)).length;
+  const nLivePicked = nActivePicked - nZeroPicked;
   const nInactivePicked = pickedItems.length - nActivePicked;
 
   return (
@@ -479,8 +543,8 @@ export default function EbayLiveListingsPage() {
             <option value="all">Both{repo ? ` (${repo.counts.all})` : ""}</option>
           </select>
         </label>
-        <label className="block w-72 text-sm font-medium text-gray-700">
-          <span className="mb-1 block">Search title, item number, custom label or SKU</span>
+        <label className="block w-full max-w-full text-sm font-medium text-gray-700 sm:w-[28rem]">
+          <span className="mb-1 block whitespace-nowrap">Search title, item number, custom label or SKU</span>
           <ClearableInput
             className={inputCls}
             value={q}
@@ -559,10 +623,20 @@ export default function EbayLiveListingsPage() {
                   Activate on eBay ({nInactivePicked})
                 </button>
               )}
-              {nActivePicked > 0 && (
+              {nLivePicked > 0 && (
                 <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkZero()} title="Keeps the listing alive at quantity 0 (needs eBay's out-of-stock setting ON)">
-                  Set 0 Qty on eBay ({nActivePicked})
+                  Set 0 Qty on eBay ({nLivePicked})
                 </button>
+              )}
+              {nZeroPicked > 0 && (
+                <>
+                  <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkRestore(false)} title="Puts the listing back on sale at the stock on hand shown on the website">
+                    Restore stock on eBay ({nZeroPicked})
+                  </button>
+                  <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkRestore(true)} title="Sets quantity 1 on eBay, which restarts the zero-days count">
+                    Set to 1 ({nZeroPicked})
+                  </button>
+                </>
               )}
               {nActivePicked > 0 && (
                 <button type="button" className={`${btn2Cls} text-red-700`} disabled={busy === "status"} onClick={() => void bulkSet("inactive")} title="Ends the listing on eBay. For parts you will not sell again.">
@@ -648,6 +722,11 @@ export default function EbayLiveListingsPage() {
                         <td className="px-3 py-2 whitespace-nowrap">{money(it.price, it.currency)}</td>
                         <td className="px-3 py-2 whitespace-nowrap">
                           {it.quantity ?? "—"}
+                          {it.active && isZero(it) && (
+                            <span className="ml-1" title="Quantity is 0 on eBay (set from here). The listing stays alive.">
+                              <Badge tone="gray">0 on eBay · {zeroMap[`${it.store.toLowerCase()}|${it.item_id}`]}d</Badge>
+                            </span>
+                          )}
                           {it.quantity_from_ebay && <span className="ml-1 text-xs text-gray-500" title="Our stock on hand is 0; this is the quantity eBay shows as available">(eBay)</span>}
                         </td>
                         <td className="px-3 py-2">
