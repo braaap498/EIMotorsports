@@ -185,7 +185,8 @@ def create(body: CreateIn, db: Session = Depends(get_db), user: AuthUser = Depen
     if not photos:
         raise HTTPException(409, "The listing has no photos to copy.")
     data = {
-        "title": src["title"], "description": src["description"], "price": src["price"] or "", "sku": src["sku"],
+        "title": src["title"], "description": src["description"], "price": src["price"] or "",
+        "sku": _product_label(db, pid) or src["sku"],  # the custom label comes from the product
         "photos": photos, "original_photos": photos,
         "item_specifics": [{"name": s["name"], "values": s["values"]} for s in src["item_specifics"]],
         **ex,
@@ -277,8 +278,6 @@ def save_copy(copy_id: int, body: DraftIn, db: Session = Depends(get_db)):
         d["description"] = body.description
     if body.price is not None:
         d["price"] = str(_money(body.price))
-    if body.sku is not None:
-        d["sku"] = body.sku.strip()[:50]
     if body.photos is not None:
         allowed = set(d.get("original_photos", []))
         if not body.photos:
@@ -309,6 +308,11 @@ def delete_copy(copy_id: int, db: Session = Depends(get_db)):
 # --------------------------------------------------------------------------
 # building the request
 # --------------------------------------------------------------------------
+def _product_label(db: Session, product_id: int) -> str:
+    v = db.execute(text("select custom_label_sku from products where id = :p"), {"p": product_id}).scalar()
+    return (str(v).strip() if v is not None else "")
+
+
 def _quantity(db: Session, store: str, product_id: int) -> int:
     avail = db.execute(text(f"select {available_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar()
     avail = int(avail or 0)
@@ -436,6 +440,7 @@ def preview(copy_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
     if r.status != "draft":
         raise HTTPException(409, "This copy is already listed.")
     d = dict(r.data or {})
+    d["sku"] = _product_label(db, r.product_id) or d.get("sku", "")
     qty = _quantity(db, r.store, r.product_id)
     xml = _item_xml(d, qty)
     root = _trading(db, r.store, "VerifyAddFixedPriceItem", xml)
@@ -475,6 +480,7 @@ def list_it(copy_id: int, body: ListIn, db: Session = Depends(get_db), user: Aut
     if not _live_on(db, r.store):
         raise HTTPException(403, f"Live pushes are OFF for {r.store}. Turn them on in the Stores box first.")
     d = dict(r.data or {})
+    d["sku"] = _product_label(db, r.product_id) or d.get("sku", "")
     qty = _quantity(db, r.store, r.product_id)
     xml = _item_xml(d, qty)
     if _fingerprint(r.store, xml) != body.fingerprint:

@@ -93,7 +93,6 @@ function CopyEditor({ id }: { id: number }) {
           title,
           description,
           price,
-          sku,
           photos,
           item_specifics: specs
             .filter((s) => s.name.trim() || s.value.trim())
@@ -194,8 +193,8 @@ function CopyEditor({ id }: { id: number }) {
             <input className={inputCls} value={price} disabled={off} onChange={(e) => { setPrice(e.target.value); touch(); }} />
           </label>
           <label className="block">
-            <span className="mb-1 block font-semibold">Custom label (SKU)</span>
-            <input className={inputCls} value={sku} disabled={off} onChange={(e) => { setSku(e.target.value); touch(); }} />
+            <span className="mb-1 block font-semibold">Custom label (SKU), from the product</span>
+            <input className={`${inputCls} bg-gray-100 text-gray-600`} value={sku} readOnly tabIndex={-1} title="Read only. The custom label comes from the product." />
           </label>
         </div>
         <p className="text-xs text-gray-500">

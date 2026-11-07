@@ -303,12 +303,29 @@ def _sync_listing_status(db: Session, item: dict) -> None:
         log.exception("could not refresh the stored status of %s", item.get("item_id"))
 
 
+def _product_label_for(db: Session, store: str, item_id: str) -> Optional[str]:
+    """The custom label of the product this listing is linked to (the website's label is the one that counts)."""
+    try:
+        v = db.execute(
+            text("select p.custom_label_sku from channel_listings cl join products p on p.id = cl.product_id "
+                 "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i "
+                 "and lower(coalesce(cl.store, '')) = lower(:s) limit 1"),
+            {"i": item_id, "s": store},
+        ).scalar()
+    except Exception:
+        db.rollback()
+        return None
+    v = (str(v).strip() if v is not None else "")
+    return v or None
+
+
 @router.get("/item")
 def get_item(store: str = Query(...), item_id: str = Query(...), db: Session = Depends(get_db)):
     item = _read_item(db, store, item_id.strip())
     _sync_listing_status(db, item)
     _note_zero_state(db, item)
     item["draft"] = _read_draft(db, item["store"], item["item_id"])
+    item["product_label"] = _product_label_for(db, item["store"], item["item_id"])
     return item
 
 
@@ -346,7 +363,7 @@ class Changes(BaseModel):
 def _no_qty(ch: "Changes") -> "Changes":
     """The website owns stock, so a quantity sent from the edit form (an old saved edit, or any other caller) is ignored.
     Revise never changes the quantity; Relist takes it from the website's available stock (see _relist_quantity)."""
-    upd: dict = {"quantity": None}
+    upd: dict = {"quantity": None, "sku": None}  # the custom label comes from the product, never from an edit
     if ch.variations:
         upd["variations"] = [v.model_copy(update={"quantity": None}) if hasattr(v, "model_copy") else v.copy(update={"quantity": None}) for v in ch.variations]
     return ch.model_copy(update=upd) if hasattr(ch, "model_copy") else ch.copy(update=upd)
@@ -1075,6 +1092,9 @@ def _relist_changes(db: Session, store: str, current: dict, ch: Changes) -> Chan
     No stored photos (or a listing with variations) -> unchanged, eBay copies its own."""
     if current["has_variations"]:
         return ch
+    label = _product_label_for(db, store, current["item_id"])
+    if label and label != current["sku"]:
+        ch = ch.model_copy(update={"sku": label}) if hasattr(ch, "model_copy") else ch.copy(update={"sku": label})
     stored = _stored_photos(db, store, current["item_id"])
     if not stored:
         return ch

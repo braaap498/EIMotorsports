@@ -19,6 +19,7 @@ type Item = {
   quantity_available: number;
   quantity_sold: number;
   sku: string;
+  product_label?: string | null;
   listing_type: string;
   status: string;
   url: string;
@@ -122,7 +123,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
     const vDesc = d?.description ?? i.description;
     const vPrice = d?.price ?? i.price ?? "";
     const vQty = String(i.quantity_available); // read only: the website owns stock, so a quantity saved in an older edit is ignored
-    const vSku = d?.sku ?? i.sku;
+    const vSku = i.product_label || i.sku; // the custom label comes from the product
     const vVars: Record<string, VarEdit> = Object.fromEntries(i.variations.map((v) => [v.sku, { price: v.price ?? "", qty: String(v.quantity_available) }]));
     (d?.variations ?? []).forEach((x) => {
       if (vVars[x.sku]) vVars[x.sku] = { price: x.price ?? vVars[x.sku].price, qty: vVars[x.sku].qty };
@@ -212,7 +213,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
         ...specsPart(),
       };
     }
-    return { title, description, price, sku, ...photoPart(), ...specsPart() }; // quantity is never sent from here: the website owns stock
+    return { title, description, price, ...photoPart(), ...specsPart() }; // quantity is never sent from here: the website owns stock
   }
 
   const dirty =
@@ -223,7 +224,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
       norm(description) !== norm(item.description) ||
       (item.has_variations
         ? item.variations.some((v) => (vars[v.sku]?.price ?? "") !== (v.price ?? ""))
-        : price !== (item.price ?? "") || sku !== item.sku));
+        : price !== (item.price ?? "")));
 
   const touch = () => setDifferences([]);
 
@@ -236,7 +237,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
     if (item.has_variations) {
       d.variations = item.variations.map((v) => ({ sku: v.sku, price: vars[v.sku]?.price ?? "" }));
     } else {
-      Object.assign(d, { price, sku });
+      Object.assign(d, { price });
     }
     if (item.photos_editable) d.photos = photos.map((p) => (p.url ? { url: p.url, thumb: p.thumb } : { key: p.key, thumb: p.thumb }));
     if (item.specifics_editable) d.item_specifics = specs.filter((x) => x.name.trim() || x.value.trim()).map((x) => ({ name: x.name, values: splitValues(x.value) }));
@@ -542,7 +543,13 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
                 </label>
                 <label className="block text-sm font-medium text-gray-700">
                   <span className="mb-1 block">Custom label (SKU)</span>
-                  <input className={inputCls} value={sku} maxLength={50} disabled={off} onChange={(e) => { setSku(e.target.value); touch(); }} />
+                  <input className={`${inputCls} bg-gray-100 text-gray-600`} value={sku} readOnly tabIndex={-1} title="Read only. The custom label comes from the product." />
+                  <span className="mt-1 block text-xs font-normal text-gray-500">
+                    Read only. The custom label comes from the product.
+                    {item.product_label && item.product_label !== item.sku && (
+                      <> eBay currently shows &ldquo;{item.sku || "(empty)"}&rdquo;; it is updated to the product&rsquo;s label when the listing is relisted.</>
+                    )}
+                  </span>
                 </label>
               </div>
             )}
