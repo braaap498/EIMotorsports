@@ -68,7 +68,7 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, current_user, needs, require_route_access
 from app.database import get_db
 from app.images import thumb_url
-from app.ebay_sales import queue_stock_push, take_stock_for_reference
+from app.ebay_sales import lower_hold_marks, queue_stock_push, take_stock_for_reference
 from app.skus import PLACEHOLDER_SKU, shelf_code_for
 from app.stock import available_sql, lock_products, reserved_paid_sql, set_aside_sql
 
@@ -1308,6 +1308,7 @@ def _take_stock_for_pick(db: Session, order, merged: dict[int, dict], user: Auth
                 ),
                 {"p": pid, "d": after - before, "ref": f"Picked for order {order.order_number}", "by": user.email},
             )
+            lower_hold_marks(db, pid)  # a listing held at 0 must still rise when stock is received later
         if res.quantity - take > 0:
             db.execute(
                 text("update stock_reservations set quantity = quantity - :t where id = :id"),
@@ -1606,6 +1607,9 @@ def cancel_order(
                 _add_back(db, pid, q, f"Order {order.order_number} cancelled: parts back in stock", user.email)
                 restored[str(pid)] = q
         db.execute(text("delete from stock_reservations where order_id = :o"), {"o": order.id})
+        # Parts that were only set aside (not picked yet) are available again: every eBay listing of these parts
+        # goes back up too (parts already picked were queued by _add_back above).
+        queue_stock_push(db, list(ordered))
         db.execute(
             text(
                 "update orders set status = 'cancelled', cancelled_at = now(), cancelled_by = :by, "

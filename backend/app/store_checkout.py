@@ -491,6 +491,23 @@ def _mark_paid(db: Session, session: dict) -> None:
     # Money is in: turn the checkout hold into a firm reservation. The website count drops now;
     # the shelf count (quantity_on_hand) drops when the warehouse commits the pick.
     confirm_holds(db, order.id)
+    # The website count just dropped, so every active eBay listing of these parts must drop to match, the same way
+    # it does when one of those listings sells on eBay. Queued here and sent by the background timer within about a
+    # minute. Inside a savepoint, so a problem here can never undo the payment.
+    try:
+        with db.begin_nested():
+            sold = [
+                r.product_id
+                for r in db.execute(
+                    text("select distinct product_id from order_items where order_id = :o and product_id is not null"),
+                    {"o": order.id},
+                ).all()
+            ]
+        from app.ebay_sales import queue_stock_push
+
+        queue_stock_push(db, sold)
+    except Exception:
+        log.exception("Could not queue eBay quantity updates for order %s (payment is still recorded)", order.id)
     # Record the buyer as a customer. Inside a savepoint so a problem here can never undo the payment.
     try:
         with db.begin_nested():

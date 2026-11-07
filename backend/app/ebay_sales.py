@@ -518,6 +518,26 @@ def _hold_gate(db: Session, store: str, item: str, product_id: int, target: int)
         return None
 
 
+def lower_hold_marks(db: Session, product_id: int) -> None:
+    """Stock on hand just FELL for this product (a pick left the shelf). Lower the mark of every listing of it that is
+    held at 0 (Set 0 Qty) to the new on-hand figure, so that stock received afterwards always counts as a rise and
+    releases the hold. Without this the mark could stay above on hand after a shipment, and a small receipt would
+    not lift the listing. Best effort, in a savepoint, never commits and never raises."""
+    try:
+        with db.begin_nested():
+            db.execute(
+                text(
+                    "update ebay_zero_qty z set held_onhand = coalesce(p.quantity_on_hand, 0) "
+                    "from channel_listings cl join products p on p.id = cl.product_id "
+                    f"where p.id = :p and z.held and z.store = cl.store and z.item_id = {DIGITS.replace('external_id', 'cl.external_id')} "
+                    "and coalesce(z.held_onhand, 0) > coalesce(p.quantity_on_hand, 0)"
+                ),
+                {"p": product_id},
+            )
+    except Exception:
+        log.exception("could not lower the hold marks for product %s", product_id)
+
+
 def _track_zero(db: Session, store: str, item: str, qty: int) -> None:
     """After a quantity push: a listing now at 0 goes on the zero-quantity list (so the keeper watches it); one with
     stock again comes off. A hold set by Set 0 Qty is left as it is."""
@@ -1016,6 +1036,7 @@ def _take_line(db: Session, line, pid: int, take: int, email: str, ref: str) -> 
         {"t": take, "id": pid},
     ).scalar()
     if after != before:
+        lower_hold_marks(db, pid)
         tid = db.execute(
             text(
                 "insert into inventory_transactions (product_id, transaction_type, quantity_change, reference, legacy_created_by) "
