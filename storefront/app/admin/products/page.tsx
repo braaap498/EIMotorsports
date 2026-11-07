@@ -5,7 +5,7 @@ import ClickRow from "../../../components/admin/ClickRow";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
-import { Badge, Field, Notice, Pager, btn2Cls, inputCls } from "../../../components/admin/ui";
+import { Badge, Field, Notice, Pager, inputCls } from "../../../components/admin/ui";
 import { useAccess } from "../../../components/admin/AdminAccess";
 import { saveNav } from "../../../lib/listNav";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
@@ -41,7 +41,6 @@ const COLUMNS: { key: SortKey; label: string; width: string }[] = [
 
 export default function ProductsPage() {
   const { can } = useAccess();
-  const mayEdit = can("products.edit_details", "products.edit_price", "inventory.adjust", "products.publish", "fitment.add");
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
   const [published, setPublished] = useState("");
@@ -124,6 +123,16 @@ export default function ProductsPage() {
     setOffset(0);
   }
 
+  // The list follows the search box: a short pause after the last keystroke reads it again from the first page.
+  useEffect(() => {
+    if (!ready || qInput.trim() === q) return;
+    const t = setTimeout(() => {
+      setQ(qInput.trim());
+      setOffset(0);
+    }, 350);
+    return () => clearTimeout(t);
+  }, [ready, qInput, q]);
+
   function filterChange(fn: () => void) {
     fn();
     setOffset(0);
@@ -142,12 +151,9 @@ export default function ProductsPage() {
       {error && <Notice kind="error">{error}</Notice>}
 
       <div className="flex flex-wrap items-end gap-3">
-        <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); filterChange(() => setQ(qInput.trim())); }}>
-          <Field label="Search">
-            <ClearableInput className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Title, SKU or part #" onClear={() => { setQInput(""); filterChange(() => setQ("")); }} />
-          </Field>
-          <button className={btn2Cls}>Search</button>
-        </form>
+        <Field label="Search">
+          <ClearableInput className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Title, SKU or part #" onClear={() => { setQInput(""); filterChange(() => setQ("")); }} />
+        </Field>
         <Field label="Status">
           <select className={inputCls} value={published} onChange={(e) => filterChange(() => setPublished(e.target.value))}>
             <option value="">All</option>
@@ -171,12 +177,11 @@ export default function ProductsPage() {
       <Pager total={data.total} limit={LIMIT} offset={offset} onChange={setOffset} />
 
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="w-full min-w-[68rem] table-fixed text-left text-sm">
+        <table className="w-full min-w-[58rem] table-fixed text-left text-sm">
           <colgroup>
             {COLUMNS.map((c) => (
               <col key={c.key} className={c.width} />
             ))}
-            <col className="w-24" />
           </colgroup>
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
@@ -193,7 +198,6 @@ export default function ProductsPage() {
                   </button>
                 </th>
               ))}
-              <th className="px-3 py-2" />
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -215,13 +219,10 @@ export default function ProductsPage() {
                     {!p.is_active && <Badge tone="amber">Inactive</Badge>}
                   </span>
                 </td>
-                <td className="px-3 py-2 text-right">
-                  <Link href={`/admin/products/${p.id}`} className={btn2Cls}>{mayEdit ? "Edit" : "View"}</Link>
-                </td>
               </ClickRow>
             ))}
             {data.items.length === 0 && (
-              <tr><td colSpan={8} className="px-3 py-6 text-center text-gray-500">No products match.</td></tr>
+              <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-500">No products match.</td></tr>
             )}
           </tbody>
         </table>
