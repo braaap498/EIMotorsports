@@ -284,8 +284,8 @@ export function LineStockButtons({
   async function act(what: "pick" | "release") {
     const q =
       what === "pick"
-        ? "Take these parts off the shelf now? Use this only when the part has already gone and was not scanned."
-        : "Stop setting these parts aside WITHOUT changing the shelf count?";
+        ? "Remove these parts from the shelf count now? Use this only if the part has already left and was never scanned out."
+        : "Release the hold on these parts? They become available again and the shelf count stays the same. Use this only if the part is still on the shelf.";
     if (!window.confirm(q)) return;
     try {
       await api(`${BASE}/lines/${lineId}/${what}`, { method: "POST" });
