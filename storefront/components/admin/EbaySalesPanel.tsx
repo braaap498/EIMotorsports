@@ -215,7 +215,19 @@ export default function EbaySalesPanel() {
           <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
 
           <div className="overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
+            {/* fixed column widths, sized for the longest content, so nothing shifts from page to page */}
+            <table className="w-full min-w-[96rem] table-fixed text-left text-sm">
+              <colgroup>
+                <col className="w-[11.5rem]" />
+                <col className="w-[10rem]" />
+                <col className="w-[10rem]" />
+                <col className="w-[10rem]" />
+                <col />
+                <col className="w-[4rem]" />
+                <col className="w-[6rem]" />
+                <col className="w-[12rem]" />
+                <col className="w-[15rem]" />
+              </colgroup>
               <thead className="bg-gray-50 text-xs text-gray-500">
                 <tr>
                   <SortTh label="Date" k="date" sort={sort} onSort={onSort} />
@@ -233,10 +245,10 @@ export default function EbaySalesPanel() {
                 {lines.map((l) => (
                   <tr key={l.id} className={l.shipped_at_ebay && !l.cancelled ? "bg-green-50" : ""}>
                     <td className="whitespace-nowrap px-3 py-2 text-gray-600">{l.sale_date ? new Date(l.sale_date).toLocaleString() : "—"}</td>
-                    <td className="px-3 py-2 text-gray-600">{l.store}</td>
+                    <td className="truncate px-3 py-2 text-gray-600" title={l.store}>{l.store}</td>
                     <td className="whitespace-nowrap px-3 py-2">{l.ebay_order_id}</td>
-                    <td className="whitespace-nowrap px-3 py-2">{l.custom_label || "—"}</td>
-                    <td className="max-w-xs px-3 py-2">
+                    <td className="truncate px-3 py-2" title={l.custom_label ?? ""}>{l.custom_label || "—"}</td>
+                    <td className="px-3 py-2">
                       <div className="truncate" title={l.title ?? ""}>
                         {l.product_id ? (
                           <a className="hover:underline" href={`/admin/products/${l.product_id}`} target="_blank" rel="noopener noreferrer">

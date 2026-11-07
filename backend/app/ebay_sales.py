@@ -67,6 +67,7 @@ OVERLAP = timedelta(minutes=15)
 FIRST_LOOKBACK_DAYS = 3
 MAX_WINDOW_DAYS = 89           # eBay will not look further back than 90 days
 MAX_CALL_DAYS = 29             # eBay's GetOrders refuses a ModTime window over 30 days; longer look-backs are split
+SHIPPED_HISTORY_DAYS = 7       # an order shipped longer ago than this is never set aside by a normal check
 QTY_PER_RUN = 20               # listings updated on eBay per check (each one is two eBay calls)
 QTY_MAX_ATTEMPTS = 5
 DIGITS = "regexp_replace(cast(external_id as text), '[^0-9]', '', 'g')"
@@ -303,7 +304,11 @@ def _apply_line(db: Session, ln, od: dict, channel_id: Optional[int], skip_shipp
         c["unmatched"] = 1
         return None, c
 
-    shipped_already = bool(od["shipped"]) and skip_shipped
+    # An order eBay shows as shipped is history (nothing to set aside) when this is a history import, OR when it shipped
+    # long ago: a buyer leaving feedback, a refund, or a late tracking update makes eBay report an old order as
+    # "changed", and a normal check would otherwise set its parts aside again.
+    shipped_long_ago = bool(od["shipped"]) and od["shipped"] < _now() - timedelta(days=SHIPPED_HISTORY_DAYS)
+    shipped_already = bool(od["shipped"]) and (skip_shipped or shipped_long_ago)
     sales_id = ln.sales_transaction_id
     if sales_id is None and channel_id is not None:
         sales_id = db.execute(
