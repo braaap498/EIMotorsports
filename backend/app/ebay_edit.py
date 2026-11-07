@@ -7,6 +7,9 @@ Mounted at /admin/ebay-edit/* (owner/admin only).
   PUT  /draft                     save edits on the website only (nothing goes to eBay)
   DELETE /draft?store=&item_id=   throw the saved edits away
   POST /end                       end a live listing on eBay (needs the store's live-push switch ON)
+  POST /set-zero                  set a live listing's quantity to 0 WITHOUT ending it (needs eBay's out-of-stock setting ON)
+  POST /restore-qty               take a listing off quantity 0: the website's stock on hand, or an override quantity
+  GET  /zero/status, POST /zero/run   the zero-quantity keeper (resets listings before eBay's zero-days limit)
   POST /photo-upload              put a picture from the computer into the website's photo storage (nothing goes to eBay)
   POST /preview                   exactly what would be sent. NOTHING is sent. Logged as a dry run.
                                   (action "relist" = bring an ended listing back on eBay; the listing gets a new item number)
@@ -24,7 +27,7 @@ Condition and the parts compatibility list are shown as read only for now.
 Safety rules built in:
   * the listing must belong to the connected account of the store (checked on every read)
   * only fixed-price listings can be edited; on variation listings only price/quantity per variation
-  * a quantity of 0 is refused (it can end the listing or drop a variation; out-of-stock handling comes later)
+  * a quantity of 0 in the edit form is refused; use /set-zero, which first checks eBay's out-of-stock setting
   * a push must carry the fingerprint of its preview; if the listing or the changes differ, it is refused
   * every preview and push is written to ebay_push_log
 """
@@ -33,7 +36,10 @@ import binascii
 import hashlib
 import json
 import logging
+import os
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -234,6 +240,7 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
         "quantity_total": total,
         "sku": t("SKU"),
         "listing_type": listing_type,
+        "duration": t("ListingDuration"),
         "status": status,
         "url": t("ListingDetails/ViewItemURL"),
         "image_url": t("PictureDetails/GalleryURL") or t("PictureDetails/PictureURL"),
@@ -275,6 +282,7 @@ def _read_draft(db: Session, store: str, item_id: str) -> Optional[dict]:
 @router.get("/item")
 def get_item(store: str = Query(...), item_id: str = Query(...), db: Session = Depends(get_db)):
     item = _read_item(db, store, item_id.strip())
+    _note_zero_state(db, item)
     item["draft"] = _read_draft(db, item["store"], item["item_id"])
     return item
 
@@ -492,7 +500,7 @@ def _build(current: dict, ch: Changes, allow_empty: bool = False, call: str = "R
 
         if ch.quantity is not None and ch.quantity != current["quantity_available"]:
             if ch.quantity < 1:
-                raise HTTPException(400, "A quantity of 0 is not allowed yet: it can end the listing. Out-of-stock handling comes in a later step.")
+                raise HTTPException(400, "To make the quantity 0 use the Set 0 Qty button; it checks eBay's out-of-stock setting first so the listing does not end.")
             if ch.quantity > 9999:
                 raise HTTPException(400, "That quantity is too large.")
             # eBay's Quantity counts what was already sold, so send available + sold.
@@ -785,7 +793,8 @@ _ACTION = {"revise": "revise_fixed_price_item", "relist": "relist_fixed_price_it
 def preview(body: EditIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     row = _store_row(db, body.store)
     current = _read_item(db, row.store, body.item_id.strip())
-    calls, diff = _plan(current, body.changes, body.action)
+    changes = _relist_changes(db, row.store, current, body.changes) if body.action == "relist" else body.changes
+    calls, diff = _plan(current, changes, body.action)
     fp = _fingerprint(row.store, calls)
     _log(db, user, row.store, current["item_id"], _ACTION[body.action], True, {"calls": calls, "diff": diff}, {}, True, None)
     enabled = bool(
@@ -809,14 +818,15 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     if not enabled:
         raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
     current = _read_item(db, row.store, body.item_id.strip())
-    calls, diff = _plan(current, body.changes, body.action)
+    changes = _relist_changes(db, row.store, current, body.changes) if body.action == "relist" else body.changes
+    calls, diff = _plan(current, changes, body.action)
     act = _ACTION[body.action]
     if _fingerprint(row.store, calls) != body.fingerprint:
         raise HTTPException(409, "The listing or the changes are not the same as in the preview. Nothing was sent. Preview again.")
 
     uploaded: dict[str, str] = {}
     try:
-        for r in body.changes.photos or []:
+        for r in changes.photos or []:
             if r.key and r.key not in uploaded:
                 uploaded[r.key] = _media_upload(db, row.store, r.key)
     except HTTPException as e:
@@ -857,14 +867,16 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     _drop_draft(db, row.store, current["item_id"])  # what was saved is on eBay now
     fresh = _read_item(db, row.store, live_id)
     notes: list[str] = list(move_notes)
-    if body.changes.photos is not None:
+    if body.action == "relist" and fresh.get("duration") and fresh["duration"] != "GTC":
+        notes.append(f"WARNING: the relisted item is not Good 'Til Cancelled (eBay shows '{fresh['duration']}'), so it will not renew by itself. Fix it on eBay.")
+    if changes.photos is not None:
         try:
-            notes += _record_photo_urls(db, row.store, live_id, body.changes.photos, fresh)
+            notes += _record_photo_urls(db, row.store, live_id, changes.photos, fresh)
         except Exception:  # eBay already has the change; a bookkeeping problem must not look like a failed push
             log.exception("could not record photo addresses for %s", current["item_id"])
             db.rollback()
             notes.append("The change is on eBay, but the photo addresses could not be recorded on the website.")
-    return {"ok": True, "warnings": warnings, "item": fresh, "differences": _differences(fresh, body.changes), "notes": notes}
+    return {"ok": True, "warnings": warnings, "item": fresh, "differences": _differences(fresh, changes), "notes": notes}
 
 
 def _drop_draft(db: Session, store: str, item_id: str) -> None:
@@ -957,6 +969,388 @@ def _move_listing(db: Session, store: str, old_id: str, new_id: str) -> list[str
     return notes
 
 
+# --------------------------------------------------------------------------
+# relists send the website's own photos (eBay only keeps an ended listing's pictures for about 90 days)
+# --------------------------------------------------------------------------
+_PHOTO_ORDER_COLS = ("position", "sort_order", "sort_index", "display_order", "sort", "ord", "idx", "rank", "id")
+
+
+def _stored_photos(db: Session, store: str, item_id: str) -> list[dict]:
+    """The photos the website holds for the product linked to this listing, main photo first:
+    [{"key": stored key, "source_url": the eBay address it came from or was last sent as}]. [] when none."""
+    try:
+        pid = db.execute(
+            text(
+                "select product_id from channel_listings "
+                "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i and store = :s and product_id is not null limit 1"
+            ),
+            {"i": item_id, "s": store},
+        ).scalar()
+        if not pid:
+            return []
+        cols = {r[0] for r in db.execute(text("select column_name from information_schema.columns where table_name = 'product_photos'")).all()}
+        order = next((c for c in _PHOTO_ORDER_COLS if c in cols), None)
+        src = "source_url" if "source_url" in cols else "null"
+        rows = db.execute(
+            text(f"select image_key, {src} as source_url from product_photos where product_id = :p" + (f" order by {order}" if order else "")),
+            {"p": pid},
+        ).all()
+        return [{"key": r.image_key, "source_url": r.source_url} for r in rows if r.image_key and KEY_RE.fullmatch(r.image_key)]
+    except Exception:
+        log.exception("could not read stored photos for %s", item_id)
+        db.rollback()
+        return []
+
+
+def _relist_changes(db: Session, store: str, current: dict, ch: Changes) -> Changes:
+    """For a relist: swap the pictures eBay would copy from the ended listing for the website's own copies.
+    No photo list sent -> all the product's stored photos, in order. A list sent -> each eBay picture in it that
+    matches a stored photo is replaced by that stored photo; anything that does not match is left as it is.
+    No stored photos (or a listing with variations) -> unchanged, eBay copies its own."""
+    if current["has_variations"]:
+        return ch
+    stored = _stored_photos(db, store, current["item_id"])
+    if not stored:
+        return ch
+    by_pic = {_pic_id(p["source_url"]): p["key"] for p in stored if p["source_url"]}
+    refs: list[PhotoRef] = []
+    seen: set[str] = set()
+    if ch.photos is None:
+        wanted = [PhotoRef(key=p["key"]) for p in stored]
+    else:
+        wanted = []
+        for r in ch.photos:
+            if r.key:
+                wanted.append(PhotoRef(key=r.key))
+            elif r.url and _pic_id(r.url) in by_pic:
+                wanted.append(PhotoRef(key=by_pic[_pic_id(r.url)]))
+            else:
+                wanted.append(r)
+    for r in wanted:
+        ident = r.key or r.url or ""
+        if ident in seen:
+            continue
+        seen.add(ident)
+        refs.append(r)
+    refs = refs[:MAX_PHOTOS]
+    if not refs:
+        return ch
+    return ch.model_copy(update={"photos": refs}) if hasattr(ch, "model_copy") else ch.copy(update={"photos": refs})
+
+
+# --------------------------------------------------------------------------
+# quantity 0 without ending the listing, and the zero-quantity keeper
+# --------------------------------------------------------------------------
+# eBay lets a listing sit at quantity 0 only while the account's "out of stock" preference is ON, and for a limited
+# time (180 consecutive days on the pages we found; older sources say 90). The keeper bounces a listing to 1 and
+# straight back to 0 before the limit. Settings are environment variables so the numbers are easy to change:
+#   EBAY_ZERO_START_DAYS (default 150)  start trying this many days after the listing reached 0
+#   EBAY_ZERO_RETRY_HOURS (default 20)  how long to wait before trying the same listing again
+_zero_ready = False
+
+
+def _ensure_zero_table(db: Session) -> None:
+    global _zero_ready
+    if _zero_ready:
+        return
+    db.execute(
+        text(
+            """
+            create table if not exists ebay_zero_qty (
+                store text not null,
+                item_id text not null,
+                zero_since timestamptz not null default now(),
+                last_reset_at timestamptz,
+                last_attempt_at timestamptz,
+                bounce_open boolean not null default false,
+                last_error text,
+                primary key (store, item_id)
+            )
+            """
+        )
+    )
+    db.commit()
+    _zero_ready = True
+
+
+def _note_zero_state(db: Session, item: dict) -> None:
+    """Keep the zero-quantity list in step with what eBay shows: add a live single listing at 0 (the date it was first
+    seen at 0), drop it once it has stock again or has ended. Never raises."""
+    try:
+        _ensure_zero_table(db)
+        if item["has_variations"]:
+            return
+        if not item["ended"] and item["quantity_available"] == 0:
+            db.execute(
+                text("insert into ebay_zero_qty (store, item_id) values (:s, :i) on conflict (store, item_id) do nothing"),
+                {"s": item["store"], "i": item["item_id"]},
+            )
+        else:
+            db.execute(text("delete from ebay_zero_qty where store = :s and item_id = :i"), {"s": item["store"], "i": item["item_id"]})
+        db.commit()
+    except Exception:
+        log.exception("could not update the zero-quantity list")
+        db.rollback()
+
+
+def _oos_preference(db: Session, store: str) -> Optional[bool]:
+    """True/False = eBay's out-of-stock preference for the account; None when eBay would not say."""
+    try:
+        root = _trading(db, store, "GetUserPreferences", "<ShowOutOfStockControlPreference>true</ShowOutOfStockControlPreference>")
+        if _failed(root):
+            return None
+        v = root.findtext(f"{NS}OutOfStockControlPreference")
+        return None if v is None else v.strip().lower() == "true"
+    except HTTPException:
+        return None
+
+
+def _set_qty(db: Session, store: str, item_id: str, qty: int) -> ET.Element:
+    return _trading(db, store, "ReviseInventoryStatus", f"<InventoryStatus><ItemID>{item_id}</ItemID><Quantity>{qty}</Quantity></InventoryStatus>")
+
+
+class SetZeroIn(BaseModel):
+    store: str
+    item_id: str = Field(..., max_length=20)
+
+
+@router.post("/set-zero")
+def set_zero(body: SetZeroIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Set a live single listing's quantity to 0 WITHOUT ending it (the Set 0 Qty button)."""
+    row = _store_row(db, body.store)
+    enabled = db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
+    if not enabled:
+        raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
+    current = _read_item(db, row.store, body.item_id.strip())
+    if current["ended"]:
+        raise HTTPException(409, f"This listing is already {current['status']}; quantity 0 only applies to a live listing.")
+    if current["has_variations"]:
+        raise HTTPException(409, "Listings with variations are not supported here yet (each variation needs its own quantity).")
+    if not current["editable"]:
+        raise HTTPException(409, current["not_editable_reason"] or "This listing cannot be changed here.")
+    if current["quantity_available"] == 0:
+        _note_zero_state(db, current)
+        return {"ok": True, "item_id": current["item_id"], "already": True, "warnings": []}
+    if _oos_preference(db, row.store) is False:
+        raise HTTPException(
+            409,
+            f"The out-of-stock setting is OFF in the {row.store} eBay account, so quantity 0 would not be allowed. Turn it on first "
+            "(eBay: Account settings > Selling > Selling preferences). Nothing was sent.",
+        )
+    root = _set_qty(db, row.store, current["item_id"], 0)
+    errs = _errors(root)
+    ok = not _failed(root)
+    _log(db, user, row.store, current["item_id"], "set_zero_qty", False, {"item_id": current["item_id"], "quantity": 0},
+         {"ack": root.findtext(f"{NS}Ack"), "errors": errs}, ok, None if ok else _first_message(root))
+    if not ok:
+        raise HTTPException(502, "eBay did not accept quantity 0: " + _first_message(root))
+    try:
+        _ensure_zero_table(db)
+        db.execute(
+            text(
+                "insert into ebay_zero_qty (store, item_id, zero_since) values (:s, :i, now()) "
+                "on conflict (store, item_id) do update set zero_since = now(), bounce_open = false, last_error = null"
+            ),
+            {"s": row.store, "i": current["item_id"]},
+        )
+        db.execute(
+            text(
+                "update channel_listings set last_pushed_at = now() "
+                "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i and store = :s"
+            ),
+            {"i": current["item_id"], "s": row.store},
+        )
+        db.commit()
+    except Exception:
+        log.exception("could not record the zero-quantity date for %s", current["item_id"])
+        db.rollback()
+    return {"ok": True, "item_id": current["item_id"], "warnings": [e for e in errs if e["severity"] == "Warning"]}
+
+
+class RestoreIn(BaseModel):
+    store: str
+    item_id: str = Field(..., max_length=20)
+    qty: Optional[int] = Field(default=None, ge=1, le=9999)  # leave out = the website's stock on hand; 1 = the "keep alive" quantity
+
+
+@router.post("/restore-qty")
+def restore_qty(body: RestoreIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Take a listing back off quantity 0 (the other half of Set 0 Qty). Without qty it uses the website's stock on hand."""
+    row = _store_row(db, body.store)
+    enabled = db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
+    if not enabled:
+        raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
+    current = _read_item(db, row.store, body.item_id.strip())
+    if current["ended"]:
+        raise HTTPException(409, f"This listing is {current['status']}; use Activate to bring it back.")
+    if current["has_variations"]:
+        raise HTTPException(409, "Listings with variations are not supported here yet.")
+    if current["quantity_available"] > 0:
+        _note_zero_state(db, current)
+        return {"ok": True, "item_id": current["item_id"], "quantity": current["quantity_available"], "already": True}
+    qty = body.qty
+    if qty is None:
+        qty = db.execute(
+            text(
+                "select p.quantity_on_hand from channel_listings cl join products p on p.id = cl.product_id "
+                "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i and cl.store = :s limit 1"
+            ),
+            {"i": current["item_id"], "s": row.store},
+        ).scalar()
+        if not qty or qty < 1:
+            raise HTTPException(409, "The website shows no stock on hand for this part, so it was left at 0. Receive stock first, or restore it with a quantity of 1.")
+        qty = min(int(qty), 9999)
+    root = _set_qty(db, row.store, current["item_id"], qty)
+    ok = not _failed(root)
+    _log(db, user, row.store, current["item_id"], "restore_qty", False, {"item_id": current["item_id"], "quantity": qty},
+         {"ack": root.findtext(f"{NS}Ack"), "errors": _errors(root)}, ok, None if ok else _first_message(root))
+    if not ok:
+        raise HTTPException(502, "eBay did not accept the quantity: " + _first_message(root))
+    try:
+        _ensure_zero_table(db)
+        db.execute(text("delete from ebay_zero_qty where store = :s and item_id = :i"), {"s": row.store, "i": current["item_id"]})
+        db.execute(
+            text(
+                "update channel_listings set last_pushed_at = now() "
+                "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i and store = :s"
+            ),
+            {"i": current["item_id"], "s": row.store},
+        )
+        db.commit()
+    except Exception:
+        log.exception("could not clear the zero-quantity record for %s", current["item_id"])
+        db.rollback()
+    return {"ok": True, "item_id": current["item_id"], "quantity": qty}
+
+
+def _reset_one(db: Session, store: str, item_id: str) -> str:
+    """Bounce one listing 0 -> 1 -> 0 to restart eBay's zero-days count. Returns "" when done, else why not."""
+    item = _read_item(db, store, item_id)
+    if item["ended"] or item["has_variations"] or item["quantity_available"] > 0:
+        db.execute(text("delete from ebay_zero_qty where store = :s and item_id = :i"), {"s": store, "i": item_id})
+        db.commit()
+        return ""  # nothing to keep alive any more
+    up = _set_qty(db, store, item_id, 1)
+    if _failed(up):
+        return "could not raise quantity to 1: " + _first_message(up)
+    db.execute(text("update ebay_zero_qty set bounce_open = true where store = :s and item_id = :i"), {"s": store, "i": item_id})
+    db.commit()
+    last = ""
+    for attempt in range(4):  # back to 0 straight away; if eBay hiccups try again, a few seconds apart
+        down = _set_qty(db, store, item_id, 0)
+        if not _failed(down):
+            db.execute(
+                text("update ebay_zero_qty set zero_since = now(), last_reset_at = now(), bounce_open = false, last_error = null where store = :s and item_id = :i"),
+                {"s": store, "i": item_id},
+            )
+            db.commit()
+            return ""
+        last = _first_message(down)
+        time.sleep(3)
+    return "quantity was raised to 1 but could not be set back to 0: " + last + " (will retry; check the listing on eBay)"
+
+
+def run_zero_keeper(db: Session) -> dict:
+    """One pass: reset every listing that has sat at 0 long enough, and finish any bounce left open. Safe to call often
+    and from several servers: each listing is claimed with one UPDATE, so it is tried at most once per retry window."""
+    _ensure_zero_table(db)
+    start = int(os.environ.get("EBAY_ZERO_START_DAYS", "150"))
+    retry = int(os.environ.get("EBAY_ZERO_RETRY_HOURS", "20"))
+    due = db.execute(
+        text(
+            "select store, item_id, bounce_open from ebay_zero_qty "
+            "where bounce_open or zero_since <= now() - make_interval(days => :d)"
+        ),
+        {"d": start},
+    ).all()
+    out = {"checked": len(due), "reset": 0, "failed": 0}
+    for r in due:
+        wait = "5 minutes" if r.bounce_open else f"{retry} hours"
+        claimed = db.execute(
+            text(
+                "update ebay_zero_qty set last_attempt_at = now() where store = :s and item_id = :i "
+                f"and (last_attempt_at is null or last_attempt_at < now() - interval '{wait}')"
+            ),
+            {"s": r.store, "i": r.item_id},
+        ).rowcount
+        db.commit()
+        if not claimed:
+            continue
+        try:
+            on = db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": r.store}).scalar()
+            if not on:
+                continue
+            why = _reset_one(db, r.store, r.item_id)
+        except HTTPException as e:
+            why = str(e.detail)
+        except Exception as e:  # one bad listing must not stop the rest
+            log.exception("zero keeper: %s", r.item_id)
+            db.rollback()
+            why = str(e)[:300]
+        if why:
+            out["failed"] += 1
+            db.execute(text("update ebay_zero_qty set last_error = :e where store = :s and item_id = :i"), {"e": why[:500], "s": r.store, "i": r.item_id})
+            db.commit()
+        else:
+            out["reset"] += 1
+    return out
+
+
+@router.post("/zero/run")
+def zero_run(db: Session = Depends(get_db)):
+    """Run the keeper once now (the same pass the background loop does)."""
+    return run_zero_keeper(db)
+
+
+@router.get("/zero/status")
+def zero_status(db: Session = Depends(get_db)):
+    """Every live listing the keeper is watching: when it reached 0, last reset, any problem."""
+    _ensure_zero_table(db)
+    start = int(os.environ.get("EBAY_ZERO_START_DAYS", "150"))
+    rows = db.execute(
+        text(
+            "select store, item_id, zero_since, last_reset_at, last_attempt_at, bounce_open, last_error, "
+            "floor(extract(epoch from (now() - zero_since)) / 86400)::int as days_at_zero "
+            "from ebay_zero_qty order by zero_since"
+        )
+    ).all()
+    return {
+        "start_days": start,
+        "items": [
+            {
+                "store": r.store, "item_id": r.item_id, "days_at_zero": r.days_at_zero,
+                "zero_since": r.zero_since.isoformat() if r.zero_since else None,
+                "last_reset_at": r.last_reset_at.isoformat() if r.last_reset_at else None,
+                "bounce_open": r.bounce_open, "last_error": r.last_error,
+            }
+            for r in rows
+        ],
+    }
+
+
+def start_zero_keeper() -> None:
+    """Background loop: one keeper pass about a minute after start-up, then every hour. Call once from main.py's start-up."""
+    def loop() -> None:
+        time.sleep(60)
+        while True:
+            gen = get_db()
+            try:
+                db = next(gen)
+                res = run_zero_keeper(db)
+                if res["reset"] or res["failed"]:
+                    log.info("zero keeper: %s", res)
+            except Exception:
+                log.exception("zero keeper pass failed")
+            finally:
+                try:
+                    gen.close()
+                except Exception:
+                    pass
+            time.sleep(3600)
+
+    threading.Thread(target=loop, name="ebay-zero-keeper", daemon=True).start()
+
+
 class DraftIn(BaseModel):
     store: str
     item_id: str
@@ -1025,6 +1419,12 @@ def end_listing(body: EndIn, db: Session = Depends(get_db), user: AuthUser = Dep
         {"i": current["item_id"], "s": row.store},
     )
     db.commit()
+    try:
+        _ensure_zero_table(db)
+        db.execute(text("delete from ebay_zero_qty where store = :s and item_id = :i"), {"s": row.store, "i": current["item_id"]})
+        db.commit()
+    except Exception:
+        db.rollback()
     item = _read_item(db, row.store, current["item_id"])
     item["draft"] = _read_draft(db, row.store, current["item_id"])
     return {"ok": True, "item": item}

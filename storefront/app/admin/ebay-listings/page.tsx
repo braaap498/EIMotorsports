@@ -228,7 +228,7 @@ export default function EbayLiveListingsPage() {
     const warns: string[] = [];
 
     if (want === "inactive") {
-      if (!window.confirm(`Inactivate will END ${one ? "this listing" : `these ${n} listings`} on eBay (${store}, item${one ? "" : "s"} ${idList(todo)}). Buyers will no longer be able to buy ${one ? "it" : "them"}. You can bring ${one ? "it" : "them"} back later with Activate.\n\nContinue?`)) return;
+      if (!window.confirm(`Inactivate will END ${one ? "this listing" : `these ${n} listings`} on eBay (${store}, item${one ? "" : "s"} ${idList(todo)}). Buyers will no longer be able to buy ${one ? "it" : "them"}.\n\nUse this for parts you will not sell again. If you only want to stop sales for now, use Set 0 Qty instead. An ended listing can be brought back with Activate, but eBay removes ended listings (and their photos) about 90 days after they end, and a relist gets a new item number.\n\nContinue?`)) return;
       setBusy("status");
       setActMsg(null);
       for (let i = 0; i < n; i++) {
@@ -324,6 +324,62 @@ export default function EbayLiveListingsPage() {
     let text = `${done} of ${want === "inactive" ? n : total} ${want === "inactive" ? "ended" : "made live"} on eBay.`;
     if (failed.length) text += ` ${failed.length} failed: ${failed.slice(0, 5).join(" · ")}${failed.length > 5 ? ` · and ${failed.length - 5} more` : ""}.`;
     if (warns.length) text += ` eBay warnings: ${warns.slice(0, 5).join(" · ")}${warns.length > 5 ? ` · and ${warns.length - 5} more` : ""}.`;
+    if (stopped) text += " Stopped after 3 failures in a row; the rest were not tried.";
+    setActMsg({ kind: failed.length ? "error" : "success", text });
+    setBusy("");
+    await loadRepo(repo.offset);
+  }
+
+  // Set the ticked listings to quantity 0 ON EBAY. The listing stays alive (hidden from search while eBay's out-of-stock setting
+  // is on) and keeps its item number, photos and history. Bring it back by raising the quantity. One at a time, each one logged.
+  async function bulkZero() {
+    if (!repo || picked.size === 0) return;
+    const todo = repo.items.filter((x) => picked.has(x.listing_id) && x.active);
+    const n = todo.length;
+    if (n === 0) return;
+    const names = todo.map((x) => x.store).filter((v, i, a) => a.indexOf(v) === i);
+    const stFor = (nm: string) => stores.find((x) => x.store.toLowerCase() === nm.toLowerCase());
+    const notConnected = names.filter((nm) => !stFor(nm)?.authorized);
+    if (notConnected.length) {
+      setActMsg({ kind: "error", text: `${notConnected.join(", ")} ${notConnected.length === 1 ? "is" : "are"} not connected to eBay yet, so nothing can be changed there. Nothing was sent.` });
+      return;
+    }
+    const pushesOff = names.filter((nm) => !stFor(nm)?.live_pushes_enabled);
+    if (pushesOff.length) {
+      setActMsg({ kind: "error", text: `Live pushes are OFF for ${pushesOff.join(", ")}, so nothing can go to eBay. Turn them on in Store API → Stores. Nothing was sent.` });
+      return;
+    }
+    const one = n === 1;
+    const ids = todo.slice(0, 10).map((x) => x.item_id).join(", ") + (n > 10 ? ` and ${n - 10} more` : "");
+    if (
+      !window.confirm(
+        `Set Qty 0 will set the quantity to 0 on ${one ? "this listing" : `these ${n} listings`} on eBay (item${one ? "" : "s"} ${ids}).\n\nThe listing is NOT ended: it keeps its item number, photos and history, and buyers cannot buy ${one ? "it" : "them"} until you raise the quantity again.\n\nThis only works if the out-of-stock setting is ON in the eBay account (Account settings › Selling › Selling preferences).\n\nContinue?`
+      )
+    )
+      return;
+    setBusy("status");
+    setActMsg(null);
+    let done = 0;
+    let streak = 0;
+    let stopped = false;
+    const failed: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const it = todo[i];
+      setActMsg({ kind: "success", text: `Working… ${i + 1} of ${n} (item ${it.item_id}). Keep this page open.` });
+      try {
+        await api("/ebay-edit/set-zero", { method: "POST", body: { store: it.store, item_id: it.item_id } });
+        done++;
+        streak = 0;
+      } catch (e) {
+        failed.push(`${it.item_id}: ${errMsg(e)}`);
+        if (++streak >= 3 && i < n - 1) {
+          stopped = true;
+          break;
+        }
+      }
+    }
+    let text = `${done} of ${n} set to quantity 0 on eBay.`;
+    if (failed.length) text += ` ${failed.length} failed: ${failed.slice(0, 5).join(" · ")}${failed.length > 5 ? ` · and ${failed.length - 5} more` : ""}.`;
     if (stopped) text += " Stopped after 3 failures in a row; the rest were not tried.";
     setActMsg({ kind: failed.length ? "error" : "success", text });
     setBusy("");
@@ -504,8 +560,13 @@ export default function EbayLiveListingsPage() {
                 </button>
               )}
               {nActivePicked > 0 && (
-                <button type="button" className={`${btn2Cls} text-red-700`} disabled={busy === "status"} onClick={() => void bulkSet("inactive")}>
-                  Inactivate on eBay ({nActivePicked})
+                <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkZero()} title="Keeps the listing alive at quantity 0 (needs eBay's out-of-stock setting ON)">
+                  Set 0 Qty on eBay ({nActivePicked})
+                </button>
+              )}
+              {nActivePicked > 0 && (
+                <button type="button" className={`${btn2Cls} text-red-700`} disabled={busy === "status"} onClick={() => void bulkSet("inactive")} title="Ends the listing on eBay. For parts you will not sell again.">
+                  Inactivate (end listing) ({nActivePicked})
                 </button>
               )}
               <button type="button" className="text-xs underline" onClick={() => setPicked(new Set())}>
