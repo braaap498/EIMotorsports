@@ -98,7 +98,9 @@ export default function EbayLiveListingsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const [picked, setPicked] = useState<Set<number>>(new Set()); // listings ticked on this page
+  const [picked, setPicked] = useState<Set<number>>(new Set()); // listings ticked on this page (or all matching, after "select all matching")
+  const [allMatch, setAllMatch] = useState<RepoItem[] | null>(null); // every listing matching the current search, loaded by "select all matching"
+  const [loadingAll, setLoadingAll] = useState(false);
   const [actMsg, setActMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [mainStore, setMainStore] = useState(""); // the store opened first on a first visit
   const [statusF, setStatusF] = useState<string>("all");
@@ -208,12 +210,48 @@ export default function EbayLiveListingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q]);
 
-  // Inactivate or Activate the ticked listings ON EBAY, one after another, with the same warnings and checks as the buttons on the
-  // edit screen. Inactivate = end the listing. Activate = relist it (preview first, then confirm, then send; eBay gives a new item number).
+  // The ticked listings: the ones on this page, or, after "select all matching", every listing matching the search.
+  function selectedItems(): RepoItem[] {
+    if (!repo) return [];
+    return (allMatch ?? repo.items).filter((x) => picked.has(x.listing_id));
+  }
+
+  // Tick every listing that matches the current store / status / search, not just this page. Read from the database only
+  // (nothing goes to eBay). Capped so a huge store cannot lock the page up.
+  const SELECT_ALL_MAX = 2000;
+  async function selectAllMatching() {
+    if (!repo || loadingAll) return;
+    setLoadingAll(true);
+    setActMsg(null);
+    try {
+      const rows: RepoItem[] = [];
+      let offset = 0;
+      for (;;) {
+        const params = new URLSearchParams({ q: lastQ.current, sort, status: repo.status || "all", offset: String(offset), limit: "200" });
+        if (repo.store === "") params.set("all_stores", "1");
+        else params.set("store", repo.store);
+        const r = await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`);
+        rows.push(...r.items);
+        offset += r.items.length;
+        if (r.items.length === 0 || offset >= r.total || rows.length >= SELECT_ALL_MAX) break;
+      }
+      const capped = rows.slice(0, SELECT_ALL_MAX);
+      setAllMatch(capped);
+      setPicked(new Set(capped.map((x) => x.listing_id)));
+      if (repo.total > capped.length) setActMsg({ kind: "error", text: `Only the first ${capped.length} of ${repo.total} matching listings were selected (the limit). Narrow the search to get the rest.` });
+    } catch (e) {
+      setActMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setLoadingAll(false);
+    }
+  }
+
+  // End listing or Relist the ticked listings ON EBAY, one after another, with the same warnings and checks as the buttons on the
+  // edit screen. End listing = end it on eBay. Relist = bring it back (preview first, then confirm, then send; eBay gives a new item number).
   // Each one is logged like a single push.
   async function bulkSet(want: "inactive" | "active") {
     if (!repo || picked.size === 0) return;
-    const todo = repo.items.filter((x) => picked.has(x.listing_id) && (want === "inactive" ? x.active : !x.active));
+    const todo = selectedItems().filter((x) => (want === "inactive" ? x.active : !x.active));
     const n = todo.length;
     if (n === 0) return;
     // each listing is sent to its own store, so check every store involved first
@@ -239,7 +277,7 @@ export default function EbayLiveListingsPage() {
     const warns: string[] = [];
 
     if (want === "inactive") {
-      if (!window.confirm(`Inactivate will END ${one ? "this listing" : `these ${n} listings`} on eBay (${store}, item${one ? "" : "s"} ${idList(todo)}). Buyers will no longer be able to buy ${one ? "it" : "them"}.\n\nUse this for parts you will not sell again. If you only want to stop sales for now, use Set 0 Qty instead. An ended listing can be brought back with Activate, but eBay removes ended listings (and their photos) about 90 days after they end, and a relist gets a new item number.\n\nContinue?`)) return;
+      if (!window.confirm(`End listing will END ${one ? "this listing" : `these ${n} listings`} on eBay (${store}, item${one ? "" : "s"} ${idList(todo)}). Buyers will no longer be able to buy ${one ? "it" : "them"}.\n\nUse this for parts you will not sell again. If you only want to stop sales for now, use Set 0 Qty instead. An ended listing can be brought back with Relist, but eBay removes ended listings (and their photos) about 90 days after they end, and a relist gets a new item number.\n\nContinue?`)) return;
       setBusy("status");
       setActMsg(null);
       for (let i = 0; i < n; i++) {
@@ -287,7 +325,7 @@ export default function EbayLiveListingsPage() {
         }
       }
       if (ready.length === 0) {
-        setActMsg({ kind: "error", text: `None of the ${n} could be activated, so nothing was sent. ${failed.slice(0, 5).join(" · ")}${failed.length > 5 ? ` · and ${failed.length - 5} more` : ""}` });
+        setActMsg({ kind: "error", text: `None of the ${n} could be relisted, so nothing was sent. ${failed.slice(0, 5).join(" · ")}${failed.length > 5 ? ` · and ${failed.length - 5} more` : ""}` });
         setBusy("");
         return;
       }
@@ -297,12 +335,12 @@ export default function EbayLiveListingsPage() {
         .join("\n\n");
       const more = ready.length > 8 ? `\n\n…and ${ready.length - 8} more like these.` : "";
       const bad = failed.length
-        ? `\n\nThese cannot be activated and will be skipped:\n${failed.slice(0, 5).join("\n")}${failed.length > 5 ? `\n…and ${failed.length - 5} more` : ""}`
+        ? `\n\nThese cannot be relisted and will be skipped:\n${failed.slice(0, 5).join("\n")}${failed.length > 5 ? `\n…and ${failed.length - 5} more` : ""}`
         : "";
       const rn = ready.length;
       if (
         !window.confirm(
-          `Activate will make ${rn === 1 ? "this listing" : `these ${rn} listings`} LIVE on eBay (${store}). Buyers will be able to buy ${rn === 1 ? "it" : "them"}, and eBay will give ${rn === 1 ? "it" : "each"} a new item number.\n\n${lines}${more}${bad}\n\nContinue?`
+          `Relist will make ${rn === 1 ? "this listing" : `these ${rn} listings`} LIVE on eBay (${store}). Buyers will be able to buy ${rn === 1 ? "it" : "them"}, and eBay will give ${rn === 1 ? "it" : "each"} a new item number.\n\n${lines}${more}${bad}\n\nContinue?`
         )
       ) {
         setActMsg({ kind: "success", text: "Cancelled. Nothing was sent to eBay." });
@@ -345,7 +383,7 @@ export default function EbayLiveListingsPage() {
   // is on) and keeps its item number, photos and history. Bring it back by raising the quantity. One at a time, each one logged.
   async function bulkZero() {
     if (!repo || picked.size === 0) return;
-    const todo = repo.items.filter((x) => picked.has(x.listing_id) && x.active && !isZero(x));
+    const todo = selectedItems().filter((x) => x.active && !isZero(x));
     const n = todo.length;
     if (n === 0) return;
     const names = todo.map((x) => x.store).filter((v, i, a) => a.indexOf(v) === i);
@@ -360,6 +398,26 @@ export default function EbayLiveListingsPage() {
       setActMsg({ kind: "error", text: `Live pushes are OFF for ${pushesOff.join(", ")}, so nothing can go to eBay. Turn them on in Store API → Stores. Nothing was sent.` });
       return;
     }
+    // eBay only accepts quantity 0 when the account's out-of-stock setting is ON. Ask once per store now, instead of once per listing.
+    const oosOk = new Set<string>();
+    setBusy("status");
+    setActMsg({ kind: "success", text: "Checking eBay's out-of-stock setting…" });
+    for (const nm of names) {
+      try {
+        const o = await api<{ enabled: boolean | null }>(`/ebay-edit/oos?store=${encodeURIComponent(nm)}`);
+        if (o.enabled === false) {
+          setActMsg({ kind: "error", text: `The out-of-stock setting is OFF in the ${nm} eBay account, so quantity 0 would not be allowed. Turn it on first (eBay: Account settings › Selling › Selling preferences, or on the Stores page). Nothing was sent.` });
+          setBusy("");
+          return;
+        }
+        if (o.enabled === true) oosOk.add(nm.toLowerCase());
+        // null = eBay would not say: leave it to the per-listing check on the server
+      } catch {
+        /* could not ask: the per-listing check on the server still runs */
+      }
+    }
+    setBusy("");
+    setActMsg(null);
     const one = n === 1;
     const ids = todo.slice(0, 10).map((x) => x.item_id).join(", ") + (n > 10 ? ` and ${n - 10} more` : "");
     if (
@@ -378,7 +436,7 @@ export default function EbayLiveListingsPage() {
       const it = todo[i];
       setActMsg({ kind: "success", text: `Working… ${i + 1} of ${n} (item ${it.item_id}). Keep this page open.` });
       try {
-        await api("/ebay-edit/set-zero", { method: "POST", body: { store: it.store, item_id: it.item_id } });
+        await api("/ebay-edit/set-zero", { method: "POST", body: { store: it.store, item_id: it.item_id, oos_checked: oosOk.has(it.store.toLowerCase()) } });
         done++;
         streak = 0;
       } catch (e) {
@@ -401,7 +459,7 @@ export default function EbayLiveListingsPage() {
   // (a quantity of 1 on eBay restarts its zero-days count). A part with no stock on hand is left at 0 and reported.
   async function bulkRestore(keepAlive: boolean) {
     if (!repo || picked.size === 0) return;
-    const todo = repo.items.filter((x) => picked.has(x.listing_id) && x.active && isZero(x));
+    const todo = selectedItems().filter((x) => x.active && isZero(x));
     const n = todo.length;
     if (n === 0) return;
     const names = todo.map((x) => x.store).filter((v, i, a) => a.indexOf(v) === i);
@@ -471,6 +529,7 @@ export default function EbayLiveListingsPage() {
     setError("");
     setSyncNote("");
     setPicked(new Set());
+    setAllMatch(null);
     try {
       // the database list sorts by title / price / newest; eBay's own "newest" and price orders map onto these
       const params = new URLSearchParams({ q: useQ.trim(), sort: useSort, status: useStatus, offset: String(offset), limit: String(PAGE_SIZE) });
@@ -494,8 +553,8 @@ export default function EbayLiveListingsPage() {
 
   const allMode = !!repo && repo.store === ""; // the "All stores" view
 
-  // which bulk buttons make sense: Inactivate for ticked listings that are active, Activate for ticked listings that are not
-  const pickedItems = repo ? repo.items.filter((x) => picked.has(x.listing_id)) : [];
+  // which bulk buttons make sense: End listing for ticked listings that are active, Relist for ticked listings that are not
+  const pickedItems = selectedItems();
   const nActivePicked = pickedItems.filter((x) => x.active).length;
   const nZeroPicked = pickedItems.filter((x) => x.active && isZero(x)).length;
   const nLivePicked = nActivePicked - nZeroPicked;
@@ -507,7 +566,7 @@ export default function EbayLiveListingsPage() {
         <h1 className="text-2xl font-semibold">Listings</h1>
         <p className="mt-1 max-w-3xl text-sm text-gray-600">
           Shows a store&rsquo;s eBay listings and which ones are products on the website. Opening a listing to edit it, or using
-          Activate / Inactivate here, changes the real listing on eBay (only when live pushes are ON for that store). Stores
+          Relist / End listing here, changes the real listing on eBay (only when live pushes are ON for that store). Stores
           are connected under Store API &rarr; Stores. Until a store&rsquo;s owner authorizes the app, eBay&rsquo;s public view
           is all that can be seen, so listings that are out of stock or ended do not appear yet.
         </p>
@@ -649,12 +708,20 @@ export default function EbayLiveListingsPage() {
             </p>
           )}
           {actMsg && <Notice kind={actMsg.kind}>{actMsg.text}</Notice>}
+          {!allMatch && repo.total > repo.items.length && repo.items.length > 0 && repo.items.every((x) => picked.has(x.listing_id)) && (
+            <div className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
+              All {repo.items.length} listings on this page are selected.{" "}
+              <button type="button" className="font-medium text-blue-800 underline" disabled={loadingAll} onClick={() => void selectAllMatching()}>
+                {loadingAll ? "Selecting…" : `Select all ${repo.total} matching listings`}
+              </button>
+            </div>
+          )}
           {picked.size > 0 && (
             <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
-              <span className="font-medium">{picked.size} selected</span>
+              <span className="font-medium">{pickedItems.length} selected{allMatch ? " (all matching)" : ""}</span>
               {nInactivePicked > 0 && (
                 <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkSet("active")}>
-                  Activate on eBay ({nInactivePicked})
+                  Relist on eBay ({nInactivePicked})
                 </button>
               )}
               {nLivePicked > 0 && (
@@ -674,10 +741,10 @@ export default function EbayLiveListingsPage() {
               )}
               {nActivePicked > 0 && (
                 <button type="button" className={`${btn2Cls} text-red-700`} disabled={busy === "status"} onClick={() => void bulkSet("inactive")} title="Ends the listing on eBay. For parts you will not sell again.">
-                  Inactivate (end listing) ({nActivePicked})
+                  End listing on eBay ({nActivePicked})
                 </button>
               )}
-              <button type="button" className="text-xs underline" onClick={() => setPicked(new Set())}>
+              <button type="button" className="text-xs underline" onClick={() => { setPicked(new Set()); setAllMatch(null); }}>
                 Clear
               </button>
               <span className="text-xs text-gray-500">Sends to eBay one at a time (needs live pushes ON for each store involved).</span>
@@ -695,7 +762,10 @@ export default function EbayLiveListingsPage() {
                         type="checkbox"
                         aria-label="Select all on this page"
                         checked={repo.items.length > 0 && repo.items.every((x) => picked.has(x.listing_id))}
-                        onChange={(e) => setPicked(e.target.checked ? new Set(repo.items.map((x) => x.listing_id)) : new Set())}
+                        onChange={(e) => {
+                          setAllMatch(null);
+                          setPicked(e.target.checked ? new Set(repo.items.map((x) => x.listing_id)) : new Set());
+                        }}
                       />
                     </th>
                     <th className="w-16 px-3 py-2"></th>

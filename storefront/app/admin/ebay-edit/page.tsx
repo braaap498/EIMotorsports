@@ -157,11 +157,11 @@ export default function EbayEditPage() {
     const vTitle = d?.title ?? i.title;
     const vDesc = d?.description ?? i.description;
     const vPrice = d?.price ?? i.price ?? "";
-    const vQty = d?.quantity !== undefined && d?.quantity !== null ? String(d.quantity) : String(i.quantity_available);
+    const vQty = String(i.quantity_available); // read only: the website owns stock, so a quantity saved in an older edit is ignored
     const vSku = d?.sku ?? i.sku;
     const vVars: Record<string, VarEdit> = Object.fromEntries(i.variations.map((v) => [v.sku, { price: v.price ?? "", qty: String(v.quantity_available) }]));
     (d?.variations ?? []).forEach((x) => {
-      if (vVars[x.sku]) vVars[x.sku] = { price: x.price ?? vVars[x.sku].price, qty: x.quantity !== undefined && x.quantity !== null ? String(x.quantity) : vVars[x.sku].qty };
+      if (vVars[x.sku]) vVars[x.sku] = { price: x.price ?? vVars[x.sku].price, qty: vVars[x.sku].qty };
     });
     const vPhotos: PhotoEdit[] = d?.photos
       ? d.photos.map((p, n) => (p.url ? { id: `e${n}`, thumb: p.url, url: p.url } : { id: "k:" + p.key, thumb: p.thumb ?? "", key: p.key }))
@@ -237,13 +237,13 @@ export default function EbayEditPage() {
         title,
         description,
         variations: item.variations
-          .map((v) => ({ sku: v.sku, price: vars[v.sku]?.price ?? "", quantity: Number(vars[v.sku]?.qty ?? v.quantity_available) }))
-          .filter((v, i) => v.price !== (item.variations[i].price ?? "") || v.quantity !== item.variations[i].quantity_available),
+          .map((v) => ({ sku: v.sku, price: vars[v.sku]?.price ?? "" }))
+          .filter((v, i) => v.price !== (item.variations[i].price ?? "")),
         ...photoPart(),
         ...specsPart(),
       };
     }
-    return { title, description, price, quantity: qty.trim() === "" ? null : Number(qty), sku, ...photoPart(), ...specsPart() };
+    return { title, description, price, sku, ...photoPart(), ...specsPart() }; // quantity is never sent from here: the website owns stock
   }
 
   const dirty =
@@ -253,8 +253,8 @@ export default function EbayEditPage() {
       (item.specifics_editable && specsChanged) ||
       norm(description) !== norm(item.description) ||
       (item.has_variations
-        ? item.variations.some((v) => (vars[v.sku]?.price ?? "") !== (v.price ?? "") || vars[v.sku]?.qty !== String(v.quantity_available))
-        : price !== (item.price ?? "") || qty !== String(item.quantity_available) || sku !== item.sku));
+        ? item.variations.some((v) => (vars[v.sku]?.price ?? "") !== (v.price ?? ""))
+        : price !== (item.price ?? "") || sku !== item.sku));
 
   const touch = () => setDifferences([]);
 
@@ -265,10 +265,9 @@ export default function EbayEditPage() {
     if (!item) return {};
     const d: Record<string, unknown> = { title, description };
     if (item.has_variations) {
-      d.variations = item.variations.map((v) => ({ sku: v.sku, price: vars[v.sku]?.price ?? "", quantity: Number(vars[v.sku]?.qty ?? v.quantity_available) }));
+      d.variations = item.variations.map((v) => ({ sku: v.sku, price: vars[v.sku]?.price ?? "" }));
     } else {
       Object.assign(d, { price, sku });
-      if (qty.trim() !== "") d.quantity = Number(qty);
     }
     if (item.photos_editable) d.photos = photos.map((p) => (p.url ? { url: p.url, thumb: p.thumb } : { key: p.key, thumb: p.thumb }));
     if (item.specifics_editable) d.item_specifics = specs.filter((x) => x.name.trim() || x.value.trim()).map((x) => ({ name: x.name, values: splitValues(x.value) }));
@@ -318,14 +317,14 @@ export default function EbayEditPage() {
     }
   }
 
-  // Activate: bring an ended listing back on eBay, or publish edits to a live one. The edits are saved first, so nothing is
+  // Relist (ended listing) / Revise listing (live listing with edits): bring an ended listing back on eBay, or publish edits to a live one. The edits are saved first, so nothing is
   // lost if eBay says no; the exact request is checked (a dry run) and read out before anything is sent.
   async function activate() {
     if (!item) return;
     const relist = item.ended;
     const warn = relist
-      ? `Activate will make this a LIVE listing on eBay (${store}). Buyers will be able to buy it, and eBay will give it a new item number.`
-      : `Activate will publish these changes to the LIVE eBay listing (${store}, item ${item.item_id}). Buyers will see them straight away.`;
+      ? `Relist will make this a LIVE listing on eBay (${store}) at the quantity the website has available. Buyers will be able to buy it, and eBay will give it a new item number.`
+      : `Revise listing will publish these changes to the LIVE eBay listing (${store}, item ${item.item_id}). Buyers will see them straight away.`;
     setBusy("activate");
     setMsg(null);
     try {
@@ -358,10 +357,10 @@ export default function EbayEditPage() {
     }
   }
 
-  // Inactivate: end the live listing on eBay.
+  // End listing: end the live listing on eBay.
   async function makeInactive() {
     if (!item) return;
-    if (!window.confirm(`Inactivate will END this listing on eBay (${store}, item ${item.item_id}). Buyers will no longer be able to buy it. You can bring it back later with Activate.\n\nContinue?`)) return;
+    if (!window.confirm(`End listing will END this listing on eBay (${store}, item ${item.item_id}). Buyers will no longer be able to buy it. You can bring it back later with Relist.\n\nContinue?`)) return;
     setBusy("end");
     setMsg(null);
     try {
@@ -414,7 +413,7 @@ export default function EbayEditPage() {
         added.push({ key: r.key, thumb: r.thumb });
       }
       addKeys(added);
-      setPhotoMsg("Added to the list below. Nothing goes to eBay until you press Activate.");
+      setPhotoMsg("Added to the list below. Nothing goes to eBay until you press Revise listing or Relist.");
     } catch (e) {
       if (added.length) addKeys(added);
       setPhotoMsg(errMsg(e));
@@ -469,19 +468,19 @@ export default function EbayEditPage() {
       )}
       {(item.ended ? item.relistable : dirty) && (
         <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => void activate()}>
-          {busy === "activate" ? "Working…" : "Activate"}
+          {busy === "activate" ? "Working…" : item.ended ? "Relist" : "Revise listing"}
         </button>
       )}
       {!item.ended && item.editable && (
         <button type="button" className={`${btn2Cls} text-red-700`} disabled={busy !== ""} onClick={() => void makeInactive()}>
-          {busy === "end" ? "Working…" : "Inactivate"}
+          {busy === "end" ? "Working…" : "End listing"}
         </button>
       )}
       <span className="text-xs text-gray-500">
         {item.ended
-          ? "Not live on eBay. Activate puts it live."
+          ? "Not live on eBay. Relist puts it live."
           : dirty
-            ? "Save keeps edits on the website only. Activate publishes them to eBay."
+            ? "Save keeps edits on the website only. Revise listing publishes them to eBay."
             : "Live on eBay."}
       </span>
     </div>
@@ -542,7 +541,7 @@ export default function EbayEditPage() {
             </Notice>
           )}
           {item.ended && item.relistable && (
-            <Notice>This listing is not live on eBay ({item.status}). Edit it here, then press Activate to bring it back; eBay gives a relisted item a new number.</Notice>
+            <Notice>This listing is not live on eBay ({item.status}). Edit it here, then press Relist to bring it back; eBay gives a relisted item a new number.</Notice>
           )}
           {!item.editable && <Notice kind="error">{item.not_editable_reason}</Notice>}
           {item.quantity_sold > 0 && (
@@ -574,7 +573,8 @@ export default function EbayEditPage() {
                 </label>
                 <label className="block text-sm font-medium text-gray-700">
                   <span className="mb-1 block">Available quantity</span>
-                  <input className={inputCls} inputMode="numeric" value={qty} disabled={off} onChange={(e) => { setQty(e.target.value); touch(); }} />
+                  <input className={`${inputCls} bg-gray-100 text-gray-600`} value={qty} readOnly tabIndex={-1} title="Read only. The website's stock sets this: sales, receiving and adjustments update it." />
+                  <span className="mt-1 block text-xs font-normal text-gray-500">Read only. Set by the website&rsquo;s stock. To pause the listing, use Set 0 Qty on the Listings page.</span>
                 </label>
                 <label className="block text-sm font-medium text-gray-700">
                   <span className="mb-1 block">Custom label (SKU)</span>
@@ -610,13 +610,7 @@ export default function EbayEditPage() {
                           />
                         </td>
                         <td className="py-1.5 pr-3">
-                          <input
-                            className={`${inputCls} w-24`}
-                            inputMode="numeric"
-                            value={vars[v.sku]?.qty ?? ""}
-                            disabled={off}
-                            onChange={(e) => { setVars({ ...vars, [v.sku]: { ...vars[v.sku], qty: e.target.value } }); touch(); }}
-                          />
+                          <span className="text-gray-700" title="Read only. The website's stock sets this.">{vars[v.sku]?.qty ?? v.quantity_available}</span>
                         </td>
                         <td className="py-1.5 text-gray-600">{v.quantity_sold}</td>
                       </tr>

@@ -343,6 +343,15 @@ class Changes(BaseModel):
     item_specifics: Optional[list[SpecIn]] = Field(default=None, max_length=100)  # the complete list
 
 
+def _no_qty(ch: "Changes") -> "Changes":
+    """The website owns stock, so a quantity sent from the edit form (an old saved edit, or any other caller) is ignored.
+    Revise never changes the quantity; Relist takes it from the website's available stock (see _relist_quantity)."""
+    upd: dict = {"quantity": None}
+    if ch.variations:
+        upd["variations"] = [v.model_copy(update={"quantity": None}) if hasattr(v, "model_copy") else v.copy(update={"quantity": None}) for v in ch.variations]
+    return ch.model_copy(update=upd) if hasattr(ch, "model_copy") else ch.copy(update=upd)
+
+
 class EditIn(BaseModel):
     store: str
     item_id: str
@@ -595,7 +604,7 @@ def _plan(current: dict, ch: Changes, action: str) -> tuple[list[dict], list[dic
     """The request(s) for either revising a live listing or relisting an ended one."""
     if action != "relist":
         if current["ended"]:
-            raise HTTPException(409, f"This listing is {current['status']}, not live, so it cannot be revised. Use Activate to relist it.")
+            raise HTTPException(409, f"This listing is {current['status']}, not live, so it cannot be revised. Use Relist to bring it back.")
         return _build(current, ch)
     if not current["relistable"]:
         raise HTTPException(409, current["not_editable_reason"] or f"This listing is {current['status']} and cannot be relisted.")
@@ -605,7 +614,7 @@ def _plan(current: dict, ch: Changes, action: str) -> tuple[list[dict], list[dic
     if not current["has_variations"] and "<Quantity>" not in calls[0]["xml"]:
         qty = ch.quantity if ch.quantity is not None else current["quantity_available"]
         if qty < 1 or qty > 9999:
-            raise HTTPException(400, "Set an available quantity of 1 or more before activating; a relisted item needs stock.")
+            raise HTTPException(400, "The website has no stock figure for this listing and eBay needs at least 1 to relist. Link it to a product and receive stock first. Nothing was sent.")
         calls[0]["xml"] = calls[0]["xml"].replace("</Item>", f"<Quantity>{qty}</Quantity></Item>", 1)
         diff.append({"field": "Available quantity", "before": str(current["quantity_available"]), "after": str(qty), "note": "sent so the relisted item has stock"})
     diff.insert(0, {"field": "Listing", "before": current["status"], "after": "Active on eBay", "note": "relisting gives the listing a new item number"})
@@ -818,7 +827,8 @@ _ACTION = {"revise": "revise_fixed_price_item", "relist": "relist_fixed_price_it
 def preview(body: EditIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     row = _store_row(db, body.store)
     current = _read_item(db, row.store, body.item_id.strip())
-    changes = _relist_changes(db, row.store, current, _relist_quantity(db, row.store, current, body.changes)) if body.action == "relist" else body.changes
+    base = _no_qty(body.changes)
+    changes = _relist_changes(db, row.store, current, _relist_quantity(db, row.store, current, base)) if body.action == "relist" else base
     calls, diff = _plan(current, changes, body.action)
     fp = _fingerprint(row.store, calls)
     _log(db, user, row.store, current["item_id"], _ACTION[body.action], True, {"calls": calls, "diff": diff}, {}, True, None)
@@ -843,7 +853,8 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     if not enabled:
         raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
     current = _read_item(db, row.store, body.item_id.strip())
-    changes = _relist_changes(db, row.store, current, _relist_quantity(db, row.store, current, body.changes)) if body.action == "relist" else body.changes
+    base = _no_qty(body.changes)
+    changes = _relist_changes(db, row.store, current, _relist_quantity(db, row.store, current, base)) if body.action == "relist" else base
     calls, diff = _plan(current, changes, body.action)
     act = _ACTION[body.action]
     if _fingerprint(row.store, calls) != body.fingerprint:
@@ -1028,7 +1039,7 @@ def _stored_photos(db: Session, store: str, item_id: str) -> list[dict]:
 
 
 def _relist_quantity(db: Session, store: str, current: dict, ch: Changes) -> Changes:
-    """For a relist (Activate): the quantity comes from the WEBSITE, not from the ended listing. The website owns stock:
+    """For a relist (the Relist button): the quantity comes from the WEBSITE, not from the ended listing. The website owns stock:
     the figure sent is what is available to sell (stock on hand minus parts set aside), up to 9999. A quantity the
     person typed that differs from what eBay showed on the ended listing is respected. A part with nothing available
     cannot be relisted (eBay needs at least 1), and the message says so. A listing with variations, or one not linked
@@ -1051,7 +1062,7 @@ def _relist_quantity(db: Session, store: str, current: dict, ch: Changes) -> Cha
         raise HTTPException(
             409,
             "The website shows nothing available to sell for this part (stock on hand minus parts set aside for open orders), "
-            "and eBay needs at least 1 to relist. Receive stock first, or type a quantity of 1 or more to override. Nothing was sent.",
+            "and eBay needs at least 1 to relist. Receive stock first. Nothing was sent.",
         )
     q = min(avail, 9999)
     return ch.model_copy(update={"quantity": q}) if hasattr(ch, "model_copy") else ch.copy(update={"quantity": q})
@@ -1191,6 +1202,7 @@ def _mark_held(db: Session, store: str, item_id: str) -> None:
 class SetZeroIn(BaseModel):
     store: str
     item_id: str = Field(..., max_length=20)
+    oos_checked: bool = False  # true = the caller (a bulk run) already confirmed eBay's out-of-stock setting is ON for this store
 
 
 @router.post("/set-zero")
@@ -1214,7 +1226,7 @@ def set_zero(body: SetZeroIn, db: Session = Depends(get_db), user: AuthUser = De
             log.exception("could not record the hold for %s", current["item_id"])
             db.rollback()
         return {"ok": True, "item_id": current["item_id"], "already": True, "warnings": []}
-    if _oos_preference(db, row.store) is False:
+    if not body.oos_checked and _oos_preference(db, row.store) is False:
         raise HTTPException(
             409,
             f"The out-of-stock setting is OFF in the {row.store} eBay account, so quantity 0 would not be allowed. Turn it on first "
@@ -1293,7 +1305,7 @@ def restore_qty(body: RestoreIn, db: Session = Depends(get_db), user: AuthUser =
         raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
     current = _read_item(db, row.store, body.item_id.strip())
     if current["ended"]:
-        raise HTTPException(409, f"This listing is {current['status']}; use Activate to bring it back.")
+        raise HTTPException(409, f"This listing is {current['status']}; use Relist to bring it back.")
     if current["has_variations"]:
         raise HTTPException(409, "Listings with variations are not supported here yet.")
     if current["quantity_available"] > 0:
@@ -1505,7 +1517,7 @@ class EndIn(BaseModel):
 
 @router.post("/end")
 def end_listing(body: EndIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
-    """Ends a live fixed-price listing on eBay (the Inactive button). It can be brought back with Activate (relist)."""
+    """Ends a live fixed-price listing on eBay (the End listing button). It can be brought back with Relist."""
     row = _store_row(db, body.store)
     enabled = db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
     if not enabled:
