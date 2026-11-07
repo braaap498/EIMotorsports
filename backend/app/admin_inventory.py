@@ -68,7 +68,7 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, current_user, needs, require_route_access
 from app.database import get_db
 from app.images import thumb_url
-from app.ebay_sales import take_stock_for_reference
+from app.ebay_sales import queue_stock_push, take_stock_for_reference
 from app.skus import PLACEHOLDER_SKU, shelf_code_for
 from app.stock import available_sql, lock_products, reserved_paid_sql, set_aside_sql
 
@@ -457,6 +457,7 @@ def receive(body: ReceiveIn, db: Session = Depends(get_db), user: AuthUser = Dep
             )
             _insert_line(db, body.batch_id, pid, m["barcode_id"], m["qty"])
             result.append({"product_id": pid, "received": m["qty"], "quantity_on_hand": new_qty})
+        queue_stock_push(db, ids)  # every eBay listing of these parts gets the new available quantity
         db.commit()
         return {"batch_id": str(body.batch_id), "lines": result}
     except HTTPException:
@@ -711,6 +712,7 @@ def receive_po_line(
                  "ref": f"Receive {str(body.batch_id)[:8]} - PO {h.po_number}", "by": user.email},
             )
             _insert_line(db, body.batch_id, line.product_id, body.barcode_id, body.quantity)
+            queue_stock_push(db, [line.product_id])  # every eBay listing of this part gets the new available quantity
 
         total_got = line.got + body.quantity
         if later:
@@ -753,6 +755,7 @@ def receive_po_line(
                 new_qty = db.execute(
                     text("select quantity_on_hand from products where id = :p"), {"p": line.kit_product_id}
                 ).scalar()
+                queue_stock_push(db, [line.kit_product_id])  # whole kits were added to stock
 
         left = db.execute(
             text("select count(*) from po_lines where po_id = :id and received_at is null"), {"id": po_id}
@@ -861,6 +864,7 @@ def receive_po_extras(
                 ln.item if ln else None, prods[pid].title, ln.quantity if ln else 0, m["qty"], user, body.note,
             )
             out.append({"product_id": pid, "received": m["qty"], "quantity_on_hand": new_qty})
+        queue_stock_push(db, ids)
         db.commit()
     except HTTPException:
         raise
@@ -1001,6 +1005,7 @@ def adjust_stock(
             ),
             {"p": product_id, "d": change, "ref": ref[:200], "by": user.email},
         )
+        queue_stock_push(db, [product_id])  # a manual change reaches every eBay listing of the part
         db.commit()
         return {"product_id": product_id, "quantity_on_hand": new, "change": change}
     except HTTPException:
@@ -1473,6 +1478,7 @@ def short_pick(
                     ),
                     {"p": body.product_id, "d": body.actual_on_hand - before, "ref": ref[:200], "by": user.email},
                 )
+                queue_stock_push(db, [body.product_id])  # the shelf count changed
         db.commit()
         return {"ok": True, "attention": _attention(db, [order.id]).get(order.id, [])}
     except HTTPException:
@@ -1551,6 +1557,7 @@ def _add_back(db: Session, pid: int, qty: int, ref: str, by: Optional[str]) -> N
         ),
         {"p": pid, "q": qty, "ref": ref[:200], "by": by},
     )
+    queue_stock_push(db, [pid])  # parts are back in stock: refresh the eBay listings
 
 
 @router.post("/orders/{order_number}/cancel")

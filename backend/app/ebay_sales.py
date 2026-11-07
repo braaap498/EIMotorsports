@@ -473,6 +473,19 @@ def enqueue_product(db: Session, product_id: int) -> int:
     return len(rows)
 
 
+def queue_stock_push(db: Session, product_ids) -> None:
+    """Call from any screen that changes a product's stock (receiving, a manual adjustment, a short pick, a cancelled
+    order), in the same request and BEFORE its commit: queues a quantity update for every eBay listing of those
+    products. The background loop sends them within about a minute. A held listing (Set 0 Qty) is released by the
+    send step when stock on hand has gone up. Never raises, so a problem here cannot undo the stock change."""
+    for pid in {int(p) for p in product_ids if p is not None}:
+        try:
+            with db.begin_nested():
+                enqueue_product(db, pid)
+        except Exception:
+            log.exception("could not queue eBay quantity updates for product %s", pid)
+
+
 def _hold_gate(db: Session, store: str, item: str, product_id: int, target: int) -> Optional[str]:
     """A listing the user set to 0 on purpose (Set 0 Qty) is HELD: sales of the product must not push stock back onto it.
     Returns a note when the listing is held (skip it), or None to go ahead. A hold is released, and the listing gets
@@ -738,6 +751,24 @@ def _cleanup_aliases_daily() -> None:
         db.close()
 
 
+def _drain_queues() -> None:
+    """Send quantity updates that are waiting (queued by receiving, adjustments, sales...). 20 per store per pass."""
+    db = _session_factory()()
+    try:
+        stores = [
+            r.store
+            for r in db.execute(text("select distinct store from ebay_qty_queue where status = 'pending'")).all()
+        ]
+        for st in stores:
+            try:
+                run_queue(db, st)
+            except Exception:
+                db.rollback()
+                log.exception("sending queued eBay quantities for %s", st)
+    finally:
+        db.close()
+
+
 def _loop() -> None:
     time.sleep(20)
     while True:
@@ -745,6 +776,10 @@ def _loop() -> None:
             run_due()
         except Exception:
             log.exception("eBay sales loop")
+        try:
+            _drain_queues()
+        except Exception:
+            log.exception("eBay quantity queue")
         try:
             _cleanup_aliases_daily()
         except Exception:
