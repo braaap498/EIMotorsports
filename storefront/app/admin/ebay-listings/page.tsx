@@ -127,6 +127,14 @@ export default function EbayLiveListingsPage() {
   // Statuses are kept true by a check against eBay that runs in the background on the server. Opening this tab only asks
   // whether one is due (the answer comes back at once); the list above never waits for it. While one runs, ask how it is
   // doing every few seconds, and when it changed anything show the fresh statuses (unless something is ticked or running).
+  async function runSyncNow() {
+    try {
+      const r = await api<SyncResp>("/ebay-listings/status-sync/run", { method: "POST", body: {} });
+      setSync(r.stores);
+    } catch {
+      /* nothing to do: the daily check still runs */
+    }
+  }
   const syncAsked = useRef(false);
   useEffect(() => {
     if (syncAsked.current || stores.length === 0) return;
@@ -606,9 +614,17 @@ export default function EbayLiveListingsPage() {
                   ? "Checking statuses with eBay in the background…"
                   : oldest
                     ? `Statuses last checked with eBay ${ago(oldest)}.`
-                    : "Statuses have not been checked with eBay yet."}
+                    : "Statuses have not been checked with eBay yet (a check runs once a day)."}
                 {failed.length > 0 && ` The last check of ${failed.map((x) => x.store).join(", ")} did not finish (${failed[0].message ?? "unknown reason"}).`}
                 {idle.length > 0 && ` Not connected, so not checked: ${idle.map((x) => x.store).join(", ")}.`}
+                {!running && (
+                  <>
+                    {" "}
+                    <button type="button" className="underline" onClick={() => void runSyncNow()}>
+                      Check with eBay now
+                    </button>
+                  </>
+                )}
               </p>
             );
           })()}

@@ -31,6 +31,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -474,8 +475,9 @@ def repo_set_status(body: RepoStatusIn, db: Session = Depends(get_db)):
 # keeping channel_listings.status true: a background check against eBay
 # --------------------------------------------------------------------------
 # The Listings tab shows the status saved in OUR database. This brings it in line with eBay without slowing the page:
-# opening the tab only asks "is a check due?" (POST /status-sync/start returns at once); if the last check of a store is
-# older than STATUS_SYNC_HOURS the check runs in the background and the page keeps its own pace.
+# a background loop (start_status_sync_daily, started from main.py) runs one check of every connected store once a day,
+# after 08:00 UTC, catching up when the server was asleep. Opening the tab only shows where the checks stand
+# (POST /status-sync/start); POST /status-sync/run starts a check now.
 #
 # One check of one store (needs the store connected to eBay):
 #   1. read the store's whole list of LIVE listings from eBay (GetMyeBaySelling, 200 per request) and mark those active;
@@ -485,13 +487,6 @@ def repo_set_status(body: RepoStatusIn, db: Session = Depends(get_db)):
 # Nothing is ever marked ended from a missing list entry alone, and a failed or half-read list changes nothing it
 # did not see. Progress and the last result are kept in ebay_status_sync (one row per store).
 STATUS_SYNC_PAGE = 200
-
-
-def _sync_hours() -> float:
-    try:
-        return max(0.1, float(os.environ.get("STATUS_SYNC_HOURS") or 6))
-    except ValueError:
-        return 6.0
 
 
 def _sync_max_checks() -> int:
@@ -676,13 +671,20 @@ def status_sync_info(db: Session = Depends(get_db)):
     return {"ready": True, "stores": _sync_rows(db)}
 
 
-@router.post("/status-sync/start")
-def status_sync_start(db: Session = Depends(get_db)):
-    """Called when the Listings tab opens. Returns at once. For every connected store whose last check is older than
-    STATUS_SYNC_HOURS (or never happened), and which is not already being checked, starts the check in the background."""
-    if not _sync_tables_ready(db):
-        return {"ready": False, "stores": []}
-    hours = _sync_hours()
+SYNC_HOUR_UTC = 8  # the daily check runs once after 08:00 UTC (3 AM US Eastern in winter); if the server was asleep it runs when it wakes
+
+
+def _sync_cutoff(now: Optional[datetime] = None) -> datetime:
+    """The most recent daily boundary (08:00 UTC). A store is due when its last finished check is older than this."""
+    now = now or datetime.now(timezone.utc)
+    cut = now.replace(hour=SYNC_HOUR_UTC, minute=0, second=0, microsecond=0)
+    return cut if now >= cut else cut - timedelta(days=1)
+
+
+def _start_due_syncs(db: Session, cutoff: datetime) -> list[str]:
+    """For every connected store whose last finished check is older than `cutoff` (or never happened), and which is not
+    already being checked, start the check in the background. Safe to call from several workers: the claim is one UPDATE."""
+    started: list[str] = []
     for r in db.execute(text("select store from ebay_accounts where refresh_token_enc is not null")).all():
         db.execute(
             text("insert into ebay_status_sync (store, status) values (:s, 'idle') on conflict (store) do nothing"),
@@ -694,13 +696,51 @@ def status_sync_start(db: Session = Depends(get_db)):
                 "message = 'Starting…', marked_active = 0, marked_ended = 0, active_found = 0 "
                 "where store = :s "
                 "and (status <> 'running' or updated_at < now() - interval '15 minutes') "
-                "and (finished_at is null or finished_at < now() - make_interval(secs => :secs)) "
+                "and (finished_at is null or finished_at < :cut) "
                 "and (status <> 'failed' or updated_at < now() - interval '30 minutes') "
                 "returning store"
             ),
-            {"s": r.store, "secs": hours * 3600},
+            {"s": r.store, "cut": cutoff},
         ).first()
         db.commit()
         if claimed:
+            started.append(r.store)
             threading.Thread(target=_sync_store, args=(r.store,), daemon=True, name=f"status-sync-{r.store}").start()
+    return started
+
+
+@router.post("/status-sync/start")
+def status_sync_start(db: Session = Depends(get_db)):
+    """Called when the Listings tab opens. It no longer starts a check (the daily background run does that); it only
+    returns where each store's check stands, so the screen can show progress and the time of the last one."""
+    if not _sync_tables_ready(db):
+        return {"ready": False, "stores": []}
     return {"ready": True, "stores": _sync_rows(db)}
+
+
+@router.post("/status-sync/run")
+def status_sync_run(db: Session = Depends(get_db)):
+    """Check every connected store against eBay now (the 'Check with eBay now' link). Returns at once."""
+    if not _sync_tables_ready(db):
+        return {"ready": False, "stores": []}
+    _start_due_syncs(db, datetime.now(timezone.utc) + timedelta(minutes=1))
+    return {"ready": True, "stores": _sync_rows(db)}
+
+
+def start_status_sync_daily() -> None:
+    """Background loop for main.py's start-up: looks every 15 minutes whether the daily check is due (once per day after
+    08:00 UTC, catching up if the server was asleep) and starts it. Call once at start-up."""
+    def loop() -> None:
+        time.sleep(90)
+        while True:
+            try:
+                with Session(get_engine()) as db:
+                    if _sync_tables_ready(db):
+                        started = _start_due_syncs(db, _sync_cutoff())
+                        if started:
+                            log.info("daily eBay status check started for %s", ", ".join(started))
+            except Exception:
+                log.exception("daily status check could not start")
+            time.sleep(900)
+
+    threading.Thread(target=loop, name="status-sync-daily", daemon=True).start()

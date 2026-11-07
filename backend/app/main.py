@@ -22,8 +22,10 @@ from app.admin_ebay_fitment import router as admin_ebay_fitment_router
 from app.admin_ebay_import import router as admin_ebay_import_router
 from app.admin_ebay_new import router as admin_ebay_new_router
 from app.admin_ebay_listings import router as admin_ebay_listings_router
+from app.admin_ebay_listings import start_status_sync_daily
 from app.ebay_oauth import router as ebay_oauth_router
 from app.ebay_edit import router as ebay_edit_router
+from app.ebay_edit import start_zero_keeper
 from app.ebay_sales import public_router as ebay_sales_public_router
 from app.ebay_sales import router as ebay_sales_router
 from app.ebay_sales import start_background as start_ebay_sales
@@ -131,3 +133,10 @@ app.include_router(qbwc_router)  # QuickBooks Web Connector (public URL, checks 
 def _start_ebay_sales_timer():
     """Per-store eBay sales checks (the interval is set on the Live listings screen)."""
     start_ebay_sales()
+
+
+@app.on_event("startup")
+def _start_ebay_listing_timers():
+    """Once-a-day eBay status check for the Listings screen, and the keeper that resets listings sitting at quantity 0."""
+    start_status_sync_daily()
+    start_zero_keeper()
