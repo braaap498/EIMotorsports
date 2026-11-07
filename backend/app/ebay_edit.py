@@ -8,6 +8,7 @@ Mounted at /admin/ebay-edit/* (owner/admin only).
   DELETE /draft?store=&item_id=   throw the saved edits away
   POST /end                       end a live listing on eBay (needs the store's live-push switch ON)
   POST /set-zero                  set a live listing's quantity to 0 WITHOUT ending it (needs eBay's out-of-stock setting ON)
+  GET/PUT /oos                    read / turn on eBay's out-of-stock preference for a store's account
   POST /restore-qty               take a listing off quantity 0: the website's stock on hand, or an override quantity
   GET  /zero/status, POST /zero/run   the zero-quantity keeper (resets listings before eBay's zero-days limit)
   POST /photo-upload              put a picture from the computer into the website's photo storage (nothing goes to eBay)
@@ -1165,6 +1166,37 @@ def set_zero(body: SetZeroIn, db: Session = Depends(get_db), user: AuthUser = De
         log.exception("could not record the zero-quantity date for %s", current["item_id"])
         db.rollback()
     return {"ok": True, "item_id": current["item_id"], "warnings": [e for e in errs if e["severity"] == "Warning"]}
+
+
+@router.get("/oos")
+def oos_status(store: str = Query(...), db: Session = Depends(get_db)):
+    """eBay's out-of-stock preference for the store's account: {"enabled": true | false | null}. null = eBay did not say."""
+    row = _store_row(db, store)
+    return {"store": row.store, "enabled": _oos_preference(db, row.store)}
+
+
+class OosIn(BaseModel):
+    store: str
+    enabled: bool
+
+
+@router.put("/oos")
+def oos_set(body: OosIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Turn the out-of-stock preference on (or off) in the store's eBay account, then read it back to confirm."""
+    row = _store_row(db, body.store)
+    root = _trading(
+        db, row.store, "SetUserPreferences",
+        f"<OutOfStockControlPreference>{'true' if body.enabled else 'false'}</OutOfStockControlPreference>",
+    )
+    ok = not _failed(root)
+    _log(db, user, row.store, "", "set_out_of_stock_pref", False, {"enabled": body.enabled},
+         {"ack": root.findtext(f"{NS}Ack"), "errors": _errors(root)}, ok, None if ok else _first_message(root))
+    if not ok:
+        raise HTTPException(502, "eBay did not change the setting: " + _first_message(root))
+    now = _oos_preference(db, row.store)
+    if now is not None and now != body.enabled:
+        raise HTTPException(502, "eBay accepted the request but still shows the setting as " + ("ON" if now else "OFF") + ". Change it in eBay: Account settings > Selling > Selling preferences.")
+    return {"store": row.store, "enabled": now if now is not None else body.enabled}
 
 
 class RestoreIn(BaseModel):
