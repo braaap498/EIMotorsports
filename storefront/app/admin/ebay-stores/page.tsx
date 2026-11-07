@@ -33,6 +33,7 @@ export default function EbayStoresPage() {
   const [addMsg, setAddMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState("");
+  const [oos, setOos] = useState<Record<string, boolean | null | "error">>({}); // store -> eBay out-of-stock setting (null = eBay did not say)
   const [diag, setDiag] = useState<{
     store: string;
     scopes_granted: string[];
@@ -41,10 +42,35 @@ export default function EbayStoresPage() {
   } | null>(null);
   const [connMsg, setConnMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
+  async function loadOos(s: string) {
+    try {
+      const r = await api<{ enabled: boolean | null }>(`/ebay-edit/oos?store=${encodeURIComponent(s)}`);
+      setOos((o) => ({ ...o, [s]: r.enabled }));
+    } catch {
+      setOos((o) => ({ ...o, [s]: "error" }));
+    }
+  }
+
+  async function setOosOn(s: string) {
+    if (!window.confirm(`Turn on "Listings stay active when you're out of stock" in the ${s} eBay account?\n\nA listing that reaches quantity 0 then stays alive (hidden from search) instead of ending. It applies to all of that account's listings.`)) return;
+    setBusy(s);
+    setConnMsg(null);
+    try {
+      const r = await api<{ enabled: boolean }>("/ebay-edit/oos", { method: "PUT", body: { store: s, enabled: true } });
+      setOos((o) => ({ ...o, [s]: r.enabled }));
+      setConnMsg({ kind: "success", text: `${s}: out-of-stock setting is now ${r.enabled ? "ON" : "OFF"}.` });
+    } catch (e) {
+      setConnMsg({ kind: "error", text: `${s}: ${errMsg(e)}` });
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function loadStores() {
     try {
       const r = await api<StoresResp>("/ebay-listings/stores");
       setStores(r.stores);
+      for (const st of r.stores.filter((x) => x.authorized)) void loadOos(st.store);
     } catch (e) {
       setError(errMsg(e));
     }
@@ -116,7 +142,7 @@ export default function EbayStoresPage() {
 
   async function setPushes(s: string, enabled: boolean) {
     const q = enabled
-      ? `Turn live pushes ON for ${s}? After this, "Send to eBay" on the edit page changes real listings on that store.\n\nFirst check that "Listings stay active when you're out of stock" is turned on in that eBay account (Account settings > Selling > Selling preferences). If it is off, eBay does not allow a quantity of 0.`
+      ? `Turn live pushes ON for ${s}? After this, "Send to eBay" on the edit page changes real listings on that store.`
       : `Turn live pushes OFF for ${s}? Previews still work; nothing can be sent.`;
     if (!window.confirm(q)) return;
     setBusy(s);
@@ -209,6 +235,7 @@ export default function EbayStoresPage() {
                     <th className="py-1 pr-6 font-normal">Linked</th>
                     <th className="py-1 pr-6 font-normal">Access</th>
                     <th className="py-1 pr-6 font-normal">Pushes</th>
+                    <th className="py-1 pr-6 font-normal">Out-of-stock setting</th>
                     <th className="py-1 pr-6 font-normal">Approval ends</th>
                     <th className="py-1 font-normal">Actions</th>
                   </tr>
@@ -226,6 +253,29 @@ export default function EbayStoresPage() {
                       </td>
                       <td className="py-2 pr-6">
                         <Badge tone={s.live_pushes_enabled ? "amber" : "gray"}>{s.live_pushes_enabled ? "Live pushes ON" : "Preview only"}</Badge>
+                      </td>
+                      <td className="py-2 pr-6">
+                        {!s.authorized ? (
+                          "—"
+                        ) : oos[s.store] === true ? (
+                          <Badge tone="green">ON</Badge>
+                        ) : oos[s.store] === false ? (
+                          <span className="flex flex-wrap items-center gap-2">
+                            <Badge tone="amber">OFF</Badge>
+                            <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void setOosOn(s.store)} title="Without it eBay refuses quantity 0 and ends a listing when it sells out">
+                              Turn ON
+                            </button>
+                          </span>
+                        ) : oos[s.store] === undefined ? (
+                          <span className="text-xs text-gray-500">checking…</span>
+                        ) : (
+                          <span className="flex flex-wrap items-center gap-2">
+                            <Badge tone="gray">{oos[s.store] === "error" ? "Could not check" : "eBay did not say"}</Badge>
+                            <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void loadOos(s.store)}>
+                              Check
+                            </button>
+                          </span>
+                        )}
                       </td>
                       <td className="py-2 pr-6 text-xs text-gray-500">
                         {s.authorized && s.refresh_token_expires_at ? new Date(s.refresh_token_expires_at).toLocaleDateString() : "—"}
@@ -257,7 +307,7 @@ export default function EbayStoresPage() {
                   ))}
                   {stores.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="py-2 text-gray-500">No stores yet.</td>
+                      <td colSpan={8} className="py-2 text-gray-500">No stores yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -265,14 +315,6 @@ export default function EbayStoresPage() {
             </div>
           </div>
 
-        {stores.length > 0 && (
-          <p className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-            <span className="font-medium">Turn on the out-of-stock setting in eBay before turning pushes ON.</span> In each eBay account:
-            Account settings &rsaquo; Selling &rsaquo; Selling preferences &rsaquo; Multi-quantity listings &rsaquo; &ldquo;Listings stay active
-            when you&rsquo;re out of stock&rdquo;. If it is off, eBay does not allow a quantity of 0, so a quantity update that takes a part to 0 can
-            be refused, and a listing that sells out ends, so bringing it back means a relist with a new item number.
-          </p>
-        )}
 
         {showAdd && (
 
