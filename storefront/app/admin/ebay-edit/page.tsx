@@ -82,48 +82,13 @@ const photoId = (p: PhotoEdit) => (p.url ? p.url : "key:" + p.key);
 const sigOf = (v: { title: string; description: string; price: string; qty: string; sku: string; vars: Record<string, VarEdit>; photos: PhotoEdit[]; specs: SpecEdit[] }) =>
   JSON.stringify([v.title, norm(v.description), v.price, v.qty, v.sku, Object.keys(v.vars).sort().map((k) => [k, v.vars[k].price, v.vars[k].qty]), v.photos.map(photoId), specSig(v.specs)]);
 
-// Does the visual editor keep this description as it is? It only keeps simple formatting (bold, lists,
-// headings, links, tables); styles, images and the like would be dropped. Read in an inert document,
-// so nothing in the description can load or run while we compare.
+// Read in an inert document, so nothing in the description can load or run while we compare.
 const inert = (h: string) => new DOMParser().parseFromString(h, "text/html").body.innerHTML.replace(/\s+/g, "");
-const losesFormatting = (h: string) => h.trim() !== "" && inert(h) !== inert(sanitizeHtml(h));
 
 // The visual editor can hand back its own tidied-up version of the HTML it was given (on load, on blur,
 // after a re-render) without the person having typed anything. That must not count as an edit: an edit
 // clears the preview, which made the preview vanish the moment it appeared.
 const sameHtml = (a: string, b: string) => inert(a) === inert(b) || inert(a) === inert(sanitizeHtml(b));
-
-// What exactly the visual editor would drop, so the warning is not a guess. Tags are counted in the
-// description and in its cleaned version; attributes are counted in the description (the editor keeps
-// only link addresses and table spans).
-function lossDetail(h: string): string[] {
-  const a = new DOMParser().parseFromString(h, "text/html").body;
-  const b = new DOMParser().parseFromString(sanitizeHtml(h), "text/html").body;
-  const tally = (root: HTMLElement) => {
-    const m: Record<string, number> = {};
-    root.querySelectorAll("*").forEach((e) => {
-      const t = e.tagName.toLowerCase();
-      m[t] = (m[t] ?? 0) + 1;
-    });
-    return m;
-  };
-  const ca = tally(a);
-  const cb = tally(b);
-  const out: string[] = [];
-  const tags = Object.keys(ca)
-    .filter((t) => ca[t] - (cb[t] ?? 0) > 0)
-    .map((t) => `<${t}> x${ca[t] - (cb[t] ?? 0)}`);
-  if (tags.length) out.push("Tags removed (their text stays): " + tags.join(", "));
-  const attrs: Record<string, number> = {};
-  a.querySelectorAll("*").forEach((e) =>
-    Array.from(e.attributes).forEach((at) => {
-      if (!["href", "colspan", "rowspan"].includes(at.name)) attrs[at.name] = (attrs[at.name] ?? 0) + 1;
-    }),
-  );
-  const attrList = Object.entries(attrs).map(([k, n]) => `${k} x${n}`);
-  if (attrList.length) out.push("Settings removed: " + attrList.join(", "));
-  return out;
-}
 
 export default function EbayEditPage() {
   const [store, setStore] = useState("");
@@ -135,9 +100,6 @@ export default function EbayEditPage() {
   const [sku, setSku] = useState("");
   const [vars, setVars] = useState<Record<string, VarEdit>>({});
   const [photos, setPhotos] = useState<PhotoEdit[]>([]);
-  const [htmlMode, setHtmlMode] = useState(false);
-  const [lossy, setLossy] = useState(false);
-  const [lossInfo, setLossInfo] = useState<string[]>([]);
   const [specs, setSpecs] = useState<SpecEdit[]>([]);
   const [showLib, setShowLib] = useState(false);
   const [libQ, setLibQ] = useState("");
@@ -175,11 +137,7 @@ export default function EbayEditPage() {
     setSku(vSku);
     setVars(vVars);
     setPhotos(vPhotos);
-    const l = losesFormatting(vDesc);
-    setLossy(l);
-    setLossInfo(l ? lossDetail(vDesc) : []);
     setSpecs(vSpecs);
-    setHtmlMode(l); // a description with styling opens as HTML so nothing is lost by accident
     setPhotoMsg("");
     setBaseSig(sigOf({ title: vTitle, description: vDesc, price: vPrice, qty: vQty, sku: vSku, vars: vVars, photos: vPhotos, specs: vSpecs }));
   }
@@ -446,11 +404,6 @@ export default function EbayEditPage() {
   }, [libQ, showLib]);
 
   // ---- description ------------------------------------------------------
-  function switchEditor() {
-    if (htmlMode && lossy && !window.confirm("This description has styling the visual editor cannot keep (for example colours, fonts or images). If you change it in the visual editor, that styling will be simplified. Switch anyway?")) return;
-    setHtmlMode(!htmlMode);
-  }
-
   const off = !item?.editable;
 
   // The same controls at the top and the bottom of the page.
@@ -698,45 +651,17 @@ export default function EbayEditPage() {
                 <span className="text-sm font-medium text-gray-700">
                   Description <span className="font-normal text-gray-500">({description.length.toLocaleString("en-US")} characters; the whole description is replaced when sent)</span>
                 </span>
-                <button type="button" className={btn2Cls} disabled={off} onClick={switchEditor}>
-                  {htmlMode ? "Switch to visual editor" : "Edit as HTML"}
-                </button>
               </div>
-              {lossy && htmlMode && (
-                <Notice>
-                  This description has formatting the visual editor cannot keep, so it opened as HTML. Edit it here to keep everything as it is.
-                  {lossInfo.length > 0 && (
-                    <ul className="mt-1 list-disc pl-5 text-xs">
-                      {lossInfo.map((x) => (
-                        <li key={x}>{x}</li>
-                      ))}
-                    </ul>
-                  )}
-                </Notice>
-              )}
-              {htmlMode ? (
-                <textarea
-                  className={`${inputCls} h-48 font-mono text-xs`}
-                  value={description}
-                  disabled={off}
-                  aria-label="Description (HTML)"
-                  onChange={(e) => {
-                    setDescription(e.target.value);
-                    touch();
-                  }}
-                />
-              ) : (
-                <DescriptionEditor
-                  label=""
-                  value={description}
-                  disabled={off}
-                  onChange={(h) => {
-                    if (sameHtml(h, description)) return; // the editor re-saying what we already have, not an edit
-                    setDescription(h);
-                    touch();
-                  }}
-                />
-              )}
+              <DescriptionEditor
+                label=""
+                value={description}
+                disabled={off}
+                onChange={(h) => {
+                  if (sameHtml(h, description)) return; // the editor re-saying what we already have, not an edit
+                  setDescription(h);
+                  touch();
+                }}
+              />
             </div>
           </div>
 
