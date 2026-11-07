@@ -212,6 +212,8 @@ export default function EbaySalesPanel() {
             </button>
           </div>
 
+          <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
+
           <div className="overflow-x-auto">
             <table className="min-w-full text-left text-sm">
               <thead className="bg-gray-50 text-xs text-gray-500">
