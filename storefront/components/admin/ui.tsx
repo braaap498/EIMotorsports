@@ -131,18 +131,19 @@ export function Pager({
   const to = Math.min(offset + limit, total);
   const page = Math.floor(offset / limit) + 1;
   const pages = Math.ceil(total / limit);
+  /* Every part has a fixed width (and digits are the same width), so the controls stay put from page to page. */
   return (
-    <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600">
-      <span>
+    <div className="flex flex-wrap items-center gap-3 text-sm tabular-nums text-gray-600">
+      <span className="inline-block w-[14rem]">
         {from}–{to} of {total}
       </span>
-      <button type="button" className={btn2Cls} disabled={offset === 0} onClick={() => onChange(Math.max(0, offset - limit))}>
+      <button type="button" className={`${btn2Cls} w-24 text-center`} disabled={offset === 0} onClick={() => onChange(Math.max(0, offset - limit))}>
         Previous
       </button>
-      <span className="flex items-center gap-2">
+      <span className="flex w-[13rem] items-center gap-2">
         Page <PageInput page={page} pages={pages} onGo={(p) => onChange((p - 1) * limit)} /> of {pages}
       </span>
-      <button type="button" className={btn2Cls} disabled={offset + limit >= total} onClick={() => onChange(offset + limit)}>
+      <button type="button" className={`${btn2Cls} w-24 text-center`} disabled={offset + limit >= total} onClick={() => onChange(offset + limit)}>
         Next
       </button>
     </div>
