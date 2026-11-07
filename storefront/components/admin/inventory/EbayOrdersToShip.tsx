@@ -85,6 +85,8 @@ export default function EbayOrdersToShip({ active }: { active: boolean }) {
         </button>
       </div>
 
+      <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
+
       <div className="overflow-x-auto rounded border border-gray-200 bg-white">
         {/* fixed column widths, sized for the longest content, so nothing shifts from page to page */}
         <table className="w-full min-w-[80rem] table-fixed text-left text-sm">
@@ -97,15 +99,15 @@ export default function EbayOrdersToShip({ active }: { active: boolean }) {
             <col className="w-[4rem]" />
             <col className="w-[17rem]" />
           </colgroup>
-          <thead className="bg-gray-50 text-xs text-gray-500">
+          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
-              <th className="px-3 py-2">Date</th>
-              <th className="px-3 py-2">Store</th>
-              <th className="px-3 py-2">Order #</th>
-              <th className="px-3 py-2">Custom label</th>
-              <th className="px-3 py-2">Title</th>
-              <th className="px-3 py-2">Qty</th>
-              <th className="px-3 py-2">Fulfillment</th>
+              <th className="whitespace-nowrap px-3 py-2">Date</th>
+              <th className="whitespace-nowrap px-3 py-2">Store</th>
+              <th className="whitespace-nowrap px-3 py-2">Order #</th>
+              <th className="whitespace-nowrap px-3 py-2">Custom label</th>
+              <th className="whitespace-nowrap px-3 py-2">Title</th>
+              <th className="whitespace-nowrap px-3 py-2">Qty</th>
+              <th className="whitespace-nowrap px-3 py-2">Fulfillment</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">

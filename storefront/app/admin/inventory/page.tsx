@@ -44,7 +44,8 @@ export default function InventoryPage() {
   // Open on ?tab=... if given, otherwise the first tab this person may use.
   useEffect(() => {
     const want = new URLSearchParams(window.location.search).get("tab");
-    setTab(tabs.find((t) => t.key === want)?.key ?? tabs[0]?.key ?? "");
+    // Pick & ship is the default; anyone without access to it gets their first tab.
+    setTab(tabs.find((t) => t.key === want)?.key ?? tabs.find((t) => t.key === "ship")?.key ?? tabs[0]?.key ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabs.map((t) => t.key).join(",")]);
 

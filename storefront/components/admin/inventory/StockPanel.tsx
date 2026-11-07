@@ -139,18 +139,31 @@ export default function StockPanel({ active }: { active: boolean }) {
 
       {error && <Notice kind="error">{error}</Notice>}
 
+      <Pager total={data.total} limit={LIMIT} offset={offset} onChange={setOffset} />
+
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="w-full text-left text-sm">
+        {/* fixed column widths, sized for the longest content, so nothing shifts from page to page */}
+        <table className={`w-full table-fixed text-left text-sm ${view === "low" ? "min-w-[90rem]" : "min-w-[84rem]"}`}>
+          <colgroup>
+            <col />
+            <col className="w-[7rem]" />
+            <col className="w-[11.5rem]" />
+            <col className="w-[7rem]" />
+            <col className="w-[7rem]" />
+            <col className="w-[11.5rem]" />
+            {view === "low" && <col className="w-[6rem]" />}
+            <col className="w-[16rem]" />
+          </colgroup>
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
-              <th className="px-3 py-2">Part</th>
-              <th className="px-3 py-2">Bin</th>
-              <th className="px-3 py-2">On hand</th>
-              <th className="px-3 py-2">Reserved</th>
-              <th className="px-3 py-2">Available</th>
-              <th className="px-3 py-2">Restock level</th>
-              {view === "low" && <th className="px-3 py-2">Short by</th>}
-              <th className="px-3 py-2">Status</th>
+              <th className="whitespace-nowrap px-3 py-2">Part</th>
+              <th className="whitespace-nowrap px-3 py-2">Bin</th>
+              <th className="whitespace-nowrap px-3 py-2">On hand</th>
+              <th className="whitespace-nowrap px-3 py-2">Reserved</th>
+              <th className="whitespace-nowrap px-3 py-2">Available</th>
+              <th className="whitespace-nowrap px-3 py-2">Restock level</th>
+              {view === "low" && <th className="whitespace-nowrap px-3 py-2">Short by</th>}
+              <th className="whitespace-nowrap px-3 py-2">Status</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
