@@ -410,8 +410,8 @@ export default function EbayLiveListingsPage() {
       return;
     }
     const one = n === 1;
-    const what = keepAlive ? "quantity 1" : "the stock on hand shown on the website";
-    if (!window.confirm(`This will put ${one ? "this listing" : `these ${n} listings`} back on sale on eBay at ${what}.${keepAlive ? "\n\nBuyers can buy the part while it is at 1, so only do this for a part you could ship." : "\n\nA part with no stock on hand is left at 0."}\n\nContinue?`)) return;
+    const what = keepAlive ? "quantity 1" : "the available stock shown on the website";
+    if (!window.confirm(`This will put ${one ? "this listing" : `these ${n} listings`} back on sale on eBay at ${what}.${keepAlive ? "\n\nBuyers can buy the part while it is at 1, so only do this for a part you could ship." : "\n\nA part with nothing available is left at 0."}\n\nContinue?`)) return;
     setBusy("status");
     setActMsg(null);
     let done = 0;
@@ -652,7 +652,7 @@ export default function EbayLiveListingsPage() {
               )}
               {nZeroPicked > 0 && (
                 <>
-                  <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkRestore(false)} title="Puts the listing back on sale at the stock on hand shown on the website">
+                  <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkRestore(false)} title="Puts the listing back on sale at the available stock shown on the website">
                     Restore stock on eBay ({nZeroPicked})
                   </button>
                   <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkRestore(true)} title="Sets quantity 1 on eBay, which restarts the zero-days count">

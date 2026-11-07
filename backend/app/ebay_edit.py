@@ -56,6 +56,7 @@ from sqlalchemy.orm import Session
 from app import images, photo_store
 from app.auth import AuthUser, require_admin
 from app.database import get_db
+from app.stock import available_sql
 from app.ebay_oauth import TRADING_URL, _access, _expected_username, _store_row, get_user_token
 
 log = logging.getLogger(__name__)
@@ -1202,12 +1203,12 @@ def oos_set(body: OosIn, db: Session = Depends(get_db), user: AuthUser = Depends
 class RestoreIn(BaseModel):
     store: str
     item_id: str = Field(..., max_length=20)
-    qty: Optional[int] = Field(default=None, ge=1, le=9999)  # leave out = the website's stock on hand; 1 = the "keep alive" quantity
+    qty: Optional[int] = Field(default=None, ge=1, le=9999)  # leave out = the website's available stock (on hand minus set aside); 1 = the "keep alive" quantity
 
 
 @router.post("/restore-qty")
 def restore_qty(body: RestoreIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
-    """Take a listing back off quantity 0 (the other half of Set 0 Qty). Without qty it uses the website's stock on hand."""
+    """Take a listing back off quantity 0 (the other half of Set 0 Qty). Without qty it uses the website's available stock (same figure the sales quantity push sends)."""
     row = _store_row(db, body.store)
     enabled = db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
     if not enabled:
@@ -1224,13 +1225,13 @@ def restore_qty(body: RestoreIn, db: Session = Depends(get_db), user: AuthUser =
     if qty is None:
         qty = db.execute(
             text(
-                "select p.quantity_on_hand from channel_listings cl join products p on p.id = cl.product_id "
+                f"select {available_sql('p')} from channel_listings cl join products p on p.id = cl.product_id "
                 "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i and cl.store = :s limit 1"
             ),
             {"i": current["item_id"], "s": row.store},
         ).scalar()
         if not qty or qty < 1:
-            raise HTTPException(409, "The website shows no stock on hand for this part, so it was left at 0. Receive stock first, or restore it with a quantity of 1.")
+            raise HTTPException(409, "The website shows nothing available to sell for this part (stock on hand minus parts set aside for open orders), so it was left at 0. Receive stock first, or restore it with a quantity of 1.")
         qty = min(int(qty), 9999)
     root = _set_qty(db, row.store, current["item_id"], qty)
     ok = not _failed(root)
