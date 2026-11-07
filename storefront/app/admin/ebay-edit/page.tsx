@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 import DescriptionEditor from "../../../components/admin/DescriptionEditor";
@@ -90,7 +91,7 @@ const inert = (h: string) => new DOMParser().parseFromString(h, "text/html").bod
 // clears the preview, which made the preview vanish the moment it appeared.
 const sameHtml = (a: string, b: string) => inert(a) === inert(b) || inert(a) === inert(sanitizeHtml(b));
 
-export default function EbayEditPage() {
+function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string }) {
   const [store, setStore] = useState("");
   const [item, setItem] = useState<Item | null>(null);
   const [title, setTitle] = useState("");
@@ -111,7 +112,8 @@ export default function EbayEditPage() {
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [differences, setDifferences] = useState<string[]>([]);
   const [busy, setBusy] = useState("");
-  const started = useRef(false);
+  const shownId = useRef(""); // the item number the form is showing right now
+  const loadSeq = useRef(0); // each load gets a number; only the newest one may fill the form
 
   // Show a listing on the form: what eBay has, with any edits saved on the website laid over it.
   function fill(i: Item) {
@@ -129,6 +131,7 @@ export default function EbayEditPage() {
       ? d.photos.map((p, n) => (p.url ? { id: `e${n}`, thumb: p.url, url: p.url } : { id: "k:" + p.key, thumb: p.thumb ?? "", key: p.key }))
       : i.photos.map((p, n) => ({ id: `e${n}`, thumb: p.url, url: p.url }));
     const vSpecs: SpecEdit[] = (d?.item_specifics ?? i.item_specifics).map((x, n) => ({ id: `s${n}`, name: x.name, value: x.values.join("; ") }));
+    shownId.current = i.item_id;
     setItem(i);
     setTitle(vTitle);
     setDescription(vDesc);
@@ -155,7 +158,10 @@ export default function EbayEditPage() {
     setBusy("load");
     setMsg(null);
     try {
-      fill(await api<Item>(`/ebay-edit/item?store=${encodeURIComponent(s)}&item_id=${encodeURIComponent(id)}`));
+      const mine = ++loadSeq.current;
+      const got = await api<Item>(`/ebay-edit/item?store=${encodeURIComponent(s)}&item_id=${encodeURIComponent(id)}`);
+      if (mine !== loadSeq.current) return; // a newer item was asked for meanwhile: this answer is old
+      fill(got);
       void loadLog(s, id);
     } catch (e) {
       setItem(null);
@@ -165,16 +171,21 @@ export default function EbayEditPage() {
     }
   }
 
+  // Follow the address: when the store or item in it changes (a click from the list, a pasted address), show that item.
+  // Never keep what the form was showing for the previous item.
   useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    const p = new URLSearchParams(window.location.search);
-    const s = p.get("store") ?? "";
-    const id = p.get("item") ?? "";
-    setStore(s);
-    if (s && id) void load(s, id);
+    setStore(urlStore);
+    if (!urlStore || !urlItem) return;
+    if (shownId.current === urlItem) return; // already showing it (e.g. the address was just updated after a relist)
+    loadSeq.current += 1;
+    shownId.current = "";
+    setItem(null);
+    setMsg(null);
+    setLog([]);
+    setDifferences([]);
+    void load(urlStore, urlItem);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [urlStore, urlItem]);
 
   // Only what differs from eBay goes into the request; the server checks again.
   const specsChanged =
@@ -802,4 +813,17 @@ export default function EbayEditPage() {
       )}
     </div>
   );
+}
+
+export default function EbayEditRoute() {
+  return (
+    <Suspense fallback={null}>
+      <EbayEditFromUrl />
+    </Suspense>
+  );
+}
+
+function EbayEditFromUrl() {
+  const p = useSearchParams();
+  return <EbayEditPage urlStore={p.get("store") ?? ""} urlItem={(p.get("item") ?? "").trim()} />;
 }
