@@ -1255,7 +1255,7 @@ with q as (
   union all
   select 'eBay'::text, l.ebay_order_id, min(coalesce(l.sale_date, l.created_at)),
          sum(l.quantity)::int, min(coalesce(l.title, '')), count(*)::int, min(l.store), null::bigint,
-         case when bool_or(o.shipped_at_ebay) then 'shipped' else 'pick' end
+         case when bool_or(o.shipped_at_ebay is not null) then 'shipped' else 'pick' end
   from ebay_order_lines l
   join ebay_orders o on o.id = l.order_pk
   where l.state = 'reserved'
