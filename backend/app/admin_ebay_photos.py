@@ -7,6 +7,7 @@ Mounted at /admin/ebay-photos/* (owner/admin only).
   GET  /status                   the latest job, for the progress display (poll it)
   POST /stop                     asks the running job to stop after its current listing
   POST /labels   {csv}           fills in custom labels from a Seller Hub report
+  POST /labels-from-ebay {store, limit}  fills in blank custom labels by asking eBay directly (no report needed)
 
 What a job does (the same steps you ran by hand for the 102 genuine-oem-parts listings):
 
@@ -1289,4 +1290,138 @@ def fill_labels(body: LabelsIn, db: Session = Depends(get_db)):
         "differs_count": len(differs),
         "differs": differs[:50],
         "unreadable_rows": bad,
+    }
+
+
+# ------------------------------------------------------- custom labels straight from eBay (no report)
+class FillApiIn(BaseModel):
+    store: str = ""  # required: the connected eBay store whose listings are asked about
+    limit: int = 40  # listings to ask eBay about in this request (one call each)
+
+
+# Listings in the import table with no label yet, for one store, that are not linked to a product and that
+# eBay has not already been asked about (a saved answer in ebay_api_details, label or not, means "done").
+_LABEL_TODO = """
+from ebay_label_import i
+where coalesce(trim(cast(i.custom_label_sku as text)), '') = ''
+  and lower(coalesce(i.store, '')) = lower(:st)
+  and not exists (select 1 from channel_listings cl
+                  where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = cast(i.item_number as text))
+"""
+
+
+@router.post("/labels-from-ebay")
+def labels_from_ebay(body: FillApiIn, db: Session = Depends(get_db)):
+    """Report-free label fill. Asks eBay (one call per listing, through the store's own login) for the custom label
+    of listings in the import table that have none, and saves it. A label already set is never changed. Changes
+    nothing on eBay. The answer is also kept in ebay_api_details, the same place the listing import keeps it, so
+    the same listing is never asked about twice."""
+    from app.admin_ebay_import import FETCH_MAX, _authorized_stores, _fetch_details  # here, not at the top: that module imports this one
+
+    if not body.store.strip():
+        raise HTTPException(400, "Type the eBay store name first, so the right store is asked.")
+    store_key = _resolve(db, body.store)["store"]
+    row = next((s for s in _authorized_stores(db) if s.store.lower() == store_key.lower()), None)
+    if row is None:
+        raise HTTPException(409, f"{store_key} is not connected to eBay yet, so eBay cannot be asked. Connect it on the Stores page, or use a report.")
+    limit = max(1, min(int(body.limit), FETCH_MAX))
+    params = {"st": store_key}
+
+    # 1) labels eBay already gave us earlier (saved by the listing import): no eBay call needed
+    saved = db.execute(
+        text(
+            "update ebay_label_import i set custom_label_sku = nullif(trim(a.custom_label_sku), '') "
+            "from ebay_api_details a "
+            "where a.item_id = cast(i.item_number as text) and a.status = 'ok' "
+            "and nullif(trim(a.custom_label_sku), '') is not null "
+            "and coalesce(trim(cast(i.custom_label_sku as text)), '') = '' "
+            "and lower(coalesce(i.store, '')) = lower(:st)"
+        ),
+        params,
+    ).rowcount or 0
+    db.commit()
+
+    todo = [
+        r.item
+        for r in db.execute(
+            text(f"select cast(i.item_number as text) as item {_LABEL_TODO} "
+                 "and not exists (select 1 from ebay_api_details a where a.item_id = cast(i.item_number as text)) "
+                 "order by i.item_number desc"),
+            params,
+        ).all()
+    ]
+    db.rollback()
+
+    asked = filled = no_label = inactive = other_store = errors = 0
+    error_sample: list[str] = []
+    rate_limited: Optional[str] = None
+    for n, item in enumerate(todo[:limit], 1):
+        try:
+            d = _fetch_details(db, [row], item)
+        except RateLimited as e:
+            rate_limited = str(e)
+            break
+        if d["state"] == "error":
+            errors += 1
+            if len(error_sample) < 10:
+                error_sample.append(f"{item}: {d['reason']}")
+            if errors >= 5 and asked == 0:
+                break  # nothing is working (approval expired, eBay down): stop instead of burning calls
+            continue
+        asked += 1
+        if d["state"] == "skipped":
+            if "Not on any connected store" in d["reason"]:
+                other_store += 1  # belongs to another store: not saved, so that store can still ask about it
+            else:
+                inactive += 1
+                db.execute(
+                    text("insert into ebay_api_details (item_id, status, reason) values (:i, 'skipped', :r) "
+                         "on conflict (item_id) do update set status = 'skipped', reason = excluded.reason, fetched_at = now()"),
+                    {"i": item, "r": d["reason"]},
+                )
+        else:
+            db.execute(
+                text("insert into ebay_api_details (item_id, status, store, title, custom_label_sku, price, quantity, ebay_category) "
+                     "values (:i, 'ok', :s, :t, :l, :p, :q, :c) "
+                     "on conflict (item_id) do update set status = 'ok', reason = null, store = excluded.store, "
+                     "title = excluded.title, custom_label_sku = excluded.custom_label_sku, price = excluded.price, "
+                     "quantity = excluded.quantity, ebay_category = excluded.ebay_category, fetched_at = now()"),
+                {"i": item, "s": d["store"], "t": d["title"], "l": d["label"], "p": d["price"], "q": d["qty"], "c": d["category"]},
+            )
+            if d["label"]:
+                db.execute(
+                    text("update ebay_label_import set custom_label_sku = :l where cast(item_number as text) = :i "
+                         "and coalesce(trim(cast(custom_label_sku as text)), '') = ''"),
+                    {"l": d["label"], "i": item},
+                )
+                filled += 1
+            else:
+                no_label += 1
+        if n % 10 == 0:
+            db.commit()
+    db.commit()
+
+    left = len(
+        db.execute(
+            text(f"select 1 {_LABEL_TODO} and not exists (select 1 from ebay_api_details a where a.item_id = cast(i.item_number as text))"),
+            params,
+        ).all()
+    )
+    no_store = db.execute(
+        text("select count(*) from ebay_label_import i where coalesce(trim(cast(i.custom_label_sku as text)), '') = '' and i.store is null")
+    ).scalar() or 0
+    db.rollback()
+    return {
+        "store": store_key,
+        "filled_from_saved": saved,
+        "asked_ebay": asked,
+        "labels_filled": filled,
+        "no_label_on_ebay": no_label,
+        "not_active": inactive,
+        "other_store": other_store,
+        "errors": errors,
+        "error_sample": error_sample,
+        "rate_limited": rate_limited,
+        "remaining": left,
+        "blank_without_store": int(no_store),
     }

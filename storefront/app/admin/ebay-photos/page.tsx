@@ -28,6 +28,20 @@ type Job = {
   finished_at: string | null;
 };
 type StatusResp = { job: Job | null };
+type ApiLabelsResp = {
+  store: string;
+  filled_from_saved: number;
+  asked_ebay: number;
+  labels_filled: number;
+  no_label_on_ebay: number;
+  not_active: number;
+  other_store: number;
+  errors: number;
+  error_sample: string[];
+  rate_limited: string | null;
+  remaining: number;
+  blank_without_store: number;
+};
 type LabelsResp = {
   store?: string | null;
   listings_in_report: number;
@@ -94,6 +108,8 @@ export default function EbayPhotoImportPage() {
   const [uploading, setUploading] = useState(false);
   const [labelsErr, setLabelsErr] = useState("");
   const [labels, setLabels] = useState<LabelsResp | null>(null);
+  const [apiBusy, setApiBusy] = useState(false);
+  const [apiLabels, setApiLabels] = useState<ApiLabelsResp | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   async function refresh() {
@@ -178,6 +194,24 @@ export default function EbayPhotoImportPage() {
       setLabelsErr(errMsg(e));
     } finally {
       setUploading(false);
+    }
+  }
+
+  // Ask eBay directly for the custom labels that are still blank for the store typed in the box (no report needed).
+  async function fillFromEbay() {
+    if (!labelsStore.trim()) {
+      setLabelsErr("Type the eBay store name above first, so the right store is asked.");
+      return;
+    }
+    setApiBusy(true);
+    setLabelsErr("");
+    setApiLabels(null);
+    try {
+      setApiLabels(await api<ApiLabelsResp>("/ebay-photos/labels-from-ebay", { method: "POST", body: { store: labelsStore.trim(), limit: 100 } }));
+    } catch (e) {
+      setLabelsErr(errMsg(e));
+    } finally {
+      setApiBusy(false);
     }
   }
 
@@ -332,20 +366,46 @@ export default function EbayPhotoImportPage() {
 
       <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
         <div>
-          <h2 className="text-base font-semibold">Fill in custom labels from a Seller Hub report</h2>
+          <h2 className="text-base font-semibold">Fill in custom labels</h2>
           <p className="mt-1 max-w-3xl text-sm text-gray-600">
-            Upload an active or inactive listings report (CSV). Empty custom labels are filled in by item number, and
+            Either ask eBay directly (no report needed), or upload a Seller Hub report. Asking eBay only works for the store
+            typed below, and only for active listings; use a report for ended ones.
+          </p>
+          <p className="mt-1 max-w-3xl text-sm text-gray-600">
+            Report upload: an active or inactive listings report (CSV). Empty custom labels are filled in by item number, and
             listings in the report that are not in the import table are added. A label that is already set is never
             changed; if the report disagrees, it is listed below for you to look at.
           </p>
         </div>
         <label className="block max-w-sm text-sm">
           <span className="mb-1 block font-medium">eBay store name (optional)</span>
-          <StoreInput value={labelsStore} onChange={setLabelsStore} placeholder="eandimotorsports or genuine-oem-parts" disabled={uploading} />
+          <StoreInput value={labelsStore} onChange={setLabelsStore} placeholder="eandimotorsports or genuine-oem-parts" disabled={uploading || apiBusy} />
           <span className="mt-1 block text-xs text-gray-500">
-            The store this report is from. Left blank, no store is recorded for these listings (it is not assumed).
+            The store these listings belong to. Needed for &ldquo;Fill from eBay&rdquo;. For a report upload, left blank, no store is recorded for these listings (it is not assumed).
           </span>
         </label>
+        <div className="flex flex-wrap items-center gap-3">
+          <button type="button" className={btnCls} disabled={apiBusy || uploading} onClick={() => void fillFromEbay()} title="Asks eBay for the custom label of up to 100 listings that have none yet. Changes nothing on eBay.">
+            {apiBusy ? "Asking eBay…" : "Fill from eBay"}
+          </button>
+          <span className="text-xs text-gray-500">Asks eBay for up to 100 listings per click (about a minute). Click again for more. Keep this page open.</span>
+        </div>
+        {apiLabels && (
+          <div className="space-y-2 text-sm">
+            <Notice kind={apiLabels.errors > 0 || apiLabels.rate_limited ? "error" : "success"}>
+              {apiLabels.store}: {(apiLabels.labels_filled + apiLabels.filled_from_saved).toLocaleString()} labels filled in
+              {apiLabels.filled_from_saved > 0 && <> ({apiLabels.filled_from_saved.toLocaleString()} from answers eBay already gave earlier)</>}.{" "}
+              Asked eBay about {apiLabels.asked_ebay.toLocaleString()} listing{apiLabels.asked_ebay === 1 ? "" : "s"}
+              {apiLabels.no_label_on_ebay > 0 && <>, {apiLabels.no_label_on_ebay.toLocaleString()} have no custom label on eBay</>}
+              {apiLabels.not_active > 0 && <>, {apiLabels.not_active.toLocaleString()} are not active on eBay (use a report for those)</>}
+              {apiLabels.other_store > 0 && <>, {apiLabels.other_store.toLocaleString()} belong to a different store</>}
+              {apiLabels.errors > 0 && <>, {apiLabels.errors.toLocaleString()} could not be read ({apiLabels.error_sample.slice(0, 3).join(" · ")})</>}.{" "}
+              {apiLabels.rate_limited ? `Stopped: ${apiLabels.rate_limited} ` : ""}
+              {apiLabels.remaining > 0 ? `${apiLabels.remaining.toLocaleString()} still to ask: click again.` : "None left to ask for this store."}
+              {apiLabels.blank_without_store > 0 && <> {apiLabels.blank_without_store.toLocaleString()} blank listings have no store recorded, so they were not asked; running the photo import for a store records it.</>}
+            </Notice>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-3">
           <input
             ref={fileRef}
@@ -358,10 +418,10 @@ export default function EbayPhotoImportPage() {
               setLabelsErr("");
             }}
           />
-          <button type="button" className={btn2Cls} disabled={uploading} onClick={() => fileRef.current?.click()}>
+          <button type="button" className={btn2Cls} disabled={uploading || apiBusy} onClick={() => fileRef.current?.click()}>
             Choose report (CSV)
           </button>
-          <button type="button" className={btnCls} disabled={!file || uploading} onClick={() => void uploadReport()}>
+          <button type="button" className={btnCls} disabled={!file || uploading || apiBusy} onClick={() => void uploadReport()}>
             {uploading ? "Reading…" : "Upload report"}
           </button>
         </div>
