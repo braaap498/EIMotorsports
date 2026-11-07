@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
+import ClearableInput from "../../../components/admin/ClearableInput";
 
 /* ------------------------------------------------------------------ types */
 
@@ -101,6 +102,8 @@ export default function EbayLiveListingsPage() {
   const [mainStore, setMainStore] = useState(""); // the store opened first on a first visit
   const [statusF, setStatusF] = useState<"all" | "active" | "inactive">("all");
   const [repo, setRepo] = useState<RepoResp | null>(null);
+  const reqSeq = useRef(0); // only the newest list request may update the screen (typing fast sends several)
+  const lastQ = useRef(""); // the search text the list on screen was read with
   const [busy, setBusy] = useState("");
   const [sync, setSync] = useState<SyncRow[]>([]);
   const [syncNote, setSyncNote] = useState(""); // set when a background check finished and changed statuses
@@ -136,7 +139,7 @@ export default function EbayLiveListingsPage() {
 
   // While a check runs, ask how it is doing every few seconds so the "checking…" line stays true. This NEVER reloads the
   // list or clears ticked rows: new statuses show the next time the list is read (arriving on this tab, coming back from a
-  // listing, Show listings, or going to another page). When a check finishes with changes a quiet note says so.
+  // listing, a refresh, or going to another page). When a check finishes with changes a quiet note says so.
   // `wasRunning` always holds the stores that were running at the last answer (a plain copy captured when the timer was
   // made would go stale and fire again on every tick).
   const syncRunning = sync.some((x) => x.running);
@@ -154,7 +157,7 @@ export default function EbayLiveListingsPage() {
           const ended = finished.reduce((n, x) => n + (x.marked_ended ?? 0), 0);
           const madeActive = finished.reduce((n, x) => n + (x.marked_active ?? 0), 0);
           if (ended + madeActive > 0) {
-            setSyncNote(`The eBay check finished: ${ended} listing${ended === 1 ? "" : "s"} ended, ${madeActive} marked active. Press Show listings to see the latest.`);
+            setSyncNote(`The eBay check finished: ${ended} listing${ended === 1 ? "" : "s"} ended, ${madeActive} marked active.`);
           }
         })
         .catch(() => {});
@@ -184,6 +187,15 @@ export default function EbayLiveListingsPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stores]);
+
+  // The list follows the search box: a short pause after the last keystroke reads it again from the first page.
+  // The store, Show and Order boxes read it as soon as they change. Nothing happens until the first read is done.
+  useEffect(() => {
+    if (!restored.current || q.trim() === lastQ.current) return;
+    const t = setTimeout(() => void loadRepo(0, { store, q, sort, statusF }), 350);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
 
   // Inactivate or Activate the ticked listings ON EBAY, one after another, with the same warnings and checks as the buttons on the
   // edit screen. Inactivate = end the listing. Activate = relist it (preview first, then confirm, then send; eBay gives a new item number).
@@ -323,6 +335,8 @@ export default function EbayLiveListingsPage() {
     const useQ = from ? from.q : q;
     const useSort = from ? from.sort : sort;
     const useStatus = from ? from.statusF : statusF;
+    const myReq = ++reqSeq.current;
+    lastQ.current = useQ.trim();
     setLoading(true);
     setError("");
     setSyncNote("");
@@ -333,12 +347,15 @@ export default function EbayLiveListingsPage() {
       if (useStore === ALL) params.set("all_stores", "1");
       else if (useStore.trim()) params.set("store", useStore.trim());
       saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset, statusF: useStatus });
-      setRepo(await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`));
+      const r = await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`);
+      if (myReq === reqSeq.current) setRepo(r);
     } catch (e) {
-      setRepo(null);
-      setError(errMsg(e));
+      if (myReq === reqSeq.current) {
+        setRepo(null);
+        setError(errMsg(e));
+      }
     } finally {
-      setLoading(false);
+      if (myReq === reqSeq.current) setLoading(false);
     }
   }
 
@@ -406,22 +423,35 @@ export default function EbayLiveListingsPage() {
             <option value="all">Both{repo ? ` (${repo.counts.all})` : ""}</option>
           </select>
         </label>
-        <label className="block w-64 text-sm font-medium text-gray-700">
-          <span className="mb-1 block">Search title, item number or custom label</span>
-          <input className={inputCls} value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. Tusk 1.8 bar" />
+        <label className="block w-72 text-sm font-medium text-gray-700">
+          <span className="mb-1 block">Search title, item number, custom label or SKU</span>
+          <ClearableInput
+            className={inputCls}
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onClear={() => {
+              setQ("");
+              void loadRepo(0, { store, q: "", sort, statusF });
+            }}
+            placeholder="e.g. Tusk 1.8 bar"
+          />
         </label>
         <label className="block text-sm font-medium text-gray-700">
           <span className="mb-1 block">Order</span>
-          <select className={inputCls} value={sort} onChange={(e) => setSort(e.target.value)}>
+          <select
+            className={inputCls}
+            value={sort}
+            onChange={(e) => {
+              setSort(e.target.value);
+              void loadRepo(0, { store, q, sort: e.target.value, statusF });
+            }}
+          >
             <option value="newest">Newest first</option>
             <option value="title">Title, A to Z</option>
             <option value="price_low">Price, low to high</option>
             <option value="price_high">Price, high to low</option>
           </select>
         </label>
-        <button type="submit" className={btnCls} disabled={loading}>
-          {loading ? "Reading…" : "Show listings"}
-        </button>
       </form>
 
       {/* ---- listings from our database */}
@@ -456,7 +486,14 @@ export default function EbayLiveListingsPage() {
               </p>
             );
           })()}
-          {syncNote && <p className="text-xs font-medium text-amber-700">{syncNote}</p>}
+          {syncNote && (
+            <p className="text-xs font-medium text-amber-700">
+              {syncNote}{" "}
+              <button type="button" className="underline" onClick={() => void loadRepo(repo.offset)}>
+                Refresh the list
+              </button>
+            </p>
+          )}
           {actMsg && <Notice kind={actMsg.kind}>{actMsg.text}</Notice>}
           {picked.size > 0 && (
             <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">

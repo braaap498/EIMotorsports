@@ -352,7 +352,7 @@ def repo_listings(
         where.append(f"not ({_ACTIVE})")
     for i, w in enumerate([w for w in re.split(r"\s+", q.strip()) if w][:6]):
         params[f"w{i}"] = f"%{w}%"
-        where.append(f"(p.title ilike :w{i} or {_L_TITLE} ilike :w{i} or {_DIGITS} ilike :w{i} or p.custom_label_sku ilike :w{i} or {_L_LABEL} ilike :w{i})")
+        where.append(f"(p.title ilike :w{i} or {_L_TITLE} ilike :w{i} or {_DIGITS} ilike :w{i} or p.custom_label_sku ilike :w{i} or {_L_LABEL} ilike :w{i} or p.sku_display ilike :w{i})")
     clause = " and ".join(where)
     total = db.execute(
         text(f"select count(*) from channel_listings cl {_LISTING_JOINS} where {clause}"), params

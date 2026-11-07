@@ -116,7 +116,7 @@ export default function EbayStoresPage() {
 
   async function setPushes(s: string, enabled: boolean) {
     const q = enabled
-      ? `Turn live pushes ON for ${s}? After this, "Send to eBay" on the edit page changes real listings on that store.`
+      ? `Turn live pushes ON for ${s}? After this, "Send to eBay" on the edit page changes real listings on that store.\n\nFirst check that "Listings stay active when you're out of stock" is turned on in that eBay account (Account settings > Selling > Selling preferences). If it is off, eBay does not allow a quantity of 0.`
       : `Turn live pushes OFF for ${s}? Previews still work; nothing can be sent.`;
     if (!window.confirm(q)) return;
     setBusy(s);
@@ -264,6 +264,15 @@ export default function EbayStoresPage() {
               </table>
             </div>
           </div>
+
+        {stores.length > 0 && (
+          <p className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            <span className="font-medium">Turn on the out-of-stock setting in eBay before turning pushes ON.</span> In each eBay account:
+            Account settings &rsaquo; Selling &rsaquo; Selling preferences &rsaquo; Multi-quantity listings &rsaquo; &ldquo;Listings stay active
+            when you&rsquo;re out of stock&rdquo;. If it is off, eBay does not allow a quantity of 0, so a quantity update that takes a part to 0 can
+            be refused, and a listing that sells out ends, so bringing it back means a relist with a new item number.
+          </p>
+        )}
 
         {showAdd && (
 
