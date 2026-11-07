@@ -37,6 +37,7 @@ type RepoItem = {
   quantity_from_ebay?: boolean; // true when our stock is 0 and this number is what eBay shows as available
   status: string | null;
   active: boolean;
+  unsent_edits?: boolean; // edits saved on the website that have not been pushed to eBay
   api_type: "trading" | "inventory" | null;
   product_id: number;
   image_url: string | null;
@@ -557,7 +558,7 @@ export default function EbayLiveListingsPage() {
               // The usual eBay statuses are always offered (with 0 when none are on file), followed by any other
               // status found on the store's listings.
               const found = repo?.statuses ?? [];
-              const usual = ["active", "ended", "scheduled", "draft"];
+              const usual = ["active", "ended", "draft"];
               const names = [...usual, ...found.map((x) => x.status).filter((n) => !usual.includes(n))];
               if (statusF !== "all" && !names.includes(statusF)) names.push(statusF);
               return names.map((n) => (
@@ -766,6 +767,11 @@ export default function EbayLiveListingsPage() {
                         </td>
                         <td className="px-3 py-2">
                           <Badge tone={it.active ? "green" : "gray"}>{it.status || "no status"}</Badge>
+                          {it.unsent_edits && (
+                            <span className="ml-1">
+                              <Badge tone="amber">Unsent edits</Badge>
+                            </span>
+                          )}
                         </td>
                       </ClickRow>
                     );

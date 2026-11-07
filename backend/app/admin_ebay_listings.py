@@ -346,11 +346,26 @@ def repo_listings(
         params,
     ).all()
 
+    # "Draft" = a listing whose stored status is draft (report import), OR a live listing with edits saved on the
+    # website that have not been pushed to eBay yet (ebay_listing_drafts). The table may not exist yet: then none.
+    has_edits_table = bool(db.execute(text("select to_regclass('public.ebay_listing_drafts') is not null")).scalar())
+    edits_sql = (
+        f"exists (select 1 from ebay_listing_drafts d where lower(d.store) = lower(cl.store) and d.item_id = {_DIGITS})"
+        if has_edits_table
+        else "false"
+    )
+    draft_sql = f"(lower(coalesce(cl.status, '')) = 'draft' or {edits_sql})"
+    draft_n = db.execute(
+        text(f"select count(*) from channel_listings cl where {' and '.join(base)} and {draft_sql}"), params
+    ).scalar() or 0
+
     where = list(base)
     if status == "active":
         where.append(_ACTIVE)
     elif status == "inactive":
         where.append(f"not ({_ACTIVE})")
+    elif status == "draft":
+        where.append(draft_sql)
     elif status != "all":
         where.append("lower(coalesce(nullif(btrim(cl.status), ''), '(none)')) = :stv")
         params["stv"] = status.strip().lower()
@@ -369,6 +384,7 @@ def repo_listings(
                    {_L_PRICE} as list_price, p.quantity_on_hand,
                    case when {_L_QTY_FROM_EBAY} then {_L_EBAY_QTY} else p.quantity_on_hand end as quantity_shown,
                    {_L_QTY_FROM_EBAY} as qty_from_ebay,
+                   {edits_sql} as unsent_edits,
                    (select count(*) from channel_listings x where x.product_id = p.id) as product_listings,
                    case
                      when exists (select 1 from channel_listings x where x.product_id = p.id
@@ -416,6 +432,7 @@ def repo_listings(
                 "quantity_from_ebay": bool(d["qty_from_ebay"]),
                 "status": (d["status"] or "").strip() or None,
                 "active": (d["status"] or "").strip().lower() == "active",
+                "unsent_edits": bool(d["unsent_edits"]),
                 "api_type": d["api_type"],
                 "product_id": d["product_id"],
                 "image_url": thumb_url(key) if key else None,
@@ -431,7 +448,9 @@ def repo_listings(
         "status": status,
         "total": total,
         "counts": {"all": counts.total, "active": counts.active, "inactive": counts.total - counts.active},
-        "statuses": [{"status": r.status, "count": r.n} for r in raw],
+        # Draft is counted as described above (stored draft status plus listings with unsent edits), not by raw status
+        "statuses": [{"status": r.status, "count": r.n} for r in raw if r.status != "draft"]
+        + ([{"status": "draft", "count": draft_n}] if draft_n else []),
         "offset": offset,
         "limit": limit,
         "items": items,
