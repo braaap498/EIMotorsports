@@ -12,6 +12,12 @@ import ReceivePo from "../../../components/admin/inventory/ReceivePo";
 import WebOrderShip from "../../../components/admin/inventory/WebOrderShip";
 import EbayOrdersToShip from "../../../components/admin/inventory/EbayOrdersToShip";
 
+/** Red count bubble: how many orders are waiting to be picked. Hidden at zero. */
+function Count({ n }: { n: number }) {
+  if (n <= 0) return null;
+  return <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs font-semibold text-white">{n}</span>;
+}
+
 const ANY = ["inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust"];
 const TABS = [
   { key: "receive", label: "Receive (scan in)", perms: ["inventory.receive"] },
@@ -29,17 +35,27 @@ export default function InventoryPage() {
   const [receiveMode, setReceiveMode] = useState<"po" | "free">("po");
   // Orders with a red flag (short pick / oversold), shown on the Ship tab so they can't be missed.
   const [flagged, setFlagged] = useState(0);
+  // Orders still waiting to be picked, for the red badges on the Pick & ship buttons.
+  const [webToPick, setWebToPick] = useState(0);
+  const [ebayToPick, setEbayToPick] = useState(0);
   const canShip = can("inventory.ship");
   useEffect(() => {
     if (!canShip) return;
-    const load = () =>
-      api<{ attention_count: number }>("/inventory/orders/to-ship")
-        .then((r) => setFlagged(r.attention_count))
+    const load = () => {
+      api<{ attention_count: number; items: { stage: string }[] }>("/inventory/orders/to-ship")
+        .then((r) => {
+          setFlagged(r.attention_count);
+          setWebToPick(r.items.filter((i) => i.stage === "pick").length);
+        })
         .catch(() => {});
+      api<{ orders: number }>("/inventory/ebay-orders/to-pick-count")
+        .then((r) => setEbayToPick(r.orders))
+        .catch(() => {});
+    };
     load();
-    const t = setInterval(load, 60000);
+    const t = setInterval(load, 30000);
     return () => clearInterval(t);
-  }, [canShip, tab]);
+  }, [canShip, tab, shipMode]);
 
   // Open on ?tab=... if given, otherwise the first tab this person may use.
   useEffect(() => {
@@ -111,13 +127,15 @@ export default function InventoryPage() {
               className={`px-4 py-2 ${shipMode === "web" ? "bg-black text-white" : "bg-white text-gray-700"}`}
               onClick={() => setShipMode("web")}
             >
-              Website order
+              Website orders
+              <Count n={webToPick} />
             </button>
             <button
               className={`px-4 py-2 ${shipMode === "ebay" ? "bg-black text-white" : "bg-white text-gray-700"}`}
               onClick={() => setShipMode("ebay")}
             >
               eBay orders
+              <Count n={ebayToPick} />
             </button>
             <button
               className={`px-4 py-2 ${shipMode === "other" ? "bg-black text-white" : "bg-white text-gray-700"}`}

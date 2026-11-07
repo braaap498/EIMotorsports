@@ -1274,6 +1274,14 @@ def ship_lines(
     return _query_lines(db, "", "reserved", q, sort, dir, offset, limit)
 
 
+@ship_router.get("/to-pick-count")
+@needs("inventory.ship")
+def to_pick_count(db: Session = Depends(get_db)):
+    """How many eBay orders still have parts set aside (the red badge on Inventory > Pick & ship)."""
+    n = db.execute(text("select count(distinct ebay_order_id) from ebay_order_lines where state = 'reserved'")).scalar()
+    return {"orders": int(n or 0)}
+
+
 def _query_lines(
     db: Session, store: str, state: str, q: str, sort: str, dir: str, offset: int, limit: int,
     date_from: str = "", date_to: str = "",
