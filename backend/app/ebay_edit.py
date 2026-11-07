@@ -818,7 +818,7 @@ _ACTION = {"revise": "revise_fixed_price_item", "relist": "relist_fixed_price_it
 def preview(body: EditIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     row = _store_row(db, body.store)
     current = _read_item(db, row.store, body.item_id.strip())
-    changes = _relist_changes(db, row.store, current, body.changes) if body.action == "relist" else body.changes
+    changes = _relist_changes(db, row.store, current, _relist_quantity(db, row.store, current, body.changes)) if body.action == "relist" else body.changes
     calls, diff = _plan(current, changes, body.action)
     fp = _fingerprint(row.store, calls)
     _log(db, user, row.store, current["item_id"], _ACTION[body.action], True, {"calls": calls, "diff": diff}, {}, True, None)
@@ -843,7 +843,7 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     if not enabled:
         raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
     current = _read_item(db, row.store, body.item_id.strip())
-    changes = _relist_changes(db, row.store, current, body.changes) if body.action == "relist" else body.changes
+    changes = _relist_changes(db, row.store, current, _relist_quantity(db, row.store, current, body.changes)) if body.action == "relist" else body.changes
     calls, diff = _plan(current, changes, body.action)
     act = _ACTION[body.action]
     if _fingerprint(row.store, calls) != body.fingerprint:
@@ -1025,6 +1025,36 @@ def _stored_photos(db: Session, store: str, item_id: str) -> list[dict]:
         log.exception("could not read stored photos for %s", item_id)
         db.rollback()
         return []
+
+
+def _relist_quantity(db: Session, store: str, current: dict, ch: Changes) -> Changes:
+    """For a relist (Activate): the quantity comes from the WEBSITE, not from the ended listing. The website owns stock:
+    the figure sent is what is available to sell (stock on hand minus parts set aside), up to 9999. A quantity the
+    person typed that differs from what eBay showed on the ended listing is respected. A part with nothing available
+    cannot be relisted (eBay needs at least 1), and the message says so. A listing with variations, or one not linked
+    to a product, is left as it was."""
+    if current["has_variations"]:
+        return ch
+    if ch.quantity is not None and ch.quantity != current["quantity_available"]:
+        return ch  # typed on purpose
+    avail = db.execute(
+        text(
+            f"select {available_sql('p')} from channel_listings cl join products p on p.id = cl.product_id "
+            "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i and lower(cl.store) = lower(:s) limit 1"
+        ),
+        {"i": current["item_id"], "s": store},
+    ).scalar()
+    if avail is None:
+        return ch  # not linked to a product: nothing to go by, keep the old behaviour
+    avail = int(avail)
+    if avail < 1:
+        raise HTTPException(
+            409,
+            "The website shows nothing available to sell for this part (stock on hand minus parts set aside for open orders), "
+            "and eBay needs at least 1 to relist. Receive stock first, or type a quantity of 1 or more to override. Nothing was sent.",
+        )
+    q = min(avail, 9999)
+    return ch.model_copy(update={"quantity": q}) if hasattr(ch, "model_copy") else ch.copy(update={"quantity": q})
 
 
 def _relist_changes(db: Session, store: str, current: dict, ch: Changes) -> Changes:
