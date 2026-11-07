@@ -67,6 +67,9 @@ export default function EbaySalesPanel() {
   const [fState, setFState] = useState("");
   const [q, setQ] = useState("");
   const [qInput, setQInput] = useState("");
+  const [fFrom, setFFrom] = useState("");
+  const [fTo, setFTo] = useState("");
+  const [fetching, setFetching] = useState(false);
   const { sort, toggle } = useSort<SortKey>();
 
   const loadSettings = useCallback(async () => {
@@ -84,6 +87,8 @@ export default function EbaySalesPanel() {
       if (fStore) p.set("store", fStore);
       if (fState) p.set("state", fState);
       if (q) p.set("q", q);
+      if (fFrom) p.set("date_from", fFrom);
+      if (fTo) p.set("date_to", fTo);
       if (sort.key) {
         p.set("sort", sort.key);
         p.set("dir", sort.dir);
@@ -94,7 +99,7 @@ export default function EbaySalesPanel() {
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     }
-  }, [offset, fStore, fState, q, sort.key, sort.dir]);
+  }, [offset, fStore, fState, q, fFrom, fTo, sort.key, sort.dir]);
 
   useEffect(() => {
     void loadSettings();
@@ -103,6 +108,31 @@ export default function EbaySalesPanel() {
   useEffect(() => {
     void loadLines();
   }, [loadLines]);
+
+  /* orders eBay shows as shipped from before tracking was saved here: ask eBay for their tracking, 100 at a time */
+  async function fetchMissingTracking() {
+    setFetching(true);
+    setMsg(null);
+    try {
+      const r = await api<{ checked: number; found: number; remaining: number }>("/ebay-sales/backfill-tracking", {
+        method: "POST",
+        body: { store: fStore },
+      });
+      setMsg({
+        kind: "success",
+        text:
+          r.checked === 0
+            ? "Nothing left to look up: every shipped order has been checked."
+            : `Checked ${r.checked} shipped orders: ${r.found} had tracking on eBay.` +
+              (r.remaining > 0 ? ` ${r.remaining} more to check. Press the button again.` : ""),
+      });
+      await loadLines();
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setFetching(false);
+    }
+  }
 
   const onSort = (k: SortKey) => {
     toggle(k);
@@ -144,7 +174,7 @@ export default function EbaySalesPanel() {
               ))}
             </select>
             <input
-              className={`${inputCls} !w-64`}
+              className={`${inputCls} !w-[28rem] max-w-full`}
               placeholder="Order #, item #, tracking #, label or title"
               value={qInput}
               onChange={(e) => setQInput(e.target.value)}
@@ -155,8 +185,30 @@ export default function EbaySalesPanel() {
                 }
               }}
             />
+            <label className="text-xs text-gray-500">
+              <span className="mb-1 block">From</span>
+              <input type="date" className={`${inputCls} !w-auto`} value={fFrom} max={fTo || undefined} onChange={(e) => { setFFrom(e.target.value); setOffset(0); }} />
+            </label>
+            <label className="text-xs text-gray-500">
+              <span className="mb-1 block">To</span>
+              <input type="date" className={`${inputCls} !w-auto`} value={fTo} min={fFrom || undefined} onChange={(e) => { setFTo(e.target.value); setOffset(0); }} />
+            </label>
+            {(fFrom || fTo) && (
+              <button type="button" className={btn2Cls} onClick={() => { setFFrom(""); setFTo(""); setOffset(0); }}>
+                Clear dates
+              </button>
+            )}
             <button type="button" className={btn2Cls} onClick={() => { setQ(qInput.trim()); setOffset(0); }}>
               Search
+            </button>
+            <button
+              type="button"
+              className={btn2Cls}
+              disabled={fetching}
+              title="Asks eBay for the tracking numbers of shipped orders we have none for yet"
+              onClick={() => void fetchMissingTracking()}
+            >
+              {fetching ? "Asking eBay…" : "Fetch missing tracking"}
             </button>
           </div>
 
@@ -216,6 +268,9 @@ export default function EbaySalesPanel() {
                             </span>
                           ) : (
                             <Badge tone="gray">Not shipped</Badge>
+                          )}
+                          {!l.tracking_number && l.shipped_at_ebay && (
+                            <div className="whitespace-nowrap text-xs text-gray-400">No tracking number on eBay</div>
                           )}
                           {l.tracking_number && (
                             <div className="whitespace-nowrap text-xs text-gray-700">

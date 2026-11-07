@@ -66,7 +66,7 @@ export default function EbayOrdersToShip({ active }: { active: boolean }) {
 
       <div className="flex flex-wrap items-end gap-2">
         <input
-          className={`${inputCls} !w-64`}
+          className={`${inputCls} !w-[28rem] max-w-full`}
           placeholder="Order #, item #, tracking #, label or title"
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}

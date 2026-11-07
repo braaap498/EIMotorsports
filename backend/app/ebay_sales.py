@@ -42,7 +42,7 @@ import os
 import threading
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -118,6 +118,7 @@ def _ensure_tracking_cols(db: Session) -> None:
         return
     db.execute(text("alter table ebay_orders add column if not exists tracking_number text"))
     db.execute(text("alter table ebay_orders add column if not exists tracking_carrier text"))
+    db.execute(text("alter table ebay_orders add column if not exists tracking_checked_at timestamptz"))
     db.commit()
     _tracking_ready = True
 
@@ -211,7 +212,7 @@ def _fetch_orders_window(db: Session, store: str, since: datetime, until: dateti
     while True:
         inner = (
             f"<ModTimeFrom>{_iso(since)}</ModTimeFrom><ModTimeTo>{_iso(until)}</ModTimeTo>"
-            "<OrderRole>Seller</OrderRole><OrderStatus>All</OrderStatus>"
+            "<DetailLevel>ReturnAll</DetailLevel><OrderRole>Seller</OrderRole><OrderStatus>All</OrderStatus>"
             f"<Pagination><EntriesPerPage>100</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>"
         )
         root = _trading(db, store, "GetOrders", inner)
@@ -1244,12 +1245,14 @@ def lines(
     q: str = "",
     sort: str = "date",
     dir: str = "desc",
+    date_from: str = "",
+    date_to: str = "",
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    """The Orders page: every order line, read only."""
-    return _query_lines(db, store, state, q, sort, dir, offset, limit)
+    """The Orders page: every order line, read only. date_from / date_to (YYYY-MM-DD, both days included)."""
+    return _query_lines(db, store, state, q, sort, dir, offset, limit, date_from, date_to)
 
 
 @ship_router.get("/lines")
@@ -1266,9 +1269,20 @@ def ship_lines(
     return _query_lines(db, "", "reserved", q, sort, dir, offset, limit)
 
 
-def _query_lines(db: Session, store: str, state: str, q: str, sort: str, dir: str, offset: int, limit: int):
+def _query_lines(
+    db: Session, store: str, state: str, q: str, sort: str, dir: str, offset: int, limit: int,
+    date_from: str = "", date_to: str = "",
+):
     _ensure_tracking_cols(db)
     where, params = ["true"], {"lim": limit, "off": offset}
+    for key, raw, op in (("df", date_from, ">="), ("dt", date_to, "<")):
+        if raw.strip():
+            try:
+                d = date.fromisoformat(raw.strip())
+            except ValueError:
+                raise HTTPException(422, "Dates must look like 2026-11-07.")
+            params[key] = d if key == "df" else d + timedelta(days=1)  # "to" includes the whole last day
+            where.append(f"coalesce(l.sale_date, l.created_at) {op} :{key}")
     if store.strip():
         where.append("l.store = :store")
         params["store"] = store.strip()
@@ -1340,7 +1354,8 @@ def refresh_tracking(order_pk: int, db: Session = Depends(get_db)):
     od = _order_row(db, order_pk)
     root = _trading(
         db, od.store, "GetOrders",
-        f"<OrderIDArray><OrderID>{escape(od.ebay_order_id)}</OrderID></OrderIDArray><OrderRole>Seller</OrderRole>",
+        f"<DetailLevel>ReturnAll</DetailLevel><OrderIDArray><OrderID>{escape(od.ebay_order_id)}</OrderID></OrderIDArray>"
+        "<OrderRole>Seller</OrderRole>",
     )
     if _failed(root):
         raise HTTPException(502, _first_message(root))
@@ -1351,7 +1366,8 @@ def refresh_tracking(order_pk: int, db: Session = Depends(get_db)):
         text(
             "update ebay_orders set tracking_number = coalesce(:tn, tracking_number), "
             "tracking_carrier = coalesce(:tc, tracking_carrier), "
-            "shipped_at_ebay = coalesce(:sh, shipped_at_ebay), updated_at = now() where id = :i"
+            "shipped_at_ebay = coalesce(:sh, shipped_at_ebay), tracking_checked_at = now(), updated_at = now() "
+            "where id = :i"
         ),
         {"tn": found["tracking_number"], "tc": found["tracking_carrier"], "sh": found["shipped"], "i": order_pk},
     )
@@ -1362,6 +1378,54 @@ def refresh_tracking(order_pk: int, db: Session = Depends(get_db)):
         "shipped": bool(found["shipped"] or od.shipped_at_ebay),
         "found": bool(found["tracking_number"]),
     }
+
+
+class BackfillIn(BaseModel):
+    store: str = ""
+
+
+@router.post("/backfill-tracking")
+def backfill_tracking(body: BackfillIn, db: Session = Depends(get_db)):
+    """Orders eBay already shows as shipped but we have no tracking for (shipped before tracking was saved here):
+    ask eBay about up to 100 of them (20 per call), newest first. Each is looked at once; an order that really has no
+    tracking on eBay (label bought elsewhere, never uploaded) is not asked about again."""
+    _ensure_tracking_cols(db)
+    where, params = "shipped_at_ebay is not null and tracking_number is null and not cancelled and tracking_checked_at is null", {}
+    if body.store.strip():
+        where += " and store = :s"
+        params["s"] = body.store.strip()
+    rows = db.execute(
+        text(f"select id, store, ebay_order_id from ebay_orders where {where} order by shipped_at_ebay desc limit 100"), params
+    ).all()
+    by_store: dict[str, list] = {}
+    for r in rows:
+        by_store.setdefault(r.store, []).append(r)
+    found = checked = 0
+    for st, items in by_store.items():
+        for i in range(0, len(items), 20):
+            chunk = items[i : i + 20]
+            ids = "".join(f"<OrderID>{escape(r.ebay_order_id)}</OrderID>" for r in chunk)
+            root = _trading(
+                db, st, "GetOrders",
+                f"<DetailLevel>ReturnAll</DetailLevel><OrderIDArray>{ids}</OrderIDArray><OrderRole>Seller</OrderRole>",
+            )
+            if _failed(root):
+                raise HTTPException(502, _first_message(root))
+            got = {o["id"]: o for o in _parse_orders(root)}
+            for r in chunk:
+                o = got.get(r.ebay_order_id)
+                db.execute(
+                    text(
+                        "update ebay_orders set tracking_number = coalesce(:tn, tracking_number), "
+                        "tracking_carrier = coalesce(:tc, tracking_carrier), tracking_checked_at = now() where id = :i"
+                    ),
+                    {"tn": o and o["tracking_number"], "tc": o and o["tracking_carrier"], "i": r.id},
+                )
+                checked += 1
+                found += 1 if o and o["tracking_number"] else 0
+            db.commit()
+    left = db.execute(text(f"select count(*) from ebay_orders where {where}"), params).scalar()
+    return {"checked": checked, "found": found, "remaining": left}
 
 
 class ShipIn(BaseModel):
