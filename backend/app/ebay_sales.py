@@ -1189,7 +1189,7 @@ _LINE_SORTS = {
     "date": "coalesce(l.sale_date, l.created_at)",
     "store": "l.store",
     "order": "l.ebay_order_id",
-    "item": "l.ebay_item_id",
+    "item": "coalesce(nullif(l.custom_label, ''), l.ebay_item_id)",
     "title": "coalesce(l.title, p.title)",
     "qty": "l.quantity",
     "price": "l.unit_price",
@@ -1216,7 +1216,7 @@ def lines(
         where.append("l.state = :state")
         params["state"] = state.strip()
     if q.strip():
-        where.append("(l.ebay_order_id ilike :q or l.ebay_item_id ilike :q or l.title ilike :q or p.title ilike :q)")
+        where.append("(l.ebay_order_id ilike :q or l.ebay_item_id ilike :q or l.custom_label ilike :q or l.title ilike :q or p.title ilike :q)")
         params["q"] = f"%{q.strip()}%"
     col = _LINE_SORTS.get(sort, _LINE_SORTS["date"])
     direction = "asc" if dir == "asc" else "desc"
@@ -1227,7 +1227,7 @@ def lines(
     rows = db.execute(
         text(
             f"""
-            select l.id, l.store, l.ebay_order_id, l.ebay_item_id, coalesce(l.title, p.title) as title, l.quantity,
+            select l.id, l.store, l.ebay_order_id, l.ebay_item_id, l.custom_label, coalesce(l.title, p.title) as title, l.quantity,
                    l.unit_price, l.state, l.product_id, p.sku_display as sku, coalesce(l.sale_date, l.created_at) as sale_date,
                    o.cancelled, o.refund_total
             from ebay_order_lines l

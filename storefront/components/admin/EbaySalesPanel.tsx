@@ -17,6 +17,7 @@ type Line = {
   store: string;
   ebay_order_id: string;
   ebay_item_id: string;
+  custom_label: string | null;
   title: string | null;
   quantity: number;
   unit_price: string | null;
@@ -152,7 +153,7 @@ export default function EbaySalesPanel() {
             </select>
             <input
               className={`${inputCls} !w-64`}
-              placeholder="Order #, item # or title"
+              placeholder="Order #, item #, custom label or title"
               value={qInput}
               onChange={(e) => setQInput(e.target.value)}
               onKeyDown={(e) => {
@@ -174,7 +175,7 @@ export default function EbaySalesPanel() {
                   <SortTh label="Date" k="date" sort={sort} onSort={onSort} />
                   <SortTh label="Store" k="store" sort={sort} onSort={onSort} />
                   <SortTh label="Order #" k="order" sort={sort} onSort={onSort} />
-                  <SortTh label="Listing" k="item" sort={sort} onSort={onSort} />
+                  <SortTh label="Custom label" k="item" sort={sort} onSort={onSort} />
                   <SortTh label="Title" k="title" sort={sort} onSort={onSort} />
                   <SortTh label="Qty" k="qty" sort={sort} onSort={onSort} />
                   <SortTh label="Price" k="price" sort={sort} onSort={onSort} />
@@ -188,7 +189,7 @@ export default function EbaySalesPanel() {
                     <td className="whitespace-nowrap px-3 py-2 text-gray-600">{l.sale_date ? new Date(l.sale_date).toLocaleString() : "—"}</td>
                     <td className="px-3 py-2 text-gray-600">{l.store}</td>
                     <td className="whitespace-nowrap px-3 py-2">{l.ebay_order_id}</td>
-                    <td className="whitespace-nowrap px-3 py-2">{l.ebay_item_id}</td>
+                    <td className="whitespace-nowrap px-3 py-2">{l.custom_label || "—"}</td>
                     <td className="max-w-xs px-3 py-2">
                       <div className="truncate" title={l.title ?? ""}>
                         {l.product_id ? (
@@ -199,7 +200,10 @@ export default function EbaySalesPanel() {
                           l.title ?? "(no title)"
                         )}
                       </div>
-                      {l.sku && <div className="text-xs text-gray-500">{l.sku}</div>}
+                      <div className="text-xs text-blue-600">
+                        {l.ebay_item_id}
+                        {l.sku ? ` · ${l.sku}` : ""}
+                      </div>
                     </td>
                     <td className="px-3 py-2">{l.quantity}</td>
                     <td className="px-3 py-2">{l.unit_price ? `$${Number(l.unit_price).toFixed(2)}` : "—"}</td>
