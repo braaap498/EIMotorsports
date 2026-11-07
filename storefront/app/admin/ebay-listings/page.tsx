@@ -47,7 +47,7 @@ type RepoResp = {
   store: string;
   seller: string;
   known_store: boolean;
-  status: "all" | "active" | "inactive";
+  status: string;
   total: number;
   counts: { all: number; active: number; inactive: number };
   statuses: { status: string; count: number }[];
@@ -100,7 +100,7 @@ export default function EbayLiveListingsPage() {
   const [picked, setPicked] = useState<Set<number>>(new Set()); // listings ticked on this page
   const [actMsg, setActMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [mainStore, setMainStore] = useState(""); // the store opened first on a first visit
-  const [statusF, setStatusF] = useState<"all" | "active" | "inactive">("all");
+  const [statusF, setStatusF] = useState<string>("all");
   const [repo, setRepo] = useState<RepoResp | null>(null);
   const reqSeq = useRef(0); // only the newest list request may update the screen (typing fast sends several)
   const lastQ = useRef(""); // the search text the list on screen was read with
@@ -172,7 +172,7 @@ export default function EbayLiveListingsPage() {
   useEffect(() => {
     if (restored.current || stores.length === 0) return;
     restored.current = true;
-    const saved = loadSaved<{ store: string; q: string; sort: string; offset: number; statusF?: "all" | "active" | "inactive" }>("ebay-listings");
+    const saved = loadSaved<{ store: string; q: string; sort: string; offset: number; statusF?: string }>("ebay-listings");
     const names = stores.map((x) => x.store);
     const first = names.includes(mainStore) ? mainStore : names[0];
     if (saved && (saved.store === ALL || names.includes(saved.store))) {
@@ -445,7 +445,7 @@ export default function EbayLiveListingsPage() {
   }
   const isZero = (x: { store: string; item_id: string }) => `${x.store.toLowerCase()}|${x.item_id}` in zeroMap;
 
-  async function loadRepo(offset: number, from?: { store: string; q: string; sort: string; statusF: "all" | "active" | "inactive" }) {
+  async function loadRepo(offset: number, from?: { store: string; q: string; sort: string; statusF: string }) {
     const useStore = from ? from.store : store;
     const useQ = from ? from.q : q;
     const useSort = from ? from.sort : sort;
@@ -533,14 +533,20 @@ export default function EbayLiveListingsPage() {
             className={inputCls}
             value={statusF}
             onChange={(e) => {
-              const v = e.target.value as "all" | "active" | "inactive";
+              const v = e.target.value as string;
               setStatusF(v);
               void loadRepo(0, { store, q, sort, statusF: v });
             }}
           >
-            <option value="active">Active{repo ? ` (${repo.counts.active})` : ""}</option>
-            <option value="inactive">Inactive{repo ? ` (${repo.counts.inactive})` : ""}</option>
-            <option value="all">Both{repo ? ` (${repo.counts.all})` : ""}</option>
+            <option value="all">All{repo ? ` (${repo.counts.all})` : ""}</option>
+            {(repo?.statuses ?? []).map((x) => (
+              <option key={x.status} value={x.status}>
+                {x.status.charAt(0).toUpperCase() + x.status.slice(1)} ({x.count})
+              </option>
+            ))}
+            {statusF !== "all" && !(repo?.statuses ?? []).some((x) => x.status === statusF) && (
+              <option value={statusF}>{statusF.charAt(0).toUpperCase() + statusF.slice(1)}</option>
+            )}
           </select>
         </label>
         <label className="block w-full max-w-full text-sm font-medium text-gray-700 sm:w-[28rem]">
@@ -650,7 +656,7 @@ export default function EbayLiveListingsPage() {
             </div>
           )}
           {repo.items.length === 0 ? (
-            <Notice>No listings{statusF !== "all" ? ` marked ${statusF}` : ""}{q.trim() ? " match that search" : ""} for {allMode ? "these stores" : "this store"}.</Notice>
+            <Notice>No listings{statusF !== "all" ? ` with status "${statusF}"` : ""}{q.trim() ? " match that search" : ""} for {allMode ? "these stores" : "this store"}.</Notice>
           ) : (
             <div className="overflow-x-auto rounded border border-gray-200 bg-white">
               <table className="w-full text-left text-sm">

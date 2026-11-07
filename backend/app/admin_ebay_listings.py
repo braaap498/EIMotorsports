@@ -314,7 +314,7 @@ _REPO_SORTS = {
 def repo_listings(
     store: Optional[str] = Query(None, description="eBay store; empty means the main store"),
     all_stores: bool = Query(False, description="true = every store at once; the store parameter is then ignored"),
-    status: str = Query("all", pattern="^(all|active|inactive)$"),
+    status: str = Query("all", max_length=40, description="all, or one status exactly as on file (active, ended, draft, ...); 'inactive' = anything not active"),
     q: str = Query("", max_length=100),
     sort: str = Query("newest", pattern="^(newest|title|price_low|price_high)$"),
     offset: int = Query(0, ge=0),
@@ -339,7 +339,7 @@ def repo_listings(
     ).first()
     raw = db.execute(
         text(
-            f"select coalesce(nullif(btrim(cl.status), ''), '(none)') as status, count(*) as n from channel_listings cl "
+            f"select lower(coalesce(nullif(btrim(cl.status), ''), '(none)')) as status, count(*) as n from channel_listings cl "
             f"where {' and '.join(base)} group by 1 order by n desc"
         ),
         params,
@@ -350,6 +350,9 @@ def repo_listings(
         where.append(_ACTIVE)
     elif status == "inactive":
         where.append(f"not ({_ACTIVE})")
+    elif status != "all":
+        where.append("lower(coalesce(nullif(btrim(cl.status), ''), '(none)')) = :stv")
+        params["stv"] = status.strip().lower()
     for i, w in enumerate([w for w in re.split(r"\s+", q.strip()) if w][:6]):
         params[f"w{i}"] = f"%{w}%"
         where.append(f"(p.title ilike :w{i} or {_L_TITLE} ilike :w{i} or {_DIGITS} ilike :w{i} or p.custom_label_sku ilike :w{i} or {_L_LABEL} ilike :w{i} or p.sku_display ilike :w{i})")
