@@ -16,7 +16,18 @@ type Flash = { kind: "success" | "error" | "info"; text: string };
  * Ship (eBay / other): scan parts going out on an order that isn't on the website, then Commit
  * to record it. Nothing is saved until Commit, and Commit is applied only once.
  */
-export default function ScanSession({ mode, active }: { mode: "receive" | "ship-other"; active: boolean }) {
+export default function ScanSession({
+  mode,
+  active,
+  initialReference = "",
+  onCommitted,
+}: {
+  mode: "receive" | "ship-other";
+  active: boolean;
+  /** The order number to start with (opened from the combined order queue). */
+  initialReference?: string;
+  onCommitted?: () => void;
+}) {
   const { can } = useAccess();
   const receive = mode === "receive";
   const scanRef = useRef<HTMLInputElement>(null);
@@ -24,7 +35,7 @@ export default function ScanSession({ mode, active }: { mode: "receive" | "ship-
   const [batchId, setBatchId] = useState(newId);
   const [perScan, setPerScan] = useState(1);
   const [keepQty, setKeepQty] = useState(false);
-  const [reference, setReference] = useState("");
+  const [reference, setReference] = useState(initialReference);
   const [note, setNote] = useState("");
   const [unknown, setUnknown] = useState<string | null>(null);
   const [flash, setFlash] = useState<Flash | null>(null);
@@ -82,15 +93,17 @@ export default function ScanSession({ mode, active }: { mode: "receive" | "ship-
           : `Recorded ${units} unit${units === 1 ? "" : "s"} shipped on ${reference.trim()}.`,
       });
       clear();
-      setReference("");
+      setReference(initialReference);
       setNote("");
       setBatchId(newId());
+      onCommitted?.();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && e.message.startsWith("Already saved")) {
         // The first try got through but the answer was lost; don't leave a stale list on screen.
         setFlash({ kind: "success", text: "That batch was already saved the first time. Nothing was added twice." });
         clear();
         setBatchId(newId());
+        onCommitted?.();
       } else {
         setFlash({ kind: "error", text: errMsg(e) });
       }

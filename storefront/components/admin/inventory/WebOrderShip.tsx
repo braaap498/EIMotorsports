@@ -57,7 +57,18 @@ const money = (c: number) => `$${(c / 100).toFixed(2)}`;
  *   3. If something goes wrong: flag a line as short, cancel the order, or (owner / admin) refund.
  * Orders with a red flag (a short pick, or not enough on the shelf to cover every paid order) sort to the top.
  */
-export default function WebOrderShip({ active }: { active: boolean }) {
+export default function WebOrderShip({
+  active,
+  embedded = false,
+  openNumber = null,
+  onClosed,
+}: {
+  active: boolean;
+  /** Shown inside the combined order queue: no list of its own, opens `openNumber`, and calls `onClosed` when the order is closed, shipped or partly picked. */
+  embedded?: boolean;
+  openNumber?: string | null;
+  onClosed?: () => void;
+}) {
   const { isAdmin } = useAccess();
   const scanRef = useRef<HTMLInputElement>(null);
   const [order, setOrder] = useState<Order | null>(null);
@@ -95,6 +106,26 @@ export default function WebOrderShip({ active }: { active: boolean }) {
       .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
   }, []);
   useEffect(loadList, [loadList]);
+
+  // Opened from the combined queue: load that order, and report back when it is closed.
+  const openedFor = useRef<string | null>(null);
+  useEffect(() => {
+    // Only once per order: switching tabs and back must not reload it and lose scans that are not committed yet.
+    if (openNumber && active && openedFor.current !== openNumber) {
+      openedFor.current = openNumber;
+      void openOrder(openNumber);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openNumber, active]);
+  const hadOrder = useRef(false);
+  useEffect(() => {
+    if (order) hadOrder.current = true;
+    else if (hadOrder.current) {
+      hadOrder.current = false;
+      onClosed?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order]);
 
   function resetPanels() {
     setDropSel({});
@@ -452,7 +483,9 @@ export default function WebOrderShip({ active }: { active: boolean }) {
 
       {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
 
-      {!order ? (
+      {!order && embedded ? (
+        <p className="text-sm text-gray-500">Opening order…</p>
+      ) : !order ? (
         <div className="space-y-4">
           {list.length === 0 ? (
             <p className="rounded border border-dashed border-gray-300 p-6 text-center text-sm text-gray-500">

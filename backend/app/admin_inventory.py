@@ -39,6 +39,10 @@ Routes
   POST   /inventory/receiving/pos/{id}/lines/{line_id}/receive   receive the counted quantity for one PO line (closes it, or keeps it open if the rest is coming later)
   POST   /inventory/receiving/pos/{id}/extras   receive parts that were not on the PO (or more than ordered)
   GET    /inventory/orders/to-ship          paid website orders: to pick, and picked / ready to ship
+  GET    /inventory/queue                   ONE list of every order waiting to be picked / shipped, all sales channels, oldest first
+  POST   /inventory/claims                  mark an order "being picked by me" (409 if someone else has it, unless take_over)
+  POST   /inventory/claims/heartbeat        keep my claim alive while the order is open
+  POST   /inventory/claims/release          let go of my claim
   GET    /inventory/orders/{order_number}   one order with what is still to scan
   POST   /inventory/ship                    commit a scan-out batch (website order pick, or eBay / other)
   POST   /inventory/orders/{n}/short        flag a line that could not be picked (missing / damaged)
@@ -68,7 +72,7 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, current_user, needs, require_route_access
 from app.database import get_db
 from app.images import thumb_url
-from app.ebay_sales import lower_hold_marks, queue_stock_push, take_stock_for_reference
+from app.ebay_sales import _ensure_tracking_cols, lower_hold_marks, queue_stock_push, take_stock_for_reference
 from app.skus import PLACEHOLDER_SKU, shelf_code_for
 from app.stock import available_sql, lock_products, reserved_paid_sql, set_aside_sql
 
@@ -1198,6 +1202,199 @@ def orders_to_ship(db: Session = Depends(get_db)):
     ]
     items.sort(key=lambda i: 0 if i["attention"] else 1)  # stable: flagged first, then oldest first
     return {"items": items, "attention_count": sum(1 for i in items if i["attention"])}
+
+
+# --------------------------------------------------------------------------
+# the combined order queue: every sales channel in one list, oldest first, plus "being picked by" claims
+# --------------------------------------------------------------------------
+CLAIM_MINUTES = 10  # a claim with no heartbeat for this long is treated as abandoned
+_claims_ready = False
+
+
+def _ensure_claims_table(db: Session) -> None:
+    global _claims_ready
+    if _claims_ready:
+        return
+    db.execute(
+        text(
+            """
+            create table if not exists inventory_order_claims (
+                channel text not null,
+                order_ref text not null,
+                claimed_by text not null,
+                claimed_at timestamptz not null default now(),
+                heartbeat_at timestamptz not null default now(),
+                primary key (channel, order_ref)
+            )
+            """
+        )
+    )
+    db.commit()
+    _claims_ready = True
+
+
+def _who(email: Optional[str]) -> Optional[str]:
+    return email.split("@")[0] if email else None
+
+
+# One row per ORDER, whatever the channel. Add a new channel by adding another select to this union.
+_QUEUE_CTE = """
+with q as (
+  select 'Website'::text as channel, o.order_number as order_ref, o.paid_at as placed_at,
+         coalesce((select sum(oi.quantity) from order_items oi where oi.order_id = o.id), 0)::int as units,
+         (select p.title from order_items oi join products p on p.id = oi.product_id
+           where oi.order_id = o.id order by oi.product_id limit 1) as first_title,
+         (select count(*) from order_items oi where oi.order_id = o.id)::int as line_count,
+         o.customer_name as sub, o.id as web_id,
+         case when o.picked_at is not null then 'ship' else 'pick' end as status
+  from orders o
+  where o.status = 'paid' and o.shipped_at is null
+    and (:q = '' or o.order_number ilike :like or o.customer_name ilike :like
+         or exists (select 1 from order_items oi join products p on p.id = oi.product_id
+                     where oi.order_id = o.id and (p.title ilike :like or p.sku_display ilike :like)))
+  union all
+  select 'eBay'::text, l.ebay_order_id, min(coalesce(l.sale_date, l.created_at)),
+         sum(l.quantity)::int, min(coalesce(l.title, '')), count(*)::int, min(l.store), null::bigint,
+         case when bool_or(o.shipped_at_ebay) then 'shipped' else 'pick' end
+  from ebay_order_lines l
+  join ebay_orders o on o.id = l.order_pk
+  where l.state = 'reserved'
+    and (:q = '' or l.ebay_order_id ilike :like or l.ebay_item_id ilike :like or l.custom_label ilike :like
+         or l.title ilike :like or o.tracking_number ilike :like)
+  group by l.order_pk, l.ebay_order_id
+)
+"""
+
+
+@router.get("/queue")
+@needs("inventory.ship")
+def order_queue(
+    q: str = "",
+    channel: str = "",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Every order still waiting to be picked or shipped, all sales channels together, OLDEST FIRST (no channel
+    gets priority). channel = '' for all, or one channel name (case does not matter)."""
+    _ensure_claims_table(db)
+    _ensure_tracking_cols(db)
+    params = {
+        "q": q.strip(),
+        "like": f"%{q.strip()}%",
+        "channel": channel.strip().lower(),
+        "lim": limit,
+        "off": offset,
+    }
+    total = db.execute(
+        text(_QUEUE_CTE + "select count(*) from q where (:channel = '' or lower(q.channel) = :channel)"), params
+    ).scalar()
+    rows = db.execute(
+        text(
+            _QUEUE_CTE
+            + f"""
+            select q.*, c.claimed_by
+            from q
+            left join inventory_order_claims c
+              on c.channel = q.channel and c.order_ref = q.order_ref
+             and c.heartbeat_at > now() - interval '{CLAIM_MINUTES} minutes'
+            where (:channel = '' or lower(q.channel) = :channel)
+            order by q.placed_at asc nulls last, q.channel, q.order_ref
+            limit :lim offset :off
+            """
+        ),
+        params,
+    ).all()
+    flags = _attention(db, [r.web_id for r in rows if r.web_id])
+    items = []
+    for r in rows:
+        title = (r.first_title or "").strip()
+        more = r.line_count - 1
+        items.append(
+            {
+                "channel": r.channel,
+                "order_ref": r.order_ref,
+                "placed_at": r.placed_at,
+                "units": int(r.units or 0),
+                "summary": (title + (f" + {more} more" if more > 0 else "")) if title else None,
+                "sub": r.sub,
+                "status": r.status,
+                "attention": flags.get(r.web_id, []) if r.web_id else [],
+                "claimed_by": _who(r.claimed_by),
+            }
+        )
+    return {"total": int(total or 0), "channels": ["Website", "eBay"], "items": items}
+
+
+class ClaimIn(BaseModel):
+    channel: str = Field(..., min_length=1, max_length=30)
+    order_ref: str = Field(..., min_length=1, max_length=100)
+    take_over: bool = False
+
+
+def _try_claim(db: Session, body: ClaimIn, me: str, take: bool) -> bool:
+    """One atomic statement: take the order if it is free, already mine, abandoned, or I am taking it over."""
+    row = db.execute(
+        text(
+            f"""
+            insert into inventory_order_claims (channel, order_ref, claimed_by, claimed_at, heartbeat_at)
+            values (:c, :r, :me, now(), now())
+            on conflict (channel, order_ref) do update
+               set claimed_by = excluded.claimed_by,
+                   claimed_at = case when inventory_order_claims.claimed_by = excluded.claimed_by
+                                     then inventory_order_claims.claimed_at else now() end,
+                   heartbeat_at = now()
+             where inventory_order_claims.claimed_by = excluded.claimed_by
+                or inventory_order_claims.heartbeat_at < now() - interval '{CLAIM_MINUTES} minutes'
+                or :take
+            returning claimed_by
+            """
+        ),
+        {"c": body.channel, "r": body.order_ref, "me": me, "take": take},
+    ).first()
+    db.commit()
+    return row is not None
+
+
+def _holder(db: Session, body: ClaimIn) -> Optional[str]:
+    e = db.execute(
+        text("select claimed_by from inventory_order_claims where channel = :c and order_ref = :r"),
+        {"c": body.channel, "r": body.order_ref},
+    ).scalar()
+    return _who(e)
+
+
+@router.post("/claims")
+@needs("inventory.ship")
+def claim_order(body: ClaimIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Open an order for picking: it now shows \"being picked by me\" to everyone else."""
+    _ensure_claims_table(db)
+    if not _try_claim(db, body, user.email or user.user_id, body.take_over):
+        raise HTTPException(409, f"{_holder(db, body) or 'Someone'} is picking this order right now.")
+    return {"ok": True}
+
+
+@router.post("/claims/heartbeat")
+@needs("inventory.ship")
+def claim_heartbeat(body: ClaimIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Called every minute while the order is open. Also re-takes a claim that lapsed (laptop asleep) if nobody
+    else grabbed it; held = false means someone else has it now."""
+    _ensure_claims_table(db)
+    if _try_claim(db, body, user.email or user.user_id, False):
+        return {"held": True, "by": None}
+    return {"held": False, "by": _holder(db, body)}
+
+
+@router.post("/claims/release")
+@needs("inventory.ship")
+def release_claim(body: ClaimIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    _ensure_claims_table(db)
+    db.execute(
+        text("delete from inventory_order_claims where channel = :c and order_ref = :r and claimed_by = :me"),
+        {"c": body.channel, "r": body.order_ref, "me": user.email or user.user_id},
+    )
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/orders/{order_number}")

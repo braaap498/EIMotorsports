@@ -9,14 +9,7 @@ import HistoryPanel from "../../../components/admin/inventory/HistoryPanel";
 import StockPanel from "../../../components/admin/inventory/StockPanel";
 import ScanSession from "../../../components/admin/inventory/ScanSession";
 import ReceivePo from "../../../components/admin/inventory/ReceivePo";
-import WebOrderShip from "../../../components/admin/inventory/WebOrderShip";
-import EbayOrdersToShip from "../../../components/admin/inventory/EbayOrdersToShip";
-
-/** Red count bubble: how many orders are waiting to be picked. Hidden at zero. */
-function Count({ n }: { n: number }) {
-  if (n <= 0) return null;
-  return <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs font-semibold text-white">{n}</span>;
-}
+import OrderQueue from "../../../components/admin/inventory/OrderQueue";
 
 const ANY = ["inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust"];
 const TABS = [
@@ -31,31 +24,21 @@ export default function InventoryPage() {
   const { can } = useAccess();
   const tabs = TABS.filter((t) => can(...t.perms));
   const [tab, setTab] = useState("");
-  const [shipMode, setShipMode] = useState<"web" | "ebay" | "other">("web");
+  const [shipMode, setShipMode] = useState<"queue" | "other">("queue");
   const [receiveMode, setReceiveMode] = useState<"po" | "free">("po");
   // Orders with a red flag (short pick / oversold), shown on the Ship tab so they can't be missed.
   const [flagged, setFlagged] = useState(0);
-  // Orders still waiting to be picked, for the red badges on the Pick & ship buttons.
-  const [webToPick, setWebToPick] = useState(0);
-  const [ebayToPick, setEbayToPick] = useState(0);
   const canShip = can("inventory.ship");
   useEffect(() => {
     if (!canShip) return;
-    const load = () => {
-      api<{ attention_count: number; items: { stage: string }[] }>("/inventory/orders/to-ship")
-        .then((r) => {
-          setFlagged(r.attention_count);
-          setWebToPick(r.items.filter((i) => i.stage === "pick").length);
-        })
+    const load = () =>
+      api<{ attention_count: number }>("/inventory/orders/to-ship")
+        .then((r) => setFlagged(r.attention_count))
         .catch(() => {});
-      api<{ orders: number }>("/inventory/ebay-orders/to-pick-count")
-        .then((r) => setEbayToPick(r.orders))
-        .catch(() => {});
-    };
     load();
-    const t = setInterval(load, 30000);
+    const t = setInterval(load, 60000);
     return () => clearInterval(t);
-  }, [canShip, tab, shipMode]);
+  }, [canShip, tab]);
 
   // Open on ?tab=... if given, otherwise the first tab this person may use.
   useEffect(() => {
@@ -124,31 +107,20 @@ export default function InventoryPage() {
         <div className={tab === "ship" ? "space-y-4" : "hidden"}>
           <div className="inline-flex overflow-hidden rounded border border-gray-300 text-sm">
             <button
-              className={`px-4 py-2 ${shipMode === "web" ? "bg-black text-white" : "bg-white text-gray-700"}`}
-              onClick={() => setShipMode("web")}
+              className={`px-4 py-2 ${shipMode === "queue" ? "bg-black text-white" : "bg-white text-gray-700"}`}
+              onClick={() => setShipMode("queue")}
             >
-              Website orders
-              <Count n={webToPick} />
-            </button>
-            <button
-              className={`px-4 py-2 ${shipMode === "ebay" ? "bg-black text-white" : "bg-white text-gray-700"}`}
-              onClick={() => setShipMode("ebay")}
-            >
-              eBay orders
-              <Count n={ebayToPick} />
+              All orders
             </button>
             <button
               className={`px-4 py-2 ${shipMode === "other" ? "bg-black text-white" : "bg-white text-gray-700"}`}
               onClick={() => setShipMode("other")}
             >
-              eBay / other sale
+              Scan out another sale
             </button>
           </div>
-          <div className={shipMode === "web" ? "" : "hidden"}>
-            <WebOrderShip active={tab === "ship" && shipMode === "web"} />
-          </div>
-          <div className={shipMode === "ebay" ? "" : "hidden"}>
-            <EbayOrdersToShip active={tab === "ship" && shipMode === "ebay"} />
+          <div className={shipMode === "queue" ? "" : "hidden"}>
+            <OrderQueue active={tab === "ship" && shipMode === "queue"} />
           </div>
           <div className={shipMode === "other" ? "" : "hidden"}>
             <ScanSession mode="ship-other" active={tab === "ship" && shipMode === "other"} />

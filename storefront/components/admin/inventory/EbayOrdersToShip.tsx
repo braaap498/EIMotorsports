@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
 import { LineStockButtons, OrderShipControls, type OrderLike, type Patch } from "../EbayOrderActions";
@@ -23,12 +23,29 @@ type Line = OrderLike & {
 
 const LIMIT = 50;
 
-export default function EbayOrdersToShip({ active }: { active: boolean }) {
+export default function EbayOrdersToShip({
+  active,
+  embedded = false,
+  initialQ = "",
+  reloadKey = 0,
+  onEmpty,
+}: {
+  active: boolean;
+  /** Shown for one order inside the combined queue: no intro, search or paging. */
+  embedded?: boolean;
+  initialQ?: string;
+  /** Bump to re-read the list (after a scan-out was committed). */
+  reloadKey?: number;
+  /** Called when the list comes back empty, i.e. the order was picked, released or cancelled. */
+  onEmpty?: () => void;
+}) {
   const [lines, setLines] = useState<Line[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
-  const [q, setQ] = useState("");
-  const [qInput, setQInput] = useState("");
+  const [q, setQ] = useState(initialQ);
+  const [qInput, setQInput] = useState(initialQ);
+  const emptyRef = useRef(onEmpty);
+  emptyRef.current = onEmpty;
   const [msg, setMsg] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -40,6 +57,7 @@ export default function EbayOrdersToShip({ active }: { active: boolean }) {
       const r = await api<{ total: number; items: Line[] }>(`/inventory/ebay-orders/lines?${p.toString()}`);
       setLines(r.items);
       setTotal(r.total);
+      if (r.items.length === 0) emptyRef.current?.();
     } catch (e) {
       setMsg(errMsg(e));
     } finally {
@@ -49,7 +67,7 @@ export default function EbayOrdersToShip({ active }: { active: boolean }) {
 
   useEffect(() => {
     if (active) void load();
-  }, [active, load]);
+  }, [active, load, reloadKey]);
 
   /* tracking / shipped belong to the whole order: update every line of it on screen */
   const patchOrder = (orderPk: number, p: Patch) =>
@@ -57,13 +75,16 @@ export default function EbayOrdersToShip({ active }: { active: boolean }) {
 
   return (
     <div className="space-y-3">
+      {!embedded && (
       <p className="text-xs text-gray-500">
         eBay orders whose parts are still set aside, oldest first. <strong>Open eBay label</strong> to print the label on eBay, then{" "}
         <strong>Mark shipped</strong> with the tracking number (tracking from an eBay label fills in by itself). A line leaves this list when it
         is picked, released, or the order is cancelled.
       </p>
+      )}
       {msg && <Notice kind="error">{msg}</Notice>}
 
+      {!embedded && (
       <div className="flex flex-wrap items-end gap-2">
         <input
           className={`${inputCls} !w-[28rem] max-w-full`}
@@ -84,8 +105,9 @@ export default function EbayOrdersToShip({ active }: { active: boolean }) {
           {loading ? "Loading…" : "Refresh"}
         </button>
       </div>
+      )}
 
-      <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
+      {!embedded && <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />}
 
       <div className="overflow-x-auto rounded border border-gray-200 bg-white">
         {/* fixed column widths, sized for the longest content, so nothing shifts from page to page */}
@@ -146,7 +168,7 @@ export default function EbayOrdersToShip({ active }: { active: boolean }) {
           </tbody>
         </table>
       </div>
-      <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
+      {!embedded && <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />}
     </div>
   );
 }
