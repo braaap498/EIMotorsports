@@ -5,15 +5,18 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "./ui";
 import { SortTh, useSort } from "./SortHeader";
+import { trackingUrl } from "./EbayOrderActions";
 
-/* The list of eBay orders (the Orders tab): filter by store, state or order/item number; mark a set-aside order
-   picked or release it. Checking stores for new orders (how often, "Check now", import 90 days, quantity
-   updates) is on the Store API > Stores page. */
+/* The list of eBay orders (Sales channels > eBay > Orders): a read-only, searchable record of every order. Shipped
+   orders show in green with their tracking number as a link to follow the package. Printing labels, entering
+   tracking (Mark shipped), Mark picked and Release are done on Inventory > Pick & ship > eBay orders. Checking
+   stores for new orders (how often, "Check now", import 90 days, quantity updates) is on the Store API > Stores page. */
 
 type StoreOption = { store: string; display_name: string | null };
 
 type Line = {
   id: number;
+  order_pk: number;
   store: string;
   ebay_order_id: string;
   ebay_item_id: string;
@@ -27,6 +30,10 @@ type Line = {
   sale_date: string | null;
   cancelled: boolean;
   refund_total: string | null;
+  shipped_at_ebay: string | null;
+  tracking_number: string | null;
+  tracking_carrier: string | null;
+  shipping_service: string | null;
 };
 
 type SortKey = "date" | "store" | "order" | "item" | "title" | "qty" | "price" | "state";
@@ -97,21 +104,6 @@ export default function EbaySalesPanel() {
     void loadLines();
   }, [loadLines]);
 
-  async function lineAction(id: number, what: "pick" | "release") {
-    const q =
-      what === "pick"
-        ? "Take these parts off the shelf now? Use this only when the part has already gone and was not scanned."
-        : "Stop setting these parts aside WITHOUT changing the shelf count?";
-    if (!window.confirm(q)) return;
-    setMsg(null);
-    try {
-      await api(`/ebay-sales/lines/${id}/${what}`, { method: "POST" });
-      await loadLines();
-    } catch (e) {
-      setMsg({ kind: "error", text: errMsg(e) });
-    }
-  }
-
   const onSort = (k: SortKey) => {
     toggle(k);
     setOffset(0);
@@ -131,7 +123,7 @@ export default function EbaySalesPanel() {
 
           <p className="text-xs text-gray-500">
             An order sets its parts aside at once, so <strong>available</strong> drops. The shelf count (<strong>on hand</strong>) drops when
-            the part is scanned out on the Ship screen with the eBay order number.
+            the part is scanned out on the Ship screen with the eBay order number. Labels, tracking, Mark shipped, Mark picked and Release are on Inventory &rsaquo; Pick &amp; ship &rsaquo; eBay orders.
           </p>
 
           <div className="flex flex-wrap items-end gap-2">
@@ -153,7 +145,7 @@ export default function EbaySalesPanel() {
             </select>
             <input
               className={`${inputCls} !w-64`}
-              placeholder="Order #, item #, custom label or title"
+              placeholder="Order #, item #, tracking #, label or title"
               value={qInput}
               onChange={(e) => setQInput(e.target.value)}
               onKeyDown={(e) => {
@@ -180,12 +172,12 @@ export default function EbaySalesPanel() {
                   <SortTh label="Qty" k="qty" sort={sort} onSort={onSort} />
                   <SortTh label="Price" k="price" sort={sort} onSort={onSort} />
                   <SortTh label="State" k="state" sort={sort} onSort={onSort} />
-                  <th className="px-3 py-2" />
+                  <th className="whitespace-nowrap px-3 py-2">Shipping</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {lines.map((l) => (
-                  <tr key={l.id}>
+                  <tr key={l.id} className={l.shipped_at_ebay && !l.cancelled ? "bg-green-50" : ""}>
                     <td className="whitespace-nowrap px-3 py-2 text-gray-600">{l.sale_date ? new Date(l.sale_date).toLocaleString() : "—"}</td>
                     <td className="px-3 py-2 text-gray-600">{l.store}</td>
                     <td className="whitespace-nowrap px-3 py-2">{l.ebay_order_id}</td>
@@ -213,16 +205,37 @@ export default function EbaySalesPanel() {
                         <div className="mt-1 text-xs font-medium text-red-700">Refunded ${Number(l.refund_total).toFixed(2)}</div>
                       )}
                     </td>
-                    <td className="whitespace-nowrap px-3 py-2 text-right">
-                      {l.state === "reserved" && (
-                        <span className="flex justify-end gap-2">
-                          <button type="button" className={btn2Cls} onClick={() => void lineAction(l.id, "pick")}>
-                            Mark picked
-                          </button>
-                          <button type="button" className={btn2Cls} onClick={() => void lineAction(l.id, "release")}>
-                            Release
-                          </button>
-                        </span>
+                    <td className="px-3 py-2">
+                      {l.cancelled || l.state === "cancelled" ? (
+                        <span className="text-xs text-gray-400">—</span>
+                      ) : (
+                        <div className="space-y-1">
+                          {l.shipped_at_ebay ? (
+                            <span className="inline-block whitespace-nowrap rounded bg-green-600 px-2 py-0.5 text-xs font-semibold text-white">
+                              ✓ Shipped {new Date(l.shipped_at_ebay).toLocaleDateString()}
+                            </span>
+                          ) : (
+                            <Badge tone="gray">Not shipped</Badge>
+                          )}
+                          {l.tracking_number && (
+                            <div className="whitespace-nowrap text-xs text-gray-700">
+                              {l.tracking_carrier ? `${l.tracking_carrier} ` : ""}
+                              {trackingUrl(l.tracking_carrier, l.tracking_number) ? (
+                                <a
+                                  className="font-medium text-blue-700 underline"
+                                  href={trackingUrl(l.tracking_carrier, l.tracking_number) as string}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title="Follow this package"
+                                >
+                                  {l.tracking_number}
+                                </a>
+                              ) : (
+                                <span className="font-medium">{l.tracking_number}</span>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       )}
                     </td>
                   </tr>

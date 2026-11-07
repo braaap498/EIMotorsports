@@ -29,6 +29,7 @@ from app.ebay_edit import router as ebay_edit_router
 from app.ebay_edit import start_zero_keeper
 from app.ebay_sales import public_router as ebay_sales_public_router
 from app.ebay_sales import router as ebay_sales_router
+from app.ebay_sales import ship_router as ebay_ship_router
 from app.ebay_sales import start_background as start_ebay_sales
 from app.admin_ebay_photos import router as admin_ebay_photos_router
 from app.admin_inventory import router as admin_inventory_router
@@ -101,6 +102,7 @@ admin_router.include_router(ebay_oauth_router)
 admin_router.include_router(ebay_edit_router)
 admin_router.include_router(ebay_copy_router)
 admin_router.include_router(ebay_sales_router)
+admin_router.include_router(ebay_ship_router)
 admin_router.include_router(admin_ebay_photos_router)
 admin_router.include_router(admin_ebay_compat_router)
 admin_router.include_router(admin_ebay_fitment_router)
