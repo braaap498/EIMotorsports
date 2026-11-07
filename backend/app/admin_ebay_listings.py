@@ -615,14 +615,18 @@ def _sync_store(store: str):
                 r[0]
                 for r in c.execute(
                     text(
-                        "select regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item "
-                        "from channel_listings cl where lower(cl.store) = lower(:s) "
-                        "and lower(coalesce(cl.status, '')) <> 'ended' "
-                        "and regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') ~ '^[0-9]{9,15}$' "
-                        "and not exists (select 1 from ebay_status_checked k "
-                        "  where k.item_number = regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') "
-                        "  and k.checked_at > now() - interval '14 days') "
-                        "order by cl.id"
+                        "select d.item from ("
+                        "  select regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item, cl.id "
+                        "  from channel_listings cl where lower(cl.store) = lower(:s) "
+                        "  and lower(coalesce(cl.status, '')) <> 'ended'"
+                        ") d left join ebay_status_checked k on k.item_number = d.item "
+                        "where d.item ~ '^[0-9]{9,15}$' "
+                        # Anything we still show as live but eBay did not list as live is looked at again on every daily
+                        # run (only the ones already looked at in the last 20 hours wait), never-checked first, then
+                        # the longest ago. The old 14-day wait let a listing that ended after its last look keep
+                        # showing as active for up to two weeks.
+                        "and (k.checked_at is null or k.checked_at < now() - interval '20 hours') "
+                        "order by k.checked_at nulls first, d.id"
                     ),
                     {"s": store},
                 )

@@ -281,9 +281,32 @@ def _read_draft(db: Session, store: str, item_id: str) -> Optional[dict]:
     return {"changes": r.changes, "updated_by": r.updated_by, "updated_at": r.updated_at.isoformat() if r.updated_at else None}
 
 
+def _sync_listing_status(db: Session, item: dict) -> None:
+    """The listing was just read from eBay itself, so make the status we show in the Listings list say the same
+    (active, or ended for Completed/Ended). Other words eBay may use are left alone. Never raises."""
+    try:
+        said = (item.get("status") or "").strip().lower()
+        word = "active" if said == "active" else "ended" if said in ("completed", "ended") else None
+        if not word:
+            return
+        db.execute(
+            text(
+                "update channel_listings set status = :w "
+                "where regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i "
+                "and lower(store) = lower(:s) and lower(coalesce(status, '')) <> :w"
+            ),
+            {"w": word, "i": item["item_id"], "s": item["store"]},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("could not refresh the stored status of %s", item.get("item_id"))
+
+
 @router.get("/item")
 def get_item(store: str = Query(...), item_id: str = Query(...), db: Session = Depends(get_db)):
     item = _read_item(db, store, item_id.strip())
+    _sync_listing_status(db, item)
     _note_zero_state(db, item)
     item["draft"] = _read_draft(db, item["store"], item["item_id"])
     return item
