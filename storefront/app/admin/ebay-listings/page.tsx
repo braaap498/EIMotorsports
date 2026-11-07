@@ -553,14 +553,19 @@ export default function EbayLiveListingsPage() {
             }}
           >
             <option value="all">All{repo ? ` (${repo.counts.all})` : ""}</option>
-            {(repo?.statuses ?? []).map((x) => (
-              <option key={x.status} value={x.status}>
-                {x.status.charAt(0).toUpperCase() + x.status.slice(1)} ({x.count})
-              </option>
-            ))}
-            {statusF !== "all" && !(repo?.statuses ?? []).some((x) => x.status === statusF) && (
-              <option value={statusF}>{statusF.charAt(0).toUpperCase() + statusF.slice(1)}</option>
-            )}
+            {(() => {
+              // The usual eBay statuses are always offered (with 0 when none are on file), followed by any other
+              // status found on the store's listings.
+              const found = repo?.statuses ?? [];
+              const usual = ["active", "ended", "scheduled", "draft"];
+              const names = [...usual, ...found.map((x) => x.status).filter((n) => !usual.includes(n))];
+              if (statusF !== "all" && !names.includes(statusF)) names.push(statusF);
+              return names.map((n) => (
+                <option key={n} value={n}>
+                  {n.charAt(0).toUpperCase() + n.slice(1)} ({found.find((x) => x.status === n)?.count ?? 0})
+                </option>
+              ));
+            })()}
           </select>
         </label>
         <label className="block w-full max-w-full text-sm font-medium text-gray-700 sm:w-[28rem]">
