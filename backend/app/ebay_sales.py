@@ -51,7 +51,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, require_admin
 from app.database import _session_factory, get_db
-from app.ebay_edit import NS, _failed, _first_message, _read_item, _trading
+from app.ebay_edit import NS, _ensure_zero_table, _failed, _first_message, _read_item, _trading
 from app.stock import available_sql, lock_products
 
 log = logging.getLogger(__name__)
@@ -473,6 +473,55 @@ def enqueue_product(db: Session, product_id: int) -> int:
     return len(rows)
 
 
+def _hold_gate(db: Session, store: str, item: str, product_id: int, target: int) -> Optional[str]:
+    """A listing the user set to 0 on purpose (Set 0 Qty) is HELD: sales of the product must not push stock back onto it.
+    Returns a note when the listing is held (skip it), or None to go ahead. A hold is released, and the listing gets
+    the available quantity, only when the product's stock ON HAND has gone up since the hold (stock received, a manual
+    adjustment) and there is something available to sell. Stock on hand falling (a sale shipped) lowers the mark, so
+    the next rise from there releases it. Cancelling an unshipped order changes only what is set aside, so it never
+    releases a hold. If the hold cannot be read the push goes ahead as it always did."""
+    try:
+        _ensure_zero_table(db)
+        with db.begin_nested():
+            h = db.execute(
+                text("select held_onhand from ebay_zero_qty where store = :s and item_id = :i and held"),
+                {"s": store, "i": item},
+            ).first()
+            if not h:
+                return None
+            onhand = int(db.execute(text("select coalesce(quantity_on_hand, 0) from products where id = :p"), {"p": product_id}).scalar() or 0)
+            mark = h.held_onhand if h.held_onhand is not None else 0
+            if onhand > mark and target > 0:
+                db.execute(text("delete from ebay_zero_qty where store = :s and item_id = :i"), {"s": store, "i": item})
+                return None
+            if onhand < mark:
+                db.execute(
+                    text("update ebay_zero_qty set held_onhand = :o where store = :s and item_id = :i"),
+                    {"o": onhand, "s": store, "i": item},
+                )
+            return "Held at 0 (Set 0 Qty): not changed until more stock is received or adjusted"
+    except Exception:
+        log.exception("could not read the hold for %s", item)
+        return None
+
+
+def _track_zero(db: Session, store: str, item: str, qty: int) -> None:
+    """After a quantity push: a listing now at 0 goes on the zero-quantity list (so the keeper watches it); one with
+    stock again comes off. A hold set by Set 0 Qty is left as it is."""
+    try:
+        _ensure_zero_table(db)
+        with db.begin_nested():
+            if qty == 0:
+                db.execute(
+                    text("insert into ebay_zero_qty (store, item_id) values (:s, :i) on conflict (store, item_id) do nothing"),
+                    {"s": store, "i": item},
+                )
+            else:
+                db.execute(text("delete from ebay_zero_qty where store = :s and item_id = :i"), {"s": store, "i": item})
+    except Exception:
+        log.exception("could not update the zero-quantity list for %s", item)
+
+
 def run_queue(db: Session, store: str, limit: int = QTY_PER_RUN) -> dict:
     """Send the queued quantities to eBay (a few per check)."""
     flags = db.execute(
@@ -490,6 +539,18 @@ def run_queue(db: Session, store: str, limit: int = QTY_PER_RUN) -> dict:
     ).all()
     for r in rows:
         target = _available(db, r.product_id) if r.product_id else r.target_qty
+        held_note = _hold_gate(db, store, r.ebay_item_id, r.product_id, target) if r.product_id else None
+        if held_note:
+            db.execute(
+                text(
+                    "update ebay_qty_queue set status = 'skipped', attempts = attempts + 1, last_error = :n, "
+                    "target_qty = :t, done_at = now() where id = :id"
+                ),
+                {"n": held_note, "t": target, "id": r.id},
+            )
+            db.commit()
+            out["skipped"] += 1
+            continue
         status, note = "done", None
         try:
             cur = _read_item(db, store, r.ebay_item_id)
@@ -508,6 +569,8 @@ def run_queue(db: Session, store: str, limit: int = QTY_PER_RUN) -> dict:
             status, note = ("failed" if r.attempts + 1 >= QTY_MAX_ATTEMPTS else "pending"), str(e.detail)[:300]
         except Exception as e:  # never let one listing stop the rest
             status, note = ("failed" if r.attempts + 1 >= QTY_MAX_ATTEMPTS else "pending"), type(e).__name__
+        if status == "done":
+            _track_zero(db, store, r.ebay_item_id, target)
         db.execute(
             text(
                 "update ebay_qty_queue set status = :st, attempts = attempts + 1, last_error = :n, "

@@ -105,6 +105,7 @@ export default function EbayLiveListingsPage() {
   const reqSeq = useRef(0); // only the newest list request may update the screen (typing fast sends several)
   const lastQ = useRef(""); // the search text the list on screen was read with
   const [busy, setBusy] = useState("");
+  const [heldMap, setHeldMap] = useState<Record<string, boolean>>({}); // "store|item" -> set to 0 on purpose (sales do not push stock onto it)
   const [zeroMap, setZeroMap] = useState<Record<string, number>>({}); // "store|item" -> days at quantity 0 (listings Set 0 Qty put there)
   const [sync, setSync] = useState<SyncRow[]>([]);
   const [syncNote, setSyncNote] = useState(""); // set when a background check finished and changed statuses
@@ -362,7 +363,7 @@ export default function EbayLiveListingsPage() {
     const ids = todo.slice(0, 10).map((x) => x.item_id).join(", ") + (n > 10 ? ` and ${n - 10} more` : "");
     if (
       !window.confirm(
-        `Set Qty 0 will set the quantity to 0 on ${one ? "this listing" : `these ${n} listings`} on eBay (item${one ? "" : "s"} ${ids}).\n\nThe listing is NOT ended: it keeps its item number, photos and history, and buyers cannot buy ${one ? "it" : "them"} until you raise the quantity again.\n\nThis only works if the out-of-stock setting is ON in the eBay account (Account settings › Selling › Selling preferences).\n\nContinue?`
+        `Set Qty 0 will set the quantity to 0 on ${one ? "this listing" : `these ${n} listings`} on eBay (item${one ? "" : "s"} ${ids}).\n\nThe listing is NOT ended: it keeps its item number, photos and history, and buyers cannot buy ${one ? "it" : "them"}. While held at 0, sales of the part will not push stock back onto ${one ? "it" : "them"}. Receiving or adjusting stock on hand releases the hold, or use Restore.\n\nThis only works if the out-of-stock setting is ON in the eBay account (Account settings › Selling › Selling preferences).\n\nContinue?`
       )
     )
       return;
@@ -443,10 +444,15 @@ export default function EbayLiveListingsPage() {
 
   async function loadZero() {
     try {
-      const z = await api<{ items: { store: string; item_id: string; days_at_zero: number }[] }>("/ebay-edit/zero/status");
+      const z = await api<{ items: { store: string; item_id: string; days_at_zero: number; held?: boolean }[] }>("/ebay-edit/zero/status");
       const m: Record<string, number> = {};
-      for (const x of z.items) m[`${x.store.toLowerCase()}|${x.item_id}`] = x.days_at_zero;
+      const h: Record<string, boolean> = {};
+      for (const x of z.items) {
+        m[`${x.store.toLowerCase()}|${x.item_id}`] = x.days_at_zero;
+        if (x.held) h[`${x.store.toLowerCase()}|${x.item_id}`] = true;
+      }
       setZeroMap(m);
+      setHeldMap(h);
     } catch {
       /* the badge is a convenience; the list still works without it */
     }
@@ -745,8 +751,10 @@ export default function EbayLiveListingsPage() {
                         <td className="px-3 py-2 whitespace-nowrap">
                           {it.quantity ?? "—"}
                           {it.active && isZero(it) && (
-                            <span className="ml-1" title="Quantity is 0 on eBay (set from here). The listing stays alive.">
-                              <Badge tone="gray">0 on eBay · {zeroMap[`${it.store.toLowerCase()}|${it.item_id}`]}d</Badge>
+                            <span className="ml-1" title="Quantity is 0 on eBay and the listing stays alive. Held = set to 0 on purpose: sales will not push stock onto it until more stock is received or adjusted.">
+                              <Badge tone={heldMap[`${it.store.toLowerCase()}|${it.item_id}`] ? "amber" : "gray"}>
+                                {heldMap[`${it.store.toLowerCase()}|${it.item_id}`] ? "Held at 0" : "0 on eBay"} · {zeroMap[`${it.store.toLowerCase()}|${it.item_id}`]}d
+                              </Badge>
                             </span>
                           )}
                           {it.quantity_from_ebay && <span className="ml-1 text-xs text-gray-500" title="Our stock on hand is 0; this is the quantity eBay shows as available">(eBay)</span>}

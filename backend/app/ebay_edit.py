@@ -1071,6 +1071,10 @@ def _ensure_zero_table(db: Session) -> None:
             """
         )
     )
+    # held = set to 0 on purpose (Set 0 Qty): sales of the product do not push stock onto it until the product's
+    # stock on hand rises above held_onhand (see _hold_gate in ebay_sales.py)
+    db.execute(text("alter table ebay_zero_qty add column if not exists held boolean not null default false"))
+    db.execute(text("alter table ebay_zero_qty add column if not exists held_onhand integer"))
     db.commit()
     _zero_ready = True
 
@@ -1111,6 +1115,26 @@ def _set_qty(db: Session, store: str, item_id: str, qty: int) -> ET.Element:
     return _trading(db, store, "ReviseInventoryStatus", f"<InventoryStatus><ItemID>{item_id}</ItemID><Quantity>{qty}</Quantity></InventoryStatus>")
 
 
+def _mark_held(db: Session, store: str, item_id: str) -> None:
+    """Record the listing as held at 0 on purpose, with the product's stock on hand as the mark to rise above."""
+    _ensure_zero_table(db)
+    onhand = db.execute(
+        text(
+            "select coalesce(p.quantity_on_hand, 0) from channel_listings cl join products p on p.id = cl.product_id "
+            "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i and cl.store = :s limit 1"
+        ),
+        {"i": item_id, "s": store},
+    ).scalar()
+    db.execute(
+        text(
+            "insert into ebay_zero_qty (store, item_id, zero_since, held, held_onhand) values (:s, :i, now(), true, :o) "
+            "on conflict (store, item_id) do update set held = true, held_onhand = :o, bounce_open = false, last_error = null"
+        ),
+        {"s": store, "i": item_id, "o": onhand},
+    )
+    db.commit()
+
+
 class SetZeroIn(BaseModel):
     store: str
     item_id: str = Field(..., max_length=20)
@@ -1130,8 +1154,12 @@ def set_zero(body: SetZeroIn, db: Session = Depends(get_db), user: AuthUser = De
         raise HTTPException(409, "Listings with variations are not supported here yet (each variation needs its own quantity).")
     if not current["editable"]:
         raise HTTPException(409, current["not_editable_reason"] or "This listing cannot be changed here.")
-    if current["quantity_available"] == 0:
-        _note_zero_state(db, current)
+    if current["quantity_available"] == 0:  # already at 0 (sold down): nothing to send, but now it is held on purpose
+        try:
+            _mark_held(db, row.store, current["item_id"])
+        except Exception:
+            log.exception("could not record the hold for %s", current["item_id"])
+            db.rollback()
         return {"ok": True, "item_id": current["item_id"], "already": True, "warnings": []}
     if _oos_preference(db, row.store) is False:
         raise HTTPException(
@@ -1147,12 +1175,9 @@ def set_zero(body: SetZeroIn, db: Session = Depends(get_db), user: AuthUser = De
     if not ok:
         raise HTTPException(502, "eBay did not accept quantity 0: " + _first_message(root))
     try:
-        _ensure_zero_table(db)
+        _mark_held(db, row.store, current["item_id"])
         db.execute(
-            text(
-                "insert into ebay_zero_qty (store, item_id, zero_since) values (:s, :i, now()) "
-                "on conflict (store, item_id) do update set zero_since = now(), bounce_open = false, last_error = null"
-            ),
+            text("update ebay_zero_qty set zero_since = now() where store = :s and item_id = :i"),
             {"s": row.store, "i": current["item_id"]},
         )
         db.execute(
@@ -1342,7 +1367,7 @@ def zero_status(db: Session = Depends(get_db)):
     start = int(os.environ.get("EBAY_ZERO_START_DAYS", "150"))
     rows = db.execute(
         text(
-            "select store, item_id, zero_since, last_reset_at, last_attempt_at, bounce_open, last_error, "
+            "select store, item_id, zero_since, last_reset_at, last_attempt_at, bounce_open, last_error, held, "
             "floor(extract(epoch from (now() - zero_since)) / 86400)::int as days_at_zero "
             "from ebay_zero_qty order by zero_since"
         )
@@ -1354,7 +1379,7 @@ def zero_status(db: Session = Depends(get_db)):
                 "store": r.store, "item_id": r.item_id, "days_at_zero": r.days_at_zero,
                 "zero_since": r.zero_since.isoformat() if r.zero_since else None,
                 "last_reset_at": r.last_reset_at.isoformat() if r.last_reset_at else None,
-                "bounce_open": r.bounce_open, "last_error": r.last_error,
+                "bounce_open": r.bounce_open, "last_error": r.last_error, "held": r.held,
             }
             for r in rows
         ],
