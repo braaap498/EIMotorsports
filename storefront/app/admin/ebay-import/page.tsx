@@ -230,6 +230,19 @@ export default function EbayListingImportPage() {
     }
   }
 
+  async function forgetUnimportable() {
+    const count = preview ? preview.total - preview.ready : 0;
+    if (!window.confirm(`Remove the ${count} listings that cannot be imported from this list?\n\nThey leave the import list only. Nothing on the website changes.`)) return;
+    setError("");
+    try {
+      await api("/ebay-import/forget-unimportable", { method: "POST" });
+    } catch (e) {
+      setError(errMsg(e));
+    }
+    await loadState();
+    await loadPreview();
+  }
+
   async function runFromEbay(limit: number, all: boolean) {
     setRunning(true);
     stopRef.current = false;
@@ -353,6 +366,9 @@ export default function EbayListingImportPage() {
                   ))}
                 </ul>
                 <p className="mt-2 text-xs text-gray-500">Upload that store&rsquo;s report, or finish its compatibility import, and check again.</p>
+                <button type="button" className={`${btn2Cls} mt-2`} disabled={running} onClick={() => void forgetUnimportable()}>
+                  Remove these from the list
+                </button>
               </details>
             )}
             {preview.sample.length > 0 && (
@@ -404,9 +420,9 @@ export default function EbayListingImportPage() {
         </>
       )}
 
-      {ebayState && !hasReport && (
+      {ebayState && (!hasReport || ebayState.api_todo + ebayState.api_ready + ebayState.api_skipped > 0) && (
         <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
-          <h3 className="text-base font-semibold">2. No report loaded: import straight from eBay</h3>
+          <h3 className="text-base font-semibold">{hasReport ? "Listings in no report: ask eBay about them" : "2. No report loaded: import straight from eBay"}</h3>
           <p className="max-w-3xl text-sm text-gray-600">
             Asks eBay about each listing that has no website listing yet (title, price, custom label and store), then imports it. That is
             one eBay lookup per listing, so it uses the same daily allowance as the photo and compatibility imports. If eBay&rsquo;s daily limit

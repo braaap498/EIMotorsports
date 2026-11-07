@@ -253,6 +253,25 @@ def _summary(rows) -> dict:
     return out
 
 
+@router.post("/forget-unimportable")
+def forget_unimportable(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Drop the listings that cannot be imported (no store or title, or eBay said they are ended/deleted) from the
+    import list: their rows in the custom-label list and eBay's saved answers. Nothing already on the website is touched."""
+    rows = db.execute(text(_CANDIDATES)).all()
+    items = [r.item for r in rows if not _usable(r)]
+    labels = answers = 0
+    for chunk in _chunks(items, 1000):
+        labels += db.execute(
+            text("delete from ebay_label_import where cast(item_number as text) = any(cast(:ids as text[]))"), {"ids": chunk}
+        ).rowcount or 0
+        answers += db.execute(
+            text("delete from ebay_api_details where item_id = any(cast(:ids as text[]))"), {"ids": chunk}
+        ).rowcount or 0
+    db.commit()
+    log.info("%s removed %d unimportable listings from the import list", user.email, len(items))
+    return {"forgotten": len(items), "label_rows": labels, "answer_rows": answers}
+
+
 @router.get("/preview")
 def preview(db: Session = Depends(get_db)):
     rows = db.execute(text(_CANDIDATES)).all()
