@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import ClickRow from "../../../components/admin/ClickRow";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -91,6 +92,7 @@ function money(v: string | number | null | undefined, cur?: string | null) {
 /* ------------------------------------------------------------------- page */
 
 export default function EbayLiveListingsPage() {
+  const router = useRouter();
   const [stores, setStores] = useState<Store[]>([]);
   const [store, setStore] = useState("");
   const [q, setQ] = useState("");
@@ -108,6 +110,12 @@ export default function EbayLiveListingsPage() {
   const reqSeq = useRef(0); // only the newest list request may update the screen (typing fast sends several)
   const lastQ = useRef(""); // the search text the list on screen was read with
   const [busy, setBusy] = useState("");
+  const [drafts, setDrafts] = useState<{ id: number; store: string; source_item_id: string; title: string }[]>([]);
+  useEffect(() => {
+    api<{ drafts: { id: number; store: string; source_item_id: string; title: string }[] }>("/ebay-copy")
+      .then((r) => setDrafts(r.drafts))
+      .catch(() => setDrafts([]));
+  }, []);
   const [heldMap, setHeldMap] = useState<Record<string, boolean>>({}); // "store|item" -> set to 0 on purpose (sales do not push stock onto it)
   const [zeroMap, setZeroMap] = useState<Record<string, number>>({}); // "store|item" -> days at quantity 0 (listings Set 0 Qty put there)
   const [sync, setSync] = useState<SyncRow[]>([]);
@@ -243,6 +251,21 @@ export default function EbayLiveListingsPage() {
       setActMsg({ kind: "error", text: errMsg(e) });
     } finally {
       setLoadingAll(false);
+    }
+  }
+
+  // Sell similar: copy the one ticked listing into a NEW listing: it is saved as a draft on the website, and the edit screen opens.
+  async function copyOne() {
+    const it = selectedItems()[0];
+    if (!it) return;
+    setBusy("copy");
+    setActMsg(null);
+    try {
+      const r = await api<{ id: number }>("/ebay-copy/create", { method: "POST", body: { store: it.store, item_id: it.item_id } });
+      router.push(`/admin/ebay-copy?id=${r.id}`);
+    } catch (e) {
+      setActMsg({ kind: "error", text: errMsg(e) });
+      setBusy("");
     }
   }
 
@@ -716,9 +739,27 @@ export default function EbayLiveListingsPage() {
               </button>
             </div>
           )}
+          {drafts.length > 0 && (
+            <details className="rounded border border-gray-200 bg-white px-3 py-2 text-sm">
+              <summary className="cursor-pointer font-medium">Sell similar drafts in progress ({drafts.length})</summary>
+              <ul className="mt-2 space-y-1">
+                {drafts.map((d) => (
+                  <li key={d.id}>
+                    <Link href={`/admin/ebay-copy?id=${d.id}`} className="text-blue-700 hover:underline">{d.title || `Draft ${d.id}`}</Link>
+                    <span className="ml-2 text-xs text-gray-500">{d.store} · copy of {d.source_item_id}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           {picked.size > 0 && (
             <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
               <span className="font-medium">{pickedItems.length} selected{allMatch ? " (all matching)" : ""}</span>
+              {pickedItems.length === 1 && (
+                <button type="button" className={btn2Cls} disabled={busy === "copy" || busy === "status"} onClick={() => void copyOne()} title="Opens a draft copy of this listing to edit, then list as a new eBay listing linked to the same product">
+                  {busy === "copy" ? "Opening…" : "Sell similar"}
+                </button>
+              )}
               {nInactivePicked > 0 && (
                 <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkSet("active")}>
                   Relist on eBay ({nInactivePicked})
