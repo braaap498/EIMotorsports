@@ -10,6 +10,7 @@ import StockPanel from "../../../components/admin/inventory/StockPanel";
 import ScanSession from "../../../components/admin/inventory/ScanSession";
 import ReceivePo from "../../../components/admin/inventory/ReceivePo";
 import OrderQueue from "../../../components/admin/inventory/OrderQueue";
+import InsideSalesComingSoon from "../../../components/admin/inventory/InsideSalesComingSoon";
 
 const ANY = ["inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust"];
 const TABS = [
@@ -24,7 +25,7 @@ export default function InventoryPage() {
   const { can } = useAccess();
   const tabs = TABS.filter((t) => can(...t.perms));
   const [tab, setTab] = useState("");
-  const [shipMode, setShipMode] = useState<"queue" | "other">("queue");
+  const [shipMode, setShipMode] = useState<"queue" | "inside">("queue");
   const [receiveMode, setReceiveMode] = useState<"po" | "free">("po");
   // Orders with a red flag (short pick / oversold), shown on the Ship tab so they can't be missed.
   const [flagged, setFlagged] = useState(0);
@@ -110,20 +111,20 @@ export default function InventoryPage() {
               className={`px-4 py-2 ${shipMode === "queue" ? "bg-black text-white" : "bg-white text-gray-700"}`}
               onClick={() => setShipMode("queue")}
             >
-              All orders
+              Online orders
             </button>
             <button
-              className={`px-4 py-2 ${shipMode === "other" ? "bg-black text-white" : "bg-white text-gray-700"}`}
-              onClick={() => setShipMode("other")}
+              className={`px-4 py-2 ${shipMode === "inside" ? "bg-black text-white" : "bg-white text-gray-700"}`}
+              onClick={() => setShipMode("inside")}
             >
-              Scan out another sale
+              Inside sales
             </button>
           </div>
           <div className={shipMode === "queue" ? "" : "hidden"}>
             <OrderQueue active={tab === "ship" && shipMode === "queue"} />
           </div>
-          <div className={shipMode === "other" ? "" : "hidden"}>
-            <ScanSession mode="ship-other" active={tab === "ship" && shipMode === "other"} />
+          <div className={shipMode === "inside" ? "" : "hidden"}>
+            <InsideSalesComingSoon />
           </div>
         </div>
       )}
