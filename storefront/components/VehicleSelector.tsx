@@ -83,6 +83,7 @@ function VehicleSelectorInner() {
   const [saving, setSaving] = useState(false);
 
   const typeParam = type ? `&type=${encodeURIComponent(type)}` : "";
+  const yearParam = year ? `year=${year}` : "";
 
   // Restore the last selection once, on first load in this tab.
   useEffect(() => {
@@ -172,11 +173,8 @@ function VehicleSelectorInner() {
 
   useEffect(() => {
     let cancelled = false;
-    if (!year) {
-      setMakes([]);
-      return;
-    }
-    get<Make[]>(`/makes?year=${year}${typeParam}`)
+    // No year chosen = makes from every year.
+    get<Make[]>(`/makes?${yearParam}${typeParam}`)
       .then((d) => {
         if (cancelled) return;
         setMakes(d);
@@ -187,15 +185,15 @@ function VehicleSelectorInner() {
     return () => {
       cancelled = true;
     };
-  }, [year, typeParam]);
+  }, [yearParam, typeParam]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!year || !makeId) {
+    if (!makeId) {
       setModels([]);
       return;
     }
-    get<Model[]>(`/models?year=${year}&make_id=${makeId}${typeParam}`)
+    get<Model[]>(`/models?make_id=${makeId}${yearParam ? `&${yearParam}` : ""}${typeParam}`)
       .then((d) => {
         if (cancelled) return;
         setModels(d);
@@ -206,7 +204,7 @@ function VehicleSelectorInner() {
     return () => {
       cancelled = true;
     };
-  }, [year, makeId, typeParam]);
+  }, [yearParam, makeId, typeParam]);
 
   const inGarage = !!modelId && garage.some((g) => g.model_id === Number(modelId) && g.year === Number(year));
 
@@ -241,7 +239,7 @@ function VehicleSelectorInner() {
 
       <Step n={2} label="Year">
         <select className={selectClass} value={year} onChange={(e) => onYearChange(e.target.value)}>
-          <option value="">Select year</option>
+          <option value="">All years</option>
           {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
@@ -249,7 +247,7 @@ function VehicleSelectorInner() {
       </Step>
 
       <Step n={3} label="Make">
-        <select className={selectClass} value={makeId} disabled={!year} onChange={(e) => onMakeChange(e.target.value)}>
+        <select className={selectClass} value={makeId} onChange={(e) => onMakeChange(e.target.value)}>
           <option value="">Select make</option>
           {makes.map((m) => (
             <option key={m.id} value={m.id}>{m.name}</option>
@@ -269,7 +267,7 @@ function VehicleSelectorInner() {
       <button
         type="button"
         disabled={!modelId}
-        onClick={() => router.push(`/shop?year=${year}&model_id=${modelId}${typeParam}`)}
+        onClick={() => router.push(`/shop?model_id=${modelId}${year ? `&year=${year}` : ""}${typeParam}`)}
         className="rounded bg-[#06bde7] px-6 py-3 text-sm font-extrabold uppercase tracking-wide text-[#04202b] hover:brightness-110 disabled:opacity-40"
       >
         Find parts
@@ -277,7 +275,8 @@ function VehicleSelectorInner() {
 
       <button
         type="button"
-        disabled={!modelId || saving || inGarage}
+        disabled={!modelId || !year || saving || inGarage}
+        title={!year ? "Pick a year to save this machine" : undefined}
         onClick={saveToGarage}
         className="whitespace-nowrap rounded border border-white/40 px-4 py-3 text-sm font-bold text-white hover:bg-white/10 disabled:opacity-40"
       >

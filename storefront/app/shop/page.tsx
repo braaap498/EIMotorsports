@@ -22,12 +22,13 @@ async function Results({ searchParams }: { searchParams: Params }) {
   let products: Product[] = [];
   let error = "";
 
-  if (!year || !model_id) {
-    error = "Pick a year, make, and model first.";
+  if (!model_id) {
+    error = "Pick a make and model first.";
   } else {
     try {
+      const yr = year ? `&year=${encodeURIComponent(year)}` : "";
       const res = await fetch(
-        `${API}/store/fitment/products?year=${year}&model_id=${model_id}`,
+        `${API}/store/fitment/products?model_id=${encodeURIComponent(model_id)}${yr}`,
         { cache: "no-store" }
       );
       if (!res.ok) throw new Error(String(res.status));
@@ -41,7 +42,7 @@ async function Results({ searchParams }: { searchParams: Params }) {
   return (
     <>
       <h1 className="mb-4 mt-2 text-2xl font-bold">
-        Parts that fit your {year ?? ""} vehicle
+        Parts that fit your {year ? `${year} ` : ""}vehicle{year ? "" : " (all years)"}
       </h1>
 
       {error && <p className="text-red-600">{error}</p>}
@@ -54,7 +55,7 @@ async function Results({ searchParams }: { searchParams: Params }) {
         {products.map((p, i) => (
           <Link
             key={p.id ?? i}
-            href={`/shop/${p.slug}?year=${encodeURIComponent(year ?? "")}&model_id=${encodeURIComponent(model_id ?? "")}`}
+            href={`/shop/${p.slug}?model_id=${encodeURIComponent(model_id ?? "")}${year ? `&year=${encodeURIComponent(year)}` : ""}`}
             className="rounded border border-gray-200 p-3 hover:shadow"
           >
             {p.image_url && (

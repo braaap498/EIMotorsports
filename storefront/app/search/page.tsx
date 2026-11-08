@@ -27,9 +27,9 @@ function pageHref(p: Awaited<Params>, page: number) {
   const qs = new URLSearchParams();
   if (p.q) qs.set("q", p.q);
   if (p.category) qs.set("category", p.category);
-  if (p.year && p.model_id) {
-    qs.set("year", p.year);
+  if (p.model_id) {
     qs.set("model_id", p.model_id);
+    if (p.year) qs.set("year", p.year);
   }
   if (page > 1) qs.set("page", String(page));
   return `/search?${qs}`;
@@ -42,9 +42,9 @@ async function Results({ searchParams }: { searchParams: Params }) {
   const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String((page - 1) * PAGE_SIZE) });
   if (p.q) qs.set("q", p.q);
   if (p.category) qs.set("category", p.category);
-  if (p.year && p.model_id) {
-    qs.set("year", p.year);
+  if (p.model_id) {
     qs.set("model_id", p.model_id);
+    if (p.year) qs.set("year", p.year);
   }
 
   let items: Item[] = [];
@@ -69,7 +69,7 @@ async function Results({ searchParams }: { searchParams: Params }) {
   }
 
   const heading = p.q ? `Results for “${p.q}”` : categoryName || "All parts";
-  const filtered = !!(p.year && p.model_id);
+  const filtered = !!p.model_id;
   const clearHref = pageHref({ ...p, year: undefined, model_id: undefined }, 1);
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -80,7 +80,7 @@ async function Results({ searchParams }: { searchParams: Params }) {
         {total} product{total === 1 ? "" : "s"}
         {filtered && (
           <>
-            {" "}fitting your selected {p.year} machine.{" "}
+            {" "}fitting your selected {p.year ? `${p.year} ` : ""}machine{p.year ? "" : " (all years)"}.{" "}
             <Link href={clearHref} className="underline">Show all</Link>
           </>
         )}
@@ -93,7 +93,7 @@ async function Results({ searchParams }: { searchParams: Params }) {
         {items.map((it) => (
           <Link
             key={it.id}
-            href={`/shop/${it.slug}${filtered ? `?year=${encodeURIComponent(p.year ?? "")}&model_id=${encodeURIComponent(p.model_id ?? "")}` : ""}`}
+            href={`/shop/${it.slug}${filtered ? `?model_id=${encodeURIComponent(p.model_id ?? "")}${p.year ? `&year=${encodeURIComponent(p.year)}` : ""}` : ""}`}
             className="rounded border border-gray-200 p-3 hover:shadow"
           >
             {it.image_url && (

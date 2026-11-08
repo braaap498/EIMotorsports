@@ -143,7 +143,9 @@ export default function SiteHeader() {
   // Keep the chosen machine when browsing a category.
   const year = sp.get("year");
   const modelId = sp.get("model_id");
-  const ride = year && modelId ? `&year=${encodeURIComponent(year)}&model_id=${encodeURIComponent(modelId)}` : "";
+  const ride = modelId
+    ? `&model_id=${encodeURIComponent(modelId)}${year ? `&year=${encodeURIComponent(year)}` : ""}`
+    : "";
   // Staff accounts have a display name ("Eric"); everyone else falls back to the part of the email before the @.
   const displayName = (user?.user_metadata as { display_name?: string } | undefined)?.display_name?.trim();
   const name = displayName || user?.email?.split("@")[0] || "";
