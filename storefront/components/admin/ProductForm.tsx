@@ -364,11 +364,14 @@ export default function ProductForm({ productId }: { productId?: number }) {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div>
+        {/* Same spot and look as the shell's "← Back to ..." link; only one of the two is ever shown. */}
+        {!shellBack && (
+          <Link href="/admin/products" className="mb-3 inline-block text-sm font-medium text-gray-600 hover:text-black hover:underline">
+            ← Back to Products
+          </Link>
+        )}
         <h1 className="text-2xl font-semibold">{productId ? "Edit product" : "New product"}</h1>
-        <div className="flex items-center gap-4">
-          {!shellBack && <Link href="/admin/products" className="text-sm underline">Back to products</Link>}
-        </div>
       </div>
       {(maySave || arrows) && (
         <div className="flex items-center gap-4">
