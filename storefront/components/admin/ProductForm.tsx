@@ -35,9 +35,8 @@ type FieldDef = {
 
 const BASIC: FieldDef[] = [
   { key: "title", label: "Title", kind: "text", wide: true },
-  { key: "ebay_item_id", label: "eBay item ID (optional)", kind: "text" },
   { key: "manufacturer_part_number", label: "Manufacturer part #", kind: "text" },
-  { key: "custom_label_sku", label: "eBay custom label (CLS) – created from the parts below the first time; after that only changes when you edit it here", kind: "text" },
+  { key: "custom_label_sku", label: "Custom label", kind: "text" },
   { key: "part_type", label: "Part type", kind: "text" },
   { key: "condition", label: "Condition", kind: "text" },
 ];
@@ -105,6 +104,7 @@ function buildPayload(vals: Record<string, string>, flags: Flags): { payload: Re
   payload.description = (vals.description ?? "").trim() ? vals.description : null;
   payload.category_id = vals.category_id ? Number(vals.category_id) : null;
   if ((vals.slug ?? "").trim()) payload.slug = vals.slug.trim();
+  if (vals.sku !== undefined) payload.sku = vals.sku.trim().toUpperCase(); // edit screen only; blank is refused by the server
   Object.assign(payload, flags);
   return { payload };
 }
@@ -132,7 +132,6 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [similar, setSimilar] = useState<SimilarMatch[]>([]);
   const [labelBy, setLabelBy] = useState<LabelBy>("mfr"); // Autodist parts in a new label: manufacturer # or vendor SKU
   const [kitParts, setKitParts] = useState<KitPart[]>([]); // pieces bought from a vendor that make up this product
-  const [inHouseSku, setInHouseSku] = useState(""); // our EI- number; set by the database, never typed in
   const [loading, setLoading] = useState(!!productId);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -179,7 +178,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
     api<Record<string, unknown> & { photos: Photo[] }>(`/products/${productId}`)
       .then((p) => {
         const next: Record<string, string> = {};
-        [...ALL.map((f) => f.key), "description", "slug", "category_id"].forEach((k) => {
+        [...ALL.map((f) => f.key), "description", "slug", "category_id", "sku"].forEach((k) => {
           const v = p[k];
           next[k] = v == null ? "" : String(v);
         });
@@ -190,7 +189,6 @@ export default function ProductForm({ productId }: { productId?: number }) {
           show_part_number: !!p.show_part_number,
         };
         setVals(next);
-        setInHouseSku(p.sku == null ? "" : String(p.sku));
         setFlags(loadedFlags);
         const base = buildPayload(next, loadedFlags);
         setBaseline("payload" in base ? base.payload : null);
@@ -206,6 +204,9 @@ export default function ProductForm({ productId }: { productId?: number }) {
     if (!(vals.title ?? "").trim()) {
       return setMsg({ kind: "error", text: "A title is required" });
     }
+    if (productId && !/^EI-\d{1,10}$/i.test((vals.sku ?? "").trim())) {
+      return setMsg({ kind: "error", text: "The SKU has to start with EI- followed by digits only, like EI-0000123." });
+    }
     const built = buildPayload(vals, flags);
     if ("error" in built) return setMsg({ kind: "error", text: built.error });
     let payload = built.payload;
@@ -220,9 +221,13 @@ export default function ProductForm({ productId }: { productId?: number }) {
     setBusy(true);
     try {
       if (productId) {
-        const r = await api<{ cls_changed?: boolean }>(`/products/${productId}`, { method: "PATCH", body: payload });
+        const r = await api<{ cls_changed?: boolean; sku?: string; shelf_code?: string; barcode_changed?: boolean }>(`/products/${productId}`, { method: "PATCH", body: payload });
         if (baseline) setBaseline({ ...baseline, ...payload });
         let text = "Saved";
+        if (r.sku) {
+          set("sku", r.sku);
+          text += `. SKU is now ${r.sku}${r.barcode_changed ? `; the shelf barcode is now ${r.shelf_code}, so reprint any label for this part` : ""}`;
+        }
         if (r.cls_changed) {
           // the custom label is the same on every linked eBay listing, so send it to all of them
           try {
@@ -366,18 +371,18 @@ export default function ProductForm({ productId }: { productId?: number }) {
       <form onSubmit={save} className="space-y-6">
         <section className={card}>
           <h2 className="text-lg font-semibold">Basics</h2>
-          <div className={grid}>
-            {renderFields(BASIC)}
-            <Field label="SKU (assigned automatically)">
+          {renderFields(BASIC.filter((f) => f.key === "title"))}
+          <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+            <Field label="SKU">
               <input
-                className={`${inputCls} cursor-not-allowed bg-gray-100 text-gray-500`}
-                readOnly
-                value={productId ? inHouseSku : "Assigned when you save"}
+                className={`${inputCls} ${productId && mayDetails ? "" : "cursor-not-allowed bg-gray-100 text-gray-500"}`}
+                readOnly={!productId || !mayDetails}
+                value={productId ? vals.sku ?? "" : "Assigned when you save"}
+                placeholder="EI-0000123"
+                onChange={(e) => set("sku", e.target.value)}
               />
-              <span className="mt-1 block text-xs font-normal text-gray-500">
-                Our own number (EI-0000001…). EI-0000000 means no number has been given yet.
-              </span>
             </Field>
+            {renderFields(BASIC.filter((f) => f.key !== "title"))}
             <Field label="Category">
               <select className={inputCls} disabled={!mayDetails} value={vals.category_id ?? ""} onChange={(e) => set("category_id", e.target.value)}>
                 <option value="">(none)</option>
@@ -386,14 +391,6 @@ export default function ProductForm({ productId }: { productId?: number }) {
                 ))}
               </select>
             </Field>
-            {productId && (
-              <Field label="URL slug (set automatically)">
-                <input className={`${inputCls} cursor-not-allowed bg-gray-100 text-gray-500`} readOnly value={vals.slug ?? ""} />
-                <span className="mt-1 block text-xs font-normal text-gray-500">
-                  This is the product&apos;s web address. It is locked because changing it would break existing links.
-                </span>
-              </Field>
-            )}
           </div>
           {!productId && similar.length > 0 && (
             <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">

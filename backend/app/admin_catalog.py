@@ -32,7 +32,7 @@ from app.database import get_db
 from app.images import thumb_url
 from app.permissions import FIELD_PERMS, label_for
 from app.kits import KitPartIn, replace_parts
-from app.skus import clean_ebay_item_id
+from app.skus import PLACEHOLDER_SKU, SKU_PREFIX, clean_ebay_item_id, shelf_code_for
 from app.sanitize import clean_description
 
 # No prefix here: main.py mounts this inside admin_router, which supplies
@@ -503,7 +503,13 @@ class ProductCreate(ProductFields):
     kit_label_by: str = Field("mfr", pattern="^(mfr|sku)$")  # new label: Autodist parts as manufacturer # or vendor SKU
 
 
-# sku (our EI-0000001 number) is never typed in: the database hands out the next number to a new product.
+class ProductUpdate(ProductFields):
+    # Our own EI- number. New products always get the next one from the database; an existing product's
+    # number can be changed to another EI- number nobody uses yet (see _change_sku).
+    sku: Optional[str] = None
+
+
+# sku (our EI-0000001 number) is never typed in on a NEW product: the database hands out the next number.
 PRODUCT_COLUMNS = ", ".join(f"p.{name}" for name in ProductFields.model_fields) + ", p.sku, p.id, p.updated_at"
 
 
@@ -516,6 +522,60 @@ def _unique_slug(db: Session, base: str, exclude_id: Optional[int] = None) -> st
         n += 1
         slug = f"{base}-{n}"
     return slug
+
+
+def _clean_sku(raw: Optional[str]) -> str:
+    """EI- followed by digits only. Returns it upper-cased, or raises a 400 saying what is wrong."""
+    v = (raw or "").strip().upper()
+    if not v:
+        raise HTTPException(400, "The SKU can't be blank. It has to be EI- followed by a number, like EI-0000123.")
+    if not re.fullmatch(re.escape(SKU_PREFIX) + r"\d{1,10}", v):
+        raise HTTPException(400, "The SKU has to start with EI- followed by digits only, like EI-0000123.")
+    if v == PLACEHOLDER_SKU or int(v[len(SKU_PREFIX):]) == 0:
+        raise HTTPException(400, "EI-0000000 is the 'no number yet' placeholder and can't be used as a real SKU.")
+    return v
+
+
+def _change_sku(db: Session, product_id: int, old_sku: Optional[str], new_sku: str) -> dict:
+    """
+    Gives a product a different EI- number and carries it everywhere it is stored as text, in ONE transaction
+    (the caller commits). Everything that points at the product by id (eBay listings, kit/PO lines, stock
+    history, fitment, photos) follows on its own. What is copied as text and must be changed here:
+      * the shelf barcode label code EIB-xxxxxxx (same digits as the SKU), so a reprinted label scans to the part
+      * the SKU written on receiving-issue records for this part
+    Refuses (nothing changed) if another product has the SKU or another part already owns the EIB- code.
+    """
+    used = db.execute(
+        text("select id, title from products where upper(sku) = :s and id <> :p limit 1"),
+        {"s": new_sku, "p": product_id},
+    ).first()
+    if used:
+        conflict(db, f"{new_sku} is already used by another product ({used.title}). Pick a different number.")
+    new_code = shelf_code_for(new_sku)
+    owner = db.execute(
+        text("select product_id from product_barcodes where upper(code) = upper(:c) and product_id <> :p limit 1"),
+        {"c": new_code, "p": product_id},
+    ).first()
+    if owner:
+        conflict(db, f"The shelf barcode {new_code} already belongs to another product. Pick a different number.")
+    try:
+        db.execute(
+            text("update products set sku = :s, updated_at = now() where id = :p"), {"s": new_sku, "p": product_id}
+        )
+        moved = db.execute(
+            text(
+                "update product_barcodes set code = :c where id = ("
+                "  select id from product_barcodes where product_id = :p and kind = 'shelf' and is_auto "
+                "  and code like 'EIB-%' order by id limit 1)"
+            ),
+            {"c": new_code, "p": product_id},
+        ).rowcount
+        db.execute(
+            text("update po_receiving_issues set sku = :s where product_id = :p"), {"s": new_sku, "p": product_id}
+        )
+    except IntegrityError:
+        conflict(db, f"{new_sku} (or its shelf barcode {new_code}) is already in use. Pick a different number.")
+    return {"sku": new_sku, "shelf_code": new_code, "barcode_changed": bool(moved), "old_sku": old_sku}
 
 
 def _product_or_404(db: Session, product_id: int):
@@ -579,7 +639,7 @@ def list_categories(db: Session = Depends(get_db)):
 
 # Columns the products list can be sorted by (whitelisted: the client never sends SQL).
 _PRODUCT_SORTS = {
-    "sku": "p.sku_display",
+    "sku": "p.sku",
     "custom_label_sku": "p.custom_label_sku",
     "title": "lower(p.title)",
     "list_price": "p.list_price",
@@ -634,7 +694,7 @@ def list_products(
     rows = db.execute(
         text(
             f"""
-            select p.id, p.sku_display as sku, p.custom_label_sku, p.ebay_item_id, p.title, p.slug, p.list_price, p.quantity_on_hand,
+            select p.id, p.sku as sku, p.custom_label_sku, p.ebay_item_id, p.title, p.slug, p.list_price, p.quantity_on_hand,
                    p.category_id, p.is_published, p.is_active, p.is_universal,
                    (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count
             from products p {where}
@@ -704,7 +764,7 @@ def create_product(body: ProductCreate, db: Session = Depends(get_db), user: Aut
 @needs("products.edit_details", "products.edit_price", "products.publish", "inventory.adjust", "fitment.add")
 def update_product(
     product_id: int,
-    body: ProductFields,
+    body: ProductUpdate,
     db: Session = Depends(get_db),
     user: AuthUser = Depends(current_user),
 ):
@@ -724,17 +784,27 @@ def update_product(
         fields["ebay_item_id"] = clean_ebay_item_id(fields["ebay_item_id"])
     if "slug" in fields:
         fields["slug"] = _unique_slug(db, slugify(fields["slug"] or ""), exclude_id=product_id)
-    sets = ", ".join(f"{k} = :{k}" for k in fields)
-    try:
-        db.execute(
-            text(f"update products set {sets}, updated_at = now() where id = :id"),
-            {**fields, "id": product_id},
-        )
-    except IntegrityError:
-        conflict(db, "That eBay item ID or slug is already used by another product")
+    new_sku = None
+    if "sku" in fields:
+        wanted = _clean_sku(fields.pop("sku"))
+        if wanted != (current._mapping.get("sku") or "").strip().upper():
+            new_sku = wanted
+    if fields:
+        sets = ", ".join(f"{k} = :{k}" for k in fields)
+        try:
+            db.execute(
+                text(f"update products set {sets}, updated_at = now() where id = :id"),
+                {**fields, "id": product_id},
+            )
+        except IntegrityError:
+            conflict(db, "That eBay item ID or slug is already used by another product")
+    sku_result = _change_sku(db, product_id, current._mapping.get("sku"), new_sku) if new_sku else None
     finish(db, refresh=True)
     # A changed custom label must reach every linked eBay listing: the screen calls POST /kits/{id}/sync next.
-    return {"id": product_id, "updated": list(fields), "cls_changed": "custom_label_sku" in fields}
+    out = {"id": product_id, "updated": list(fields) + (["sku"] if sku_result else []), "cls_changed": "custom_label_sku" in fields}
+    if sku_result:
+        out.update(sku_result)
+    return out
 
 
 # --------------------------------------------------------------------------
