@@ -1371,7 +1371,7 @@ def claim_order(body: ClaimIn, db: Session = Depends(get_db), user: AuthUser = D
     _ensure_claims_table(db)
     if not _try_claim(db, body, user.email or user.user_id, body.take_over):
         raise HTTPException(409, f"{_holder(db, body) or 'Someone'} is picking this order right now.")
-    return {"ok": True}
+    return {"ok": True, "by": _who(user.email or user.user_id)}
 
 
 @router.post("/claims/heartbeat")

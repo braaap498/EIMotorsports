@@ -50,6 +50,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState<Row | null>(null);
   const [takenBy, setTakenBy] = useState<string | null>(null); // someone took the open order over
+  const [me, setMe] = useState<string | null>(null); // my name as the others see it on the list
   const [reloadKey, setReloadKey] = useState(0);
   const scanRef = useRef<HTMLInputElement>(null);
   const openRef = useRef<Row | null>(null);
@@ -119,10 +120,11 @@ export default function OrderQueue({ active }: { active: boolean }) {
   async function openRow(r: Row, takeOver = false) {
     setMsg(null);
     try {
-      await api("/inventory/claims", {
+      const c = await api<{ ok: boolean; by?: string }>("/inventory/claims", {
         method: "POST",
         body: { channel: r.channel, order_ref: r.order_ref, take_over: takeOver },
       });
+      setMe(c.by ?? null);
       setTakenBy(null);
       setReloadKey(0);
       setOpen(r);
@@ -183,6 +185,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
             <Badge tone={open.channel === "Website" ? "blue" : "amber"}>{open.channel}</Badge>
             order <strong>{open.order_ref}</strong>
           </span>
+          {!takenBy && <Badge tone="amber">Being picked by you{me ? ` (${me})` : ""}</Badge>}
         </div>
         {takenBy && (
           <Notice kind="error">
