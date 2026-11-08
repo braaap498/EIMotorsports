@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
+import ClearableInput from "../ClearableInput";
 import ScanBox from "./ScanBox";
 import ScanSession from "./ScanSession";
 import WebOrderShip from "./WebOrderShip";
@@ -218,11 +219,16 @@ export default function OrderQueue({ active }: { active: boolean }) {
       </div>
 
       <div className="flex flex-wrap items-end gap-2">
-        <input
-          className={`${inputCls} !w-[28rem] max-w-full`}
-          placeholder="Order #, customer, item, label, title or tracking #"
+        <ClearableInput
+          className={`${inputCls} w-[30rem] max-w-full`}
+          placeholder="Search title, order number, item number, custom label or SKU"
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}
+          onClear={() => {
+            setQInput("");
+            setQ("");
+            setOffset(0);
+          }}
         />
         <select
           className={`${inputCls} !w-48`}
