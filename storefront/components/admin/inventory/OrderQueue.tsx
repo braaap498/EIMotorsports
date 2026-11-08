@@ -220,7 +220,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
 
       <div className="flex flex-wrap items-end gap-2">
         <ClearableInput
-          className={`${inputCls} w-[30rem] max-w-full`}
+          className={`${inputCls} w-[36rem] max-w-full`}
           placeholder="Search title, order number, item number, custom label or SKU"
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}
