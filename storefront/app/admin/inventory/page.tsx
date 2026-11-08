@@ -115,7 +115,7 @@ export default function InventoryPage() {
               className={`px-4 py-2 ${shipMode === "queue" ? "bg-black text-white" : "bg-white text-gray-700"}`}
               onClick={() => setShipMode("queue")}
             >
-              Sales
+              Online sales
             </button>
             <button
               className={`px-4 py-2 ${shipMode === "inside" ? "bg-black text-white" : "bg-white text-gray-700"}`}

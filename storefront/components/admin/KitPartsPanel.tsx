@@ -278,16 +278,16 @@ export default function KitPartsPanel({
       setSavedCls(r.cls);
       onSaved?.(r.cls);
       let text = !r.cls
-        ? "Saved (no custom label yet)."
+        ? "Parts saved (no custom label yet)."
         : r.cls_changed
-          ? `Saved. Custom label created: ${r.cls}.`
-          : `Saved. The custom label stays ${r.cls} (it was not changed; edit the label box above to change it).`;
+          ? `Parts saved. Custom label created: ${r.cls}.`
+          : `Parts saved. The custom label stays ${r.cls} (it was not changed; edit the label box above to change it).`;
       if (r.duplicates.length) text += ` Warning: ${r.duplicates.map((d) => d.sku).join(", ")} already use the same label.`;
+      if (r.cls && r.listings_to_update > 0 && !canSync) text += ` ${r.listings_to_update} eBay listing(s) still need the new label; an admin must send it.`;
       setMsg({ kind: "success", text });
-      if (r.cls && r.listings_to_update > 0) {
-        if (canSync) await sendToEbay();
-        else setMsg({ kind: "success", text: text + ` ${r.listings_to_update} eBay listing(s) still need the new label; an admin must send it.` });
-      }
+      // the Send button decides from the listings' state, so read it again
+      const fresh = await api<{ listings: Listing[] }>(`/kits/${productId}`);
+      setListings(fresh.listings);
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -296,16 +296,16 @@ export default function KitPartsPanel({
   }
 
   const pending = listings.filter((l) => !l.in_sync).length;
+  // The label in the box above may be typed but not saved yet; Send always sends the saved one.
+  const labelSaved = (currentCls ?? savedCls ?? "").trim() === (savedCls ?? "").trim();
+  const showSend = !dirty && labelSaved && !!savedCls && listings.length > 0 && pending > 0 && canSync;
   const small = "rounded border border-gray-300 px-2 py-1 text-xs";
 
   return (
     <section className={cardCls}>
-      <h2 className="text-lg font-semibold">Kit parts &amp; custom label (CLS)</h2>
+      <h2 className="text-lg font-semibold">Distributor parts</h2>
       <p className="text-xs text-gray-500">
-        If this product is made of parts bought from a vendor, add them here. The custom label is built from the part
-        numbers, is the same on every eBay listing of this product, and the parts are what goes on the purchase order when this
-        product is ordered. Autodist parts use the manufacturer number in the label, each part once, in the order added. A label
-        that already exists is never changed by adding parts; edit it in the label box above. Leave empty if it is a single part.
+        If this product is made of parts bought from a vendor, add them here. The custom label is automatically built from the part numbers.
       </p>
 
       {/* the pieces */}
@@ -488,11 +488,11 @@ export default function KitPartsPanel({
           {!disabled && (
             <div className="flex flex-wrap items-center gap-3">
               <button type="button" className={btnCls} disabled={busy || !dirty} onClick={() => void save()}>
-                {busy ? "Working…" : "Save kit parts & update eBay"}
+                {busy ? "Working…" : "Save parts"}
               </button>
-              {!dirty && listings.length > 0 && pending > 0 && canSync && (
-                <button type="button" className="text-sm underline" disabled={busy} onClick={() => void sendToEbay()}>
-                  Send the label to {pending} eBay listing{pending === 1 ? "" : "s"} now
+              {showSend && (
+                <button type="button" className={btnCls} disabled={busy} onClick={() => void sendToEbay()}>
+                  Send custom label to eBay
                 </button>
               )}
             </div>

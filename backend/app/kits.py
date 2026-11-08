@@ -379,8 +379,12 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
 def _linked_listings(db: Session, product_id: int) -> list[dict]:
     rows = db.execute(
         text(
-            f"select cl.id, cl.store, {_DIGITS} as item_id, cl.status, cl.cls_pushed, cl.cls_pushed_at "
-            f"from channel_listings cl where cl.product_id = :p order by cl.store, cl.id"
+            f"select cl.id, cl.store, {_DIGITS} as item_id, cl.status, cl.cls_pushed, cl.cls_pushed_at, "
+            f"       coalesce(nullif(btrim(lr.custom_label_sku), ''), nullif(btrim(la.custom_label_sku), '')) as ebay_label "
+            f"from channel_listings cl "
+            f"left join ebay_report_rows lr on lr.item_id = {_DIGITS} "
+            f"left join ebay_api_details la on la.item_id = {_DIGITS} "
+            f"where cl.product_id = :p order by cl.store, cl.id"
         ),
         {"p": product_id},
     ).all()
@@ -400,7 +404,8 @@ def get_kit(product_id: int, db: Session = Depends(get_db), user: AuthUser = Dep
     cls = _product_cls(db, product_id)
     listings = _linked_listings(db, product_id)
     for l in listings:
-        l["in_sync"] = bool(cls) and (l["cls_pushed"] or "") == cls
+        # in sync when we pushed this label, or the label eBay already shows (last report / eBay lookup) is it
+        l["in_sync"] = bool(cls) and ((l["cls_pushed"] or "") == cls or (l.get("ebay_label") or "") == cls)
     return {
         "cls": cls,
         "parts": _parts_of(db, product_id, see_cost=has_perm(user, "products.edit_price")),

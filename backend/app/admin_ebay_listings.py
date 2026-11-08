@@ -288,7 +288,7 @@ _ACTIVE = "lower(coalesce(cl.status, '')) = 'active'"
 # look the same. Each listing's own title and custom label come first, from what we saved about that item number
 # (uploaded report, then the eBay lookup, then the compat import); the product's own values are only the fallback.
 _LISTING_JOINS = f"""
-    join products p on p.id = cl.product_id
+    left join products p on p.id = cl.product_id
     left join ebay_report_rows lr on lr.item_id = {_DIGITS}
     left join ebay_api_details la on la.item_id = {_DIGITS}
     left join ebay_compat_items lc on lc.item_id = {_DIGITS}
