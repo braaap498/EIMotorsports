@@ -26,7 +26,7 @@ export default function InventoryPage() {
   const tabs = TABS.filter((t) => can(...t.perms));
   const [tab, setTab] = useState("");
   const [shipMode, setShipMode] = useState<"queue" | "inside">("queue");
-  // Online orders is always what you land on when Pick & ship is opened, even if you left it on Inside sales.
+  // Sales is always what you land on when Pick & ship is opened, even if you left it on Inside sales.
   useEffect(() => {
     if (tab === "ship") setShipMode("queue");
   }, [tab]);
@@ -115,7 +115,7 @@ export default function InventoryPage() {
               className={`px-4 py-2 ${shipMode === "queue" ? "bg-black text-white" : "bg-white text-gray-700"}`}
               onClick={() => setShipMode("queue")}
             >
-              Online orders
+              Sales
             </button>
             <button
               className={`px-4 py-2 ${shipMode === "inside" ? "bg-black text-white" : "bg-white text-gray-700"}`}

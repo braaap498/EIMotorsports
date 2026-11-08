@@ -17,10 +17,20 @@ type Opt = { id: number; name: string };
 type ModelOpt = { id: number; name: string; make: string; year_min: number | null; year_max: number | null };
 type YearRow = { vehicle_id: number; year: number };
 
-export default function FitmentPanel({ productId, isUniversal }: { productId: number; isUniversal: boolean }) {
+export default function FitmentPanel({
+  productId,
+  isUniversal,
+  onUniversalChange,
+}: {
+  productId: number;
+  isUniversal: boolean;
+  onUniversalChange: (v: boolean) => void;
+}) {
   const { can } = useAccess();
   const mayAdd = can("fitment.add");
   const mayRemove = can("fitment.remove");
+  const [open, setOpen] = useState(false); // collapsed until asked for: the list can be very long
+  const [sel, setSel] = useState<Set<number>>(new Set()); // machines (models) ticked for removal
   const [fits, setFits] = useState<FitModel[]>([]);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -40,7 +50,10 @@ export default function FitmentPanel({ productId, isUniversal }: { productId: nu
 
   const loadFits = useCallback(() => {
     api<{ models: FitModel[] }>(`/products/${productId}/fitment`)
-      .then((r) => setFits(r.models))
+      .then((r) => {
+        setFits(r.models);
+        setSel((prev) => new Set([...prev].filter((id) => r.models.some((m) => m.model_id === id))));
+      })
       .catch((e) => setMsg({ kind: "error", text: errMsg(e) }));
   }, [productId]);
   useEffect(loadFits, [loadFits]);
@@ -143,62 +156,25 @@ export default function FitmentPanel({ productId, isUniversal }: { productId: nu
 
   const canAdd = !!modelId && (allYears || picked.size > 0);
 
-  return (
-    <section className="space-y-5 rounded-lg border border-gray-200 bg-white p-4">
-      <h2 className="text-lg font-semibold">Fitment</h2>
+  const toggleSel = (id: number) =>
+    setSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const allSelected = fits.length > 0 && sel.size === fits.length;
+  async function removeSelected() {
+    const chosen = fits.filter((f) => sel.has(f.model_id));
+    if (chosen.length < 2) return;
+    const yearsCount = chosen.reduce((n, f) => n + f.years.length, 0);
+    if (!confirm(`Remove ${chosen.length} machines (${yearsCount} model years) from this product?`)) return;
+    await remove({ vehicle_ids: chosen.flatMap((f) => f.years.map((y) => y.vehicle_id)) });
+    setSel(new Set());
+  }
 
-      {isUniversal && (
-        <Notice kind="info">
-          This product is marked universal, so it shows for every machine. You don&apos;t need to add fitment below.
-        </Notice>
-      )}
-      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
-
-      <div>
-        <h3 className="mb-2 text-sm font-medium text-gray-700">Fits these machines</h3>
-        {fits.length === 0 ? (
-          <p className="text-sm text-gray-500">No fitment added yet.</p>
-        ) : (
-          <ul className="space-y-3">
-            {fits.map((f) => (
-              <li key={f.model_id} className="rounded border border-gray-200 p-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <div className="text-sm font-medium">
-                    {f.make} {f.model} {f.vehicle_type && <Badge>{f.vehicle_type}</Badge>}
-                    <span className="ml-2 text-xs font-normal text-gray-500">{f.years.length} year(s)</span>
-                  </div>
-                  {mayRemove && (
-                    <button
-                      className={dangerCls}
-                      disabled={busy}
-                      onClick={() => {
-                        if (confirm(`Remove ${f.make} ${f.model} (all years)?`)) remove({ model_id: f.model_id });
-                      }}
-                    >
-                      Remove model
-                    </button>
-                  )}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {f.years.map((y) => (
-                    <span key={y.vehicle_id} className="inline-flex items-center gap-1 rounded border border-gray-300 bg-gray-50 px-2 py-1 text-sm">
-                      {y.year}
-                      {mayRemove && (
-                        <button type="button" className="text-gray-400 hover:text-red-600" disabled={busy} onClick={() => remove({ vehicle_ids: [y.vehicle_id] })} aria-label={`Remove ${y.year}`}>
-                          ×
-                        </button>
-                      )}
-                    </span>
-                  ))}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {mayAdd && (
-      <div className="space-y-3 border-t border-gray-200 pt-4">
+  const addForm = (pos: "top" | "bottom") => (
+      <div className={`space-y-3 ${pos === "top" ? "border-b pb-4" : "border-t pt-4"} border-gray-200`}>
         <h3 className="text-sm font-medium text-gray-700">Add fitment</h3>
         <div className="grid gap-3 sm:grid-cols-3">
           <Field label="Machine type (narrows models)">
@@ -272,7 +248,110 @@ export default function FitmentPanel({ productId, isUniversal }: { productId: nu
           </div>
         )}
       </div>
+  );
+
+  return (
+    <section className="space-y-5 rounded-lg border border-gray-200 bg-white p-4">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between text-left"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <h2 className="text-lg font-semibold">
+          Fitment <span className="text-sm font-normal text-gray-500">({fits.length} machine{fits.length === 1 ? "" : "s"}{isUniversal ? ", universal" : ""})</span>
+        </h2>
+        <span className="text-sm text-gray-500">{open ? "▲ Hide" : "▼ Show"}</span>
+      </button>
+
+      <div className={open ? "space-y-5" : "hidden"}>
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" disabled={!mayAdd} checked={isUniversal} onChange={(e) => onUniversalChange(e.target.checked)} />
+        Universal fit (shows for every machine)
+        <span className="text-xs text-gray-500">– saved with the Save button</span>
+      </label>
+      {isUniversal && (
+        <Notice kind="info">
+          This product is marked universal, so it shows for every machine. You don&apos;t need to add fitment below.
+        </Notice>
       )}
+      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+
+      {mayAdd && addForm("top")}
+
+      <div>
+        <h3 className="mb-2 text-sm font-medium text-gray-700">Fits these machines</h3>
+        {fits.length === 0 ? (
+          <p className="text-sm text-gray-500">No fitment added yet.</p>
+        ) : (
+          <>
+          {mayRemove && (
+            <div className="mb-3 flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={(e) => setSel(e.target.checked ? new Set(fits.map((f) => f.model_id)) : new Set())}
+                />
+                Select all
+              </label>
+              <span className="text-gray-500">{sel.size} selected</span>
+              {sel.size > 0 && (
+                <button type="button" className={btn2Cls} onClick={() => setSel(new Set())}>Deselect all</button>
+              )}
+              {sel.size > 1 && (
+                <button type="button" className={dangerCls} disabled={busy} onClick={() => void removeSelected()}>
+                  Remove all selected ({sel.size})
+                </button>
+              )}
+            </div>
+          )}
+          <ul className="space-y-3">
+            {fits.map((f) => (
+              <li key={f.model_id} className={`rounded border p-3 ${sel.has(f.model_id) ? "border-red-300 bg-red-50" : "border-gray-200"}`}>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    {mayRemove && (
+                      <input type="checkbox" checked={sel.has(f.model_id)} onChange={() => toggleSel(f.model_id)} aria-label={`Select ${f.make} ${f.model}`} />
+                    )}
+                    <span>
+                    {f.make} {f.model} {f.vehicle_type && <Badge>{f.vehicle_type}</Badge>}
+                    <span className="ml-2 text-xs font-normal text-gray-500">{f.years.length} year(s)</span>
+                    </span>
+                  </div>
+                  {mayRemove && (
+                    <button
+                      className={dangerCls}
+                      disabled={busy}
+                      onClick={() => {
+                        if (confirm(`Remove ${f.make} ${f.model} (all years)?`)) remove({ model_id: f.model_id });
+                      }}
+                    >
+                      Remove model
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {f.years.map((y) => (
+                    <span key={y.vehicle_id} className="inline-flex items-center gap-1 rounded border border-gray-300 bg-gray-50 px-2 py-1 text-sm">
+                      {y.year}
+                      {mayRemove && (
+                        <button type="button" className="text-gray-400 hover:text-red-600" disabled={busy} onClick={() => remove({ vehicle_ids: [y.vehicle_id] })} aria-label={`Remove ${y.year}`}>
+                          ×
+                        </button>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              </li>
+            ))}
+          </ul>
+          </>
+        )}
+      </div>
+
+      {mayAdd && addForm("bottom")}
+      </div>
     </section>
   );
 }

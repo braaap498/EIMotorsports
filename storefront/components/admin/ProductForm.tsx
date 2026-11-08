@@ -116,7 +116,6 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const mayPrice = can("products.edit_price");
   const mayStock = can("inventory.adjust");
   const mayPublish = can("products.publish");
-  const mayUniversal = can("fitment.add");
   const maySave = productId
     ? can("products.edit_details", "products.edit_price", "inventory.adjust", "products.publish", "fitment.add")
     : can("products.create");
@@ -344,6 +343,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
       </Field>
     ));
 
+  const saveLabel = busy ? "Saving…" : productId ? "Save changes" : "Create product";
   const card = "space-y-3 rounded-lg border border-gray-200 bg-white p-4";
   const grid = "grid gap-3 sm:grid-cols-2 lg:grid-cols-3";
 
@@ -364,11 +364,17 @@ export default function ProductForm({ productId }: { productId?: number }) {
               onDown={() => void step(1)}
             />
           )}
+          {maySave && (
+            <button type="submit" form="product-form" className={btnCls} disabled={busy}>
+              {saveLabel}
+            </button>
+          )}
           <Link href="/admin/products" className="text-sm underline">Back to products</Link>
         </div>
       </div>
+      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
 
-      <form onSubmit={save} className="space-y-6">
+      <form id="product-form" onSubmit={save} className="space-y-6">
         <section className={card}>
           <h2 className="text-lg font-semibold">Basics</h2>
           {renderFields(BASIC.filter((f) => f.key === "title"))}
@@ -449,15 +455,11 @@ export default function ProductForm({ productId }: { productId?: number }) {
           <div className="flex flex-wrap gap-6 text-sm">
             <label className="flex items-center gap-2">
               <input type="checkbox" disabled={!mayPublish} checked={flags.is_published} onChange={(e) => setFlags((f) => ({ ...f, is_published: e.target.checked }))} />
-              Published (shown in the store)
+              Published (to sales channels)
             </label>
             <label className="flex items-center gap-2">
               <input type="checkbox" disabled={!mayPublish} checked={flags.is_active} onChange={(e) => setFlags((f) => ({ ...f, is_active: e.target.checked }))} />
               Active
-            </label>
-            <label className="flex items-center gap-2">
-              <input type="checkbox" disabled={!mayUniversal} checked={flags.is_universal} onChange={(e) => setFlags((f) => ({ ...f, is_universal: e.target.checked }))} />
-              Universal fit (shows for every machine)
             </label>
           </div>
         </section>
@@ -473,7 +475,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
         {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
         {maySave ? (
           <button className={btnCls} disabled={busy}>
-            {busy ? "Saving…" : productId ? "Save changes" : "Create product"}
+            {saveLabel}
           </button>
         ) : (
           <p className="text-sm text-gray-500">You can look at this product but not change it.</p>
@@ -481,9 +483,17 @@ export default function ProductForm({ productId }: { productId?: number }) {
         {!productId && <p className="text-xs text-gray-500">Fitment and photos can be added after the product is created.</p>}
       </form>
 
-      {productId && <FitmentPanel productId={productId} isUniversal={flags.is_universal} />}
+      {productId && <FitmentPanel productId={productId} isUniversal={flags.is_universal} onUniversalChange={(v) => setFlags((f) => ({ ...f, is_universal: v }))} />}
 
       {productId && <PhotosPanel productId={productId} photos={photos} onChange={setPhotos} cardCls={card} onDirtyChange={setPhotosDirty} />}
+
+      {maySave && (
+        <div className="flex items-center gap-3">
+          <button type="submit" form="product-form" className={btnCls} disabled={busy}>
+            {saveLabel}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
