@@ -26,6 +26,10 @@ export default function InventoryPage() {
   const tabs = TABS.filter((t) => can(...t.perms));
   const [tab, setTab] = useState("");
   const [shipMode, setShipMode] = useState<"queue" | "inside">("queue");
+  // Online orders is always what you land on when Pick & ship is opened, even if you left it on Inside sales.
+  useEffect(() => {
+    if (tab === "ship") setShipMode("queue");
+  }, [tab]);
   const [receiveMode, setReceiveMode] = useState<"po" | "free">("po");
   // Orders with a red flag (short pick / oversold), shown on the Ship tab so they can't be missed.
   const [flagged, setFlagged] = useState(0);
