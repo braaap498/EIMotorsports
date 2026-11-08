@@ -42,6 +42,17 @@ type ApiLabelsResp = {
   remaining: number;
   blank_without_store: number;
 };
+type InvItem = { item: string; label: string | null; saved: string | null; ebay: string | null; checked_on_ebay: boolean; problem: string | null; differs_from_product?: boolean };
+type InvResp = {
+  this_click: { filled: number; already_ok: number; no_label: number; no_items: number; id_mismatch: number; conflict: number; products: number; asked_ebay: number; unverified_ids: number };
+  totals: Record<string, number>;
+  remaining: number;
+  errors: number;
+  error_sample: string[];
+  rate_limited: string | null;
+  flagged_total: number;
+  flagged: { product_id: number; sku: string | null; title: string | null; product_label: string | null; outcome: "id_mismatch" | "conflict"; items: InvItem[] }[];
+};
 type LabelsResp = {
   store?: string | null;
   listings_in_report: number;
@@ -111,6 +122,9 @@ export default function EbayPhotoImportPage() {
   const [apiBusy, setApiBusy] = useState(false);
   const [apiLabels, setApiLabels] = useState<ApiLabelsResp | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [labelTarget, setLabelTarget] = useState<"channel" | "inventory">("channel");
+  const [invBusy, setInvBusy] = useState(false);
+  const [inv, setInv] = useState<InvResp | null>(null);
 
   async function refresh() {
     try {
@@ -212,6 +226,22 @@ export default function EbayPhotoImportPage() {
       setLabelsErr(errMsg(e));
     } finally {
       setApiBusy(false);
+    }
+  }
+
+  // Inventory labels: walks every product, checks each linked eBay item id against what we saved and against eBay,
+  // and fills in blank product labels only when everything agrees. Click again to carry on.
+  async function fillInventory(reset: "none" | "flagged" | "all" = "none") {
+    if (reset === "all" && !window.confirm("Start over? This forgets which products were already checked (no labels are changed) and checks every product again.")) return;
+    setInvBusy(true);
+    setLabelsErr("");
+    if (reset !== "none") setInv(null);
+    try {
+      setInv(await api<InvResp>("/ebay-photos/labels-inventory", { method: "POST", body: { limit: 100, reset } }));
+    } catch (e) {
+      setLabelsErr(errMsg(e));
+    } finally {
+      setInvBusy(false);
     }
   }
 
@@ -367,6 +397,8 @@ export default function EbayPhotoImportPage() {
       <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
         <div>
           <h2 className="text-base font-semibold">Fill in custom labels</h2>
+          {labelTarget === "channel" && (
+            <>
           <p className="mt-1 max-w-3xl text-sm text-gray-600">
             Either ask eBay directly (no report needed), or upload a Seller Hub report. Asking eBay only works for the store
             typed below, and only for active listings; use a report for ended ones.
@@ -376,7 +408,105 @@ export default function EbayPhotoImportPage() {
             listings in the report that are not in the import table are added. A label that is already set is never
             changed; if the report disagrees, it is listed below for you to look at.
           </p>
+            </>
+          )}
         </div>
+        <div className="flex flex-wrap gap-4 text-sm">
+          <label className="flex items-center gap-2">
+            <input type="radio" name="labelTarget" checked={labelTarget === "channel"} onChange={() => setLabelTarget("channel")} disabled={uploading || apiBusy || invBusy} />
+            <span><span className="font-medium">eBay channel</span> custom labels (the listings in the sales channel)</span>
+          </label>
+          <label className="flex items-center gap-2">
+            <input type="radio" name="labelTarget" checked={labelTarget === "inventory"} onChange={() => setLabelTarget("inventory")} disabled={uploading || apiBusy || invBusy} />
+            <span><span className="font-medium">Inventory</span> custom labels (the products)</span>
+          </label>
+        </div>
+        {labelTarget === "inventory" && (
+          <div className="space-y-3">
+            <p className="max-w-3xl text-sm text-gray-600">
+              Goes through every product. Each product&rsquo;s eBay item numbers (all the listings merged into it, or its own
+              source listing if it was never merged) are checked against the labels saved for them and against eBay.
+              A blank product label is filled in only when every item number agrees on one label. A product that already
+              has a label is never changed; if one of its item numbers has a different label it is listed below. Products
+              with no label anywhere stay blank. Ended listings cannot be asked, so their saved label is used and they are
+              counted as not checked on eBay.
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" className={btnCls} disabled={invBusy} onClick={() => void fillInventory("none")} title="Checks the next products against eBay (up to 100 eBay lookups per click). Changes nothing on eBay.">
+                {invBusy ? "Checking…" : inv && inv.remaining > 0 ? "Continue" : "Fill inventory labels"}
+              </button>
+              <button type="button" className={btn2Cls} disabled={invBusy} onClick={() => void fillInventory("flagged")} title="Checks the listed products again, for example after you fixed a merge.">
+                Re-check the listed ones
+              </button>
+              <button type="button" className={btn2Cls} disabled={invBusy} onClick={() => void fillInventory("all")} title="Forgets which products were checked and begins again. No labels are changed by this.">
+                Start over
+              </button>
+              <span className="text-xs text-gray-500">Up to 100 eBay lookups per click (about a minute). Click again for more. Keep this page open.</span>
+            </div>
+          </div>
+        )}
+        {labelTarget === "inventory" && inv && (
+          <div className="space-y-2 text-sm">
+            <Notice kind={inv.errors > 0 || inv.rate_limited ? "error" : "success"}>
+              This click: {inv.this_click.products.toLocaleString()} products checked, {inv.this_click.filled.toLocaleString()} labels filled in,{" "}
+              {inv.this_click.already_ok.toLocaleString()} already correct, {inv.this_click.no_label.toLocaleString()} have no label anywhere (left blank)
+              {inv.this_click.no_items > 0 && <>, {inv.this_click.no_items.toLocaleString()} have no eBay item number</>}
+              {inv.this_click.id_mismatch > 0 && <>, {inv.this_click.id_mismatch.toLocaleString()} have an item number with a different label (listed below)</>}
+              {inv.this_click.conflict > 0 && <>, {inv.this_click.conflict.toLocaleString()} have labels that disagree, so nothing was filled in (listed below)</>}.{" "}
+              Asked eBay {inv.this_click.asked_ebay.toLocaleString()} time{inv.this_click.asked_ebay === 1 ? "" : "s"}
+              {inv.this_click.unverified_ids > 0 && <>; {inv.this_click.unverified_ids.toLocaleString()} item numbers could not be asked (ended or another store) and used their saved label</>}.{" "}
+              {inv.errors > 0 && <>{inv.errors.toLocaleString()} could not be read and will be retried ({inv.error_sample.slice(0, 3).join(" · ")}). </>}
+              {inv.rate_limited ? `Stopped: ${inv.rate_limited} ` : ""}
+              {inv.remaining > 0 ? `${inv.remaining.toLocaleString()} products still to check: click Continue.` : "Every product has been checked."}
+            </Notice>
+            {inv.flagged_total > 0 && (
+              <div>
+                <p className="font-medium">
+                  {inv.flagged_total.toLocaleString()} product{inv.flagged_total === 1 ? "" : "s"} to look at (nothing was changed on them)
+                  {inv.flagged_total > inv.flagged.length && <> &mdash; newest {inv.flagged.length} shown</>}
+                </p>
+                <div className="mt-1 max-h-96 overflow-auto rounded border border-gray-200">
+                  <table className="w-full text-left text-xs">
+                    <thead className="sticky top-0 bg-gray-50 uppercase text-gray-500">
+                      <tr>
+                        <th className="px-3 py-2">Product</th>
+                        <th className="px-3 py-2">Product label</th>
+                        <th className="px-3 py-2">Item number</th>
+                        <th className="px-3 py-2">Label on that item</th>
+                        <th className="px-3 py-2">Saved / eBay</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {inv.flagged.map((f) =>
+                        f.items.map((it, n) => (
+                          <tr key={f.product_id + "-" + it.item} className={it.differs_from_product || it.problem ? "bg-amber-50" : ""}>
+                            <td className="px-3 py-1.5 align-top">
+                              {n === 0 && (
+                                <a className="text-blue-700 underline" href={"/admin/products/" + f.product_id} target="_blank" rel="noreferrer">
+                                  {f.sku || "#" + f.product_id}
+                                </a>
+                              )}
+                              {n === 0 && <div className="max-w-xs truncate text-gray-500">{f.title}</div>}
+                            </td>
+                            <td className="px-3 py-1.5 align-top">{n === 0 ? f.product_label || "(blank)" : ""}</td>
+                            <td className="px-3 py-1.5">{it.item}</td>
+                            <td className="px-3 py-1.5">{it.label || "(none)"}</td>
+                            <td className="px-3 py-1.5 text-gray-600">
+                              {it.saved || "—"} / {it.checked_on_ebay ? it.ebay || "(none)" : "not asked"}
+                              {it.problem && <div className="text-amber-700">{it.problem}</div>}
+                            </td>
+                          </tr>
+                        )),
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {labelTarget === "channel" && (
+          <>
         <label className="block max-w-sm text-sm">
           <span className="mb-1 block font-medium">eBay store name (optional)</span>
           <StoreInput value={labelsStore} onChange={setLabelsStore} placeholder="eandimotorsports or genuine-oem-parts" disabled={uploading || apiBusy} />
@@ -428,8 +558,10 @@ export default function EbayPhotoImportPage() {
         <p className="text-xs text-gray-500">
           {uploading ? "Reading the report…" : file ? `Selected: ${file.name}` : "No file chosen yet."}
         </p>
+          </>
+        )}
         {labelsErr && <Notice kind="error">{labelsErr}</Notice>}
-        {labels && (
+        {labelTarget === "channel" && labels && (
           <div className="space-y-2 text-sm">
             <Notice kind="success">
               {labels.listings_in_report.toLocaleString()} listings in the report. {labels.labels_filled.toLocaleString()} labels

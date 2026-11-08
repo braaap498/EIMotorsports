@@ -1425,3 +1425,261 @@ def labels_from_ebay(body: FillApiIn, db: Session = Depends(get_db)):
         "remaining": left,
         "blank_without_store": int(no_store),
     }
+
+
+# ------------------------------------------------------- custom labels for INVENTORY (the products themselves)
+# The path above fills the import table for the eBay sales channel. This one fills products.custom_label_sku.
+#
+# For every product we collect its eBay item ids (every channel_listings row linked to it, plus the product's own
+# EBAY-<id>, which is the source for a product that was never merged). For each id we know what we saved earlier
+# (uploaded report, eBay lookup, label import table, merge snapshot) and, for active listings, we ask eBay live.
+#
+#   product has a label   -> every id's label must equal it. Any id with a different label is LISTED (id_mismatch),
+#                            nothing is changed. All fine = already_ok.
+#   product has no label  -> all ids must agree (saved vs eBay, and id vs id). One agreed label is applied (filled).
+#                            No label anywhere = left blank (no_label). Any disagreement = listed (conflict) and
+#                            nothing is applied.
+#   an id eBay could not be asked about because of an error: the product is NOT recorded, so the next click retries.
+#   an id that is ended / on a store that is not connected cannot be asked: its saved label is used, and the result
+#   says how many ids were not verified live.
+#
+# Progress is kept in inventory_label_checks (one row per checked product), so every click carries on where the last
+# one stopped. Nothing is ever changed on eBay, and a label that is already set is never overwritten.
+class InvLabelsIn(BaseModel):
+    limit: int = 100  # eBay lookups allowed in this click
+    reset: str = "none"  # "none" | "flagged" (re-check products that were listed) | "all" (start over)
+
+
+def _lab_norm(v) -> str:
+    return (v or "").strip().upper()
+
+
+def _ensure_inv_checks(db: Session) -> None:
+    db.execute(
+        text(
+            """
+            create table if not exists inventory_label_checks (
+                product_id bigint primary key,
+                outcome text not null,
+                detail jsonb,
+                checked_at timestamptz not null default now()
+            )
+            """
+        )
+    )
+    db.commit()
+
+
+def _judge_product(product_label: str, items: dict) -> dict:
+    """Pure decision. items: {item_id: {"saved": [labels], "state": "ok"|"unverified", "ebay": label|None}}.
+    Returns {"outcome", "label"?, "rows": [...], "unverified": n}."""
+    rows = []
+    best: dict[str, str] = {}
+    conflicts = 0
+    unverified = 0
+    for item, d in items.items():
+        saved = [s.strip() for s in d["saved"] if (s or "").strip()]
+        saved_norm = {_lab_norm(s) for s in saved}
+        why = ""
+        if d["state"] == "ok":
+            live = (d.get("ebay") or "").strip()
+            if saved_norm and (not live or _lab_norm(live) not in saved_norm or len(saved_norm) > 1):
+                why = "eBay and the saved label differ" if len(saved_norm) == 1 else "saved labels disagree with each other or eBay"
+            final = live
+        else:
+            unverified += 1
+            final = saved[0] if saved else ""
+            if len(saved_norm) > 1:
+                why = "saved labels disagree with each other"
+        if why:
+            conflicts += 1
+        if final:
+            best[item] = final
+        rows.append({"item": item, "label": final or None, "saved": saved[0] if saved else None,
+                     "ebay": (d.get("ebay") or None) if d["state"] == "ok" else None,
+                     "checked_on_ebay": d["state"] == "ok", "problem": why or None})
+
+    have = (product_label or "").strip()
+    if have:
+        bad = [r["item"] for r in rows if r["label"] and _lab_norm(r["label"]) != _lab_norm(have)]
+        for r in rows:
+            r["differs_from_product"] = r["item"] in bad
+        return {"outcome": "id_mismatch" if bad else "already_ok", "rows": rows, "unverified": unverified}
+
+    distinct = {_lab_norm(v) for v in best.values()}
+    if conflicts or len(distinct) > 1:
+        return {"outcome": "conflict", "rows": rows, "unverified": unverified}
+    if len(distinct) == 1:
+        return {"outcome": "filled", "label": next(iter(best.values())), "rows": rows, "unverified": unverified}
+    return {"outcome": "no_label", "rows": rows, "unverified": unverified}
+
+
+@router.post("/labels-inventory")
+def labels_inventory(body: InvLabelsIn, db: Session = Depends(get_db)):
+    from app.admin_ebay_import import _authorized_stores, _fetch_details  # here, not at the top: that module imports this one
+
+    limit = max(1, min(int(body.limit), 100))
+    _ensure_inv_checks(db)
+    if body.reset == "all":
+        db.execute(text("delete from inventory_label_checks"))
+    elif body.reset == "flagged":
+        db.execute(text("delete from inventory_label_checks where outcome in ('id_mismatch', 'conflict')"))
+    db.commit()
+
+    stores = _authorized_stores(db)
+    by_store = {s.store.lower(): s for s in stores}
+
+    counts = {"filled": 0, "already_ok": 0, "no_label": 0, "no_items": 0, "id_mismatch": 0, "conflict": 0}
+    products_done = asked = unverified_ids = errors = 0
+    error_sample: list[str] = []
+    rate_limited: Optional[str] = None
+    stop = False
+    started = time.time()
+    last_id = 0
+
+    while not stop and asked < limit and time.time() - started < 85:
+        batch = db.execute(
+            text(
+                "select p.id, btrim(coalesce(p.custom_label_sku, '')) as label, "
+                "regexp_replace(coalesce(p.ebay_item_id, ''), '[^0-9]', '', 'g') as own "
+                "from products p where p.id > :last "
+                "and not exists (select 1 from inventory_label_checks c where c.product_id = p.id) "
+                "order by p.id limit 200"
+            ),
+            {"last": last_id},
+        ).all()
+        if not batch:
+            break
+        pids = [b.id for b in batch]
+        # every item id each product points to, with the store and status of its link
+        links: dict[int, dict[str, dict]] = {pid: {} for pid in pids}
+        for r in db.execute(
+            text(
+                "select cl.product_id as pid, regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as digits, "
+                "cl.store, lower(coalesce(cl.status, '')) as status from channel_listings cl "
+                "where cl.product_id = any(cast(:p as bigint[])) and cl.external_id is not null"
+            ),
+            {"p": pids},
+        ):
+            if r.digits:
+                links[r.pid][r.digits] = {"store": r.store, "active": r.status == "active"}
+        for b in batch:
+            if b.own and b.own not in links[b.id]:
+                links[b.id][b.own] = {"store": None, "active": True}  # source id of an unmerged product: ask eBay
+        all_ids = sorted({d for m in links.values() for d in m})
+        saved: dict[str, list[str]] = defaultdict(list)
+        for chunk in _chunks(all_ids, 3000):
+            for item, lab in db.execute(
+                text(
+                    "select item, lab from ("
+                    " select item_id as item, custom_label_sku as lab, 1 as o from ebay_report_rows"
+                    " union all select item_id, custom_label_sku, 2 from ebay_api_details where status = 'ok'"
+                    " union all select cast(item_number as text), cast(custom_label_sku as text), 3 from ebay_label_import"
+                    " union all select ebay_item_id, custom_label_sku, 4 from ebay_listings"
+                    ") t where item = any(cast(:ids as text[])) and nullif(btrim(lab), '') is not null order by o"
+                ),
+                {"ids": chunk},
+            ):
+                if lab.strip() not in saved[item]:
+                    saved[item].append(lab.strip())
+
+        for b in batch:
+            last_id = b.id
+            ids = links[b.id]
+            if not ids:
+                db.execute(text("insert into inventory_label_checks (product_id, outcome) values (:p, 'no_items') "
+                                "on conflict (product_id) do nothing"), {"p": b.id})
+                counts["no_items"] += 1
+                products_done += 1
+                continue
+            cost = sum(1 if v["store"] and v["store"].lower() in by_store else (len(stores) or 0)
+                       for v in ids.values() if v["active"] and (not v["store"] or v["store"].lower() in by_store))
+            if asked > 0 and asked + cost > limit:
+                stop = True
+                break
+
+            items: dict[str, dict] = {}
+            product_failed = False
+            for item, v in ids.items():
+                d = {"saved": saved.get(item, []), "state": "unverified", "ebay": None}
+                can_ask = v["active"] and (not v["store"] or v["store"].lower() in by_store)
+                if can_ask:
+                    use = [by_store[v["store"].lower()]] if v["store"] else list(stores)
+                    try:
+                        r = _fetch_details(db, use, item)
+                    except RateLimited as e:
+                        rate_limited = str(e)
+                        product_failed = stop = True
+                        break
+                    asked += len(use) if not v["store"] else 1
+                    if r["state"] == "ok":
+                        d["state"], d["ebay"] = "ok", r["label"]
+                    elif r["state"] == "error":
+                        errors += 1
+                        if len(error_sample) < 10:
+                            error_sample.append(f"{item}: {r['reason']}")
+                        product_failed = True
+                        break
+                    # "skipped" = ended or not on a connected store: saved label is used, counted as not verified
+                items[item] = d
+            if product_failed:
+                if errors >= 5 and products_done == 0:
+                    stop = True
+                    break
+                if stop:
+                    break
+                continue  # not recorded: retried on the next click
+
+            j = _judge_product(b.label, items)
+            if j["outcome"] == "filled":
+                n = db.execute(
+                    text("update products set custom_label_sku = :l, updated_at = now() "
+                         "where id = :p and coalesce(btrim(custom_label_sku), '') = ''"),
+                    {"l": j["label"], "p": b.id},
+                ).rowcount or 0
+                if not n:
+                    j["outcome"] = "already_ok"
+            unverified_ids += j["unverified"]
+            detail = {"label": j.get("label"), "unverified": j["unverified"], "items": j["rows"][:40]}
+            db.execute(
+                text("insert into inventory_label_checks (product_id, outcome, detail) values (:p, :o, cast(:d as jsonb)) "
+                     "on conflict (product_id) do update set outcome = excluded.outcome, detail = excluded.detail, checked_at = now()"),
+                {"p": b.id, "o": j["outcome"], "d": json.dumps(detail)},
+            )
+            counts[j["outcome"]] += 1
+            products_done += 1
+            if products_done % 10 == 0:
+                db.commit()
+        db.commit()
+        if time.time() - started >= 85:
+            break
+    db.commit()
+
+    left = db.execute(
+        text("select count(*) from products p where not exists (select 1 from inventory_label_checks c where c.product_id = p.id)")
+    ).scalar() or 0
+    totals = {r.outcome: r.n for r in db.execute(text("select outcome, count(*) as n from inventory_label_checks group by 1"))}
+    flagged = [
+        {
+            "product_id": r.product_id, "sku": r.sku, "title": r.title, "product_label": (r.label or None),
+            "outcome": r.outcome, "items": (r.detail or {}).get("items", []),
+        }
+        for r in db.execute(
+            text(
+                "select c.product_id, c.outcome, c.detail, p.sku_display as sku, p.title, btrim(p.custom_label_sku) as label "
+                "from inventory_label_checks c join products p on p.id = c.product_id "
+                "where c.outcome in ('id_mismatch', 'conflict') order by c.checked_at desc, c.product_id limit 100"
+            )
+        )
+    ]
+    db.rollback()
+    return {
+        "this_click": {**counts, "products": products_done, "asked_ebay": asked, "unverified_ids": unverified_ids},
+        "totals": totals,
+        "remaining": int(left),
+        "errors": errors,
+        "error_sample": error_sample,
+        "rate_limited": rate_limited,
+        "flagged": flagged,
+        "flagged_total": int(totals.get("id_mismatch", 0) + totals.get("conflict", 0)),
+    }
