@@ -1463,44 +1463,57 @@ def _lab_norm(v) -> str:
     return (v or "").strip().upper()
 
 
+_inv_tables_ready = False
+
+
 def _ensure_inv_tables(db: Session) -> None:
-    db.execute(
-        text(
-            """
-            create table if not exists inventory_label_checks (
-                product_id bigint primary key,
-                outcome text not null,
-                detail jsonb,
-                live boolean not null default false,
-                checked_at timestamptz not null default now()
+    """Creates the two progress tables once per server start. It must NOT run on every status poll: ALTER TABLE needs a
+    lock that waits behind the running job's writes, and the waiting polls would use up the connection pool."""
+    global _inv_tables_ready
+    if _inv_tables_ready:
+        return
+    try:
+        db.execute(text("set local lock_timeout = '5s'"))
+        db.execute(
+            text(
+                """
+                create table if not exists inventory_label_checks (
+                    product_id bigint primary key,
+                    outcome text not null,
+                    detail jsonb,
+                    live boolean not null default false,
+                    checked_at timestamptz not null default now()
+                )
+                """
             )
-            """
         )
-    )
-    db.execute(text("alter table inventory_label_checks add column if not exists live boolean not null default false"))
-    db.execute(
-        text(
-            """
-            create table if not exists inventory_label_jobs (
-                id bigserial primary key,
-                mode text not null,
-                scope text,
-                status text not null default 'running',
-                total integer not null default 0,
-                done integer not null default 0,
-                counts jsonb not null default '{}'::jsonb,
-                ebay_calls integer not null default 0,
-                message text,
-                error_sample jsonb not null default '[]'::jsonb,
-                started_by text,
-                started_at timestamptz not null default now(),
-                updated_at timestamptz not null default now(),
-                finished_at timestamptz
+        db.execute(text("alter table inventory_label_checks add column if not exists live boolean not null default false"))
+        db.execute(
+            text(
+                """
+                create table if not exists inventory_label_jobs (
+                    id bigserial primary key,
+                    mode text not null,
+                    scope text,
+                    status text not null default 'running',
+                    total integer not null default 0,
+                    done integer not null default 0,
+                    counts jsonb not null default '{}'::jsonb,
+                    ebay_calls integer not null default 0,
+                    message text,
+                    error_sample jsonb not null default '[]'::jsonb,
+                    started_by text,
+                    started_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now(),
+                    finished_at timestamptz
+                )
+                """
             )
-            """
         )
-    )
-    db.commit()
+        db.commit()
+        _inv_tables_ready = True
+    except Exception:
+        db.rollback()  # e.g. a lock timeout: the tables already exist, so carry on and try again later
 
 
 def _judge_product(product_label: str, items: dict) -> dict:
@@ -1670,64 +1683,79 @@ def _inv_work(db: Session, job: _InvJob, mode: str, scope: str):
                 job.message = "Stopped. Start it again to carry on where it left off."
                 job.save("stopped", force=True)
                 return
-            ids = links[b.id]
-            if not ids:
-                _inv_record(db, b.id, "no_items", None, live)
-                job.counts["no_items"] += 1
-                job.done += 1
-                continue
+            try:
+                ids = links[b.id]
+                if not ids:
+                    _inv_record(db, b.id, "no_items", None, live)
+                    job.counts["no_items"] += 1
+                    job.done += 1
+                    continue
 
-            items: dict[str, dict] = {}
-            failed = False
-            for item, v in ids.items():
-                d = {"saved": saved.get(item, []), "state": "unverified", "ebay": None}
-                can_ask = live and v["active"] and (not v["store"] or v["store"].lower() in by_store)
-                if can_ask:
-                    use = [by_store[v["store"].lower()]] if v["store"] else list(stores)
-                    if job.calls >= max_calls:
-                        raise RateLimited(f"This run reached its limit of {max_calls} eBay lookups.")
-                    r = _fetch_details(db, use, item)  # RateLimited propagates: the run pauses
-                    job.calls += len(use)
-                    if r["state"] == "ok":
-                        d["state"], d["ebay"] = "ok", r["label"]
-                        consecutive_errors = 0
-                    elif r["state"] == "error":
-                        job.counts["errors"] += 1
-                        consecutive_errors += 1
-                        if len(job.error_sample) < 10:
-                            job.error_sample.append(f"{item}: {r['reason']}")
-                        failed = True
-                        break
-                    # "skipped" = ended or not on a connected store: the saved label is used
-                items[item] = d
-            if failed:
+                items: dict[str, dict] = {}
+                failed = False
+                for item, v in ids.items():
+                    d = {"saved": saved.get(item, []), "state": "unverified", "ebay": None}
+                    can_ask = live and v["active"] and (not v["store"] or v["store"].lower() in by_store)
+                    if can_ask:
+                        use = [by_store[v["store"].lower()]] if v["store"] else list(stores)
+                        if job.calls >= max_calls:
+                            raise RateLimited(f"This run reached its limit of {max_calls} eBay lookups.")
+                        r = _fetch_details(db, use, item)  # RateLimited propagates: the run pauses
+                        job.calls += len(use)
+                        if r["state"] == "ok":
+                            d["state"], d["ebay"] = "ok", r["label"]
+                            consecutive_errors = 0
+                        elif r["state"] == "error":
+                            job.counts["errors"] += 1
+                            consecutive_errors += 1
+                            if len(job.error_sample) < 10:
+                                job.error_sample.append(f"{item}: {r['reason']}")
+                            failed = True
+                            break
+                        # "skipped" = ended or not on a connected store: the saved label is used
+                    items[item] = d
+                if failed:
+                    if consecutive_errors >= 10:
+                        db.commit()
+                        job.message = "Stopped: eBay failed ten times in a row (the store approval may have expired). Start it again later."
+                        job.save("failed", force=True)
+                        return
+                    job.done += 1  # not recorded: picked up again by the next run
+                    continue
+
+                j = _judge_product(b.label, items)
+                if j["outcome"] == "filled":
+                    n = db.execute(
+                        text("update products set custom_label_sku = :l, updated_at = now() "
+                             "where id = :p and coalesce(btrim(custom_label_sku), '') = ''"),
+                        {"l": j["label"], "p": b.id},
+                    ).rowcount or 0
+                    if not n:
+                        j["outcome"] = "already_ok"
+                if live:
+                    job.counts["unverified_ids"] += j["unverified"]
+                detail = None
+                if j["outcome"] in FLAGGED or j["outcome"] == "filled":
+                    detail = {"label": j.get("label"), "unverified": j["unverified"], "items": j["rows"][:40]}
+                _inv_record(db, b.id, j["outcome"], detail, live)
+                job.counts[j["outcome"]] += 1
+                job.done += 1
+                db.commit()  # one product at a time, so a failure only loses that product
+                consecutive_errors = 0
+            except RateLimited:
+                raise
+            except Exception as e:  # one bad product must not end the whole run
+                db.rollback()
+                log.exception("inventory label check failed for product %s", b.id)
+                job.counts["errors"] += 1
+                consecutive_errors += 1
+                if len(job.error_sample) < 10:
+                    job.error_sample.append(f"product {b.id}: {type(e).__name__}: {str(e)[:150]}")
+                job.done += 1
                 if consecutive_errors >= 10:
-                    db.commit()
-                    job.message = "Stopped: eBay failed ten times in a row (the store approval may have expired). Start it again later."
+                    job.message = "Stopped: ten products in a row failed. The first errors are listed below."
                     job.save("failed", force=True)
                     return
-                job.done += 1  # not recorded: picked up again by the next run
-                continue
-
-            j = _judge_product(b.label, items)
-            if j["outcome"] == "filled":
-                n = db.execute(
-                    text("update products set custom_label_sku = :l, updated_at = now() "
-                         "where id = :p and coalesce(btrim(custom_label_sku), '') = ''"),
-                    {"l": j["label"], "p": b.id},
-                ).rowcount or 0
-                if not n:
-                    j["outcome"] = "already_ok"
-            if live:
-                job.counts["unverified_ids"] += j["unverified"]
-            detail = None
-            if j["outcome"] in FLAGGED or j["outcome"] == "filled":
-                detail = {"label": j.get("label"), "unverified": j["unverified"], "items": j["rows"][:40]}
-            _inv_record(db, b.id, j["outcome"], detail, live)
-            job.counts[j["outcome"]] += 1
-            job.done += 1
-            if job.done % 20 == 0:
-                db.commit()
         db.commit()
     db.commit()
     c = job.counts
@@ -1755,9 +1783,9 @@ def _inv_run(job_id: int, mode: str, scope: str):
     except RateLimited as e:
         job.message = f"Paused: {e} Start it again later and it carries on where it stopped."
         job.save("paused", force=True)
-    except Exception:
+    except Exception as e:
         log.exception("inventory label run crashed")
-        job.message = "Something unexpected went wrong. The details are in the API log."
+        job.message = f"Something unexpected went wrong ({type(e).__name__}: {str(e)[:200]}). Start it again; finished products are skipped."
         job.save("failed", force=True)
 
 

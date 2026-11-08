@@ -250,11 +250,16 @@ export default function EbayPhotoImportPage() {
   }
 
   // Inventory labels run in the background on the server; this page just shows its status.
+  const invPolling = useRef(false);
   async function refreshInv() {
+    if (invPolling.current) return; // never stack requests: a slow answer must not pile up more
+    invPolling.current = true;
     try {
       setInv(await api<InvStatus>("/ebay-photos/labels-inventory/status"));
     } catch (e) {
       setLabelsErr(errMsg(e));
+    } finally {
+      invPolling.current = false;
     }
   }
   async function loadFlagged() {
