@@ -45,18 +45,19 @@ def years(db: Session = Depends(get_db)):
 
 @router.get("/makes")
 def makes(
-    year: int,
+    year: Optional[int] = None,
     type: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
-    # Left joins so a model with no type yet still shows when no type is chosen.
+    # No year = makes from every year. Left joins so a model with no type yet
+    # still shows when no type is chosen.
     rows = db.execute(
         text(
             "select distinct fc.make_id, fc.make "
             "from fitment_catalog fc "
             "left join vehicle_models vm on vm.id = fc.model_id "
             "left join vehicle_types vt on vt.id = vm.vehicle_type_id "
-            "where fc.year = :year "
+            "where (cast(:year as int) is null or fc.year = cast(:year as int)) "
             "and (cast(:type as text) is null or vt.slug = cast(:type as text)) "
             "order by fc.make"
         ),
@@ -67,19 +68,25 @@ def makes(
 
 @router.get("/models")
 def models(
-    year: int,
     make_id: int,
+    year: Optional[int] = None,
     type: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
+    # With no year, fitment_catalog has one row per year for each model, so group
+    # to one row per model. "products" is then the best single year's count
+    # (summing would double count); the selector doesn't display it.
     rows = db.execute(
         text(
-            "select fc.model_id, fc.model, fc.products, vt.slug as vehicle_type "
+            "select fc.model_id, fc.model, max(fc.products) as products, "
+            "vt.slug as vehicle_type "
             "from fitment_catalog fc "
             "left join vehicle_models vm on vm.id = fc.model_id "
             "left join vehicle_types vt on vt.id = vm.vehicle_type_id "
-            "where fc.year = :year and fc.make_id = :make_id "
+            "where fc.make_id = :make_id "
+            "and (cast(:year as int) is null or fc.year = cast(:year as int)) "
             "and (cast(:type as text) is null or vt.slug = cast(:type as text)) "
+            "group by fc.model_id, fc.model, vt.slug "
             "order by fc.model"
         ),
         {"year": year, "make_id": make_id, "type": clean_type(type)},
@@ -97,13 +104,15 @@ def models(
 
 @router.get("/products")
 def products(
-    year: int,
     model_id: int,
+    year: Optional[int] = None,
     limit: int = Query(24, le=100),
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
     # Universal products fit every machine, so they are always included.
+    # No year = every year of this model; exists() keeps a part that fits
+    # several years from showing up more than once.
     base = f"""
         from products p
         where {PUBLISHED_FILTER}
@@ -113,7 +122,8 @@ def products(
               select 1 from product_fitment pf
               join vehicles v on v.id = pf.vehicle_id
               where pf.product_id = p.id
-                and v.model_id = :model_id and v.year = :year
+                and v.model_id = :model_id
+                and (cast(:year as int) is null or v.year = cast(:year as int))
             )
           )
     """

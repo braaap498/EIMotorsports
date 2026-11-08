@@ -111,14 +111,14 @@ def search(
           )
         )
         and (
-          cast(:model_id as bigint) is null or cast(:year as int) is null
+          cast(:model_id as bigint) is null
           or p.is_universal
           or exists (
             select 1 from product_fitment pf
             join vehicles v on v.id = pf.vehicle_id
             where pf.product_id = p.id
               and v.model_id = cast(:model_id as bigint)
-              and v.year = cast(:year as int)
+              and (cast(:year as int) is null or v.year = cast(:year as int))
           )
         )
     """
