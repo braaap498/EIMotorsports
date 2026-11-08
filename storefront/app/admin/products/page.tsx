@@ -152,7 +152,7 @@ export default function ProductsPage() {
 
       <div className="flex flex-wrap items-end gap-3">
         <Field label="Search">
-          <ClearableInput className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Title, SKU or part #" onClear={() => { setQInput(""); filterChange(() => setQ("")); }} />
+          <ClearableInput className="w-[36rem] max-w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900" value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Search title, item number, custom label or SKU" onClear={() => { setQInput(""); filterChange(() => setQ("")); }} />
         </Field>
         <Field label="Status">
           <select className={inputCls} value={published} onChange={(e) => filterChange(() => setPublished(e.target.value))}>
