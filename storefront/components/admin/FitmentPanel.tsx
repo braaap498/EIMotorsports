@@ -29,7 +29,6 @@ export default function FitmentPanel({
   const { can } = useAccess();
   const mayAdd = can("fitment.add");
   const mayRemove = can("fitment.remove");
-  const [open, setOpen] = useState(false); // collapsed until asked for: the list can be very long
   const [sel, setSel] = useState<Set<number>>(new Set()); // machines (models) ticked for removal
   const [fits, setFits] = useState<FitModel[]>([]);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -251,20 +250,12 @@ export default function FitmentPanel({
   );
 
   return (
-    <section className="space-y-5 rounded-lg border border-gray-200 bg-white p-4">
-      <button
-        type="button"
-        className="flex w-full items-center justify-between text-left"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-      >
-        <h2 className="text-lg font-semibold">
-          Fitment <span className="text-sm font-normal text-gray-500">({fits.length} machine{fits.length === 1 ? "" : "s"}{isUniversal ? ", universal" : ""})</span>
-        </h2>
-        <span className="text-sm text-gray-500">{open ? "▲ Hide" : "▼ Show"}</span>
-      </button>
+    <details className="rounded-lg border border-gray-200 bg-white p-4">
+      <summary className="cursor-pointer text-lg font-semibold">
+        Fitment <span className="text-sm font-normal text-gray-500">({fits.length} machine{fits.length === 1 ? "" : "s"}{isUniversal ? ", universal" : ""})</span>
+      </summary>
 
-      <div className={open ? "space-y-5" : "hidden"}>
+      <div className="mt-3 space-y-5">
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" disabled={!mayAdd} checked={isUniversal} onChange={(e) => onUniversalChange(e.target.checked)} />
         Universal fit (shows for every machine)
@@ -352,6 +343,6 @@ export default function FitmentPanel({
 
       {mayAdd && addForm("bottom")}
       </div>
-    </section>
+    </details>
   );
 }

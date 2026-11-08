@@ -364,14 +364,16 @@ export default function ProductForm({ productId }: { productId?: number }) {
               onDown={() => void step(1)}
             />
           )}
-          {maySave && (
-            <button type="submit" form="product-form" className={btnCls} disabled={busy}>
-              {saveLabel}
-            </button>
-          )}
           <Link href="/admin/products" className="text-sm underline">Back to products</Link>
         </div>
       </div>
+      {maySave && (
+        <div>
+          <button type="submit" form="product-form" className={btnCls} disabled={busy}>
+            {saveLabel}
+          </button>
+        </div>
+      )}
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
 
       <form id="product-form" onSubmit={save} className="space-y-6">
