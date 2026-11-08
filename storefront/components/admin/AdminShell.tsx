@@ -8,6 +8,7 @@ import { getSupabase } from "../../lib/supabase";
 import { Notice, btnCls, btn2Cls, inputCls, Field } from "./ui";
 import PasswordInput from "./PasswordInput";
 import { AdminAccessProvider } from "./AdminAccess";
+import { ShellBackProvider } from "./ShellBack";
 
 type Status = "loading" | "signedout" | "forbidden" | "error" | "ok";
 
@@ -175,8 +176,13 @@ export default function AdminShell({ children }: { children: ReactNode }) {
   const [backTo, setBackTo] = useState<string | null>(null);
   // A distributor's own page already has a "← All distributors" link, so this Back link would be a second copy when you
   // came from that list. It still shows when you came from anywhere else (an order screen, say), naming that page.
+  // A product page has its own "Back to products" button, so it only gets this one when you came from somewhere else
+  // (an order, a purchase order...). Stepping with the up / down arrows lands on another product page, which is no use
+  // as a "back" either, so that case keeps the page's own button too.
+  const backPath = (backTo ?? "").split("?")[0].replace(/\/+$/, "");
   const hasOwnBackLink =
-    pathname.startsWith("/admin/distributors/") && (backTo ?? "").split("?")[0].replace(/\/+$/, "") === "/admin/distributors";
+    (pathname.startsWith("/admin/distributors/") && backPath === "/admin/distributors") ||
+    (pathname.startsWith("/admin/products/") && /^\/admin\/products(\/[^/]+)?$/.test(backPath));
 
   // Keep the trail of pages visited, and work out where "Back" goes.
   useEffect(() => {
@@ -420,7 +426,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
                   )}
                 </div>
               )}
-              {children}
+              <ShellBackProvider value={!!backTo && !hasOwnBackLink}>{children}</ShellBackProvider>
             </>
           )}
         </div>

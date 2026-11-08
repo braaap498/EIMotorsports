@@ -11,6 +11,7 @@ import PhotosPanel, { type Photo } from "./PhotosPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
 import { useAccess } from "./AdminAccess";
 import ArrowBar from "./ArrowBar";
+import { useShellBack } from "./ShellBack";
 import { loadNav, saveNav, type NavState } from "../../lib/listNav";
 
 type Cat = { id: number; parent_id: number | null; name: string; sort_order: number };
@@ -111,6 +112,7 @@ function buildPayload(vals: Record<string, string>, flags: Flags): { payload: Re
 
 export default function ProductForm({ productId }: { productId?: number }) {
   const { can } = useAccess();
+  const shellBack = useShellBack(); // the page already shows a "← Back to ..." link, so this page leaves its own out
   // What this person may change. New products: "create" covers the basic details.
   const mayDetails = productId ? can("products.edit_details") : can("products.create");
   const mayPrice = can("products.edit_price");
@@ -343,6 +345,19 @@ export default function ProductForm({ productId }: { productId?: number }) {
       </Field>
     ));
 
+  const arrows =
+    productId && navIdx >= 0 ? (
+      <ArrowBar
+        upLabel="Previous product in the list"
+        downLabel="Next product in the list"
+        position={`${navPos + 1} of ${nav!.total}`}
+        canUp={canUp}
+        canDown={canDown}
+        busy={navBusy}
+        onUp={() => void step(-1)}
+        onDown={() => void step(1)}
+      />
+    ) : null;
   const saveLabel = busy ? "Saving…" : productId ? "Save changes" : "Create product";
   const card = "space-y-3 rounded-lg border border-gray-200 bg-white p-4";
   const grid = "grid gap-3 sm:grid-cols-2 lg:grid-cols-3";
@@ -352,26 +367,17 @@ export default function ProductForm({ productId }: { productId?: number }) {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">{productId ? "Edit product" : "New product"}</h1>
         <div className="flex items-center gap-4">
-          {productId && navIdx >= 0 && (
-            <ArrowBar
-              upLabel="Previous product in the list"
-              downLabel="Next product in the list"
-              position={`${navPos + 1} of ${nav!.total}`}
-              canUp={canUp}
-              canDown={canDown}
-              busy={navBusy}
-              onUp={() => void step(-1)}
-              onDown={() => void step(1)}
-            />
-          )}
-          <Link href="/admin/products" className="text-sm underline">Back to products</Link>
+          {!shellBack && <Link href="/admin/products" className="text-sm underline">Back to products</Link>}
         </div>
       </div>
-      {maySave && (
-        <div>
-          <button type="submit" form="product-form" className={btnCls} disabled={busy}>
-            {saveLabel}
-          </button>
+      {(maySave || arrows) && (
+        <div className="flex items-center gap-4">
+          {maySave && (
+            <button type="submit" form="product-form" className={btnCls} disabled={busy}>
+              {saveLabel}
+            </button>
+          )}
+          {arrows}
         </div>
       )}
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
@@ -489,11 +495,14 @@ export default function ProductForm({ productId }: { productId?: number }) {
 
       {productId && <PhotosPanel productId={productId} photos={photos} onChange={setPhotos} cardCls={card} onDirtyChange={setPhotosDirty} />}
 
-      {maySave && (
-        <div className="flex items-center gap-3">
-          <button type="submit" form="product-form" className={btnCls} disabled={busy}>
-            {saveLabel}
-          </button>
+      {(maySave || arrows) && (
+        <div className="flex items-center gap-4">
+          {maySave && (
+            <button type="submit" form="product-form" className={btnCls} disabled={busy}>
+              {saveLabel}
+            </button>
+          )}
+          {arrows}
         </div>
       )}
     </div>
