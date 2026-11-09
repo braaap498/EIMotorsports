@@ -125,6 +125,13 @@ function EditModal({
   const [name, setName] = useState(model.name);
   const [makeId, setMakeId] = useState(String(model.make_id));
   const [typeId, setTypeId] = useState(model.vehicle_type_id ? String(model.vehicle_type_id) : "");
+  // What is saved right now. Starts as the row the window was opened with and moves forward every time Save details works,
+  // so the window knows whether anything is really unsaved (the row passed in does not change after a save).
+  const [saved, setSaved] = useState({
+    name: model.name,
+    makeId: String(model.make_id),
+    typeId: model.vehicle_type_id ? String(model.vehicle_type_id) : "",
+  });
   const [years, setYears] = useState<YearRow[]>([]);
   const [yearsLoaded, setYearsLoaded] = useState(false);
   const [from, setFrom] = useState("");
@@ -172,15 +179,51 @@ function EditModal({
     });
   }
 
-  const hasUnsaved =
-    name !== model.name ||
-    makeId !== String(model.make_id) ||
-    typeId !== (model.vehicle_type_id ? String(model.vehicle_type_id) : "") ||
-    from !== "" ||
-    to !== "";
+  const detailsDirty = name !== saved.name || makeId !== saved.makeId || typeId !== saved.typeId;
+  const rangePending = from !== "" && to !== "";
 
-  function step(dir: -1 | 1) {
-    if (hasUnsaved && !confirm("You have unsaved changes on this model. Leave without saving?")) return;
+  async function saveDetails() {
+    const clean = name.trim();
+    await api(`/models/${model.id}`, {
+      method: "PATCH",
+      body: { name: clean, make_id: Number(makeId), vehicle_type_id: Number(typeId) },
+    });
+    setName(clean);
+    setSaved({ name: clean, makeId, typeId });
+  }
+
+  async function addRange() {
+    const r = await api<{ years_added: number }>(`/models/${model.id}/years`, {
+      method: "POST",
+      body: { year_from: Number(from), year_to: Number(to) },
+    });
+    setFrom("");
+    setTo("");
+    loadYears();
+    return r.years_added;
+  }
+
+  /* Stepping to another model: no warning. If something was changed but not saved, it is saved first, then the window moves on.
+     If that save fails, the window stays so nothing is lost. */
+  async function step(dir: -1 | 1) {
+    if (detailsDirty || rangePending) {
+      if (detailsDirty && (!name.trim() || !typeId)) {
+        setMsg({ kind: "error", text: "Fill in the model name and machine type before moving to another model." });
+        return;
+      }
+      setBusy(true);
+      setMsg(null);
+      try {
+        if (detailsDirty) await saveDetails();
+        if (rangePending) await addRange();
+        onChanged();
+      } catch (e) {
+        setMsg({ kind: "error", text: errMsg(e) });
+        setBusy(false);
+        return;
+      }
+      setBusy(false);
+    }
     onStep(dir);
   }
 
@@ -219,13 +262,10 @@ function EditModal({
           </div>
           <button
             className={btnCls}
-            disabled={busy || !name.trim() || !typeId}
+            disabled={busy || !detailsDirty || !name.trim() || !typeId}
             onClick={() =>
               run(async () => {
-                await api(`/models/${model.id}`, {
-                  method: "PATCH",
-                  body: { name: name.trim(), make_id: Number(makeId), vehicle_type_id: Number(typeId) },
-                });
+                await saveDetails();
                 return "Saved";
               })
             }
@@ -257,16 +297,7 @@ function EditModal({
               className={btn2Cls}
               disabled={busy || !from || !to}
               onClick={() =>
-                run(async () => {
-                  const r = await api<{ years_added: number }>(`/models/${model.id}/years`, {
-                    method: "POST",
-                    body: { year_from: Number(from), year_to: Number(to) },
-                  });
-                  setFrom("");
-                  setTo("");
-                  loadYears();
-                  return `${r.years_added} year(s) added`;
-                })
+                run(async () => `${await addRange()} year(s) added`)
               }
             >
               Add range
@@ -314,7 +345,10 @@ function EditModal({
           </ul>
         </section>
 
-        <section className="border-t border-gray-200 pt-4">
+        <section className="flex items-center justify-between border-t border-gray-200 pt-4">
+          <button type="button" className={btn2Cls} onClick={onClose}>
+            Close
+          </button>
           <button
             className={dangerCls}
             disabled={busy}

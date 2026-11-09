@@ -1044,11 +1044,22 @@ export default function EbayLiveListingsPage() {
           {repo.items.length === 0 ? (
             <Notice>No listings{statusF !== "all" ? ` with status "${statusF}"` : ""}{q.trim() ? " match that search" : ""} for {allMode ? "these stores" : "this store"}.</Notice>
           ) : (
-            <div className="overflow-x-auto rounded border border-gray-200 bg-white">
-              <table className="w-full text-left text-sm">
+            <div className="rounded border border-gray-200 bg-white">
+              {/* fixed widths so the table always fits the screen (no sideways scroll); the Listing column takes what is left and long text wraps */}
+              <table className="w-full table-fixed text-left text-sm">
+                <colgroup>
+                  <col className="w-[2.5rem]" />
+                  <col className="w-[4.5rem]" />
+                  <col />
+                  <col className="w-[7rem]" />
+                  <col className="w-[11rem]" />
+                  <col className="w-[5.5rem]" />
+                  <col className="w-[8rem]" />
+                  <col className="w-[7rem]" />
+                </colgroup>
                 <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
-                    <th className="w-8 px-3 py-2">
+                    <th className="px-3 py-2">
                       <input
                         type="checkbox"
                         aria-label="Select all on this page"
@@ -1059,7 +1070,7 @@ export default function EbayLiveListingsPage() {
                         }}
                       />
                     </th>
-                    <th className="w-16 px-3 py-2"></th>
+                    <th className="px-3 py-2"></th>
                     <th className="px-3 py-2">Listing</th>
                     <th className="px-3 py-2">Store</th>
                     <th className="px-3 py-2">Custom label</th>
@@ -1099,7 +1110,7 @@ export default function EbayLiveListingsPage() {
                           )}
                         </td>
                         <td className="px-3 py-2">
-                          <div className="max-w-xl">{it.title}</div>
+                          <div className="break-words">{it.title}</div>
                           <a href={it.url} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline">
                             {it.item_id}
                           </a>
@@ -1112,8 +1123,8 @@ export default function EbayLiveListingsPage() {
                             </span>
                           )}
                         </td>
-                        <td className="whitespace-nowrap px-3 py-2">{rowStore?.display_name || it.store}</td>
-                        <td className="px-3 py-2">{it.custom_label ?? "—"}</td>
+                        <td className="break-words px-3 py-2">{rowStore?.display_name || it.store}</td>
+                        <td className="break-all px-3 py-2">{it.custom_label ?? "—"}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{money(it.price, it.currency)}</td>
                         <td className="px-3 py-2 whitespace-nowrap">
                           {it.quantity ?? "—"}
