@@ -70,6 +70,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, current_user, needs, require_route_access
+from app import fulfillment
 from app.database import get_db
 from app.images import thumb_url
 from app.ebay_sales import _ensure_tracking_cols, lower_hold_marks, queue_stock_push, take_stock_for_reference
@@ -1276,40 +1277,62 @@ def order_queue(
     db: Session = Depends(get_db),
 ):
     """Every order still waiting to be picked or shipped, all sales channels together, OLDEST FIRST (no channel
-    gets priority). channel = '' for all, or one channel name (case does not matter)."""
+    gets priority). channel = '' for all, or one channel name (case does not matter).
+    URGENT orders (see app/fulfillment.py) waiting for a human decision are pinned above the list, in red, on the first page."""
     _ensure_claims_table(db)
     _ensure_tracking_cols(db)
+    try:
+        urgent = fulfillment.urgent_orders(db)
+    except Exception:  # the pinned list is a safety net: if it cannot be worked out, the normal list must still work
+        db.rollback()
+        log.exception("could not work out urgent orders")
+        urgent = {}
     params = {
         "q": q.strip(),
         "like": f"%{q.strip()}%",
         "channel": channel.strip().lower(),
         "lim": limit,
         "off": offset,
+        "ukeys": list(urgent),
     }
-    total = db.execute(
-        text(_QUEUE_CTE + "select count(*) from q where (:channel = '' or lower(q.channel) = :channel)"), params
-    ).scalar()
-    rows = db.execute(
-        text(
-            _QUEUE_CTE
-            + f"""
-            select q.*, c.claimed_by
-            from q
-            left join inventory_order_claims c
-              on c.channel = q.channel and c.order_ref = q.order_ref
-             and c.heartbeat_at > now() - interval '{CLAIM_MINUTES} minutes'
-            where (:channel = '' or lower(q.channel) = :channel)
-            order by q.placed_at asc nulls last, q.channel, q.order_ref
-            limit :lim offset :off
-            """
-        ),
+    is_urgent = "((q.channel || '|' || q.order_ref) = any(cast(:ukeys as text[])))"
+    main_total = db.execute(
+        text(_QUEUE_CTE + f"select count(*) from q where (:channel = '' or lower(q.channel) = :channel) and not {is_urgent}"),
         params,
-    ).all()
-    flags = _attention(db, [r.web_id for r in rows if r.web_id])
+    ).scalar()
+
+    def fetch(extra: str, lim_sql: str):
+        return db.execute(
+            text(
+                _QUEUE_CTE
+                + f"""
+                select q.*, c.claimed_by
+                from q
+                left join inventory_order_claims c
+                  on c.channel = q.channel and c.order_ref = q.order_ref
+                 and c.heartbeat_at > now() - interval '{CLAIM_MINUTES} minutes'
+                where (:channel = '' or lower(q.channel) = :channel) and {extra}
+                order by q.placed_at asc nulls last, q.channel, q.order_ref
+                {lim_sql}
+                """
+            ),
+            params,
+        ).all()
+
+    pinned = fetch(is_urgent, "") if (offset == 0 and urgent) else []
+    rows = fetch(f"not {is_urgent}", "limit :lim offset :off")
+    flags = _attention(db, [r.web_id for r in [*pinned, *rows] if r.web_id])
+    keys = [fulfillment.key_of(r.channel, r.order_ref) for r in [*pinned, *rows]]
+    try:
+        decided = fulfillment.decisions_for(db, keys)
+    except Exception:
+        db.rollback()
+        decided = {}
     items = []
-    for r in rows:
+    for r in [*pinned, *rows]:
         title = (r.first_title or "").strip()
         more = r.line_count - 1
+        k = fulfillment.key_of(r.channel, r.order_ref)
         items.append(
             {
                 "channel": r.channel,
@@ -1321,9 +1344,46 @@ def order_queue(
                 "status": r.status,
                 "attention": flags.get(r.web_id, []) if r.web_id else [],
                 "claimed_by": _who(r.claimed_by),
+                "urgent": k in urgent,
+                "urgent_reasons": urgent.get(k, []),
+                "decision": decided.get(k),
             }
         )
-    return {"total": int(total or 0), "channels": ["Website", "eBay"], "items": items}
+    return {"total": int(main_total or 0) + len(pinned), "channels": ["Website", "eBay"], "items": items}
+
+
+@router.get("/fulfillment/urgent-count")
+@needs("inventory.ship")
+def urgent_count(db: Session = Depends(get_db)):
+    """How many open orders are waiting for a fulfillment decision (the red badge on the tab)."""
+    try:
+        return {"count": len(fulfillment.urgent_orders(db))}
+    except Exception:
+        db.rollback()
+        log.exception("could not count urgent orders")
+        return {"count": 0}
+
+
+class DecisionIn(BaseModel):
+    channel: str = Field(..., min_length=1, max_length=30)
+    order_ref: str = Field(..., min_length=1, max_length=60)
+    decision: Literal["dropship", "stock"]
+
+
+@router.post("/fulfillment/decision")
+@needs("inventory.ship")
+def fulfillment_decision(body: DecisionIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """A person decides an urgent order: approve a drop ship, or ship it from our own stock instead. Recorded with who and
+    when; the order stops being urgent. THIS DOES NOT PLACE A DISTRIBUTOR ORDER. A decision already made can be changed."""
+    channel = "eBay" if body.channel.strip().lower() == "ebay" else "Website"
+    ref = body.order_ref.strip()
+    key = fulfillment.key_of(channel, ref)
+    urgent = fulfillment.urgent_orders(db)
+    already = fulfillment.decisions_for(db, [key])
+    if key not in urgent and key not in already:
+        raise HTTPException(409, "That order is no longer waiting for a decision (it may have shipped or been cancelled). Refresh the list.")
+    fulfillment.record_decision(db, channel, ref, body.decision, user.email or user.user_id, urgent.get(key))
+    return {"ok": True, "decision": body.decision, "by": _who(user.email or user.user_id)}
 
 
 class ClaimIn(BaseModel):

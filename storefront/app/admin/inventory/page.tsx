@@ -34,6 +34,18 @@ export default function InventoryPage() {
   // Orders with a red flag (short pick / oversold), shown on the Ship tab so they can't be missed.
   const [flagged, setFlagged] = useState(0);
   const canShip = can("inventory.ship");
+  // Orders waiting for a fulfillment decision (drop ship or our own stock): the red badge, checked even from other tabs.
+  const [urgent, setUrgent] = useState(0);
+  useEffect(() => {
+    if (!canShip) return;
+    const load = () =>
+      api<{ count: number }>("/inventory/fulfillment/urgent-count")
+        .then((r) => setUrgent(r.count))
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, [canShip, tab]);
   useEffect(() => {
     if (!canShip) return;
     const load = () =>
@@ -74,6 +86,9 @@ export default function InventoryPage() {
             }`}
           >
             {t.label}
+            {t.key === "ship" && urgent > 0 && (
+              <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs font-bold text-white">{urgent} URGENT</span>
+            )}
             {t.key === "ship" && flagged > 0 && (
               <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs font-semibold text-white">
                 {flagged} need attention
@@ -116,6 +131,7 @@ export default function InventoryPage() {
               onClick={() => setShipMode("queue")}
             >
               Online sales
+              {urgent > 0 && <span className="ml-2 rounded-full bg-red-600 px-2 py-0.5 text-xs font-bold text-white">{urgent} URGENT</span>}
             </button>
             <button
               className={`px-4 py-2 ${shipMode === "inside" ? "bg-black text-white" : "bg-white text-gray-700"}`}

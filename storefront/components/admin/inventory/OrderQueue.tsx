@@ -16,7 +16,10 @@ import { beep } from "./shared";
    - Open an order by clicking it or by scanning its order number. That marks it "being picked by <you>" for
      everyone else (kept alive while it is open, dropped when you go back, or after 10 minutes of silence).
    - Website orders open the website pick screen; eBay orders open the scan-out screen plus the label / tracking
-     controls. Orders that need a human look (short pick, oversold) are marked in red but stay in date order. */
+     controls. Orders that need a human look (short pick, oversold) are marked in red but stay in date order.
+   - URGENT orders (too big for our shelf and a big share of the distributor's stock, or nothing can fill them) are pinned
+     above the list in red until a person approves a drop ship or chooses our own stock. Recording the choice does not
+     place the distributor order. */
 
 type Row = {
   channel: string;
@@ -28,6 +31,9 @@ type Row = {
   status: "pick" | "ship" | "shipped";
   attention: string[];
   claimed_by: string | null;
+  urgent: boolean; // waiting for a person to decide: drop ship or our own stock
+  urgent_reasons: string[];
+  decision: { decision: "dropship" | "stock"; by: string; at: string } | null;
 };
 type Resp = { total: number; channels: string[]; items: Row[] };
 
@@ -52,6 +58,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
   const [takenBy, setTakenBy] = useState<string | null>(null); // someone took the open order over
   const [me, setMe] = useState<string | null>(null); // my name as the others see it on the list
   const [reloadKey, setReloadKey] = useState(0);
+  const [deciding, setDeciding] = useState<string | null>(null);
   const scanRef = useRef<HTMLInputElement>(null);
   const openRef = useRef<Row | null>(null);
   openRef.current = open;
@@ -117,8 +124,27 @@ export default function OrderQueue({ active }: { active: boolean }) {
     []
   );
 
+  async function decide(r: Row, decision: "dropship" | "stock") {
+    const what =
+      decision === "dropship"
+        ? "APPROVE A DROP SHIP for"
+        : "SHIP FROM OUR OWN STOCK instead for";
+    if (!window.confirm(`${what} ${r.channel} order ${r.order_ref}?\n\n${r.urgent_reasons.join("\n")}\n\nThis records your decision. It does not place the distributor order.`)) return;
+    setMsg(null);
+    setDeciding(`${r.channel}:${r.order_ref}`);
+    try {
+      await api("/inventory/fulfillment/decision", { method: "POST", body: { channel: r.channel, order_ref: r.order_ref, decision } });
+      await load();
+    } catch (e) {
+      setMsg(errMsg(e));
+    } finally {
+      setDeciding(null);
+    }
+  }
+
   async function openRow(r: Row, takeOver = false) {
     setMsg(null);
+    if (r.urgent && !takeOver && !window.confirm(`This order is URGENT and still waiting for a decision (drop ship or our own stock).\n\nOpen it anyway?`)) return;
     try {
       const c = await api<{ ok: boolean; by?: string }>("/inventory/claims", {
         method: "POST",
@@ -254,6 +280,13 @@ export default function OrderQueue({ active }: { active: boolean }) {
         </button>
       </div>
 
+      {rows.some((r) => r.urgent) && (
+        <div className="rounded border-2 border-red-600 bg-red-50 px-3 py-2 text-sm font-semibold text-red-800">
+          {rows.filter((r) => r.urgent).length} order{rows.filter((r) => r.urgent).length === 1 ? "" : "s"} waiting for a human decision. Approve a
+          drop ship or choose our own stock; they stay pinned at the top until you do.
+        </div>
+      )}
+
       <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
 
       <div className="overflow-x-auto rounded border border-gray-200 bg-white">
@@ -290,11 +323,13 @@ export default function OrderQueue({ active }: { active: boolean }) {
                   onKeyDown={(e) => {
                     if (e.key === "Enter") void openRow(r);
                   }}
-                  className={`cursor-pointer hover:bg-gray-50 ${
-                    r.attention.length ? "bg-red-50" : r.status === "shipped" ? "bg-green-50" : ""
+                  className={`cursor-pointer ${
+                    r.urgent
+                      ? "bg-red-100 hover:bg-red-200"
+                      : `hover:bg-gray-50 ${r.attention.length ? "bg-red-50" : r.status === "shipped" ? "bg-green-50" : ""}`
                   }`}
                 >
-                  <td className="whitespace-nowrap px-3 py-2 text-gray-600">
+                  <td className={`whitespace-nowrap px-3 py-2 text-gray-600 ${r.urgent ? "border-l-4 border-red-600" : ""}`}>
                     {r.placed_at ? new Date(r.placed_at).toLocaleString() : "—"}
                   </td>
                   <td className="px-3 py-2">
@@ -308,6 +343,11 @@ export default function OrderQueue({ active }: { active: boolean }) {
                       {r.summary ?? "(no title)"}
                     </div>
                     {r.sub && <div className="truncate text-xs text-gray-500">{r.sub}</div>}
+                    {r.urgent_reasons.map((t) => (
+                      <div key={t} className="whitespace-normal text-xs font-semibold text-red-800">
+                        URGENT: {t}
+                      </div>
+                    ))}
                     {r.attention.map((t) => (
                       <div key={t} className="text-xs font-semibold text-red-700">
                         ⚠ {t}
@@ -316,7 +356,40 @@ export default function OrderQueue({ active }: { active: boolean }) {
                   </td>
                   <td className="px-3 py-2">{r.units}</td>
                   <td className="px-3 py-2">
-                    <Badge tone={st.tone}>{st.label}</Badge>
+                    {r.urgent ? (
+                      <div className="space-y-1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                        <span className="inline-block rounded bg-red-600 px-2 py-0.5 text-xs font-bold text-white">URGENT · needs a decision</span>
+                        <div className="flex flex-wrap gap-1">
+                          <button
+                            type="button"
+                            className="rounded bg-black px-2 py-1 text-xs font-medium text-white disabled:opacity-50"
+                            disabled={deciding === `${r.channel}:${r.order_ref}`}
+                            onClick={() => void decide(r, "dropship")}
+                          >
+                            Approve drop ship
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded border border-gray-400 bg-white px-2 py-1 text-xs font-medium text-gray-800 disabled:opacity-50"
+                            disabled={deciding === `${r.channel}:${r.order_ref}`}
+                            onClick={() => void decide(r, "stock")}
+                          >
+                            Ship from our stock
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <Badge tone={st.tone}>{st.label}</Badge>
+                        {r.decision && (
+                          <div>
+                            <Badge tone="blue">
+                              {r.decision.decision === "dropship" ? "Drop ship approved" : "Ship from our stock"} · {r.decision.by}
+                            </Badge>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </td>
                   <td className="truncate px-3 py-2">
                     {r.claimed_by ? <Badge tone="amber">{r.claimed_by}</Badge> : <span className="text-gray-400">—</span>}
