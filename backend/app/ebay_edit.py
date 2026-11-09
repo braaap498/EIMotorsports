@@ -50,7 +50,7 @@ from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from app import images, photo_store
@@ -609,6 +609,8 @@ def _build(current: dict, ch: Changes, allow_empty: bool = False, call: str = "R
             parts.append(f"<Variations>{var_xml}</Variations>")
 
     if not parts and not allow_empty:
+        if has_var and ch.price is not None and ch.price.strip() and not ch.variations:
+            raise HTTPException(400, "This listing has variations, so each variation has its own price. Change them on the listing's own edit screen.")
         raise HTTPException(400, "Nothing is different from what is on eBay, so there is nothing to send.")
     xml = (
         f'<{call}Request xmlns="urn:ebay:apis:eBLBaseComponents"><Item>'
@@ -1521,6 +1523,72 @@ def save_draft(body: DraftIn, db: Session = Depends(get_db), user: AuthUser = De
         db.rollback()
         raise HTTPException(503, "Saved edits cannot be stored yet. Run sql/ebay_listing_drafts.sql in Supabase, then try again.")
     return {"ok": True, "draft": _read_draft(db, row.store, item_id)}
+
+
+class BulkPriceIn(BaseModel):
+    price: str
+    listing_ids: list[int] = Field(min_length=1, max_length=2000)  # every listing whose new price is to be kept on the website
+    unsent_ids: list[int] = Field(default_factory=list, max_length=2000)  # of those, the ones NOT on eBay (ended, or the push failed)
+    set_website_price: bool = True  # also set the product's own (single-unit) website price; False leaves it alone
+
+
+@router.post("/bulk-price")
+def bulk_price(body: BulkPriceIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """The website side of the Listings tab's "Change price" button. The eBay side is the ordinary /preview and /push, one
+    listing at a time; this is called afterwards. It sets the single-unit website price of every product behind the listings (the Listings
+    tab shows the product's price; skipped when set_website_price is false), and for the listings that did NOT go to eBay (ended listings, or a push that failed)
+    it keeps the new price as a saved edit, so it fills the price box when that listing is opened or relisted. Saved edits
+    already there are kept; only their price is replaced. Never calls eBay."""
+    price = _money(body.price)
+    ids = list(dict.fromkeys(body.listing_ids))
+    rows = db.execute(
+        text(
+            "select cl.id as listing_id, cl.store, regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item_id, cl.product_id "
+            "from channel_listings cl where cl.id in :ids"
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"ids": ids},
+    ).all()
+    if not rows:
+        raise HTTPException(404, "Those listings were not found.")
+    product_ids = sorted({r.product_id for r in rows if r.product_id is not None})
+    if product_ids and body.set_website_price:
+        db.execute(
+            text("update products set list_price = :p, updated_at = now() where id in :ids").bindparams(bindparam("ids", expanding=True)),
+            {"p": price, "ids": product_ids},
+        )
+    db.commit()
+
+    unsent = set(body.unsent_ids)
+    who = user.email or user.user_id
+    store_names: dict[str, str] = {}
+    saved = 0
+    note: Optional[str] = None
+    for r in rows:
+        if r.listing_id not in unsent or not ITEM_RE.fullmatch(r.item_id or ""):
+            continue
+        if r.store not in store_names:
+            try:
+                store_names[r.store] = _store_row(db, r.store).store
+            except Exception:
+                store_names[r.store] = r.store
+        try:
+            db.execute(
+                text(
+                    "insert into ebay_listing_drafts (store, item_id, changes, updated_by, updated_at) "
+                    "values (:s, :i, cast(:c as jsonb), :u, now()) "
+                    "on conflict (store, item_id) do update set "
+                    "changes = coalesce(ebay_listing_drafts.changes, '{}'::jsonb) || excluded.changes, "
+                    "updated_by = excluded.updated_by, updated_at = now()"
+                ),
+                {"s": store_names[r.store], "i": r.item_id, "c": json.dumps({"price": str(price)}), "u": who},
+            )
+            db.commit()
+            saved += 1
+        except Exception:
+            db.rollback()
+            note = "The website price was set, but the new price could not be saved as an edit on the listings that were not sent to eBay (run sql/ebay_listing_drafts.sql in Supabase, then change the price again)."
+            break
+    return {"ok": True, "price": str(price), "products_updated": len(product_ids) if body.set_website_price else 0, "saved_edits": saved, "note": note}
 
 
 @router.delete("/draft")

@@ -110,6 +110,13 @@ export default function EbayLiveListingsPage() {
   const reqSeq = useRef(0); // only the newest list request may update the screen (typing fast sends several)
   const lastQ = useRef(""); // the search text the list on screen was read with
   const [busy, setBusy] = useState("");
+  const [priceOpen, setPriceOpen] = useState(false); // the "Change price" box under the selection bar
+  const [priceText, setPriceText] = useState("");
+  const [groupDone, setGroupDone] = useState(""); // the custom label whose whole group was just selected
+  const [setSite, setSetSite] = useState(true); // also set the website's single-unit price (leave off to change eBay only)
+  const [others, setOthers] = useState<RepoItem[]>([]); // listings with the same custom label in OTHER stores than the ticked ones
+  const [includeOthers, setIncludeOthers] = useState(false);
+  const othersSeq = useRef(0);
   const [drafts, setDrafts] = useState<{ id: number; store: string; source_item_id: string; title: string }[]>([]);
   useEffect(() => {
     api<{ drafts: { id: number; store: string; source_item_id: string; title: string }[] }>("/ebay-copy")
@@ -247,6 +254,38 @@ export default function EbayLiveListingsPage() {
       setAllMatch(capped);
       setPicked(new Set(capped.map((x) => x.listing_id)));
       if (repo.total > capped.length) setActMsg({ kind: "error", text: `Only the first ${capped.length} of ${repo.total} matching listings were selected (the limit). Narrow the search to get the rest.` });
+    } catch (e) {
+      setActMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setLoadingAll(false);
+    }
+  }
+
+  // Tick every listing (any status) that has exactly this custom label, in the store being shown (or all stores in the All stores view).
+  // The search box matches part of a label, so the rows are filtered to the exact label afterwards. Database only; nothing goes to eBay.
+  async function selectLabelGroup(label: string) {
+    if (!repo || loadingAll) return;
+    setLoadingAll(true);
+    setActMsg(null);
+    try {
+      const rows: RepoItem[] = [];
+      let offset = 0;
+      for (;;) {
+        const params = new URLSearchParams({ q: label, sort, status: "all", offset: String(offset), limit: "200" });
+        if (repo.store === "") params.set("all_stores", "1");
+        else params.set("store", repo.store);
+        const r = await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`);
+        rows.push(...r.items);
+        offset += r.items.length;
+        if (r.items.length === 0 || offset >= r.total || rows.length >= SELECT_ALL_MAX) break;
+      }
+      const want = label.trim().toLowerCase();
+      const group = rows.filter((x) => (x.custom_label ?? "").trim().toLowerCase() === want);
+      if (group.length === 0) return;
+      setAllMatch(group);
+      setPicked(new Set(group.map((x) => x.listing_id)));
+      setGroupDone(label);
+      setActMsg({ kind: "success", text: `Selected all ${group.length} listing${group.length === 1 ? "" : "s"} with custom label ${label} (every status).` });
     } catch (e) {
       setActMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -524,6 +563,146 @@ export default function EbayLiveListingsPage() {
     await loadRepo(repo.offset);
   }
 
+  // Every listing (any status, any store) whose custom label is exactly this one. Database only.
+  async function rowsWithLabel(label: string): Promise<RepoItem[]> {
+    const rows: RepoItem[] = [];
+    let offset = 0;
+    for (;;) {
+      const params = new URLSearchParams({ q: label, sort: "newest", status: "all", offset: String(offset), limit: "200", all_stores: "1" });
+      const r = await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`);
+      rows.push(...r.items);
+      offset += r.items.length;
+      if (r.items.length === 0 || offset >= r.total || rows.length >= SELECT_ALL_MAX) break;
+    }
+    const want = label.trim().toLowerCase();
+    return rows.filter((x) => (x.custom_label ?? "").trim().toLowerCase() === want);
+  }
+
+  // Change price: one new price for every ticked listing. ONE confirmation up front, then each active listing is checked against eBay
+  // and sent straight away (only the price changes, so there is nothing else to review), one at a time, each logged like a single push.
+  // Needs live pushes ON. Ended listings are not sent: the price is saved on the website and fills the price box when the listing is opened
+  // or relisted. Optionally the website's single-unit price is set too. Listings with variations are left alone.
+  async function bulkPrice() {
+    if (!repo || picked.size === 0) return;
+    const clean = priceText.trim().replace(/^\$/, "").replace(/,/g, "");
+    const num = Number(clean);
+    if (!clean || !Number.isFinite(num) || num <= 0 || num > 99999.99) {
+      setActMsg({ kind: "error", text: "Type a price above 0 and below 100,000, for example 24.99. Nothing was changed." });
+      return;
+    }
+    const priceStr = num.toFixed(2);
+    const seen = new Set<number>();
+    const todo = [...selectedItems(), ...(includeOthers ? others : [])].filter((x) => (seen.has(x.listing_id) ? false : (seen.add(x.listing_id), true)));
+    if (todo.length === 0) return;
+    const active = todo.filter((x) => x.active);
+    const ended = todo.filter((x) => !x.active);
+    const names = active.map((x) => x.store).filter((v, i, a) => a.indexOf(v) === i);
+    const stFor = (nm: string) => stores.find((x) => x.store.toLowerCase() === nm.toLowerCase());
+    const notConnected = names.filter((nm) => !stFor(nm)?.authorized);
+    if (notConnected.length) {
+      setActMsg({ kind: "error", text: `${notConnected.join(", ")} ${notConnected.length === 1 ? "is" : "are"} not connected to eBay yet (connect in Store API → Stores), so the active listings cannot be changed there. Nothing was changed.` });
+      return;
+    }
+    const pushesOff = names.filter((nm) => !stFor(nm)?.live_pushes_enabled);
+    if (pushesOff.length) {
+      setActMsg({ kind: "error", text: `Live pushes are OFF for ${pushesOff.join(", ")}, so the new price cannot go to eBay. Turn them on in Store API → Stores. Nothing was changed.` });
+      return;
+    }
+    const prices = todo.map((x) => x.price).filter((v): v is number => typeof v === "number");
+    const lo = prices.length ? Math.min(...prices) : null;
+    const hi = prices.length ? Math.max(...prices) : null;
+    const n = todo.length;
+    const lines: string[] = [`Change the price to $${priceStr} on ${n} listing${n === 1 ? "" : "s"}.`];
+    if (lo !== null && hi !== null) lines.push(`Current price${lo === hi ? "" : "s"}: ${lo === hi ? money(lo) : `${money(lo)} to ${money(hi)}`}.`);
+    if (lo !== null && hi !== null && (num > hi * 3 || num < lo / 3)) lines.push(`WARNING: $${priceStr} is far from the current price${lo === hi ? "" : "s"}. Check it is not a typo.`);
+    if (active.length) lines.push(`${active.length} active: sent to eBay now (${names.join(", ")}), one at a time.`);
+    if (ended.length) lines.push(`${ended.length} ended: NOT sent to eBay. The price is saved on the website and shows when you open or relist ${ended.length === 1 ? "it" : "them"}.`);
+    if (includeOthers && others.length) lines.push(`Includes ${others.length} listing${others.length === 1 ? "" : "s"} with the same custom label in other stores.`);
+    lines.push(setSite ? "The website's single-unit price for each part is set to this price too." : "The website price is left as it is.");
+    lines.push("Listings with variations cannot be changed here and are left alone. Keep this page open until it finishes.");
+    if (!window.confirm(lines.join("\n\n") + "\n\nContinue?")) {
+      setActMsg({ kind: "success", text: "Cancelled. Nothing was changed." });
+      return;
+    }
+
+    setBusy("status");
+    setActMsg(null);
+    let done = 0;
+    let streak = 0;
+    let stopped = false;
+    const failed: string[] = [];
+    const warns: string[] = [];
+    const skipped: string[] = [];
+    const same: RepoItem[] = []; // already at this price on eBay
+    const pushedOk: RepoItem[] = [];
+    const failedIts: RepoItem[] = [];
+    for (let i = 0; i < active.length; i++) {
+      const it = active[i];
+      setActMsg({ kind: "success", text: `Changing… ${i + 1} of ${active.length} (item ${it.item_id}). Keep this page open.` });
+      try {
+        const pv = await api<{ fingerprint: string; live_pushes_enabled: boolean }>("/ebay-edit/preview", {
+          method: "POST",
+          body: { store: it.store, item_id: it.item_id, changes: { price: priceStr }, action: "revise" },
+        });
+        if (!pv.live_pushes_enabled) throw new Error(`Live pushes are OFF for ${it.store}.`);
+        const res = await api<{ warnings: { message: string }[] }>("/ebay-edit/push", {
+          method: "POST",
+          body: { store: it.store, item_id: it.item_id, changes: { price: priceStr }, action: "revise", fingerprint: pv.fingerprint },
+        });
+        if (res.warnings?.length) warns.push(`${it.item_id}: ${res.warnings.map((w) => w.message).join("; ")}`);
+        done++;
+        pushedOk.push(it);
+        streak = 0;
+      } catch (e) {
+        const m = errMsg(e);
+        if (/nothing is different/i.test(m)) {
+          same.push(it);
+          streak = 0;
+        } else if (/variations/i.test(m)) {
+          skipped.push(`${it.item_id}: has variations`);
+        } else {
+          failed.push(`${it.item_id}: ${m}`);
+          failedIts.push(it);
+          if (++streak >= 3 && i < active.length - 1) {
+            stopped = true;
+            break;
+          }
+        }
+      }
+    }
+    // the website side: listings that were sent, were already at the price, or are ended; plus those whose push failed
+    // (their price is saved as an unsent edit so the list shows them as edited and nothing is lost)
+    const handled = [...pushedOk, ...same, ...ended, ...failedIts];
+    const unsent = [...ended, ...failedIts];
+    let site = "";
+    if (handled.length) {
+      try {
+        const r = await api<{ products_updated: number; saved_edits: number; note?: string | null }>("/ebay-edit/bulk-price", {
+          method: "POST",
+          body: { price: priceStr, listing_ids: handled.map((x) => x.listing_id), unsent_ids: unsent.map((x) => x.listing_id), set_website_price: setSite },
+        });
+        if (setSite) site = ` Website price set on ${r.products_updated} part${r.products_updated === 1 ? "" : "s"}.`;
+        if (r.note) site += ` ${r.note}`;
+      } catch (e) {
+        failed.push(`website side: ${errMsg(e)}`);
+      }
+    }
+    let text = `Price $${priceStr}: ${done} of ${active.length} active listing${active.length === 1 ? "" : "s"} sent to eBay.`;
+    if (same.length) text += ` ${same.length} already at that price.`;
+    if (ended.length) text += ` ${ended.length} ended (saved on the website only).`;
+    text += site;
+    if (failed.length) text += ` ${failed.length} problem${failed.length === 1 ? "" : "s"}: ${failed.slice(0, 5).join(" · ")}${failed.length > 5 ? ` · and ${failed.length - 5} more` : ""}.`;
+    if (skipped.length) text += ` ${skipped.length} left alone (variation listings).`;
+    if (warns.length) text += ` eBay warnings: ${warns.slice(0, 5).join(" · ")}${warns.length > 5 ? ` · and ${warns.length - 5} more` : ""}.`;
+    if (stopped) text += " Stopped after 3 failures in a row; the rest were not tried.";
+    setActMsg({ kind: failed.length ? "error" : "success", text });
+    setBusy("");
+    setPriceOpen(false);
+    setPriceText("");
+    setIncludeOthers(false);
+    await loadRepo(repo.offset);
+  }
+
   async function loadZero() {
     try {
       const z = await api<{ items: { store: string; item_id: string; days_at_zero: number; held?: boolean }[] }>("/ebay-edit/zero/status");
@@ -553,6 +732,7 @@ export default function EbayLiveListingsPage() {
     setSyncNote("");
     setPicked(new Set());
     setAllMatch(null);
+    setGroupDone("");
     try {
       // the database list sorts by title / price / newest; eBay's own "newest" and price orders map onto these
       const params = new URLSearchParams({ q: useQ.trim(), sort: useSort, status: useStatus, offset: String(offset), limit: String(PAGE_SIZE) });
@@ -582,6 +762,33 @@ export default function EbayLiveListingsPage() {
   const nZeroPicked = pickedItems.filter((x) => x.active && isZero(x)).length;
   const nLivePicked = nActivePicked - nZeroPicked;
   const nInactivePicked = pickedItems.length - nActivePicked;
+  const pickedLabels = pickedItems.map((x) => (x.custom_label ?? "").trim()).filter((v, i, a) => v && a.indexOf(v) === i);
+  const oneLabel = pickedLabels.length === 1 ? pickedLabels[0] : "";
+
+  // While the price box is open: look for the same custom labels in OTHER stores (database only). Only when they exist is the
+  // "change those too" choice shown. Checks at most 30 labels.
+  const pickedKey = priceOpen ? pickedItems.map((x) => x.listing_id).join(",") : "";
+  useEffect(() => {
+    if (!priceOpen || pickedLabels.length === 0) {
+      setOthers([]);
+      return;
+    }
+    const mySeq = ++othersSeq.current;
+    const mine = pickedItems;
+    void (async () => {
+      const found: RepoItem[] = [];
+      for (const label of pickedLabels.slice(0, 30)) {
+        const lc = label.toLowerCase();
+        const myStores = new Set(mine.filter((x) => (x.custom_label ?? "").trim().toLowerCase() === lc).map((x) => x.store.toLowerCase()));
+        for (const x of await rowsWithLabel(label)) if (!myStores.has(x.store.toLowerCase())) found.push(x);
+      }
+      if (mySeq === othersSeq.current) setOthers(found);
+    })().catch(() => {
+      if (mySeq === othersSeq.current) setOthers([]);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [priceOpen, pickedKey]);
+  const othersByStore = others.reduce<Record<string, number>>((m, x) => ((m[x.store] = (m[x.store] ?? 0) + 1), m), {});
 
   return (
     <div className="space-y-5">
@@ -755,6 +962,14 @@ export default function EbayLiveListingsPage() {
           {picked.size > 0 && (
             <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
               <span className="font-medium">{pickedItems.length} selected{allMatch ? " (all matching)" : ""}</span>
+              <button type="button" className={btnCls} disabled={busy === "status"} onClick={() => setPriceOpen((v) => !v)} title="Set one new price on everything selected. Active listings are sent to eBay after you confirm (live pushes must be ON).">
+                Change price
+              </button>
+              {oneLabel && groupDone !== oneLabel && (
+                <button type="button" className={btn2Cls} disabled={loadingAll || busy === "status"} onClick={() => void selectLabelGroup(oneLabel)} title="Ticks every listing (any status) with exactly this custom label">
+                  {loadingAll ? "Selecting…" : `Select all with label ${oneLabel}`}
+                </button>
+              )}
               {pickedItems.length === 1 && (
                 <button type="button" className={btn2Cls} disabled={busy === "copy" || busy === "status"} onClick={() => void copyOne()} title="Opens a draft copy of this listing to edit, then list as a new eBay listing linked to the same product">
                   {busy === "copy" ? "Opening…" : "Sell similar"}
@@ -785,10 +1000,45 @@ export default function EbayLiveListingsPage() {
                   End listing on eBay ({nActivePicked})
                 </button>
               )}
-              <button type="button" className="text-xs underline" onClick={() => { setPicked(new Set()); setAllMatch(null); }}>
+              <button type="button" className="text-xs underline" onClick={() => { setPicked(new Set()); setAllMatch(null); setGroupDone(""); setPriceOpen(false); }}>
                 Clear
               </button>
               <span className="text-xs text-gray-500">Sends to eBay one at a time (needs live pushes ON for each store involved).</span>
+            </div>
+          )}
+          {picked.size > 0 && priceOpen && (
+            <div className="space-y-2 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="block text-sm font-medium text-gray-700">
+                  <span className="mb-1 block">New price for the {pickedItems.length} selected listing{pickedItems.length === 1 ? "" : "s"}</span>
+                  <input
+                    className={`${inputCls} w-32`}
+                    inputMode="decimal"
+                    placeholder="24.99"
+                    value={priceText}
+                    onChange={(e) => setPriceText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && priceText.trim() && busy !== "status") void bulkPrice(); }}
+                  />
+                </label>
+                <button type="button" className={btnCls} disabled={busy === "status" || !priceText.trim()} onClick={() => void bulkPrice()}>
+                  {busy === "status" ? "Working…" : "Continue"}
+                </button>
+                <button type="button" className="text-xs underline" onClick={() => setPriceOpen(false)}>Cancel</button>
+              </div>
+              <label className="flex items-center gap-2 text-gray-700">
+                <input type="checkbox" checked={setSite} onChange={(e) => setSetSite(e.target.checked)} />
+                Also set the website&rsquo;s single-unit price for these parts (leave unticked to change eBay only)
+              </label>
+              {others.length > 0 && (
+                <label className="flex items-center gap-2 font-medium text-gray-800">
+                  <input type="checkbox" checked={includeOthers} onChange={(e) => setIncludeOthers(e.target.checked)} />
+                  <span>
+                    The same custom label is also on {others.length} listing{others.length === 1 ? "" : "s"} in other stores (
+                    {Object.entries(othersByStore).map(([nm, c]) => `${nm}: ${c}`).join(", ")}). Change those to this price too?
+                  </span>
+                </label>
+              )}
+              <p className="text-xs text-gray-500">One confirmation, then active listings are sent to eBay one at a time. Ended listings only get the price saved on the website.</p>
             </div>
           )}
           {repo.items.length === 0 ? (
