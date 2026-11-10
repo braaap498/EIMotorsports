@@ -540,7 +540,7 @@ export default function StockPanel({ active }: { active: boolean }) {
           Warehouse
           <select className={`${inputCls} !w-64`} value={whId ?? ""} onChange={(e) => setWhId(e.target.value ? Number(e.target.value) : null)}>
             <option value="">All warehouses (total)</option>
-            {whs.map((
+            {whs.map((w) => (
               <option key={w.id} value={w.id}>
                 {w.name}
                 {w.is_default ? " (Main)" : ""}
