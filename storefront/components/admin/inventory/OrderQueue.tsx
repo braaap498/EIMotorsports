@@ -30,7 +30,9 @@ type Row = {
   sub: string | null;
   status: "pick" | "ship" | "shipped";
   attention: string[];
-  claimed_by: string | null;
+  claimed_by: string | null; // the person's name
+  claimed_by_email: string | null; // shown under the name
+  fulfillment: { kind: "dropship" | "warehouse" | "undecided"; source: string; po_number: number | null; po_pending: boolean };
   urgent: boolean; // waiting for a person to decide: drop ship or our own stock
   urgent_reasons: string[];
   decision: { decision: "dropship" | "stock"; by: string; at: string } | null;
@@ -239,7 +241,8 @@ export default function OrderQueue({ active }: { active: boolean }) {
     <div className="space-y-3">
       <p className="text-xs text-gray-500">
         Every order waiting to be picked or shipped, from all sales channels, oldest first. Click an order, or scan its
-        order number, to work on it. <strong>Being picked by</strong> shows who already has an order open.
+        order number, to work on it. <strong>Being picked by</strong> shows who already has an order open. <strong>Fulfillment source</strong> shows
+        whether the parts come from one of our warehouses or from a drop ship.
       </p>
       {msg && <Notice kind="error">{msg}</Notice>}
 
@@ -291,15 +294,16 @@ export default function OrderQueue({ active }: { active: boolean }) {
 
       <div className="overflow-x-auto rounded border border-gray-200 bg-white">
         {/* fixed column widths, sized for the longest content, so nothing shifts from page to page */}
-        <table className="w-full min-w-[82rem] table-fixed text-left text-sm">
+        <table className="w-full min-w-[96rem] table-fixed text-left text-sm">
           <colgroup>
-            <col className="w-[11.5rem]" />
-            <col className="w-[7rem]" />
-            <col className="w-[11rem]" />
-            <col />
-            <col className="w-[5rem]" />
-            <col className="w-[16rem]" />
-            <col className="w-[11rem]" />
+            <col className="w-[7rem]" /> {/* Date (date, time under it) */}
+            <col className="w-[7rem]" /> {/* Channel */}
+            <col className="w-[11rem]" /> {/* Order # */}
+            <col /> {/* Items: takes the rest */}
+            <col className="w-[5rem]" /> {/* Units */}
+            <col className="w-[12rem]" /> {/* Fulfillment source */}
+            <col className="w-[16rem]" /> {/* Status */}
+            <col className="w-[16rem]" /> {/* Being picked by (name, email under it) */}
           </colgroup>
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
@@ -308,6 +312,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
               <th className="whitespace-nowrap px-3 py-2">Order #</th>
               <th className="whitespace-nowrap px-3 py-2">Items</th>
               <th className="whitespace-nowrap px-3 py-2">Units</th>
+              <th className="whitespace-nowrap px-3 py-2">Fulfillment source</th>
               <th className="whitespace-nowrap px-3 py-2">Status</th>
               <th className="whitespace-nowrap px-3 py-2">Being picked by</th>
             </tr>
@@ -330,7 +335,14 @@ export default function OrderQueue({ active }: { active: boolean }) {
                   }`}
                 >
                   <td className={`whitespace-nowrap px-3 py-2 text-gray-600 ${r.urgent ? "border-l-4 border-red-600" : ""}`}>
-                    {r.placed_at ? new Date(r.placed_at).toLocaleString() : "—"}
+                    {r.placed_at ? (
+                      <>
+                        <div>{new Date(r.placed_at).toLocaleDateString()}</div>
+                        <div>{new Date(r.placed_at).toLocaleTimeString()}</div>
+                      </>
+                    ) : (
+                      "—"
+                    )}
                   </td>
                   <td className="px-3 py-2">
                     <Badge tone={r.channel === "Website" ? "blue" : "amber"}>{r.channel}</Badge>
@@ -355,6 +367,18 @@ export default function OrderQueue({ active }: { active: boolean }) {
                     ))}
                   </td>
                   <td className="px-3 py-2">{r.units}</td>
+                  <td className="whitespace-nowrap px-3 py-2">
+                    {r.fulfillment?.kind === "dropship" ? (
+                      <>
+                        <Badge tone="blue">{r.fulfillment.source}</Badge>
+                        <div className="text-xs text-gray-500">{r.fulfillment.po_number ? `PO ${r.fulfillment.po_number}` : "PO not made yet"}</div>
+                      </>
+                    ) : r.fulfillment?.kind === "undecided" ? (
+                      <span className="text-xs font-semibold text-red-700">{r.fulfillment.source}</span>
+                    ) : (
+                      <Badge tone="gray">{r.fulfillment?.source ?? "—"}</Badge>
+                    )}
+                  </td>
                   <td className="px-3 py-2">
                     {r.urgent ? (
                       <div className="space-y-1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
@@ -391,15 +415,22 @@ export default function OrderQueue({ active }: { active: boolean }) {
                       </div>
                     )}
                   </td>
-                  <td className="truncate px-3 py-2">
-                    {r.claimed_by ? <Badge tone="amber">{r.claimed_by}</Badge> : <span className="text-gray-400">—</span>}
+                  <td className="whitespace-nowrap px-3 py-2">
+                    {r.claimed_by ? (
+                      <>
+                        <Badge tone="amber">{r.claimed_by}</Badge>
+                        {r.claimed_by_email && <div className="text-xs text-gray-500">{r.claimed_by_email}</div>}
+                      </>
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
                   </td>
                 </tr>
               );
             })}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={7} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={8} className="px-3 py-6 text-center text-gray-500">
                   {loading ? "Loading…" : q || channel ? "No orders match." : "No orders waiting. Everything has been picked and shipped."}
                 </td>
               </tr>

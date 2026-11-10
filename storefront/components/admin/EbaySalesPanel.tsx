@@ -222,12 +222,12 @@ export default function EbaySalesPanel() {
                 <col className="w-[6.5rem]" /> {/* Date (date on one line, time under it) */}
                 <col className="w-[9.5rem]" /> {/* Store */}
                 <col className="w-[8rem]" /> {/* Order # */}
-                <col className="w-[16rem]" /> {/* Custom label */}
+                <col className="w-[19rem]" /> {/* Custom label (room for a 3-part kit label) */}
                 <col /> {/* Title: takes the rest */}
                 <col className="w-[3.5rem]" /> {/* Qty */}
                 <col className="w-[5.5rem]" /> {/* Price */}
                 <col className="w-[12.5rem]" /> {/* State */}
-                <col className="w-[12.5rem]" /> {/* Shipping */}
+                <col className="w-[14.5rem]" /> {/* Shipping (room for a 22-digit USPS number plus a gap before the edge) */}
               </colgroup>
               <thead className="bg-gray-50 text-xs text-gray-500">
                 <tr>
@@ -281,7 +281,7 @@ export default function EbaySalesPanel() {
                         <div className="mt-1 text-xs font-medium text-red-700">Refunded ${Number(l.refund_total).toFixed(2)}</div>
                       )}
                     </td>
-                    <td className="whitespace-nowrap px-2 py-2">
+                    <td className="whitespace-nowrap py-2 pl-2 pr-4">
                       {l.cancelled || l.state === "cancelled" ? (
                         <span className="text-xs text-gray-400">—</span>
                       ) : (

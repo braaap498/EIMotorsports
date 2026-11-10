@@ -1053,7 +1053,7 @@ export default function EbayLiveListingsPage() {
                   <col className="w-[4rem]" /> {/* photo */}
                   <col /> {/* Listing: takes the rest */}
                   <col className="w-[9.5rem]" /> {/* Store */}
-                  <col className="w-[16rem]" /> {/* Custom label */}
+                  <col className="w-[19rem]" /> {/* Custom label (room for a 3-part kit label) */}
                   <col className="w-[6.5rem]" /> {/* Price */}
                   <col className="w-[10.5rem]" /> {/* Quantity */}
                   <col className="w-[11.5rem]" /> {/* Status */}

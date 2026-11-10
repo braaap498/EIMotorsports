@@ -10,6 +10,7 @@ import StockPanel from "../../../components/admin/inventory/StockPanel";
 import ScanSession from "../../../components/admin/inventory/ScanSession";
 import ReceivePo from "../../../components/admin/inventory/ReceivePo";
 import OrderQueue from "../../../components/admin/inventory/OrderQueue";
+import WarehousePanel from "../../../components/admin/inventory/WarehousePanel";
 import InsideSalesComingSoon from "../../../components/admin/inventory/InsideSalesComingSoon";
 
 const ANY = ["inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust"];
@@ -17,6 +18,7 @@ const TABS = [
   { key: "receive", label: "Receive (scan in)", perms: ["inventory.receive"] },
   { key: "ship", label: "Pick & ship", perms: ["inventory.ship"] },
   { key: "stock", label: "Stock", perms: ANY },
+  { key: "warehouses", label: "Warehouses", perms: ANY },
   { key: "barcodes", label: "Barcodes & labels", perms: ["inventory.barcodes"] },
   { key: "history", label: "History", perms: ANY },
 ];
@@ -151,6 +153,10 @@ export default function InventoryPage() {
 
       <div className={tab === "stock" ? "" : "hidden"}>
         <StockPanel active={tab === "stock"} />
+      </div>
+
+      <div className={tab === "warehouses" ? "" : "hidden"}>
+        <WarehousePanel active={tab === "warehouses"} canRename={can("inventory.adjust")} />
       </div>
 
       {can("inventory.barcodes") && (

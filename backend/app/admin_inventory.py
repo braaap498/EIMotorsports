@@ -55,6 +55,8 @@ Routes
   GET    /inventory/stock                   every product with on-hand + restock level (search, low, out)
   POST   /inventory/products/{id}/adjust    manual +/- or set-the-count (writes an 'Adjustment' ledger row)
   PUT    /inventory/products/{id}/reorder-point   set or clear the restock level
+  GET    /inventory/warehouses              the warehouses (just "E&I Warehouse" to start) and what each holds
+  PATCH  /inventory/warehouses/{id}         rename a warehouse
 """
 import logging
 import re
@@ -1238,6 +1240,95 @@ def _who(email: Optional[str]) -> Optional[str]:
     return email.split("@")[0] if email else None
 
 
+def _person(who: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """(name, email) for whoever holds a claim. The claim stores the email (or the account id when the sign-in token had
+    none). The name is the staff account's name (first + last, the same lookup the purchase orders use); when that cannot be
+    looked up, it is the part of the email before the @."""
+    if not who:
+        return None, None
+    if "@" not in who:
+        return who, None
+    name = None
+    try:
+        from app.admin_purchase_orders import _staff_names
+
+        name = _staff_names().get(who.strip().lower())
+    except Exception:
+        name = None
+    return (name or _who(who)), who
+
+
+# --------------------------------------------------------------------------
+# warehouses. Today there is ONE ("E&I Warehouse") and every part on hand is in it. The table is here so more can be added
+# later (stock per warehouse comes with that step). The name can be changed; the code never depends on the name.
+# --------------------------------------------------------------------------
+DEFAULT_WAREHOUSE = "E&I Warehouse"
+WAREHOUSE_NAME_MAX = 20  # keeps the Online orders column a fixed width
+_wh_ready = False
+
+
+def _ensure_warehouses(db: Session) -> None:
+    global _wh_ready
+    if _wh_ready:
+        return
+    db.execute(
+        text(
+            """
+            create table if not exists warehouses (
+                id bigserial primary key,
+                name text not null,
+                is_default boolean not null default false,
+                active boolean not null default true,
+                created_at timestamptz not null default now()
+            )
+            """
+        )
+    )
+    db.execute(text("create unique index if not exists warehouses_name_lower_uniq on warehouses (lower(name))"))
+    db.execute(text("create unique index if not exists warehouses_one_default on warehouses (is_default) where is_default"))
+    db.execute(
+        text("insert into warehouses (name, is_default) select :n, true where not exists (select 1 from warehouses)"),
+        {"n": DEFAULT_WAREHOUSE},
+    )
+    db.commit()
+    _wh_ready = True
+
+
+def _default_warehouse_name(db: Session) -> str:
+    """The warehouse orders ship from today. The order list must keep working even if this cannot be read."""
+    try:
+        _ensure_warehouses(db)
+        return db.execute(text("select name from warehouses where is_default order by id limit 1")).scalar() or DEFAULT_WAREHOUSE
+    except Exception:
+        db.rollback()
+        log.exception("could not read the default warehouse")
+        return DEFAULT_WAREHOUSE
+
+
+def _drop_ship_pos(db: Session, rows) -> dict[str, int]:
+    """{order key: PO number} for orders that have a live (not cancelled) drop ship purchase order."""
+    srcs = {("web:" if r.channel == "Website" else "ebay:") + str(r.order_ref): fulfillment.key_of(r.channel, r.order_ref) for r in rows}
+    if not srcs:
+        return {}
+    try:
+        from app.admin_purchase_orders import _po_cols
+
+        if not {"po_type", "source"} <= _po_cols(db):
+            return {}
+        found = db.execute(
+            text(
+                "select source, po_number from po_headers where source = any(cast(:s as text[])) "
+                "and status <> 'cancelled' and coalesce(po_type, 'stock') = 'drop_ship' order by id"
+            ),
+            {"s": list(srcs)},
+        ).all()
+    except Exception:
+        db.rollback()
+        log.exception("could not look up drop ship POs for the order list")
+        return {}
+    return {srcs[f.source]: f.po_number for f in found}
+
+
 # One row per ORDER, whatever the channel. Add a new channel by adding another select to this union.
 _QUEUE_CTE = """
 with q as (
@@ -1328,11 +1419,22 @@ def order_queue(
     except Exception:
         db.rollback()
         decided = {}
+    ds_pos = _drop_ship_pos(db, [*pinned, *rows])
+    wh_name = _default_warehouse_name(db)
     items = []
     for r in [*pinned, *rows]:
         title = (r.first_title or "").strip()
         more = r.line_count - 1
         k = fulfillment.key_of(r.channel, r.order_ref)
+        # Where the parts come from: a drop ship PO (or an approved drop ship), our warehouse, or not decided yet.
+        dec = decided.get(k)
+        if k in ds_pos or (dec and dec.get("decision") == "dropship"):
+            fulfil = {"kind": "dropship", "source": "Drop Ship", "po_number": ds_pos.get(k), "po_pending": k not in ds_pos}
+        elif k in urgent:
+            fulfil = {"kind": "undecided", "source": "Decision needed", "po_number": None, "po_pending": False}
+        else:
+            fulfil = {"kind": "warehouse", "source": wh_name, "po_number": None, "po_pending": False}
+        claimer, claimer_email = _person(r.claimed_by)
         items.append(
             {
                 "channel": r.channel,
@@ -1343,13 +1445,67 @@ def order_queue(
                 "sub": r.sub,
                 "status": r.status,
                 "attention": flags.get(r.web_id, []) if r.web_id else [],
-                "claimed_by": _who(r.claimed_by),
+                "claimed_by": claimer,
+                "claimed_by_email": claimer_email,
+                "fulfillment": fulfil,
                 "urgent": k in urgent,
                 "urgent_reasons": urgent.get(k, []),
                 "decision": decided.get(k),
             }
         )
     return {"total": int(main_total or 0) + len(pinned), "channels": ["Website", "eBay"], "items": items}
+
+
+@router.get("/warehouses")
+@needs(*ANY_INVENTORY)
+def list_warehouses(db: Session = Depends(get_db)):
+    """The warehouses. Until stock is tracked per warehouse, everything on hand is in the default one."""
+    _ensure_warehouses(db)
+    held = db.execute(
+        text("select count(*) filter (where coalesce(quantity_on_hand, 0) > 0) as parts, coalesce(sum(greatest(quantity_on_hand, 0)), 0) as units from products")
+    ).first()
+    rows = db.execute(text("select id, name, is_default, active from warehouses order by is_default desc, id")).all()
+    return {
+        "name_max": WAREHOUSE_NAME_MAX,
+        "items": [
+            {
+                "id": w.id,
+                "name": w.name,
+                "is_default": bool(w.is_default),
+                "active": bool(w.active),
+                "parts": int(held.parts or 0) if w.is_default else 0,
+                "units": int(held.units or 0) if w.is_default else 0,
+            }
+            for w in rows
+        ],
+    }
+
+
+class WarehouseRename(BaseModel):
+    name: str = Field(..., max_length=WAREHOUSE_NAME_MAX)
+
+
+@router.patch("/warehouses/{warehouse_id}")
+@needs("inventory.adjust")
+def rename_warehouse(warehouse_id: int, body: WarehouseRename, db: Session = Depends(get_db)):
+    """Change a warehouse's name. The new name shows in the Fulfillment source column right away."""
+    _ensure_warehouses(db)
+    name = " ".join((body.name or "").split())
+    if not name or _CONTROL.search(name):
+        raise HTTPException(400, "Type a name for the warehouse.")
+    if len(name) > WAREHOUSE_NAME_MAX:
+        raise HTTPException(400, f"Keep the name to {WAREHOUSE_NAME_MAX} characters or fewer.")
+    try:
+        row = db.execute(
+            text("update warehouses set name = :n where id = :i returning id, name"), {"n": name, "i": warehouse_id}
+        ).first()
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Another warehouse already has that name.")
+    if not row:
+        raise HTTPException(404, "No such warehouse.")
+    return {"ok": True, "id": row.id, "name": row.name}
 
 
 @router.get("/fulfillment/urgent-count")
@@ -1421,7 +1577,7 @@ def _holder(db: Session, body: ClaimIn) -> Optional[str]:
         text("select claimed_by from inventory_order_claims where channel = :c and order_ref = :r"),
         {"c": body.channel, "r": body.order_ref},
     ).scalar()
-    return _who(e)
+    return _person(e)[0]
 
 
 @router.post("/claims")
@@ -1431,7 +1587,8 @@ def claim_order(body: ClaimIn, db: Session = Depends(get_db), user: AuthUser = D
     _ensure_claims_table(db)
     if not _try_claim(db, body, user.email or user.user_id, body.take_over):
         raise HTTPException(409, f"{_holder(db, body) or 'Someone'} is picking this order right now.")
-    return {"ok": True, "by": _who(user.email or user.user_id)}
+    name, email = _person(user.email or user.user_id)
+    return {"ok": True, "by": name, "by_email": email}
 
 
 @router.post("/claims/heartbeat")
