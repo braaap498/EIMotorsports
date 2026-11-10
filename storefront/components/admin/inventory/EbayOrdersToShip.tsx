@@ -111,12 +111,12 @@ export default function EbayOrdersToShip({
 
       <div className="overflow-x-auto rounded border border-gray-200 bg-white">
         {/* fixed column widths, sized for the longest content, so nothing shifts from page to page */}
-        <table className="w-full min-w-[80rem] table-fixed text-left text-sm">
+        <table className="w-full min-w-[90rem] table-fixed text-left text-sm">
           <colgroup>
             <col className="w-[11.5rem]" />
             <col className="w-[10rem]" />
             <col className="w-[10rem]" />
-            <col className="w-[10rem]" />
+            <col className="w-[19rem]" /> {/* Custom label: room for a 3-part kit label; a longer one wraps instead of being cut off */}
             <col />
             <col className="w-[4rem]" />
             <col className="w-[17rem]" />
@@ -138,7 +138,7 @@ export default function EbayOrdersToShip({
                 <td className="whitespace-nowrap px-3 py-2 text-gray-600">{l.sale_date ? new Date(l.sale_date).toLocaleString() : "—"}</td>
                 <td className="truncate px-3 py-2 text-gray-600" title={l.store}>{l.store}</td>
                 <td className="whitespace-nowrap px-3 py-2">{l.ebay_order_id}</td>
-                <td className="truncate px-3 py-2" title={l.custom_label ?? ""}>{l.custom_label || "—"}</td>
+                <td className="break-all px-3 py-2">{l.custom_label || "—"}</td>
                 <td className="px-3 py-2">
                   <div className="truncate" title={l.title ?? ""}>
                     {l.title ?? "(no title)"}
