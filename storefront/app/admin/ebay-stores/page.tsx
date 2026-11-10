@@ -227,7 +227,19 @@ export default function EbayStoresPage() {
               </div>
             )}
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
+              {/* Fixed column widths so nothing shifts while the out-of-stock setting loads in (checking… → ON / OFF + button).
+                  The Out-of-stock column reserves room for its widest state. Actions takes the rest. */}
+              <table className="w-full min-w-[76rem] table-fixed text-left text-sm">
+                <colgroup>
+                  <col className="w-[10rem]" /> {/* Store */}
+                  <col className="w-[10rem]" /> {/* eBay name */}
+                  <col className="w-[13.5rem]" /> {/* Linked */}
+                  <col className="w-[11rem]" /> {/* Access */}
+                  <col className="w-[9rem]" /> {/* Pushes */}
+                  <col className="w-[14rem]" /> {/* Out-of-stock setting */}
+                  <col className="w-[6rem]" /> {/* Approval ends */}
+                  <col /> {/* Actions */}
+                </colgroup>
                 <thead className="text-xs text-gray-500">
                   <tr>
                     <th className="py-1 pr-6 font-normal">Store</th>
@@ -243,24 +255,24 @@ export default function EbayStoresPage() {
                 <tbody className="divide-y divide-gray-100">
                   {stores.map((s) => (
                     <tr key={s.store} className="align-middle">
-                      <td className="py-2 pr-6">
+                      <td className="whitespace-nowrap py-2 pr-6">
                         <span className="font-medium">{s.display_name || s.store}</span>
                       </td>
-                      <td className="py-2 pr-6 text-gray-500">{s.store}</td>
-                      <td className="py-2 pr-6 text-gray-500">{s.linked_count} linked to products</td>
-                      <td className="py-2 pr-6">
+                      <td className="whitespace-nowrap py-2 pr-6 text-gray-500">{s.store}</td>
+                      <td className="whitespace-nowrap py-2 pr-6 text-gray-500">{s.linked_count} linked to products</td>
+                      <td className="whitespace-nowrap py-2 pr-6">
                         <Badge tone={s.authorized ? "green" : "gray"}>{s.authorized ? "Authorized" : "Not authorized yet"}</Badge>
                       </td>
-                      <td className="py-2 pr-6">
+                      <td className="whitespace-nowrap py-2 pr-6">
                         <Badge tone={s.live_pushes_enabled ? "amber" : "gray"}>{s.live_pushes_enabled ? "Live pushes ON" : "Preview only"}</Badge>
                       </td>
-                      <td className="py-2 pr-6">
+                      <td className="whitespace-nowrap py-2 pr-6">
                         {!s.authorized ? (
                           "—"
                         ) : oos[s.store] === true ? (
                           <Badge tone="green">ON</Badge>
                         ) : oos[s.store] === false ? (
-                          <span className="flex flex-wrap items-center gap-2">
+                          <span className="flex flex-nowrap items-center gap-2">
                             <Badge tone="amber">OFF</Badge>
                             <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void setOosOn(s.store)} title="Without it eBay refuses quantity 0 and ends a listing when it sells out">
                               Turn ON
@@ -269,7 +281,7 @@ export default function EbayStoresPage() {
                         ) : oos[s.store] === undefined ? (
                           <span className="text-xs text-gray-500">checking…</span>
                         ) : (
-                          <span className="flex flex-wrap items-center gap-2">
+                          <span className="flex flex-nowrap items-center gap-2">
                             <Badge tone="gray">{oos[s.store] === "error" ? "Could not check" : "eBay did not say"}</Badge>
                             <button type="button" className={btn2Cls} disabled={busy === s.store} onClick={() => void loadOos(s.store)}>
                               Check
@@ -277,7 +289,7 @@ export default function EbayStoresPage() {
                           </span>
                         )}
                       </td>
-                      <td className="py-2 pr-6 text-xs text-gray-500">
+                      <td className="whitespace-nowrap py-2 pr-6 text-xs text-gray-500">
                         {s.authorized && s.refresh_token_expires_at ? new Date(s.refresh_token_expires_at).toLocaleDateString() : "—"}
                       </td>
                       <td className="py-2">
