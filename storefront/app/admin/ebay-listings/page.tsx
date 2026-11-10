@@ -1045,21 +1045,22 @@ export default function EbayLiveListingsPage() {
             <Notice>No listings{statusF !== "all" ? ` with status "${statusF}"` : ""}{q.trim() ? " match that search" : ""} for {allMode ? "these stores" : "this store"}.</Notice>
           ) : (
             <div className="rounded border border-gray-200 bg-white">
-              {/* fixed widths so the table always fits the screen (no sideways scroll); the Listing column takes what is left and long text wraps */}
+              {/* Fits the screen with no sideways scroll. Every column has a fixed width sized for its longest content (same on every page, nothing wraps),
+                  and only the Listing column (the flexible one) cuts off long text. To widen or narrow a column, change its width in this list. */}
               <table className="w-full table-fixed text-left text-sm">
                 <colgroup>
-                  <col className="w-[2.5rem]" />
-                  <col className="w-[4.5rem]" />
-                  <col />
-                  <col className="w-[7rem]" />
-                  <col className="w-[11rem]" />
-                  <col className="w-[5.5rem]" />
-                  <col className="w-[8rem]" />
-                  <col className="w-[7rem]" />
+                  <col className="w-[2rem]" /> {/* checkbox */}
+                  <col className="w-[4rem]" /> {/* photo */}
+                  <col /> {/* Listing: takes the rest */}
+                  <col className="w-[9.5rem]" /> {/* Store */}
+                  <col className="w-[16rem]" /> {/* Custom label */}
+                  <col className="w-[6.5rem]" /> {/* Price */}
+                  <col className="w-[10.5rem]" /> {/* Quantity */}
+                  <col className="w-[11.5rem]" /> {/* Status */}
                 </colgroup>
                 <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
-                    <th className="px-3 py-2">
+                    <th className="px-2 py-2">
                       <input
                         type="checkbox"
                         aria-label="Select all on this page"
@@ -1070,13 +1071,13 @@ export default function EbayLiveListingsPage() {
                         }}
                       />
                     </th>
-                    <th className="px-3 py-2"></th>
-                    <th className="px-3 py-2">Listing</th>
-                    <th className="px-3 py-2">Store</th>
-                    <th className="px-3 py-2">Custom label</th>
-                    <th className="px-3 py-2">Price</th>
-                    <th className="px-3 py-2">Quantity</th>
-                    <th className="px-3 py-2">Status</th>
+                    <th className="px-2 py-2"></th>
+                    <th className="whitespace-nowrap px-2 py-2">Listing</th>
+                    <th className="whitespace-nowrap px-2 py-2">Store</th>
+                    <th className="whitespace-nowrap px-2 py-2">Custom label</th>
+                    <th className="whitespace-nowrap px-2 py-2">Price</th>
+                    <th className="whitespace-nowrap px-2 py-2">Quantity</th>
+                    <th className="whitespace-nowrap px-2 py-2">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -1086,7 +1087,7 @@ export default function EbayLiveListingsPage() {
                     const editHref = `/admin/ebay-edit?store=${encodeURIComponent(it.store)}&item=${it.item_id}`;
                     return (
                       <ClickRow key={it.listing_id} className="align-top" href={canEdit ? editHref : undefined}>
-                        <td className="px-3 py-2">
+                        <td className="px-2 py-2">
                           <input
                             type="checkbox"
                             aria-label={`Select ${it.item_id}`}
@@ -1101,7 +1102,7 @@ export default function EbayLiveListingsPage() {
                             }
                           />
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="px-2 py-2">
                           {it.image_url ? (
                             // eslint-disable-next-line @next/next/no-img-element
                             <img src={it.image_url} alt="" className="h-12 w-12 rounded object-cover" />
@@ -1109,8 +1110,9 @@ export default function EbayLiveListingsPage() {
                             <div className="h-12 w-12 rounded bg-gray-100" />
                           )}
                         </td>
-                        <td className="px-3 py-2">
-                          <div className="break-words">{it.title}</div>
+                        <td className="overflow-hidden px-2 py-2">
+                          <div className="truncate" title={it.title}>{it.title}</div>
+                          <div className="truncate">
                           <a href={it.url} target="_blank" rel="noreferrer" className="text-blue-700 hover:underline">
                             {it.item_id}
                           </a>
@@ -1122,11 +1124,12 @@ export default function EbayLiveListingsPage() {
                               <Badge tone="gray">Product photos</Badge>
                             </span>
                           )}
+                          </div>
                         </td>
-                        <td className="break-words px-3 py-2">{rowStore?.display_name || it.store}</td>
-                        <td className="break-all px-3 py-2">{it.custom_label ?? "—"}</td>
-                        <td className="px-3 py-2 whitespace-nowrap">{money(it.price, it.currency)}</td>
-                        <td className="px-3 py-2 whitespace-nowrap">
+                        <td className="whitespace-nowrap px-2 py-2">{rowStore?.display_name || it.store}</td>
+                        <td className="whitespace-nowrap px-2 py-2">{it.custom_label ?? "—"}</td>
+                        <td className="whitespace-nowrap px-2 py-2">{money(it.price, it.currency)}</td>
+                        <td className="whitespace-nowrap px-2 py-2">
                           {it.quantity ?? "—"}
                           {it.active && isZero(it) && (
                             <span className="ml-1" title="Quantity is 0 on eBay and the listing stays alive. Held = set to 0 on purpose: sales will not push stock onto it until more stock is received or adjusted.">
@@ -1137,7 +1140,7 @@ export default function EbayLiveListingsPage() {
                           )}
                           {it.quantity_from_ebay && <span className="ml-1 text-xs text-gray-500" title="Our stock on hand is 0; this is the quantity eBay shows as available">(eBay)</span>}
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="whitespace-nowrap px-2 py-2">
                           <Badge tone={it.active ? "green" : "gray"}>{it.status || "no status"}</Badge>
                           {it.unsent_edits && (
                             <span className="ml-1">

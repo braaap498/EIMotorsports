@@ -215,18 +215,19 @@ export default function EbaySalesPanel() {
           <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
 
           <div>
-            {/* fixed column widths so nothing shifts from page to page; the table always fits the screen (no sideways scroll), the Title column takes whatever is left and long text wraps */}
+            {/* Fits the screen with no sideways scroll. Every column has a fixed width sized for its longest content (same on every page, nothing wraps),
+                and only the Title column (the flexible one) cuts off long text. To widen or narrow a column, change its width in this list. */}
             <table className="w-full table-fixed text-left text-sm">
               <colgroup>
-                <col className="w-[8.5rem]" />
-                <col className="w-[7rem]" />
-                <col className="w-[9rem]" />
-                <col className="w-[12rem]" />
-                <col />
-                <col className="w-[3.5rem]" />
-                <col className="w-[5rem]" />
-                <col className="w-[6.5rem]" />
-                <col className="w-[10rem]" />
+                <col className="w-[6.5rem]" /> {/* Date (date on one line, time under it) */}
+                <col className="w-[9.5rem]" /> {/* Store */}
+                <col className="w-[8rem]" /> {/* Order # */}
+                <col className="w-[16rem]" /> {/* Custom label */}
+                <col /> {/* Title: takes the rest */}
+                <col className="w-[3.5rem]" /> {/* Qty */}
+                <col className="w-[5.5rem]" /> {/* Price */}
+                <col className="w-[12.5rem]" /> {/* State */}
+                <col className="w-[12.5rem]" /> {/* Shipping */}
               </colgroup>
               <thead className="bg-gray-50 text-xs text-gray-500">
                 <tr>
@@ -238,18 +239,27 @@ export default function EbaySalesPanel() {
                   <SortTh label="Qty" k="qty" sort={sort} onSort={onSort} className="px-2 py-2" />
                   <SortTh label="Price" k="price" sort={sort} onSort={onSort} className="px-2 py-2" />
                   <SortTh label="State" k="state" sort={sort} onSort={onSort} className="px-2 py-2" />
-                  <th className="px-2 py-2">Shipping</th>
+                  <th className="whitespace-nowrap px-2 py-2">Shipping</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {lines.map((l) => (
                   <tr key={l.id} className={l.shipped_at_ebay && !l.cancelled ? "bg-green-50" : ""}>
-                    <td className="px-2 py-2 text-xs text-gray-600">{l.sale_date ? new Date(l.sale_date).toLocaleString() : "—"}</td>
-                    <td className="break-all px-2 py-2 text-xs text-gray-600">{l.store}</td>
-                    <td className="whitespace-nowrap px-2 py-2 text-xs">{l.ebay_order_id}</td>
-                    <td className="break-all px-2 py-2">{l.custom_label || "—"}</td>
+                    <td className="whitespace-nowrap px-2 py-2 text-gray-600">
+                      {l.sale_date ? (
+                        <>
+                          <div>{new Date(l.sale_date).toLocaleDateString()}</div>
+                          <div>{new Date(l.sale_date).toLocaleTimeString()}</div>
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-2 py-2 text-gray-600">{l.store}</td>
+                    <td className="whitespace-nowrap px-2 py-2">{l.ebay_order_id}</td>
+                    <td className="whitespace-nowrap px-2 py-2">{l.custom_label || "—"}</td>
                     <td className="px-2 py-2">
-                      <div className="break-words" title={l.title ?? ""}>
+                      <div className="truncate" title={l.title ?? ""}>
                         {l.product_id ? (
                           <a className="hover:underline" href={`/admin/products/${l.product_id}`} target="_blank" rel="noopener noreferrer">
                             {l.title ?? "(no title)"}
@@ -258,20 +268,20 @@ export default function EbaySalesPanel() {
                           l.title ?? "(no title)"
                         )}
                       </div>
-                      <div className="break-all text-xs text-blue-600">
+                      <div className="truncate text-xs text-blue-600">
                         {l.ebay_item_id}
                         {l.sku ? ` · ${l.sku}` : ""}
                       </div>
                     </td>
-                    <td className="px-2 py-2">{l.quantity}</td>
+                    <td className="whitespace-nowrap px-2 py-2">{l.quantity}</td>
                     <td className="whitespace-nowrap px-2 py-2">{l.unit_price ? `$${Number(l.unit_price).toFixed(2)}` : "—"}</td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">
                       <Badge tone={STATE_TONE[l.state] ?? "gray"}>{STATE_LABEL[l.state] ?? l.state}</Badge>
                       {Number(l.refund_total) > 0 && (
                         <div className="mt-1 text-xs font-medium text-red-700">Refunded ${Number(l.refund_total).toFixed(2)}</div>
                       )}
                     </td>
-                    <td className="px-2 py-2">
+                    <td className="whitespace-nowrap px-2 py-2">
                       {l.cancelled || l.state === "cancelled" ? (
                         <span className="text-xs text-gray-400">—</span>
                       ) : (
@@ -284,10 +294,10 @@ export default function EbaySalesPanel() {
                             <Badge tone="gray">Not shipped</Badge>
                           )}
                           {!l.tracking_number && l.shipped_at_ebay && (
-                            <div className="text-xs text-gray-400">No tracking number on eBay</div>
+                            <div className="whitespace-nowrap text-xs text-gray-400">No tracking number on eBay</div>
                           )}
                           {l.tracking_number && (
-                            <div className="break-all text-xs text-gray-700">
+                            <div className="whitespace-nowrap text-xs text-gray-700">
                               {l.tracking_carrier ? `${l.tracking_carrier} ` : ""}
                               {trackingUrl(l.tracking_carrier, l.tracking_number) ? (
                                 <a
