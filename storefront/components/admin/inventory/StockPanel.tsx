@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
 import { useAccess } from "../AdminAccess";
+import WarehouseStock from "./WarehouseStock";
 
 type Row = {
   id: number;
@@ -22,8 +23,9 @@ type Row = {
   has_open_po: boolean; // the part is on a purchase order that has not been received; only then can Backordered be ticked
   expected_date: string | null; // "YYYY-MM-DD", typed by hand, shown to customers
   oversold: boolean; // more promised to paid orders than the shelf count says is there
+  others?: { name: string; qty: number }[]; // what the non-main warehouses hold (on hand above is the total of all)
 };
-type Resp = { total: number; low_count: number; out_count: number; oversold_count?: number; items: Row[] };
+type Resp = { total: number; low_count: number; out_count: number; oversold_count?: number; primary_name?: string; items: Row[] };
 type View = "all" | "low" | "out";
 type Note = "" | "saving" | "saved";
 
@@ -33,7 +35,7 @@ const SAVE_DELAY_MS = 700;
 const isLow = (r: Row) => (r.reorder_point ?? 0) > 0 && r.available > 0 && r.available <= (r.reorder_point ?? 0);
 
 /** Every product with its stock, manual count changes, restock levels, and the list of what needs reordering. */
-export default function StockPanel({ active }: { active: boolean }) {
+function MainStock({ active }: { active: boolean }) {
   const { can } = useAccess();
   const canEdit = can("inventory.adjust");
   const [view, setView] = useState<View>("all");
@@ -158,7 +160,7 @@ export default function StockPanel({ active }: { active: boolean }) {
             <tr>
               <th className="whitespace-nowrap px-3 py-2">Part</th>
               <th className="whitespace-nowrap px-3 py-2">Bin</th>
-              <th className="whitespace-nowrap px-3 py-2">On hand</th>
+              <th className="whitespace-nowrap px-3 py-2">On hand (all warehouses)</th>
               <th className="whitespace-nowrap px-3 py-2">Reserved</th>
               <th className="whitespace-nowrap px-3 py-2">Available</th>
               <th className="whitespace-nowrap px-3 py-2">Restock level</th>
@@ -168,7 +170,7 @@ export default function StockPanel({ active }: { active: boolean }) {
           </thead>
           <tbody className="divide-y divide-gray-100">
             {data.items.map((r) => (
-              <StockRow key={r.id} row={r} canEdit={canEdit} showShort={view === "low"} onUpdate={onUpdate} onError={setError} />
+              <StockRow key={r.id} row={r} primaryName={data.primary_name ?? "Main"} canEdit={canEdit} showShort={view === "low"} onUpdate={onUpdate} onError={setError} />
             ))}
             {loaded && data.items.length === 0 && (
               <tr>
@@ -192,12 +194,14 @@ export default function StockPanel({ active }: { active: boolean }) {
 
 function StockRow({
   row,
+  primaryName,
   canEdit,
   showShort,
   onUpdate,
   onError,
 }: {
   row: Row;
+  primaryName: string;
   canEdit: boolean;
   showShort: boolean;
   onUpdate: (id: number, patch: Partial<Row>) => void;
@@ -437,6 +441,12 @@ function StockRow({
         ) : (
           row.quantity_on_hand
         )}
+        {(row.others?.length ?? 0) > 0 && (
+          <div className="mt-1 text-xs text-gray-500" title="On hand is the total of every warehouse">
+            {primaryName} {row.quantity_on_hand - (row.others ?? []).reduce((n, o) => n + o.qty, 0)}
+            {(row.others ?? []).map((o) => ` · ${o.name} ${o.qty}`).join("")}
+          </div>
+        )}
       </td>
       <td className="px-3 py-2 text-gray-700">{row.reserved}</td>
       <td className="px-3 py-2 font-semibold">{row.available}</td>
@@ -498,5 +508,52 @@ function StockRow({
         )}
       </td>
     </ClickRow>
+  );
+}
+
+type Wh = { id: number; name: string; is_default: boolean };
+
+/** Stock for the chosen warehouse. The Main warehouse is the full table above; any other one lists its own parts. */
+export default function StockPanel({ active }: { active: boolean }) {
+  const { can } = useAccess();
+  const [whs, setWhs] = useState<Wh[]>([]);
+  const [whId, setWhId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    api<{ items: Wh[] }>("/inventory/warehouses")
+      .then((r) => {
+        setWhs(r.items);
+        // whId stays null for "All warehouses"; an id means that one warehouse's own parts.
+        setWhId((cur) => (cur !== null && r.items.some((w) => w.id === cur) ? cur : null));
+      })
+      .catch(() => {});
+  }, [active]);
+
+  const current = whs.find((w) => w.id === whId);
+  const other = current ?? null; // a single warehouse chosen (the main one too); null = the full table
+
+  return (
+    <div className="space-y-4">
+      {whs.length > 0 && (
+        <label className="flex flex-wrap items-center gap-2 text-sm font-medium text-gray-700">
+          Warehouse
+          <select className={`${inputCls} !w-64`} value={whId ?? ""} onChange={(e) => setWhId(e.target.value ? Number(e.target.value) : null)}>
+            <option value="">All warehouses (total)</option>
+            {whs.map((
+              <option key={w.id} value={w.id}>
+                {w.name}
+                {w.is_default ? " (Main)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {/* The Main table stays mounted (just hidden) so its search and page are not lost when switching. */}
+      <div className={other ? "hidden" : ""}>
+        <MainStock active={active && !other} />
+      </div>
+      {other && <WarehouseStock warehouseId={other.id} name={other.name} canEdit={can("inventory.adjust")} active={active} />}
+    </div>
   );
 }

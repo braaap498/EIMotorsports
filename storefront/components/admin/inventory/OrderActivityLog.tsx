@@ -20,6 +20,7 @@ type Row = {
 const LIMIT = 50;
 const TONE: Record<string, "gray" | "green" | "amber" | "blue"> = {
   picked: "blue",
+  released: "gray",
   label_opened: "amber",
   tracking_shipped: "green",
 };
@@ -65,7 +66,7 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <input
-          className={`${inputCls} max-w-xs`}
+          className={`${inputCls} min-w-[20rem] flex-1`}
           placeholder="Search EIO, eBay, Amazon or website order number"
           value={q}
           onChange={(e) => {
@@ -84,6 +85,7 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
           <option value="">All actions</option>
           <option value="picked">Picked</option>
           <option value="label_opened">Label button pressed</option>
+          <option value="released">Released</option>
           <option value="tracking_shipped">Tracking entered / shipped</option>
         </select>
         <select

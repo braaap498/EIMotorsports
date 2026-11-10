@@ -1511,10 +1511,10 @@ def pick_line(line_id: int, db: Session = Depends(get_db), user: AuthUser = Depe
 @ship_router.post("/lines/{line_id}/release")
 @router.post("/lines/{line_id}/release")
 @needs("inventory.ship")
-def release_line(line_id: int, db: Session = Depends(get_db)):
+def release_line(line_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     """Stop setting these parts aside WITHOUT changing the shelf count (use when the sale should not hold stock)."""
     ln = db.execute(
-        text("select id, product_id, state from ebay_order_lines where id = :l for update"), {"l": line_id}
+        text("select id, product_id, quantity, ebay_order_id, state from ebay_order_lines where id = :l for update"), {"l": line_id}
     ).first()
     if not ln or ln.state != "reserved":
         raise HTTPException(409, "Only a line whose parts are set aside can be released.")
@@ -1522,5 +1522,9 @@ def release_line(line_id: int, db: Session = Depends(get_db)):
     db.execute(text("update ebay_order_lines set state = 'history' where id = :l"), {"l": line_id})
     if ln.product_id:
         enqueue_product(db, ln.product_id)
+    order_activity.log_action(
+        db, user, "released", "eBay", ln.ebay_order_id,
+        (order_activity.parts_summary(db, {ln.product_id: ln.quantity}) if ln.product_id else "") + " (parts no longer set aside; shelf count unchanged)",
+    )
     db.commit()
     return {"ok": True}

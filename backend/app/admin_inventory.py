@@ -939,11 +939,16 @@ def stock_list(
             f"       coalesce(p.on_order, false) as on_order, p.expected_date, "
             f"       exists (select 1 from po_lines l join po_headers ph on ph.id = l.po_id "
             f"         where l.product_id = p.id and l.received_at is null and ph.status <> 'cancelled') as has_open_po, "
-            f"       {_OVERSOLD_SQL} as oversold "
+            f"       {_OVERSOLD_SQL} as oversold, "
+            "       (select coalesce(jsonb_agg(jsonb_build_object('name', w.name, 'qty', s.quantity) order by w.id), '[]'::jsonb) "
+            "          from warehouse_stock s join warehouses w on w.id = s.warehouse_id "
+            "         where s.product_id = p.id and s.quantity > 0) as others "
             f"from products p {where} order by {order} limit :limit offset :offset"
         ),
         params,
     ).all()
+    _ensure_warehouses(db)
+    primary_name = db.execute(text("select name from warehouses where is_default order by id limit 1")).scalar() or DEFAULT_WAREHOUSE
     scope_where = ("where " + " and ".join(scope)) if scope else ""
     counts = db.execute(
         text(
@@ -958,6 +963,7 @@ def stock_list(
         "low_count": counts.low_count if counts else 0,
         "out_count": counts.out_count if counts else 0,
         "oversold_count": counts.oversold_count if counts else 0,
+        "primary_name": primary_name,
         "items": [dict(r._mapping) for r in rows],
     }
 
@@ -1462,9 +1468,20 @@ def list_warehouses(db: Session = Depends(get_db)):
     """The warehouses. Until stock is tracked per warehouse, everything on hand is in the default one."""
     _ensure_warehouses(db)
     held = db.execute(
-        text("select count(*) filter (where coalesce(quantity_on_hand, 0) > 0) as parts, coalesce(sum(greatest(quantity_on_hand, 0)), 0) as units from products")
+        text(
+            "select count(*) filter (where coalesce(p.quantity_on_hand, 0) - coalesce(o.s, 0) > 0) as parts, "
+            "       coalesce(sum(greatest(coalesce(p.quantity_on_hand, 0) - coalesce(o.s, 0), 0)), 0) as units "
+            "from products p left join (select product_id, sum(quantity) as s from warehouse_stock group by product_id) o on o.product_id = p.id"
+        )
     ).first()
-    rows = db.execute(text("select id, name, is_default, active from warehouses order by is_default desc, id")).all()
+    rows = db.execute(
+        text(
+            "select w.id, w.name, w.is_default, w.active, w.address, w.city, w.state, w.zip, w.manager, w.phone, w.email, w.notes, "
+            "       (select count(*) from warehouse_stock s where s.warehouse_id = w.id and s.quantity > 0) as ws_parts, "
+            "       (select coalesce(sum(s.quantity), 0) from warehouse_stock s where s.warehouse_id = w.id) as ws_units "
+            "from warehouses w order by w.is_default desc, w.id"
+        )
+    ).all()
     return {
         "name_max": WAREHOUSE_NAME_MAX,
         "items": [
@@ -1473,8 +1490,10 @@ def list_warehouses(db: Session = Depends(get_db)):
                 "name": w.name,
                 "is_default": bool(w.is_default),
                 "active": bool(w.active),
-                "parts": int(held.parts or 0) if w.is_default else 0,
-                "units": int(held.units or 0) if w.is_default else 0,
+                "parts": int(held.parts or 0) if w.is_default else int(w.ws_parts or 0),
+                "units": int(held.units or 0) if w.is_default else int(w.ws_units or 0),
+                "address": w.address, "city": w.city, "state": w.state, "zip": w.zip,
+                "manager": w.manager, "phone": w.phone, "email": w.email, "notes": w.notes,
             }
             for w in rows
         ],

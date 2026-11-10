@@ -4,9 +4,10 @@ One row each time somebody does something to an order:
 
   picked           parts scanned/taken off the shelf for the order
   label_opened     pressed "Open eBay label" (we cannot see whether a label was actually bought on eBay)
+  released         an eBay line's parts were released (no longer set aside, shelf count unchanged)
   tracking_shipped tracking number entered and the order marked shipped (website and eBay)
 
-Opening and releasing an order are NOT logged on purpose.
+Opening an order is NOT logged on purpose (releasing an eBay line is: it changes what is set aside).
 
 Every row carries the sales channel ("Website", "eBay", later "Amazon"), that channel's own order number, and the EIO
 number. An EIO number is made the first time an order is logged, from one shared sequence for every channel
@@ -37,6 +38,7 @@ router = APIRouter(prefix="/inventory/activity", tags=["admin-order-activity"], 
 ACTIONS = {
     "picked": "Picked",
     "label_opened": "Label button pressed",
+    "released": "Released",
     "tracking_shipped": "Tracking entered / shipped",
 }
 CHANNELS = ("Website", "eBay", "Amazon")
@@ -118,6 +120,8 @@ def log_action(
         return
     try:
         with db.begin_nested():
+            if action == "picked":
+                detail = ((detail or "") + _taken_from_other_warehouses(db)).strip()
             eio = eio_for(db, channel, ref)
             db.execute(
                 text(
@@ -128,6 +132,26 @@ def log_action(
             )
     except Exception:
         log.exception("Could not write the order activity log (%s %s %s)", action, channel, ref)
+
+
+def _taken_from_other_warehouses(db: Session) -> str:
+    """' Taken from Reno: ei-0001 x3' when this same transaction had to draw on another warehouse (the main one ran out)."""
+    try:
+        rows = db.execute(
+            text(
+                "select w.name, coalesce(p.sku_display, '#' || p.id::text) as sku, sum(-l.delta) as n "
+                "from warehouse_stock_log l join warehouses w on w.id = l.warehouse_id join products p on p.id = l.product_id "
+                "where l.txid = txid_current() and l.delta < 0 group by w.name, p.id, p.sku_display order by w.name, p.id"
+            )
+        ).all()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    by: dict[str, list[str]] = {}
+    for r in rows:
+        by.setdefault(r.name, []).append(f"{r.sku} x{int(r.n)}")
+    return " | " + "; ".join(f"Taken from {name}: {', '.join(items)}" for name, items in by.items())
 
 
 def parts_summary(db: Session, qty_by_product: dict) -> str:

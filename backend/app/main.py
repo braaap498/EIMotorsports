@@ -43,6 +43,8 @@ from app.autodist import router as autodist_router
 from app.kits import router as kits_router
 from app.order_activity import ensure_tables as ensure_order_activity_tables
 from app.order_activity import router as order_activity_router
+from app.warehouse_stock import ensure_tables as ensure_warehouse_tables
+from app.warehouse_stock import router as warehouse_stock_router
 from app.auth import AuthUser, require_staff
 from app.config import get_settings
 from app.database import get_db
@@ -112,6 +114,7 @@ admin_router.include_router(admin_ebay_import_router)
 admin_router.include_router(admin_quickbooks_router)
 admin_router.include_router(admin_inventory_router)
 admin_router.include_router(order_activity_router)
+admin_router.include_router(warehouse_stock_router)
 admin_router.include_router(admin_purchase_orders_router)
 admin_router.include_router(admin_photos_router)
 admin_router.include_router(admin_users_router)
@@ -153,3 +156,4 @@ def _start_ebay_listing_timers():
 def _order_activity_tables():
     """The order activity log's tables (History tab > Order activity)."""
     ensure_order_activity_tables()
+    ensure_warehouse_tables()
