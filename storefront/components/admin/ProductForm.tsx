@@ -124,6 +124,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const fieldAllowed = (key: string) =>
     key === "list_price" || key === "cost" ? mayPrice : key === "quantity_on_hand" || key === "reorder_point" ? mayStock : mayDetails;
   const [baseline, setBaseline] = useState<Record<string, unknown> | null>(null);
+  // the fields as last loaded or saved, so "Cancel changes" can put them back
+  const [original, setOriginal] = useState<{ vals: Record<string, string>; flags: Flags } | null>(null);
   const router = useRouter();
   const [vals, setVals] = useState<Record<string, string>>({});
   const [flags, setFlags] = useState<Flags>({ is_published: false, is_active: true, is_universal: false, show_part_number: false });
@@ -191,6 +193,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
         };
         setVals(next);
         setFlags(loadedFlags);
+        setOriginal({ vals: next, flags: loadedFlags });
         const base = buildPayload(next, loadedFlags);
         setBaseline("payload" in base ? base.payload : null);
         setPhotos(p.photos ?? []);
@@ -223,7 +226,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
     try {
       if (productId) {
         const r = await api<{ cls_changed?: boolean; sku?: string; shelf_code?: string; barcode_changed?: boolean }>(`/products/${productId}`, { method: "PATCH", body: payload });
-        if (baseline) setBaseline({ ...baseline, ...payload });
+        if (baseline) setBaseline({ ...baseline, ...payload, ...(r.sku ? { sku: r.sku } : {}) });
+        setOriginal({ vals: r.sku ? { ...vals, sku: r.sku } : vals, flags });
         let text = "Saved";
         if (r.sku) {
           set("sku", r.sku);
@@ -277,12 +281,23 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const canUp = navPos > 0;
   const canDown = !!nav && navPos >= 0 && navPos < nav.total - 1;
 
-  function hasUnsavedChanges(): boolean {
-    if (photosDirty) return true;
+  // Did anything in the product's own fields change since it was loaded or last saved? (Photos and distributor parts save themselves.)
+  function fieldsChanged(): boolean {
     if (!baseline) return false;
     const built = buildPayload(vals, flags);
     if (!("payload" in built)) return true;
     return Object.entries(built.payload).some(([k, v]) => JSON.stringify(v) !== JSON.stringify(baseline[k]));
+  }
+
+  function hasUnsavedChanges(): boolean {
+    return photosDirty || fieldsChanged();
+  }
+
+  function cancelChanges() {
+    if (!original) return;
+    setVals(original.vals);
+    setFlags(original.flags);
+    setMsg(null);
   }
 
   async function step(dir: -1 | 1) {
@@ -359,6 +374,22 @@ export default function ProductForm({ productId }: { productId?: number }) {
       />
     ) : null;
   const saveLabel = busy ? "Saving…" : productId ? "Save changes" : "Create product";
+  // An existing product only offers Save / Cancel once something has changed. A new product always offers Create.
+  const formDirty = !productId || fieldsChanged();
+  const actionButtons =
+    maySave && formDirty ? (
+      <>
+        <button type="submit" form="product-form" className={btnCls} disabled={busy}>
+          {saveLabel}
+        </button>
+        {productId && (
+          <button type="button" className={btnCls} disabled={busy} onClick={cancelChanges}>
+            Cancel changes
+          </button>
+        )}
+        {productId && <span className="text-xs text-amber-700">Unsaved changes</span>}
+      </>
+    ) : null;
   const card = "space-y-3 rounded-lg border border-gray-200 bg-white p-4";
   const grid = "grid gap-3 sm:grid-cols-2 lg:grid-cols-3";
 
@@ -374,12 +405,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
         <h1 className="text-2xl font-semibold">{productId ? "Edit product" : "New product"}</h1>
       </div>
       {(maySave || arrows) && (
-        <div className="flex items-center gap-4">
-          {maySave && (
-            <button type="submit" form="product-form" className={btnCls} disabled={busy}>
-              {saveLabel}
-            </button>
-          )}
+        <div className="flex min-h-[2.5rem] flex-wrap items-center gap-4">
+          {actionButtons}
           {arrows}
         </div>
       )}
@@ -485,9 +512,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
 
         {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
         {maySave ? (
-          <button className={btnCls} disabled={busy}>
-            {saveLabel}
-          </button>
+          <div className="flex min-h-[2.5rem] flex-wrap items-center gap-3">{actionButtons}</div>
         ) : (
           <p className="text-sm text-gray-500">You can look at this product but not change it.</p>
         )}
@@ -499,12 +524,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
       {productId && <PhotosPanel productId={productId} photos={photos} onChange={setPhotos} cardCls={card} onDirtyChange={setPhotosDirty} />}
 
       {(maySave || arrows) && (
-        <div className="flex items-center gap-4">
-          {maySave && (
-            <button type="submit" form="product-form" className={btnCls} disabled={busy}>
-              {saveLabel}
-            </button>
-          )}
+        <div className="flex min-h-[2.5rem] flex-wrap items-center gap-4">
+          {actionButtons}
           {arrows}
         </div>
       )}

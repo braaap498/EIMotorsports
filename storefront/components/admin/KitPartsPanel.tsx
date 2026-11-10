@@ -205,7 +205,7 @@ export default function KitPartsPanel({
     if (existing) {
       edit(parts.map((p) => (p === existing ? { ...p, quantity: Math.min(1000, p.quantity + qty) } : p)));
       clearSearch();
-      setMsg({ kind: "success", text: `${it.sku} was already in the list, so its quantity went up by ${qty}. Click Save parts to keep it.` });
+      setMsg({ kind: "success", text: `${it.sku} was already in the list, so its quantity went up by ${qty}. Click Save distributor parts to keep it.` });
       return;
     }
     edit([
@@ -223,7 +223,7 @@ export default function KitPartsPanel({
       },
     ]);
     clearSearch();
-    setMsg({ kind: "success", text: `Added ${it.sku}. Click Save parts to keep it.` });
+    setMsg({ kind: "success", text: `Added ${it.sku}. Click Save distributor parts to keep it.` });
   }
 
   function cancelChanges() {
@@ -519,10 +519,10 @@ export default function KitPartsPanel({
               {dirty && (
                 <>
                   <button type="button" className={btnCls} disabled={busy} onClick={() => void save()}>
-                    {busy ? "Working…" : "Save parts"}
+                    {busy ? "Working…" : "Save distributor parts"}
                   </button>
                   <button type="button" className={btnCls} disabled={busy} onClick={cancelChanges}>
-                    Cancel changes
+                    Cancel distributor parts changes
                   </button>
                   <span className="text-xs text-amber-700">Unsaved changes</span>
                 </>
