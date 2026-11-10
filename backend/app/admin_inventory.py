@@ -72,7 +72,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, current_user, needs, require_route_access
-from app import fulfillment
+from app import fulfillment, order_activity
 from app.database import get_db
 from app.images import thumb_url
 from app.ebay_sales import _ensure_tracking_cols, lower_hold_marks, queue_stock_push, take_stock_for_reference
@@ -1816,6 +1816,13 @@ def ship(body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(c
             # eBay order: if its number matches a recorded eBay sale, the scanned parts leave the shelf and the
             # sale's reservation is released. Any other reference is only recorded, as before.
             take_stock_for_reference(db, (body.reference or "").strip(), merged, user.email)
+        # Activity log: who picked what for which order (saved or rolled back together with the pick).
+        picked_note = order_activity.parts_summary(db, {pid: m["qty"] for pid, m in merged.items()})
+        if order:
+            picked_note += " (order fully picked)" if fully_picked else " (partial pick)"
+            order_activity.log_action(db, user, "picked", "Website", order.order_number, picked_note)
+        else:
+            order_activity.log_action(db, user, "picked", "eBay", (body.reference or "").strip(), picked_note)
         db.commit()
         return {
             "batch_id": str(body.batch_id),
@@ -1947,6 +1954,10 @@ def mark_shipped(
             "c": (body.carrier or "").strip() or None,
             "id": order.id,
         },
+    )
+    order_activity.log_action(
+        db, user, "tracking_shipped", "Website", order.order_number,
+        f"{(body.carrier or '').strip() + ' ' if (body.carrier or '').strip() else ''}{body.tracking_number.strip()}",
     )
     db.commit()
     return {"ok": True, "order_number": order.order_number}

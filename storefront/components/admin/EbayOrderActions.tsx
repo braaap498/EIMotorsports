@@ -136,6 +136,13 @@ export function OrderShipControls({
             target="_blank"
             rel="noopener noreferrer"
             title="Opens this order on eBay, where you buy and print the label"
+            onClick={() => {
+              // Record who pressed it (the page still opens normally; a failed log never blocks the label).
+              void api("/inventory/activity/label-opened", {
+                method: "POST",
+                body: { channel: "eBay", order_ref: o.ebay_order_id },
+              }).catch(() => {});
+            }}
           >
             Open eBay label
           </a>

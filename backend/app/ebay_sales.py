@@ -52,6 +52,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, current_user, needs, require_admin, require_route_access
+from app import order_activity
 from app.database import _session_factory, get_db
 from app.ebay_edit import NS, _ensure_zero_table, _failed, _first_message, _read_item, _trading
 from app.stock import available_sql, lock_products
@@ -1449,7 +1450,7 @@ class ShipIn(BaseModel):
 @ship_router.post("/orders/{order_pk}/ship")
 @router.post("/orders/{order_pk}/ship")
 @needs("inventory.ship")
-def mark_shipped(order_pk: int, body: ShipIn, db: Session = Depends(get_db)):
+def mark_shipped(order_pk: int, body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     """Tell eBay this order shipped, with its tracking number. eBay marks it shipped and notifies the buyer."""
     _ensure_tracking_cols(db)
     od = _order_row(db, order_pk)
@@ -1478,6 +1479,7 @@ def mark_shipped(order_pk: int, body: ShipIn, db: Session = Depends(get_db)):
         ),
         {"tn": tracking, "tc": carrier, "i": order_pk},
     )
+    order_activity.log_action(db, user, "tracking_shipped", "eBay", od.ebay_order_id, f"{carrier} {tracking}")
     db.commit()
     return {"ok": True, "tracking_number": tracking, "tracking_carrier": carrier}
 
@@ -1495,6 +1497,10 @@ def pick_line(line_id: int, db: Session = Depends(get_db), user: AuthUser = Depe
         raise HTTPException(409, "Only a line whose parts are set aside can be marked picked.")
     try:
         _take_line(db, ln, ln.product_id, ln.quantity, user.email, ln.ebay_order_id)
+        order_activity.log_action(
+            db, user, "picked", "eBay", ln.ebay_order_id,
+            order_activity.parts_summary(db, {ln.product_id: ln.quantity}) + " (marked picked without scanning)",
+        )
         db.commit()
     except Exception:
         db.rollback()

@@ -261,18 +261,36 @@ function EditModal({
               </select>
             </Field>
           </div>
-          <button
-            className={btnCls}
-            disabled={busy || !detailsDirty || !name.trim() || !typeId}
-            onClick={() =>
-              run(async () => {
-                await saveDetails();
-                return "Saved";
-              })
-            }
-          >
-            Save details
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className={btnCls}
+              disabled={busy || !detailsDirty || !name.trim() || !typeId}
+              onClick={() =>
+                run(async () => {
+                  await saveDetails();
+                  return "Saved";
+                })
+              }
+            >
+              Save details
+            </button>
+            {detailsDirty && (
+              <button
+                type="button"
+                className={btn2Cls}
+                disabled={busy}
+                onClick={() => {
+                  // Put the three fields back to what is saved.
+                  setName(saved.name);
+                  setMakeId(saved.makeId);
+                  setTypeId(saved.typeId);
+                  setMsg(null);
+                }}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
         </section>
 
         <section className="space-y-3">

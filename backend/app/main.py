@@ -41,6 +41,8 @@ from app.analytics_qb import router as analytics_qb_router
 from app.analytics_insights import router as analytics_insights_router
 from app.autodist import router as autodist_router
 from app.kits import router as kits_router
+from app.order_activity import ensure_tables as ensure_order_activity_tables
+from app.order_activity import router as order_activity_router
 from app.auth import AuthUser, require_staff
 from app.config import get_settings
 from app.database import get_db
@@ -109,6 +111,7 @@ admin_router.include_router(admin_ebay_fitment_router)
 admin_router.include_router(admin_ebay_import_router)
 admin_router.include_router(admin_quickbooks_router)
 admin_router.include_router(admin_inventory_router)
+admin_router.include_router(order_activity_router)
 admin_router.include_router(admin_purchase_orders_router)
 admin_router.include_router(admin_photos_router)
 admin_router.include_router(admin_users_router)
@@ -144,3 +147,9 @@ def _start_ebay_listing_timers():
     """Once-a-day eBay status check for the Listings screen, and the keeper that resets listings sitting at quantity 0."""
     start_status_sync_daily()
     start_zero_keeper()
+
+
+@app.on_event("startup")
+def _order_activity_tables():
+    """The order activity log's tables (History tab > Order activity)."""
+    ensure_order_activity_tables()

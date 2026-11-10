@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, btn2Cls, inputCls } from "../ui";
+import OrderActivityLog from "./OrderActivityLog";
 
 type Batch = {
   id: string;
@@ -17,6 +18,28 @@ type Batch = {
 
 /** Who received or shipped what, and when. */
 export default function HistoryPanel({ active }: { active: boolean }) {
+  const [view, setView] = useState<"orders" | "stock">("orders");
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2">
+        <button className={view === "orders" ? "rounded bg-black px-3 py-1.5 text-sm font-semibold text-white" : btn2Cls} onClick={() => setView("orders")}>
+          Order activity
+        </button>
+        <button className={view === "stock" ? "rounded bg-black px-3 py-1.5 text-sm font-semibold text-white" : btn2Cls} onClick={() => setView("stock")}>
+          Receiving and shipping
+        </button>
+      </div>
+      <div className={view === "orders" ? "" : "hidden"}>
+        <OrderActivityLog active={active && view === "orders"} />
+      </div>
+      <div className={view === "stock" ? "" : "hidden"}>
+        <StockHistory active={active && view === "stock"} />
+      </div>
+    </div>
+  );
+}
+
+function StockHistory({ active }: { active: boolean }) {
   const [kind, setKind] = useState("");
   const [items, setItems] = useState<Batch[]>([]);
   const [error, setError] = useState("");
