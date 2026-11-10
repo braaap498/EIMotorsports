@@ -152,10 +152,10 @@ def catalog_search(
         where.append("coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0) > 0")
     if see_cost:
         if min_cost is not None:
-            where.append("s.dealer_cost >= :minc")
+            where.append("coalesce(s.effective_cost, s.dealer_cost) >= :minc")
             params["minc"] = min_cost
         if max_cost is not None:
-            where.append("s.dealer_cost <= :maxc")
+            where.append("coalesce(s.effective_cost, s.dealer_cost) <= :maxc")
             params["maxc"] = max_cost
 
     def one(word: str, i: int) -> str:
@@ -242,8 +242,8 @@ def catalog_search(
         "sku": "s.sku",
         "name": "lower(s.name), s.sku",
         "brand": "s.manufacturer, s.sku",
-        "cost_asc": "s.dealer_cost asc nulls last, s.sku" if see_cost else "s.sku",
-        "cost_desc": "s.dealer_cost desc nulls last, s.sku" if see_cost else "s.sku",
+        "cost_asc": "coalesce(s.effective_cost, s.dealer_cost) asc nulls last, s.sku" if see_cost else "s.sku",
+        "cost_desc": "coalesce(s.effective_cost, s.dealer_cost) desc nulls last, s.sku" if see_cost else "s.sku",
         "stock": "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0)) desc, s.sku",
     }.get(sort)
     if order is None:  # "best": an exact number match first, then in-stock, then by brand and SKU
@@ -260,7 +260,7 @@ def catalog_search(
     total = db.execute(text(f"select count(*) from supplier_items s where {clause}"), params).scalar()
     rows = db.execute(
         text(
-            f"select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, s.dealer_cost, "
+            f"select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, coalesce(s.effective_cost, s.dealer_cost) as dealer_cost, "
             f"s.qty_maine, s.qty_indiana, s.qty_nevada, s.upc, s.active from supplier_items s "
             f"where {clause} order by {order} limit :n offset :o"
         ),
@@ -335,7 +335,7 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
         label = ""
         if p.supplier_item_id:
             it = db.execute(
-                text("select sku, mfr_number, name, manufacturer, dealer_cost from supplier_items where id = :i and supplier = :s"),
+                text("select sku, mfr_number, name, manufacturer, coalesce(effective_cost, dealer_cost) as dealer_cost from supplier_items where id = :i and supplier = :s"),
                 {"i": p.supplier_item_id, "s": SUPPLIER},
             ).first()
             if not it:
@@ -501,7 +501,7 @@ def expand_rows(db: Session, rows: list[dict], distributor_id: int) -> tuple[lis
         parts = db.execute(
             text(
                 "select k.id, k.distributor_id, k.part_number, k.description, k.unit_cost, k.quantity, k.supplier_item_id, "
-                "       si.dealer_cost as live_cost, si.name as live_name, d.name as vendor "
+                "       coalesce(si.effective_cost, si.dealer_cost) as live_cost, si.name as live_name, d.name as vendor "
                 "from product_kit_parts k left join supplier_items si on si.id = k.supplier_item_id "
                 "left join po_distributors d on d.id = k.distributor_id "
                 "where k.product_id = :p order by k.sort_order, k.id"

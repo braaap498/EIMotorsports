@@ -118,6 +118,8 @@ export default function KitPartsPanel({
   const [results2, setResults2] = useState<SyncResult[] | null>(null);
   const [dirty, setDirty] = useState(false);
   const [savedCls, setSavedCls] = useState<string | null>(null);
+  // the parts as last saved, so Cancel changes can put them back
+  const [savedParts, setSavedParts] = useState<KitPart[]>([]);
 
   const vendor = vendors.find((v) => v.id === vendorId);
   const PAGE = 30;
@@ -138,7 +140,9 @@ export default function KitPartsPanel({
     if (!productId) return;
     api<{ cls: string | null; parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[]; can_sync: boolean }>(`/kits/${productId}`)
       .then((r) => {
-        onChange(r.parts.map((p) => ({ ...p, key: `p${p.id}`, description: p.description ?? "" })));
+        const loaded = r.parts.map((p) => ({ ...p, key: `p${p.id}`, description: p.description ?? "" }));
+        onChange(loaded);
+        setSavedParts(loaded);
         setListings(r.listings);
         setCanSync(r.can_sync);
         setSavedCls(r.cls);
@@ -184,12 +188,24 @@ export default function KitPartsPanel({
     }
   }
 
+  // after a part is added the search is finished: clear it so the Add button does not stay behind and get clicked twice
+  function clearSearch() {
+    setResults(null);
+    setTotal(0);
+    setOffset(0);
+    setQ("");
+    setCodes("");
+    setAddQty({});
+  }
+
   function addFromCatalog(it: CatItem) {
     if (!vendorId) return;
     const qty = Math.max(1, Math.min(1000, Number(addQty[it.id] || 1) || 1));
     const existing = parts.find((p) => p.supplier_item_id === it.id);
     if (existing) {
       edit(parts.map((p) => (p === existing ? { ...p, quantity: Math.min(1000, p.quantity + qty) } : p)));
+      clearSearch();
+      setMsg({ kind: "success", text: `${it.sku} was already in the list, so its quantity went up by ${qty}. Click Save parts to keep it.` });
       return;
     }
     edit([
@@ -206,6 +222,16 @@ export default function KitPartsPanel({
         quantity: qty,
       },
     ]);
+    clearSearch();
+    setMsg({ kind: "success", text: `Added ${it.sku}. Click Save parts to keep it.` });
+  }
+
+  function cancelChanges() {
+    onChange(savedParts);
+    setDirty(false);
+    clearSearch();
+    setMan({ part_number: "", description: "", unit_cost: "", quantity: "1" });
+    setMsg(null);
   }
 
   function addManual() {
@@ -285,8 +311,11 @@ export default function KitPartsPanel({
       if (r.duplicates.length) text += ` Warning: ${r.duplicates.map((d) => d.sku).join(", ")} already use the same label.`;
       if (r.cls && r.listings_to_update > 0 && !canSync) text += ` ${r.listings_to_update} eBay listing(s) still need the new label; an admin must send it.`;
       setMsg({ kind: "success", text });
-      // the Send button decides from the listings' state, so read it again
-      const fresh = await api<{ listings: Listing[] }>(`/kits/${productId}`);
+      // read it again: the Send button decides from the listings' state, and the server may have refreshed the costs
+      const fresh = await api<{ parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[] }>(`/kits/${productId}`);
+      const loaded = fresh.parts.map((p) => ({ ...p, key: `p${p.id}`, description: p.description ?? "" }));
+      onChange(loaded);
+      setSavedParts(loaded);
       setListings(fresh.listings);
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
@@ -325,7 +354,7 @@ export default function KitPartsPanel({
                   </div>
                   <div className="flex items-center gap-5 text-sm">
                     <div>
-                      <div className="text-[11px] uppercase text-gray-500">Cost</div>
+                      <div className="text-[11px] uppercase text-gray-500">Your cost</div>
                       <div>{p.unit_cost != null ? `$${Number(p.unit_cost).toFixed(2)}` : "—"}</div>
                     </div>
                     <label>
@@ -435,7 +464,7 @@ export default function KitPartsPanel({
                   <div className="max-h-96 overflow-auto rounded border">
                     <table className="w-full text-xs">
                       <thead className="sticky top-0 bg-gray-50 text-left text-gray-500">
-                        <tr><th className="p-1">SKU</th><th className="p-1">Mfr #</th><th className="p-1">Brand</th><th className="p-1">Name</th><th className="p-1">UPC</th><th className="p-1">Cost</th><th className="p-1">Stock</th><th className="p-1">Qty</th><th className="p-1" /></tr>
+                        <tr><th className="p-1">SKU</th><th className="p-1">Mfr #</th><th className="p-1">Brand</th><th className="p-1">Name</th><th className="p-1">UPC</th><th className="p-1">Your cost</th><th className="p-1">Stock</th><th className="p-1">Qty</th><th className="p-1" /></tr>
                       </thead>
                       <tbody>
                         {results.map((it) => (
@@ -485,11 +514,19 @@ export default function KitPartsPanel({
 
       {productId ? (
         <div className="space-y-2">
-          {!disabled && (
+          {!disabled && (dirty || showSend) && (
             <div className="flex flex-wrap items-center gap-3">
-              <button type="button" className={btnCls} disabled={busy || !dirty} onClick={() => void save()}>
-                {busy ? "Working…" : "Save parts"}
-              </button>
+              {dirty && (
+                <>
+                  <button type="button" className={btnCls} disabled={busy} onClick={() => void save()}>
+                    {busy ? "Working…" : "Save parts"}
+                  </button>
+                  <button type="button" className={btnCls} disabled={busy} onClick={cancelChanges}>
+                    Cancel changes
+                  </button>
+                  <span className="text-xs text-amber-700">Unsaved changes</span>
+                </>
+              )}
               {showSend && (
                 <button type="button" className={btnCls} disabled={busy} onClick={() => void sendToEbay()}>
                   Send custom label to eBay
