@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
 import ClearableInput from "../ClearableInput";
+import { useAccess } from "../AdminAccess";
 import ScanBox from "./ScanBox";
 import ScanSession from "./ScanSession";
 import WebOrderShip from "./WebOrderShip";
@@ -61,6 +62,11 @@ export default function OrderQueue({ active }: { active: boolean }) {
   const [me, setMe] = useState<string | null>(null); // my name as the others see it on the list
   const [reloadKey, setReloadKey] = useState(0);
   const [deciding, setDeciding] = useState<string | null>(null);
+  const { isAdmin } = useAccess();
+  // eBay order numbers ticked for a bulk Mark picked / Release. Admins only; website orders are picked by scanning, so they have no tick box.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
   const scanRef = useRef<HTMLInputElement>(null);
   const openRef = useRef<Row | null>(null);
   openRef.current = open;
@@ -74,6 +80,9 @@ export default function OrderQueue({ active }: { active: boolean }) {
       const r = await api<Resp>(`/inventory/queue?${p.toString()}`);
       setRows(r.items);
       setTotal(r.total);
+      // keep only ticks for orders still in the list, so a bulk action never touches an order you cannot see
+      const here = new Set(r.items.filter((i) => i.channel === "eBay").map((i) => i.order_ref));
+      setSelected((prev) => (prev.size === 0 ? prev : new Set([...prev].filter((id) => here.has(id)))));
       if (r.channels?.length) setChannels(r.channels);
     } catch (e) {
       setMsg(errMsg(e));
@@ -141,6 +150,55 @@ export default function OrderQueue({ active }: { active: boolean }) {
       setMsg(errMsg(e));
     } finally {
       setDeciding(null);
+    }
+  }
+
+  const canSelect = (r: Row) => isAdmin && r.channel === "eBay";
+  const selectable = rows.filter(canSelect);
+  const allTicked = selectable.length > 0 && selectable.every((r) => selected.has(r.order_ref));
+  const someTicked = selectable.some((r) => selected.has(r.order_ref));
+
+  function toggleOne(ref: string) {
+    setOkMsg(null);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(ref)) next.delete(ref);
+      else next.add(ref);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    setOkMsg(null);
+    setSelected(allTicked ? new Set() : new Set(selectable.map((r) => r.order_ref)));
+  }
+
+  async function bulk(action: "pick" | "release") {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    const n = `${ids.length} selected eBay order${ids.length === 1 ? "" : "s"}`;
+    const q =
+      action === "pick"
+        ? `Mark ALL parts of ${n} as picked? This removes them from the shelf count now. Use this only if the parts have already left and were never scanned out.`
+        : `Release the hold on ALL parts of ${n}? They become available again and the shelf count stays the same. Use this only if the parts are still on the shelf.`;
+    if (!window.confirm(q)) return;
+    setMsg(null);
+    setOkMsg(null);
+    setBulkBusy(true);
+    try {
+      const r = await api<{ lines: number; orders: number; failed: { order_id: string; detail: string }[] }>("/inventory/ebay-orders/lines/bulk", {
+        method: "POST",
+        body: { order_ids: ids, action },
+      });
+      if (r.lines > 0) setOkMsg(`${action === "pick" ? "Marked picked" : "Released"}: ${r.lines} line${r.lines === 1 ? "" : "s"} on ${r.orders} order${r.orders === 1 ? "" : "s"}.`);
+      if (r.failed.length) setMsg(`Could not do ${r.failed.length} line${r.failed.length === 1 ? "" : "s"}: ${r.failed.map((f) => `${f.order_id} (${f.detail})`).join("; ")}`);
+      else if (r.lines === 0) setMsg("Nothing to do: those orders have no parts set aside any more.");
+      setSelected(new Set());
+      await load();
+    } catch (e) {
+      setMsg(errMsg(e));
+    } finally {
+      setBulkBusy(false);
     }
   }
 
@@ -245,6 +303,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
         whether the parts come from one of our warehouses or from a drop ship.
       </p>
       {msg && <Notice kind="error">{msg}</Notice>}
+      {okMsg && <Notice kind="success">{okMsg}</Notice>}
 
       <div className="max-w-xl">
         <ScanBox ref={scanRef} onScan={(c) => void scanOrder(c)} placeholder="Scan or type an order number to open it…" />
@@ -292,10 +351,26 @@ export default function OrderQueue({ active }: { active: boolean }) {
 
       <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
 
+      {isAdmin && selected.size > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded border border-gray-300 bg-gray-50 px-3 py-2 text-sm">
+          <span className="font-medium">{selected.size} eBay order{selected.size === 1 ? "" : "s"} selected</span>
+          <button type="button" className={btn2Cls} disabled={bulkBusy} onClick={() => void bulk("pick")}>
+            {bulkBusy ? "Working…" : "Mark picked"}
+          </button>
+          <button type="button" className={btn2Cls} disabled={bulkBusy} onClick={() => void bulk("release")}>
+            Release
+          </button>
+          <button type="button" className="text-xs underline" disabled={bulkBusy} onClick={() => setSelected(new Set())}>
+            Clear selection
+          </button>
+        </div>
+      )}
+
       <div className="overflow-x-auto rounded border border-gray-200 bg-white">
         {/* fixed column widths, sized for the longest content, so nothing shifts from page to page */}
-        <table className="w-full min-w-[96rem] table-fixed text-left text-sm">
+        <table className="w-full min-w-[98rem] table-fixed text-left text-sm">
           <colgroup>
+            {isAdmin && <col className="w-[2.5rem]" />} {/* tick box (admin only) */}
             <col className="w-[7rem]" /> {/* Date (date, time under it) */}
             <col className="w-[7rem]" /> {/* Channel */}
             <col className="w-[11rem]" /> {/* Order # */}
@@ -307,6 +382,20 @@ export default function OrderQueue({ active }: { active: boolean }) {
           </colgroup>
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
+              {isAdmin && (
+                <th className="px-3 py-2">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all eBay orders on this page"
+                    disabled={selectable.length === 0 || bulkBusy}
+                    checked={allTicked}
+                    ref={(el) => {
+                      if (el) el.indeterminate = someTicked && !allTicked;
+                    }}
+                    onChange={toggleAll}
+                  />
+                </th>
+              )}
               <th className="whitespace-nowrap px-3 py-2">Date</th>
               <th className="whitespace-nowrap px-3 py-2">Channel</th>
               <th className="whitespace-nowrap px-3 py-2">Order #</th>
@@ -334,7 +423,24 @@ export default function OrderQueue({ active }: { active: boolean }) {
                       : `hover:bg-gray-50 ${r.attention.length ? "bg-red-50" : r.status === "shipped" ? "bg-green-50" : ""}`
                   }`}
                 >
-                  <td className={`whitespace-nowrap px-3 py-2 text-gray-600 ${r.urgent ? "border-l-4 border-red-600" : ""}`}>
+                  {isAdmin && (
+                    <td
+                      className={`px-3 py-2 ${r.urgent ? "border-l-4 border-red-600" : ""}`}
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    >
+                      {canSelect(r) && (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select eBay order ${r.order_ref}`}
+                          disabled={bulkBusy}
+                          checked={selected.has(r.order_ref)}
+                          onChange={() => toggleOne(r.order_ref)}
+                        />
+                      )}
+                    </td>
+                  )}
+                  <td className={`whitespace-nowrap px-3 py-2 text-gray-600 ${r.urgent && !isAdmin ? "border-l-4 border-red-600" : ""}`}>
                     {r.placed_at ? (
                       <>
                         <div>{new Date(r.placed_at).toLocaleDateString()}</div>
@@ -383,6 +489,9 @@ export default function OrderQueue({ active }: { active: boolean }) {
                     {r.urgent ? (
                       <div className="space-y-1" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                         <span className="inline-block rounded bg-red-600 px-2 py-0.5 text-xs font-bold text-white">URGENT · needs a decision</span>
+                        <div>
+                          <Badge tone={st.tone}>{st.label}</Badge>
+                        </div>
                         <div className="flex flex-wrap gap-1">
                           <button
                             type="button"
@@ -430,7 +539,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
             })}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-3 py-6 text-center text-gray-500">
+                <td colSpan={isAdmin ? 9 : 8} className="px-3 py-6 text-center text-gray-500">
                   {loading ? "Loading…" : q || channel ? "No orders match." : "No orders waiting. Everything has been picked and shipped."}
                 </td>
               </tr>

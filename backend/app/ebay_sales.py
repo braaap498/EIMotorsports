@@ -44,7 +44,7 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -1528,3 +1528,35 @@ def release_line(line_id: int, db: Session = Depends(get_db), user: AuthUser = D
     )
     db.commit()
     return {"ok": True}
+
+
+class BulkLinesIn(BaseModel):
+    order_ids: list[str] = Field(..., min_length=1, max_length=100)
+    action: Literal["pick", "release"]
+
+
+@ship_router.post("/lines/bulk")
+def bulk_lines(body: BulkLinesIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """ADMIN ONLY (no @needs on purpose: a route in this router without it is closed to employees).
+    Mark picked / Release for EVERY set-aside line of the chosen eBay orders, in one go. Each line goes through the same
+    code as the single-line buttons, one at a time, so a line that cannot be done is reported and the rest still are."""
+    ids = list(dict.fromkeys(i.strip() for i in body.order_ids if i and i.strip()))
+    rows = db.execute(
+        text("select id, ebay_order_id from ebay_order_lines where state = 'reserved' and ebay_order_id = any(cast(:ids as text[])) order by id"),
+        {"ids": ids},
+    ).all()
+    one = pick_line if body.action == "pick" else release_line
+    lines_done, orders_done, failed = 0, set(), []
+    for r in rows:
+        try:
+            one(r.id, db, user)
+            lines_done += 1
+            orders_done.add(r.ebay_order_id)
+        except HTTPException as e:
+            db.rollback()
+            failed.append({"order_id": r.ebay_order_id, "detail": str(e.detail)})
+        except Exception:
+            db.rollback()
+            log.exception("bulk %s failed for order line %s", body.action, r.id)
+            failed.append({"order_id": r.ebay_order_id, "detail": "That did not work and nothing was changed."})
+    return {"lines": lines_done, "orders": len(orders_done), "skipped": len(ids) - len({r.ebay_order_id for r in rows}), "failed": failed}
