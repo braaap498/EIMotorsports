@@ -4,6 +4,7 @@ import ClearableInput from "../../../components/admin/ClearableInput";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, errMsg } from "../../../lib/adminApi";
 import ArrowBar from "../../../components/admin/ArrowBar";
+import ModelProductsModal from "../../../components/admin/ModelProductsModal";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Field, Modal, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
 
@@ -380,6 +381,7 @@ export default function ModelsPage() {
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<ModelsResp>({ total: 0, items: [] });
   const [editing, setEditing] = useState<ModelRow | null>(null);
+  const [viewing, setViewing] = useState<ModelRow | null>(null); // the "Products" window
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
 
@@ -531,8 +533,9 @@ export default function ModelsPage() {
                 </td>
                 <td className="px-3 py-2">{m.year_min == null ? <Badge tone="amber">no years</Badge> : yearSpan(m)}</td>
                 <td className="px-3 py-2">{m.products}</td>
-                <td className="px-3 py-2 text-right">
+                <td className="whitespace-nowrap px-3 py-2 text-right">
                   <button className={btn2Cls} onClick={() => setEditing(m)}>Edit</button>
+                  <button className={`${btn2Cls} ml-2`} onClick={() => setViewing(m)}>Products</button>
                 </td>
               </tr>
             ))}
@@ -544,6 +547,8 @@ export default function ModelsPage() {
       </div>
 
       <Pager total={data.total} limit={LIMIT} offset={offset} onChange={setOffset} />
+
+      {viewing && <ModelProductsModal model={viewing} onClose={() => setViewing(null)} onChanged={load} />}
 
       {editing && (
         <EditModal

@@ -431,6 +431,150 @@ def model_years(model_id: int, db: Session = Depends(get_db)):
     return [dict(r._mapping) for r in rows]
 
 
+# --------------------------------------------------------------------------
+# products on a model: see them, and move them to another model (consolidating a duplicate)
+# --------------------------------------------------------------------------
+_MODEL_PRODUCTS_WHERE = """
+    from products p
+    where exists (select 1 from product_fitment pf join vehicles v on v.id = pf.vehicle_id
+                   where pf.product_id = p.id and v.model_id = :m)
+      and (cast(:like as text) is null
+           or p.title ilike cast(:like as text)
+           or p.ebay_item_id ilike cast(:like as text)
+           or p.sku ilike cast(:like as text)
+           or p.manufacturer_part_number ilike cast(:like as text)
+           or p.custom_label_sku ilike cast(:like as text))
+"""
+
+
+def _model_or_404(db: Session, model_id: int) -> None:
+    if not db.execute(text("select 1 from vehicle_models where id = :i"), {"i": model_id}).first():
+        raise HTTPException(404, "Model not found")
+
+
+@router.get("/models/{model_id}/products")
+@needs(*READ_LISTS)
+def model_products(
+    model_id: int,
+    q: Optional[str] = None,
+    limit: int = Query(50, le=200),
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    """Every product that fits this model, with the years it fits on this model."""
+    _model_or_404(db, model_id)
+    params = {"m": model_id, "like": like(q), "limit": limit, "offset": offset}
+    total = db.execute(text(f"select count(*) {_MODEL_PRODUCTS_WHERE}"), params).scalar()
+    rows = db.execute(
+        text(
+            f"""
+            select p.id, p.sku, p.custom_label_sku, p.ebay_item_id, p.title,
+                   (select coalesce(array_agg(distinct v.year order by v.year), '{{}}')
+                      from product_fitment pf join vehicles v on v.id = pf.vehicle_id
+                     where pf.product_id = p.id and v.model_id = :m) as years,
+                   (select count(distinct v.model_id)
+                      from product_fitment pf join vehicles v on v.id = pf.vehicle_id
+                     where pf.product_id = p.id and v.model_id <> :m) as other_models
+            {_MODEL_PRODUCTS_WHERE}
+            order by p.title, p.id
+            limit :limit offset :offset
+            """
+        ),
+        params,
+    ).all()
+    return {"total": total, "items": [dict(r._mapping) for r in rows]}
+
+
+class MoveProducts(BaseModel):
+    to_model_id: int
+    product_ids: list[int] = Field(default_factory=list, max_length=2000)
+    all_matching: bool = False  # every product on the model that matches `q` (or all of them when q is empty)
+    q: Optional[str] = None
+
+
+@router.post("/models/{model_id}/products/move")
+def move_model_products(model_id: int, body: MoveProducts, db: Session = Depends(get_db)):
+    """Move products from this model to another, year for year: a product that fit 2008 here now fits 2008 on the target.
+    A year the target does not have yet is added to it. The products stop fitting this model, so once it is empty it can be
+    deleted. Nothing else about the products changes. All or nothing: if anything fails, nothing is moved."""
+    src, dst = model_id, body.to_model_id
+    if src == dst:
+        raise HTTPException(400, "Choose a different model to move them to")
+    _model_or_404(db, src)
+    _model_or_404(db, dst)
+    if body.all_matching:
+        ids = [
+            r[0]
+            for r in db.execute(
+                text(f"select p.id {_MODEL_PRODUCTS_WHERE}"), {"m": src, "like": like(body.q)}
+            ).all()
+        ]
+    else:
+        ids = sorted({int(i) for i in body.product_ids})
+    if not ids:
+        raise HTTPException(400, "Choose at least one product to move")
+    prm = {"src": src, "dst": dst, "ids": ids}
+    try:
+        on_src = db.execute(
+            text(
+                "select count(distinct pf.product_id) from product_fitment pf join vehicles sv on sv.id = pf.vehicle_id "
+                "where sv.model_id = :src and pf.product_id = any(cast(:ids as bigint[]))"
+            ),
+            prm,
+        ).scalar()
+        # 1. years the products use here that the target does not have yet
+        years_added = db.execute(
+            text(
+                "insert into vehicles (model_id, year, submodel) "
+                "select distinct :dst, sv.year, sv.submodel "
+                "from product_fitment pf join vehicles sv on sv.id = pf.vehicle_id "
+                "where sv.model_id = :src and pf.product_id = any(cast(:ids as bigint[])) "
+                "and not exists (select 1 from vehicles t where t.model_id = :dst and t.year = sv.year "
+                "                and t.submodel is not distinct from sv.submodel)"
+            ),
+            prm,
+        ).rowcount
+        # 2. the same years on the target
+        db.execute(
+            text(
+                """
+                with src as (
+                  select pf.product_id, pf.notes, pf.source,
+                         (select min(t.id) from vehicles t
+                           where t.model_id = :dst and t.year = sv.year and t.submodel is not distinct from sv.submodel) as tv
+                  from product_fitment pf join vehicles sv on sv.id = pf.vehicle_id
+                  where sv.model_id = :src and pf.product_id = any(cast(:ids as bigint[]))
+                )
+                insert into product_fitment (product_id, vehicle_id, notes, source)
+                select distinct on (s.product_id, s.tv) s.product_id, s.tv, s.notes, s.source
+                from src s
+                where s.tv is not null
+                  and not exists (select 1 from product_fitment x where x.product_id = s.product_id and x.vehicle_id = s.tv)
+                """
+            ),
+            prm,
+        )
+        # 3. they no longer fit the source model
+        removed = db.execute(
+            text(
+                "delete from product_fitment where product_id = any(cast(:ids as bigint[])) "
+                "and vehicle_id in (select id from vehicles where model_id = :src)"
+            ),
+            prm,
+        ).rowcount
+        remaining = db.execute(
+            text(
+                "select count(distinct pf.product_id) from product_fitment pf join vehicles v on v.id = pf.vehicle_id "
+                "where v.model_id = :src"
+            ),
+            prm,
+        ).scalar()
+    except IntegrityError:
+        conflict(db, "Could not move them (a fitment row collides). Nothing was changed.")
+    finish(db, refresh=True)
+    return {"moved_products": int(on_src or 0), "years_added": int(years_added or 0), "fitment_rows": int(removed or 0), "remaining": int(remaining or 0)}
+
+
 @router.post("/models/{model_id}/years", status_code=201)
 def add_model_years(model_id: int, body: YearRange, db: Session = Depends(get_db)):
     added = _insert_years(db, model_id, body.year_from, body.year_to)
