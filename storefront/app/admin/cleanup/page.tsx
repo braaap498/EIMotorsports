@@ -176,7 +176,11 @@ function ProductBadges({ p }: { p: Item }) {
     <span className="flex flex-wrap gap-1">
       {isMaster(p) && <Badge tone="blue">MASTER · {Number(p.prior_merges)} merged</Badge>}
       <Badge tone={p.listing_count > 0 ? "green" : "gray"}>{p.listing_count} eBay</Badge>
-      {!p.is_published && <Badge tone="amber">Draft</Badge>}
+      {!p.is_published && (
+        <span title="This product is not published on the website store. It says nothing about the eBay listing's status.">
+          <Badge tone="amber">Not on website</Badge>
+        </span>
+      )}
     </span>
   );
 }
