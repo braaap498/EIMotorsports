@@ -41,17 +41,25 @@ export default function HistoryPanel({ active }: { active: boolean }) {
 
 function StockHistory({ active }: { active: boolean }) {
   const [kind, setKind] = useState("");
+  const [fFrom, setFFrom] = useState("");
+  const [fTo, setFTo] = useState("");
   const [items, setItems] = useState<Batch[]>([]);
   const [error, setError] = useState("");
 
+  // With no dates the newest 40 show; with dates the server sends up to 200 so a whole range is visible.
+  const LIMIT = fFrom || fTo ? 200 : 40;
   const load = useCallback(() => {
-    api<{ items: Batch[] }>(`/inventory/history${kind ? `?kind=${kind}` : ""}`)
+    const p = new URLSearchParams({ limit: String(LIMIT) });
+    if (kind) p.set("kind", kind);
+    if (fFrom) p.set("date_from", fFrom);
+    if (fTo) p.set("date_to", fTo);
+    api<{ items: Batch[] }>(`/inventory/history?${p.toString()}`)
       .then((r) => {
         setItems(r.items);
         setError("");
       })
       .catch((e) => setError(errMsg(e)));
-  }, [kind]);
+  }, [kind, fFrom, fTo, LIMIT]);
   useEffect(() => {
     if (active) load();
   }, [active, load]);
@@ -64,12 +72,26 @@ function StockHistory({ active }: { active: boolean }) {
           <option value="receive">Receiving only</option>
           <option value="ship">Shipping only</option>
         </select>
+        <label className="text-xs text-gray-500">
+          <span className="mb-1 block">From</span>
+          <input type="date" className={`${inputCls} !w-auto`} value={fFrom} max={fTo || undefined} onChange={(e) => { setFFrom(e.target.value); }} />
+        </label>
+        <label className="text-xs text-gray-500">
+          <span className="mb-1 block">To</span>
+          <input type="date" className={`${inputCls} !w-auto`} value={fTo} min={fFrom || undefined} onChange={(e) => { setFTo(e.target.value); }} />
+        </label>
+        {(fFrom || fTo) && (
+          <button type="button" className={btn2Cls} onClick={() => { setFFrom(""); setFTo(""); }}>
+            Clear dates
+          </button>
+        )}
         <button className={btn2Cls} onClick={load}>
           Refresh
         </button>
       </div>
       {error && <Notice kind="error">{error}</Notice>}
-      {items.length === 0 && !error && <p className="text-sm text-gray-500">Nothing recorded yet.</p>}
+      {items.length === 0 && !error && <p className="text-sm text-gray-500">{fFrom || fTo ? "Nothing recorded in those dates." : "Nothing recorded yet."}</p>}
+      {items.length >= LIMIT && <p className="text-xs text-gray-500">Showing the newest {LIMIT}. Narrow the dates to see older ones.</p>}
       <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 bg-white">
         {items.map((b) => {
           const units = b.lines.reduce((n, l) => n + l.quantity, 0);

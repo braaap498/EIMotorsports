@@ -20,6 +20,7 @@ but inside a savepoint, so a problem with the log can never stop a pick or a shi
 Tables are created at startup (ensure_tables), never in a request, because creating a table commits the open transaction.
 """
 import logging
+from datetime import date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -202,11 +203,14 @@ def activity(
     q: Optional[str] = Query(None, max_length=100),
     action: Optional[str] = Query(None, max_length=30),
     channel: Optional[str] = Query(None, max_length=20),
+    date_from: str = Query("", max_length=10),
+    date_to: str = Query("", max_length=10),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """Newest first. q matches the EIO number, the channel's own order number, or the employee's email."""
+    """Newest first. q matches the EIO number, the channel's own order number, or the employee's email.
+    date_from / date_to (YYYY-MM-DD, both days included) keep only what happened between them."""
     if action and action not in ACTIONS:
         raise HTTPException(400, "Unknown action")
     where, params = [], {"limit": limit, "offset": offset}
@@ -220,6 +224,14 @@ def activity(
     if channel:
         where.append("channel = :channel")
         params["channel"] = channel
+    for key, raw, op in (("df", date_from, ">="), ("dt", date_to, "<")):
+        if raw.strip():
+            try:
+                d = date.fromisoformat(raw.strip())
+            except ValueError:
+                raise HTTPException(422, "Dates must look like 2026-11-07.")
+            params[key] = d if key == "df" else d + timedelta(days=1)  # "to" includes the whole last day
+            where.append(f"at {op} :{key}")
     clause = ("where " + " and ".join(where)) if where else ""
     total = db.execute(text(f"select count(*) from order_activity {clause}"), params).scalar() or 0
     rows = db.execute(

@@ -30,6 +30,8 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
   const [q, setQ] = useState("");
   const [action, setAction] = useState("");
   const [channel, setChannel] = useState("");
+  const [fFrom, setFFrom] = useState("");
+  const [fTo, setFTo] = useState("");
   const [offset, setOffset] = useState(0);
   const [rows, setRows] = useState<Row[]>([]);
   const [total, setTotal] = useState(0);
@@ -43,6 +45,8 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
     if (q.trim()) p.set("q", q.trim());
     if (action) p.set("action", action);
     if (channel) p.set("channel", channel);
+    if (fFrom) p.set("date_from", fFrom);
+    if (fTo) p.set("date_to", fTo);
     setLoading(true);
     api<{ items: Row[]; total: number }>(`/inventory/activity?${p.toString()}`)
       .then((r) => {
@@ -53,7 +57,7 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
       })
       .catch((e) => my === seq.current && setError(errMsg(e)))
       .finally(() => my === seq.current && setLoading(false));
-  }, [q, action, channel, offset]);
+  }, [q, action, channel, fFrom, fTo, offset]);
 
   // Typing in the search box waits a moment so it does not ask the server on every key.
   useEffect(() => {
@@ -101,6 +105,19 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
           <option value="eBay">eBay</option>
           <option value="Amazon">Amazon</option>
         </select>
+        <label className="text-xs text-gray-500">
+          <span className="mb-1 block">From</span>
+          <input type="date" className={`${inputCls} !w-auto`} value={fFrom} max={fTo || undefined} onChange={(e) => { setFFrom(e.target.value); setOffset(0); }} />
+        </label>
+        <label className="text-xs text-gray-500">
+          <span className="mb-1 block">To</span>
+          <input type="date" className={`${inputCls} !w-auto`} value={fTo} min={fFrom || undefined} onChange={(e) => { setFTo(e.target.value); setOffset(0); }} />
+        </label>
+        {(fFrom || fTo) && (
+          <button type="button" className={btn2Cls} onClick={() => { setFFrom(""); setFTo(""); setOffset(0); }}>
+            Clear dates
+          </button>
+        )}
         <button className={btn2Cls} onClick={load} disabled={loading}>
           Refresh
         </button>

@@ -61,7 +61,7 @@ Routes
 import logging
 import re
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal, Optional
 
 import stripe
@@ -2147,9 +2147,20 @@ def refund_order(
 @needs(*ANY_INVENTORY)
 def history(
     kind: Optional[str] = Query(None, pattern="^(receive|ship)$"),
+    date_from: str = Query("", max_length=10),
+    date_to: str = Query("", max_length=10),
     limit: int = Query(40, le=200),
     db: Session = Depends(get_db),
 ):
+    """Newest first. date_from / date_to (YYYY-MM-DD, both days included) keep only what happened between them."""
+    bounds: dict = {}
+    for key, raw in (("df", date_from), ("dt", date_to)):
+        if raw.strip():
+            try:
+                d = date.fromisoformat(raw.strip())
+            except ValueError:
+                raise HTTPException(422, "Dates must look like 2026-11-07.")
+            bounds[key] = d if key == "df" else d + timedelta(days=1)  # "to" includes the whole last day
     rows = db.execute(
         text(
             """
@@ -2162,11 +2173,13 @@ def history(
             left join inventory_batch_lines l on l.batch_id = b.id
             left join products p on p.id = l.product_id
             where (cast(:kind as text) is null or b.kind = cast(:kind as text))
+              and (cast(:df as date) is null or b.created_at >= cast(:df as date))
+              and (cast(:dt as date) is null or b.created_at < cast(:dt as date))
             group by b.id, o.order_number
             order by b.created_at desc
             limit :limit
             """
         ),
-        {"kind": kind, "limit": limit},
+        {"kind": kind, "limit": limit, "df": bounds.get("df"), "dt": bounds.get("dt")},
     ).all()
     return {"items": [{**dict(r._mapping), "id": str(r.id)} for r in rows]}
