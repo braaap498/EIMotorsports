@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
+import { SortTh, useSort } from "../SortHeader";
 
 type Row = {
   id: number;
@@ -17,6 +18,7 @@ type Row = {
   detail: string | null;
 };
 
+type SortKey = "date" | "employee" | "action" | "eio" | "channel" | "order" | "detail";
 const LIMIT = 50;
 const TONE: Record<string, "gray" | "green" | "amber" | "blue"> = {
   picked: "blue",
@@ -38,6 +40,7 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const seq = useRef(0);
+  const { sort, toggle } = useSort<SortKey>(); // nothing chosen = newest first
 
   const load = useCallback(() => {
     const my = ++seq.current;
@@ -47,6 +50,10 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
     if (channel) p.set("channel", channel);
     if (fFrom) p.set("date_from", fFrom);
     if (fTo) p.set("date_to", fTo);
+    if (sort.key) {
+      p.set("sort", sort.key);
+      p.set("dir", sort.dir);
+    }
     setLoading(true);
     api<{ items: Row[]; total: number }>(`/inventory/activity?${p.toString()}`)
       .then((r) => {
@@ -57,7 +64,12 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
       })
       .catch((e) => my === seq.current && setError(errMsg(e)))
       .finally(() => my === seq.current && setLoading(false));
-  }, [q, action, channel, fFrom, fTo, offset]);
+  }, [q, action, channel, fFrom, fTo, sort.key, sort.dir, offset]);
+
+  const onSort = (k: SortKey) => {
+    toggle(k);
+    setOffset(0);
+  };
 
   // Typing in the search box waits a moment so it does not ask the server on every key.
   useEffect(() => {
@@ -129,13 +141,13 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
           <table className="w-full text-left text-sm">
             <thead className="bg-gray-50 text-xs uppercase text-gray-500">
               <tr>
-                <th className="px-3 py-2">Date and time</th>
-                <th className="px-3 py-2">Employee</th>
-                <th className="px-3 py-2">Action</th>
-                <th className="px-3 py-2">EIO</th>
-                <th className="px-3 py-2">Channel</th>
-                <th className="px-3 py-2">Order number</th>
-                <th className="px-3 py-2">Details</th>
+                <SortTh label="Date and time" k="date" sort={sort} onSort={onSort} />
+                <SortTh label="Employee" k="employee" sort={sort} onSort={onSort} />
+                <SortTh label="Action" k="action" sort={sort} onSort={onSort} />
+                <SortTh label="EIO" k="eio" sort={sort} onSort={onSort} />
+                <SortTh label="Channel" k="channel" sort={sort} onSort={onSort} />
+                <SortTh label="Order number" k="order" sort={sort} onSort={onSort} />
+                <SortTh label="Details" k="detail" sort={sort} onSort={onSort} />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">

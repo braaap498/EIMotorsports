@@ -197,6 +197,18 @@ def _names() -> dict[str, str]:
         return {}
 
 
+# what each column heading sorts by (a fixed list, so nothing the browser sends ever reaches the SQL)
+_ACTIVITY_SORTS = {
+    "date": "at",
+    "employee": "lower(user_email)",
+    "action": "action",
+    "eio": "eio_number",
+    "channel": "channel",
+    "order": "order_ref",
+    "detail": "detail",
+}
+
+
 @router.get("")
 @needs("inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust")
 def activity(
@@ -205,11 +217,13 @@ def activity(
     channel: Optional[str] = Query(None, max_length=20),
     date_from: str = Query("", max_length=10),
     date_to: str = Query("", max_length=10),
+    sort: str = Query("date", max_length=12),
+    dir: str = Query("desc", max_length=4),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """Newest first. q matches the EIO number, the channel's own order number, or the employee's email.
+    """Newest first unless sort / dir say otherwise. q matches the EIO number, the channel's own order number, or the employee's email.
     date_from / date_to (YYYY-MM-DD, both days included) keep only what happened between them."""
     if action and action not in ACTIONS:
         raise HTTPException(400, "Unknown action")
@@ -233,11 +247,13 @@ def activity(
             params[key] = d if key == "df" else d + timedelta(days=1)  # "to" includes the whole last day
             where.append(f"at {op} :{key}")
     clause = ("where " + " and ".join(where)) if where else ""
+    col = _ACTIVITY_SORTS.get(sort, _ACTIVITY_SORTS["date"])
+    direction = "asc" if dir == "asc" else "desc"
     total = db.execute(text(f"select count(*) from order_activity {clause}"), params).scalar() or 0
     rows = db.execute(
         text(
             f"select id, at, user_email, action, channel, order_ref, eio_number, detail from order_activity {clause} "
-            "order by at desc, id desc limit :limit offset :offset"
+            f"order by {col} {direction} nulls last, at desc, id desc limit :limit offset :offset"
         ),
         params,
     ).all()
