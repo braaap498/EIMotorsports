@@ -459,12 +459,12 @@ function StockRow({
       </td>
       <td className="whitespace-nowrap px-3 py-2 font-semibold">{row.bin_location || "—"}</td>
       <td className="whitespace-nowrap px-3 py-2">
-        <EditCell value={String(row.quantity)} canEdit={canEdit} onSave={saveCount} type="number" widthCls="w-28 min-w-[7rem] shrink-0" center />
+        <EditCell value={String(row.quantity)} canEdit={canEdit} onSave={saveCount} type="number" widthCls="w-[5.5rem] min-w-[5.5rem] shrink-0" />
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-gray-700">{row.reserved}</td>
       <td className="whitespace-nowrap px-3 py-2 font-semibold">{row.available}</td>
       <td className="whitespace-nowrap px-3 py-2">
-        <EditCell value={row.reorder_point ? String(row.reorder_point) : ""} canEdit={canEdit} onSave={saveLevel} type="number" placeholder="none" widthCls="w-28 min-w-[7rem] shrink-0" />
+        <EditCell value={row.reorder_point ? String(row.reorder_point) : ""} canEdit={canEdit} onSave={saveLevel} type="number" placeholder="none" widthCls="w-[5.5rem] min-w-[5.5rem] shrink-0" />
       </td>
       {showShort && <td className="whitespace-nowrap px-3 py-2 font-semibold">{Math.max(0, (row.reorder_point ?? 0) - row.available)}</td>}
       <td className="whitespace-nowrap px-3 py-2">
