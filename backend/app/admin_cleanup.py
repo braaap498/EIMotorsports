@@ -22,6 +22,7 @@ What a merge does (and does not do):
     photo rows, custom label) keyed by eBay item id and store, so the listing can still be edited
     later. Those rows follow the part to the survivor.
   * If the kept product has no description, the fullest description among the duplicates is copied onto it (like photos).
+  * (Later) /blank-descriptions and /fill-descriptions refill kept parts whose description is blank from their live eBay listings (read only).
   * The other products are deleted, after a full snapshot is saved in part_merge_log.
   * If anything unexpected is found (an unknown table pointing at products, changed data
     since the preview, a count that doesn't add up) the merge refuses or rolls back.
@@ -885,6 +886,93 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
     except Exception as exc:  # any surprise = full rollback
         db.rollback()
         raise HTTPException(500, f"Merge failed and was rolled back; nothing changed. ({type(exc).__name__})")
+
+
+# --------------------------------------------------------------------------
+# 6. refill descriptions that a merge lost, by reading them from the live eBay listings
+#    Reads eBay only (GetItem). Nothing is ever sent to eBay. Only blank descriptions are written.
+# --------------------------------------------------------------------------
+_BLANK_DESC = "nullif(btrim(coalesce(p.description, '')), '') is null"
+_MERGED_BLANK = (
+    f"from products p where {_BLANK_DESC} "
+    "and exists (select 1 from part_merge_log l where l.survivor_product_id = p.id) "
+    "and exists (select 1 from channel_listings cl where cl.product_id = p.id)"
+)
+
+
+@router.get("/blank-descriptions")
+def blank_descriptions(db: Session = Depends(get_db)):
+    """Kept parts of earlier merges that have no description and have an eBay listing to read it from."""
+    total = db.execute(text(f"select count(*) {_MERGED_BLANK}")).scalar()
+    return {"total": total}
+
+
+class FillDescIn(BaseModel):
+    after_id: int = 0
+    limit: int = Field(5, ge=1, le=10)
+
+
+@router.post("/fill-descriptions")
+def fill_descriptions(body: FillDescIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """One batch: the next few kept parts (by id, after `after_id`) with a blank description. For each, the part's
+    eBay listings are read (the kept part's own listing first, active ones first) and the first real description is
+    cleaned and saved. The page calls this again with `next_after_id` until `done`."""
+    from app.ebay_edit import _read_item
+    from app.sanitize import clean_description
+
+    ids = [
+        r[0]
+        for r in db.execute(
+            text(f"select p.id {_MERGED_BLANK} and p.id > :a order by p.id limit :n"),
+            {"a": body.after_id, "n": body.limit},
+        ).all()
+    ]
+    results = []
+    for pid in ids:
+        listings = db.execute(
+            text(
+                "select coalesce(nullif(btrim(cl.store), ''), :main) as store, "
+                "       regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item "
+                "from channel_listings cl join products p on p.id = cl.product_id "
+                "where cl.product_id = :p "
+                "order by (regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') "
+                "          = regexp_replace(coalesce(p.ebay_item_id, ''), '[^0-9]', '', 'g')) desc, "
+                "         (lower(coalesce(cl.status, '')) = 'active') desc, cl.id limit 6"
+            ),
+            {"p": pid, "main": MAIN_STORE},
+        ).all()
+        status, why = "none", "no eBay listing had a description"
+        for lst in listings:
+            if not lst.item:
+                continue
+            try:
+                item = _read_item(db, lst.store, lst.item)
+            except HTTPException as e:
+                why = f"eBay item {lst.item}: {e.detail}"
+                continue
+            except Exception as e:  # never let one listing stop the batch
+                db.rollback()
+                why = f"eBay item {lst.item}: {type(e).__name__}"
+                continue
+            cleaned = clean_description(item.get("description"))
+            if not cleaned:
+                continue
+            done = db.execute(
+                text(
+                    "update products p set description = :d, updated_at = now() "
+                    f"where p.id = :p and {_BLANK_DESC}"
+                ),
+                {"d": cleaned, "p": pid},
+            ).rowcount
+            db.commit()
+            status, why = ("filled", f"from eBay item {lst.item}") if done else ("skipped", "it was filled in meanwhile")
+            break
+        results.append({"id": pid, "status": status, "note": why})
+    return {
+        "results": results,
+        "next_after_id": ids[-1] if ids else body.after_id,
+        "done": len(ids) < body.limit,
+    }
 
 
 # --------------------------------------------------------------------------

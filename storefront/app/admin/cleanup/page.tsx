@@ -523,6 +523,78 @@ function FitmentStep({
 
 /* -------------------------------------------------------------- the page */
 
+/* Kept parts whose description was lost by a merge: read it back from their live eBay listings (read only). */
+function FillDescriptions() {
+  const [count, setCount] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [log, setLog] = useState<{ id: number; status: string; note: string }[]>([]);
+
+  const load = useCallback(() => {
+    api<{ total: number }>("/cleanup/blank-descriptions")
+      .then((r) => setCount(r.total))
+      .catch((e) => setError(errMsg(e)));
+  }, []);
+  useEffect(load, [load]);
+
+  async function run() {
+    setBusy(true);
+    setError("");
+    setLog([]);
+    try {
+      let after = 0;
+      for (;;) {
+        const r = await api<{ results: { id: number; status: string; note: string }[]; next_after_id: number; done: boolean }>(
+          "/cleanup/fill-descriptions",
+          { method: "POST", body: { after_id: after, limit: 5 } }
+        );
+        setLog((l) => [...l, ...r.results]);
+        after = r.next_after_id;
+        if (r.done) break;
+      }
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(false);
+      load();
+    }
+  }
+
+  if (count === 0 && log.length === 0) return null;
+  const filled = log.filter((x) => x.status === "filled").length;
+  return (
+    <section className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+      <h2 className="text-lg font-semibold">Kept parts missing a description</h2>
+      <p className="text-sm text-gray-600">
+        {count ?? "…"} kept part{count === 1 ? "" : "s"} from earlier merges {count === 1 ? "has" : "have"} no description. This reads each one’s
+        description from its live eBay listing and saves it on the part. Nothing is sent to eBay, and a description that is already there is never replaced.
+      </p>
+      {error && <Notice kind="error">{error}</Notice>}
+      <button className={btnCls} disabled={busy || count === 0} onClick={run}>
+        {busy ? `Reading from eBay… (${log.length} done)` : "Fill from eBay"}
+      </button>
+      {log.length > 0 && (
+        <div className="space-y-1 text-sm">
+          <div className="font-medium">
+            {filled} filled, {log.length - filled} not filled
+          </div>
+          <ul className="max-h-60 overflow-y-auto divide-y divide-gray-100 rounded border border-gray-200">
+            {log.map((x) => (
+              <li key={x.id} className="flex flex-wrap items-center gap-2 px-2 py-1">
+                <Link href={`/admin/products/${x.id}`} className="underline">
+                  Product {x.id}
+                </Link>
+                <Badge tone={x.status === "filled" ? "green" : "amber"}>{x.status}</Badge>
+                <span className="text-gray-600">{x.note}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function PartsCleanupPage() {
   const [step, setStep] = useState<Step>("search");
 
@@ -932,6 +1004,7 @@ export default function PartsCleanupPage() {
             </>
           )}
 
+          <FillDescriptions />
           <HistoryPanel refreshKey={logKey} />
         </>
       )}
