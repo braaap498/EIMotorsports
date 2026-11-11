@@ -5,6 +5,7 @@ import ClickRow from "./ClickRow";
 import { useCallback, useEffect, useState } from "react";
 import { api, apiDownload, errMsg } from "../../lib/adminApi";
 import { Badge, Modal, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "./ui";
+import { SortTh, useSort } from "./SortHeader";
 
 type Part = {
   id: number;
@@ -19,7 +20,12 @@ type Part = {
   on_order: boolean;
   open_pos: number[];
   suggested_qty: number;
+  // The distributor parts (Edit product > Distributor parts) that make up this part. Part # and Cost above come from these.
+  pieces: { part_number: string; quantity: number; vendor: string | null; cost: number | null }[];
 };
+type PartsResp = { total: number; low_count: number; out_count: number; items: Part[] };
+type View = "all" | "low" | "out";
+type PartSort = "sku" | "part" | "partnumber" | "onhand" | "reserved" | "available" | "level" | "cost" | "po";
 type Dist = { id: number; name: string; address: string | null; email: string | null; phone: string | null; notes: string | null };
 type PoLine = {
   id: number;
@@ -101,8 +107,7 @@ type Tab = "reorder" | "history" | "issues";
 const PARTS_LIMIT = 50;
 const PO_LIMIT = 30;
 const money = (n: number) => `$${n.toFixed(2)}`;
-// One size bigger than the rest of the admin screens, so a purchase order is easy to read.
-const inp = inputCls.replace("text-sm", "text-base");
+const inp = inputCls;
 const who = (name: string | null, email: string | null) => name ?? email ?? "—";
 const KIND_LABEL: Record<Issue["kind"], string> = { short: "Short", over: "Over", not_on_po: "Over (not on PO)" };
 const KIND_TONE: Record<Issue["kind"], "amber" | "blue" | "gray"> = { short: "amber", over: "blue", not_on_po: "blue" };
@@ -154,7 +159,7 @@ export default function PurchaseOrders() {
     <button
       key={key}
       onClick={() => setTab(key)}
-      className={`whitespace-nowrap px-4 py-2 text-base font-medium ${
+      className={`whitespace-nowrap px-4 py-2 text-sm font-medium ${
         tab === key ? "border-b-2 border-black text-black" : "text-gray-500 hover:text-black"
       }`}
     >
@@ -218,11 +223,16 @@ function Reorder({
   onCreated: () => void;
   setFlash: FlashFn;
 }) {
-  const [showAll, setShowAll] = useState(false);
+  const [view, setView] = useState<View>("all");
+  const { sort, toggle } = useSort<PartSort>();
+  const onSort = (k: PartSort) => {
+    toggle(k);
+    setOffset(0);
+  };
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
   const [offset, setOffset] = useState(0);
-  const [data, setData] = useState<{ total: number; items: Part[] }>({ total: 0, items: [] });
+  const [data, setData] = useState<PartsResp>({ total: 0, low_count: 0, out_count: 0, items: [] });
   const [loaded, setLoaded] = useState(false);
   const [creating, setCreating] = useState(false);
   const [made, setMade] = useState<PoDetail | null>(null);
@@ -236,16 +246,19 @@ function Reorder({
   }, [qInput]);
 
   useEffect(() => {
-    const p = new URLSearchParams({ limit: String(PARTS_LIMIT), offset: String(offset) });
+    const p = new URLSearchParams({ limit: String(PARTS_LIMIT), offset: String(offset), view });
+    if (sort.key) {
+      p.set("sort", sort.key);
+      p.set("dir", sort.dir);
+    }
     if (q) p.set("q", q);
-    if (showAll) p.set("show_all", "true");
-    api<{ total: number; items: Part[] }>(`/purchase-orders/parts?${p}`)
+    api<PartsResp>(`/purchase-orders/parts?${p}`)
       .then((d) => {
         setData(d);
         setLoaded(true);
       })
       .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
-  }, [q, offset, showAll, partsKey, setFlash]);
+  }, [q, offset, view, sort.key, sort.dir, partsKey, setFlash]);
 
   function toggle(p: Part) {
     setSel((s) => {
@@ -257,55 +270,63 @@ function Reorder({
   }
 
   const ticked = Object.values(sel);
+  const viewBtn = (v: View, label: string) => (
+    <button
+      type="button"
+      className={`px-4 py-2 ${view === v ? "bg-black text-white" : "bg-white text-gray-700"}`}
+      onClick={() => {
+        setView(v);
+        setOffset(0);
+      }}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <div className="space-y-4">
-      <p className="text-base text-gray-600">
-        Parts that are low or out of stock. Parts with a restock level come first, biggest shortfall first. Tick the
-        parts you want to reorder, then press Create PO. Tick “Show all parts” to add any part.
+      <p className="text-sm text-gray-600">
+        Pick All, Low stock or Out of stock, the same lists as Inventory &gt; Stock. Low stock parts with the biggest shortfall come
+        first. Part # and Cost are the distributor’s part number and our cost from the distributor (Edit product &gt; Distributor
+        parts). Tick the parts you want to reorder, then press Create PO.
       </p>
 
       <div className="flex flex-wrap items-center gap-3">
+        <div className="inline-flex overflow-hidden rounded border border-gray-300 text-sm">
+          {viewBtn("all", "All")}
+          {viewBtn("low", `Low stock (${data.low_count})`)}
+          {viewBtn("out", `Out of stock (${data.out_count})`)}
+        </div>
         <ClearableInput
-          className={`${inp} w-full max-w-md`}
+          className={`${inp} w-[24rem] max-w-full`}
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}
           placeholder="Search title, SKU or part number"
         />
-        <label className="flex items-center gap-2 text-base text-gray-700">
-          <input
-            type="checkbox"
-            checked={showAll}
-            onChange={(e) => {
-              setShowAll(e.target.checked);
-              setOffset(0);
-            }}
-          />
-          Show all parts
-        </label>
         <button className={btnCls} disabled={ticked.length === 0} onClick={() => setCreating(true)}>
           Create PO{ticked.length ? ` (${ticked.length})` : ""}
         </button>
         {ticked.length > 0 && (
-          <button className="text-base underline" onClick={() => setSel({})}>
+          <button className="text-sm underline" onClick={() => setSel({})}>
             Clear ticks
           </button>
         )}
       </div>
 
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="w-full text-left text-base">
-          <thead className="bg-gray-50 text-sm uppercase text-gray-500">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
               <th className="px-3 py-2"></th>
-              <th className="px-3 py-2">Part</th>
-              <th className="px-3 py-2">Part #</th>
-              <th className="px-3 py-2">On hand</th>
-              <th className="px-3 py-2">Reserved</th>
-              <th className="px-3 py-2">Available</th>
-              <th className="px-3 py-2">Restock level</th>
-              <th className="px-3 py-2">Cost</th>
-              <th className="px-3 py-2">On a PO</th>
+              <SortTh label="SKU" k="sku" sort={sort} onSort={onSort} />
+              <SortTh label="Part" k="part" sort={sort} onSort={onSort} />
+              <SortTh label="Part #" k="partnumber" sort={sort} onSort={onSort} />
+              <SortTh label="On hand" k="onhand" sort={sort} onSort={onSort} />
+              <SortTh label="Reserved" k="reserved" sort={sort} onSort={onSort} />
+              <SortTh label="Available" k="available" sort={sort} onSort={onSort} />
+              <SortTh label="Restock level" k="level" sort={sort} onSort={onSort} />
+              <SortTh label="Our cost" k="cost" sort={sort} onSort={onSort} />
+              <SortTh label="On a PO" k="po" sort={sort} onSort={onSort} />
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -314,18 +335,33 @@ function Reorder({
                 <td className="px-3 py-2">
                   <input type="checkbox" checked={!!sel[p.id]} onChange={() => toggle(p)} aria-label={`Select ${p.sku}`} />
                 </td>
-                <td className="px-3 py-2">
+                <td className="whitespace-nowrap px-3 py-2">{p.sku}</td>
+                <td className="min-w-[14rem] px-3 py-2">
                   <div className="font-medium">{p.title}</div>
-                  <div className="text-sm text-gray-500">{p.sku}</div>
                 </td>
-                <td className="whitespace-nowrap px-3 py-2">
-                  {p.part_number ?? <span className="text-sm text-amber-700">none on file</span>}
+                <td className="px-3 py-2">
+                  {p.pieces.length > 0 ? (
+                    <div className="space-y-0.5">
+                      {p.pieces.map((pc, n) => (
+                        <div key={n} className="whitespace-nowrap">
+                          {pc.part_number}
+                          {pc.quantity > 1 && <span className="text-gray-500"> ×{pc.quantity}</span>}
+                          {pc.vendor && <span className="text-xs text-gray-500"> · {pc.vendor}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="whitespace-nowrap">{p.part_number ?? <span className="text-amber-700">none on file</span>}</span>
+                  )}
                 </td>
                 <td className="px-3 py-2">{p.on_hand}</td>
                 <td className="px-3 py-2">{p.reserved}</td>
                 <td className="px-3 py-2 font-semibold">{p.available}</td>
                 <td className="px-3 py-2">{p.reorder_point ?? "—"}</td>
-                <td className="px-3 py-2">{p.cost != null ? money(p.cost) : "—"}</td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {p.cost != null ? money(p.cost) : "—"}
+                  {p.pieces.length > 1 && <div className="text-xs text-gray-500">all pieces</div>}
+                </td>
                 <td className="whitespace-nowrap px-3 py-2">
                   {p.open_pos.length > 0 ? <Badge tone="blue">PO {p.open_pos.join(", ")}</Badge> : "—"}
                 </td>
@@ -333,8 +369,8 @@ function Reorder({
             ))}
             {loaded && data.items.length === 0 && (
               <tr>
-                <td colSpan={9} className="px-3 py-6 text-center text-gray-500">
-                  {showAll || q ? "No parts match." : "Nothing is low or out of stock."}
+                <td colSpan={10} className="px-3 py-6 text-center text-gray-500">
+                  {q || view === "all" ? "No parts match." : view === "low" ? "Nothing is low on stock." : "Nothing is out of stock."}
                 </td>
               </tr>
             )}
@@ -364,7 +400,7 @@ function Reorder({
 
       {made && (
         <Modal title={`PO ${made.po_number} created`} onClose={() => setMade(null)}>
-          <div className="space-y-4 text-base">
+          <div className="space-y-4 text-sm">
             <p>
               Purchase order <b>{made.po_number}</b> to <b>{made.vendor_name}</b> for <b>{money(made.total)}</b> is saved in
               PO history. Its parts are now marked Backordered on the Stock tab (un-tick any you don’t want shown that way).
@@ -474,7 +510,7 @@ function CreatePo({
 
   return (
     <Modal title="Create purchase order" onClose={onClose}>
-      <div className="space-y-4 text-base">
+      <div className="space-y-4 text-sm">
         {error && <Notice kind="error">{error}</Notice>}
 
         <div className="space-y-2">
@@ -506,7 +542,7 @@ function CreatePo({
 
         <div className="space-y-1">
           <div className="font-medium">Type</div>
-          <div className="flex flex-wrap gap-4 text-sm">
+          <div className="flex flex-wrap gap-4 text-xs">
             <label className="flex items-center gap-1">
               <input
                 type="radio"
@@ -532,14 +568,14 @@ function CreatePo({
               Drop ship (ships straight to a customer)
             </label>
           </div>
-          {poType === "drop_ship" && <div className="text-sm text-gray-600">Type the customer’s name and address in Ship To below. Make one PO per customer address.</div>}
+          {poType === "drop_ship" && <div className="text-xs text-gray-600">Type the customer’s name and address in Ship To below. Make one PO per customer address.</div>}
         </div>
 
         <div className="space-y-2">
           <div className="font-medium">2. Parts, quantities and cost</div>
           <div className="overflow-x-auto rounded border border-gray-200">
             <table className="w-full text-left">
-              <thead className="bg-gray-50 text-sm uppercase text-gray-500">
+              <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                 <tr>
                   <th className="px-2 py-1">Item (part #)</th>
                   <th className="px-2 py-1">Description</th>
@@ -551,7 +587,18 @@ function CreatePo({
               <tbody className="divide-y divide-gray-100">
                 {lines.map((l) => (
                   <tr key={l.part.id}>
-                    <td className="whitespace-nowrap px-2 py-1">{l.part.part_number ?? <span className="text-sm text-amber-700">none on file</span>}</td>
+                    <td className="px-2 py-1">
+                      {l.part.pieces.length > 0 ? (
+                        l.part.pieces.map((pc, n) => (
+                          <div key={n} className="whitespace-nowrap">
+                            {pc.part_number}
+                            {pc.quantity > 1 && <span className="text-gray-500"> ×{pc.quantity}</span>}
+                          </div>
+                        ))
+                      ) : (
+                        <span className="whitespace-nowrap">{l.part.part_number ?? <span className="text-xs text-amber-700">none on file</span>}</span>
+                      )}
+                    </td>
                     <td className="px-2 py-1">{l.part.title}</td>
                     <td className="px-2 py-1">
                       <input type="number" min={1} className={`${inp} w-20`} value={l.qty} onChange={(e) => edit(l.part.id, { qty: e.target.value })} />
@@ -579,13 +626,19 @@ function CreatePo({
             </table>
           </div>
           <div className="text-right font-semibold">Total {money(total)}</div>
+          {lines.some((l) => l.part.pieces.length > 0) && (
+            <p className="text-xs text-gray-500">
+              A part made of distributor parts goes on the PO one line per piece, at that distributor’s current cost. Pieces bought
+              from a different distributor are left off and reported after the PO is made.
+            </p>
+          )}
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block font-medium text-gray-700">
             <span className="mb-1 block">Ship To</span>
             <textarea className={inp} rows={4} value={shipTo} placeholder={poType === "drop_ship" ? "Customer name and address" : "Type a ship-to address"} onChange={(e) => setShipTo(e.target.value)} />
-            <span className="mt-1 flex gap-3 text-sm font-normal">
+            <span className="mt-1 flex gap-3 text-xs font-normal">
               <button type="button" className="underline" onClick={() => setShipTo("")}>
                 Clear
               </button>
@@ -615,7 +668,7 @@ function CreatePo({
           <button className={btn2Cls} disabled={busy} onClick={onClose}>
             Cancel
           </button>
-          <span className="text-sm text-gray-500">The part numbers come from each product’s manufacturer part number.</span>
+          <span className="text-xs text-gray-500">Part numbers and cost come from each product’s distributor parts.</span>
         </div>
       </div>
     </Modal>
@@ -715,8 +768,8 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
         placeholder="Search PO number, distributor, part number, SKU or description"
       />
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="w-full text-left text-base">
-          <thead className="bg-gray-50 text-sm uppercase text-gray-500">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
               <th className="px-3 py-2">PO #</th>
               <th className="px-3 py-2">Date</th>
@@ -799,18 +852,18 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
 
       {open && (
         <Modal title={`Purchase order ${open.po_number}`} onClose={() => setOpen(null)}>
-          <div className="space-y-3 text-base">
+          <div className="space-y-3 text-sm">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
-                <div className="text-sm font-semibold uppercase text-gray-500">Vendor</div>
+                <div className="text-xs font-semibold uppercase text-gray-500">Vendor</div>
                 <div className="font-medium">{open.vendor_name}</div>
                 <div className="whitespace-pre-line text-gray-600">{open.vendor_address}</div>
               </div>
               <div>
-                <div className="text-sm font-semibold uppercase text-gray-500">Ship to</div>
+                <div className="text-xs font-semibold uppercase text-gray-500">Ship to</div>
                 <div className="whitespace-pre-line text-gray-600">{open.ship_to}</div>
                 {open.po_type === "drop_ship" && <div className="mt-1"><Badge tone="blue">drop ship</Badge></div>}
-                {open.supplier_order_number && <div className="mt-1 text-sm text-gray-600">Distributor order {open.supplier_order_number}</div>}
+                {open.supplier_order_number && <div className="mt-1 text-xs text-gray-600">Distributor order {open.supplier_order_number}</div>}
               </div>
             </div>
             <div className="text-gray-600">
@@ -825,7 +878,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
             )}
             <div className="overflow-x-auto rounded border border-gray-200">
               <table className="w-full text-left">
-                <thead className="bg-gray-50 text-sm uppercase text-gray-500">
+                <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
                     <th className="px-2 py-1">Item</th>
                     <th className="px-2 py-1">Description</th>
@@ -861,7 +914,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                 </tbody>
               </table>
             </div>
-            <div className="text-right text-base font-semibold">Total {money(open.total)}</div>
+            <div className="text-right text-sm font-semibold">Total {money(open.total)}</div>
             <div className="flex flex-wrap items-center gap-2">
               {open.sent_at ? <Badge tone="green">sent {new Date(open.sent_at).toLocaleDateString()}</Badge> : <Badge tone="amber">not sent</Badge>}
               {open.status === "received" && <Badge tone="green">received in</Badge>}
@@ -871,7 +924,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                 </button>
               )}
               {open.status === "open" && !open.sent_at && (
-                <span className="text-sm text-gray-500">Mark it sent to make it appear on Inventory › Receive.</span>
+                <span className="text-xs text-gray-500">Mark it sent to make it appear on Inventory › Receive.</span>
               )}
             </div>
             <div className="flex flex-wrap gap-2">
@@ -937,7 +990,7 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
 
   return (
     <div className="space-y-4">
-      <p className="text-base text-gray-600">
+      <p className="text-sm text-gray-600">
         Every purchase order that had a problem when it was received: <strong>short</strong> (fewer than ordered and the
         rest isn’t coming) or <strong>over</strong> (more than ordered, or a part that wasn’t on the PO). A short line whose
         rest is still expected stays on its open PO and isn’t listed here. Each one shows who acknowledged it and when.
@@ -971,7 +1024,7 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
               <div className="flex flex-wrap items-center gap-3">
                 <span className="text-lg font-semibold">PO {po.po_number}</span>
                 <span className="text-gray-600">{po.vendor_name}</span>
-                <span className="text-sm text-gray-500">{new Date(po.created_at).toLocaleDateString()}</span>
+                <span className="text-xs text-gray-500">{new Date(po.created_at).toLocaleDateString()}</span>
                 {po.status === "received" && <Badge tone="green">received</Badge>}
                 {po.status === "open" && <Badge tone="amber">still receiving</Badge>}
                 {po.status === "cancelled" && <Badge tone="gray">cancelled</Badge>}
@@ -980,8 +1033,8 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
               <button className={btn2Cls} onClick={() => view(po.id)}>View PO</button>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-base">
-                <thead className="text-sm uppercase text-gray-500">
+              <table className="w-full text-left text-sm">
+                <thead className="text-xs uppercase text-gray-500">
                   <tr>
                     <th className="px-3 py-1">Problem</th>
                     <th className="px-3 py-1">Part</th>
@@ -997,7 +1050,7 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
                       <td className="whitespace-nowrap px-3 py-1"><Badge tone={KIND_TONE[i.kind]}>{KIND_LABEL[i.kind]}</Badge></td>
                       <td className="px-3 py-1">
                         <div>{i.description ?? "—"}</div>
-                        <div className="text-sm text-gray-500">{[i.item, i.sku].filter(Boolean).join(" · ")}</div>
+                        <div className="text-xs text-gray-500">{[i.item, i.sku].filter(Boolean).join(" · ")}</div>
                       </td>
                       <td className="px-3 py-1">{i.expected_qty}</td>
                       <td className="px-3 py-1">{i.received_qty}</td>
@@ -1006,8 +1059,8 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
                       </td>
                       <td className="px-3 py-1">
                         <div>{who(i.acknowledged_by_name, i.acknowledged_by)}</div>
-                        <div className="text-sm text-gray-500">{new Date(i.acknowledged_at).toLocaleString()}</div>
-                        {i.note && <div className="text-sm text-gray-600">{i.note}</div>}
+                        <div className="text-xs text-gray-500">{new Date(i.acknowledged_at).toLocaleString()}</div>
+                        {i.note && <div className="text-xs text-gray-600">{i.note}</div>}
                       </td>
                     </tr>
                   ))}
@@ -1026,13 +1079,13 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
 
       {open && (
         <Modal title={`Purchase order ${open.po_number}`} onClose={() => setOpen(null)}>
-          <div className="space-y-3 text-base">
+          <div className="space-y-3 text-sm">
             <div className="text-gray-600">
               {open.vendor_name} · dated {new Date(open.date + "T12:00:00").toLocaleDateString()} · made by {who(open.created_by_name, open.created_by)}
             </div>
             <div className="overflow-x-auto rounded border border-gray-200">
               <table className="w-full text-left">
-                <thead className="bg-gray-50 text-sm uppercase text-gray-500">
+                <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                   <tr>
                     <th className="px-2 py-1">Item</th>
                     <th className="px-2 py-1">Description</th>
@@ -1189,7 +1242,7 @@ function EditPo({
 
   return (
     <Modal title={`Edit purchase order ${po.po_number}`} onClose={onClose}>
-      <div className="space-y-4 text-base">
+      <div className="space-y-4 text-sm">
         {error && <Notice kind="error">{error}</Notice>}
 
         {sent && (
@@ -1206,12 +1259,12 @@ function EditPo({
             <div className="flex items-center gap-2">
               <input type="number" min={1} className={`${inp} w-32`} value={number} onChange={(e) => setNumber(e.target.value)} />
               {defaults && (
-                <button type="button" className="whitespace-nowrap text-base underline" onClick={() => setNumber(String(defaults.next_po_number))}>
+                <button type="button" className="whitespace-nowrap text-sm underline" onClick={() => setNumber(String(defaults.next_po_number))}>
                   Use the next unused ({defaults.next_po_number})
                 </button>
               )}
             </div>
-            {numberChanged && <span className="mt-1 block text-base font-normal text-amber-700">Was {po.po_number}. It must not be used by another PO.</span>}
+            {numberChanged && <span className="mt-1 block text-sm font-normal text-amber-700">Was {po.po_number}. It must not be used by another PO.</span>}
           </label>
           <label className="block font-medium text-gray-700">
             <span className="mb-1 block">Distributor</span>
@@ -1230,7 +1283,7 @@ function EditPo({
           <div className="font-medium">Parts, quantities and cost</div>
           <div className="overflow-x-auto rounded border border-gray-200">
             <table className="w-full text-left">
-              <thead className="bg-gray-50 text-base uppercase text-gray-500">
+              <thead className="bg-gray-50 text-sm uppercase text-gray-500">
                 <tr>
                   <th className="px-2 py-1">Item (part #)</th>
                   <th className="px-2 py-1">Description</th>
@@ -1242,7 +1295,7 @@ function EditPo({
               <tbody className="divide-y divide-gray-100">
                 {lines.map((l, i) => (
                   <tr key={l.product_id}>
-                    <td className="whitespace-nowrap px-2 py-1">{l.item ?? <span className="text-base text-amber-700">none on file</span>}</td>
+                    <td className="whitespace-nowrap px-2 py-1">{l.item ?? <span className="text-sm text-amber-700">none on file</span>}</td>
                     <td className="px-2 py-1">
                       <input className={inp} value={l.description} maxLength={250} onChange={(e) => patch(i, { description: e.target.value })} />
                     </td>
@@ -1265,15 +1318,15 @@ function EditPo({
                     <td className="px-2 py-1">{l.description}</td>
                     <td className="px-2 py-1">{l.quantity}</td>
                     <td className="px-2 py-1">{money(l.rate)}</td>
-                    <td className="whitespace-nowrap px-2 py-1 text-base">received (locked)</td>
+                    <td className="whitespace-nowrap px-2 py-1 text-sm">received (locked)</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           <div className="text-right font-semibold">Total {money(total)}</div>
-          <p className="text-base text-gray-500">
-            Cost is what you pay the distributor. It starts from the product’s cost and is never shown to customers.
+          <p className="text-sm text-gray-500">
+            Cost is what you pay the distributor. A part added here starts from its distributor part cost (the product’s own cost if it has none) and is never shown to customers.
           </p>
         </div>
 
@@ -1285,7 +1338,7 @@ function EditPo({
               {found.map((p) => (
                 <li key={p.id} className="flex items-center justify-between gap-3 px-2 py-1">
                   <span>
-                    {p.title} <span className="text-base text-gray-500">{p.sku}{p.part_number ? ` · ${p.part_number}` : ""}</span>
+                    {p.title} <span className="text-sm text-gray-500">{p.sku}{p.part_number ? ` · ${p.part_number}` : ""}</span>
                   </span>
                   <button className={btn2Cls} onClick={() => addPart(p)}>Add</button>
                 </li>
@@ -1298,7 +1351,7 @@ function EditPo({
           <label className="block font-medium text-gray-700">
             <span className="mb-1 block">Ship To</span>
             <textarea className={inp} rows={4} value={shipTo} placeholder="Type a ship-to address" onChange={(e) => setShipTo(e.target.value)} />
-            <span className="mt-1 flex gap-3 text-base font-normal">
+            <span className="mt-1 flex gap-3 text-sm font-normal">
               <button type="button" className="underline" onClick={() => setShipTo("")}>
                 Clear
               </button>
