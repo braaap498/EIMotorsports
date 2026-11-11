@@ -21,11 +21,11 @@ export default function HistoryPanel({ active }: { active: boolean }) {
   const [view, setView] = useState<"orders" | "stock">("orders");
   return (
     <div className="space-y-4">
-      <div className="flex gap-2">
-        <button className={view === "orders" ? "rounded bg-black px-3 py-1.5 text-sm font-semibold text-white" : btn2Cls} onClick={() => setView("orders")}>
+      <div className="inline-flex overflow-hidden rounded border border-gray-300 text-sm">
+        <button className={`px-4 py-2 ${view === "orders" ? "bg-black text-white" : "bg-white text-gray-700"}`} onClick={() => setView("orders")}>
           Order activity
         </button>
-        <button className={view === "stock" ? "rounded bg-black px-3 py-1.5 text-sm font-semibold text-white" : btn2Cls} onClick={() => setView("stock")}>
+        <button className={`px-4 py-2 ${view === "stock" ? "bg-black text-white" : "bg-white text-gray-700"}`} onClick={() => setView("stock")}>
           Receiving and shipping
         </button>
       </div>
@@ -66,7 +66,7 @@ function StockHistory({ active }: { active: boolean }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-end gap-3">
         <select className={`${inputCls} w-48`} value={kind} onChange={(e) => setKind(e.target.value)}>
           <option value="">Receiving and shipping</option>
           <option value="receive">Receiving only</option>

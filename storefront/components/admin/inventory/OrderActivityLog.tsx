@@ -80,10 +80,10 @@ export default function OrderActivityLog({ active }: { active: boolean }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-end gap-3">
         <input
           className={`${inputCls} min-w-[20rem] flex-1`}
-          placeholder="Search EIO, eBay, Amazon or website order number"
+          placeholder="Search EIO, website or sales channel order number"
           value={q}
           onChange={(e) => {
             setQ(e.target.value);
