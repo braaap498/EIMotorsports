@@ -523,7 +523,7 @@ function FitmentStep({
 
 /* -------------------------------------------------------------- the page */
 
-/* Kept parts whose description was lost by a merge: read it back from their live eBay listings (read only). */
+/* Products with no description: read it from their live eBay listings (read only). */
 function FillDescriptions() {
   const [count, setCount] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -564,10 +564,10 @@ function FillDescriptions() {
   const filled = log.filter((x) => x.status === "filled").length;
   return (
     <section className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
-      <h2 className="text-lg font-semibold">Kept parts missing a description</h2>
+      <h2 className="text-lg font-semibold">Products missing a description</h2>
       <p className="text-sm text-gray-600">
-        {count ?? "…"} kept part{count === 1 ? "" : "s"} from earlier merges {count === 1 ? "has" : "have"} no description. This reads each one’s
-        description from its live eBay listing and saves it on the part. Nothing is sent to eBay, and a description that is already there is never replaced.
+        {count ?? "…"} product{count === 1 ? "" : "s"} with an eBay listing {count === 1 ? "has" : "have"} no description (kept parts of merges, and products made from eBay listings). This reads each one’s
+        description from its live eBay listing and saves it on the product. It can take a while for a long list; keep this page open. Nothing is sent to eBay, and a description that is already there is never replaced.
       </p>
       {error && <Notice kind="error">{error}</Notice>}
       <button className={btnCls} disabled={busy || count === 0} onClick={run}>

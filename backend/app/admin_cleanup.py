@@ -22,7 +22,7 @@ What a merge does (and does not do):
     photo rows, custom label) keyed by eBay item id and store, so the listing can still be edited
     later. Those rows follow the part to the survivor.
   * If the kept product has no description, the fullest description among the duplicates is copied onto it (like photos).
-  * (Later) /blank-descriptions and /fill-descriptions refill kept parts whose description is blank from their live eBay listings (read only).
+  * (Later) /blank-descriptions and /fill-descriptions refill blank product descriptions from their live eBay listings (read only).
   * The other products are deleted, after a full snapshot is saved in part_merge_log.
   * If anything unexpected is found (an unknown table pointing at products, changed data
     since the preview, a count that doesn't add up) the merge refuses or rolls back.
@@ -889,20 +889,19 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
 
 
 # --------------------------------------------------------------------------
-# 6. refill descriptions that a merge lost, by reading them from the live eBay listings
+# 6. refill blank descriptions (merged parts, and products made from eBay listings) from the live eBay listings
 #    Reads eBay only (GetItem). Nothing is ever sent to eBay. Only blank descriptions are written.
 # --------------------------------------------------------------------------
 _BLANK_DESC = "nullif(btrim(coalesce(p.description, '')), '') is null"
 _MERGED_BLANK = (
     f"from products p where {_BLANK_DESC} "
-    "and exists (select 1 from part_merge_log l where l.survivor_product_id = p.id) "
     "and exists (select 1 from channel_listings cl where cl.product_id = p.id)"
-)
+)  # every product with an eBay listing and no description (merged or not)
 
 
 @router.get("/blank-descriptions")
 def blank_descriptions(db: Session = Depends(get_db)):
-    """Kept parts of earlier merges that have no description and have an eBay listing to read it from."""
+    """Products that have no description and have an eBay listing to read it from."""
     total = db.execute(text(f"select count(*) {_MERGED_BLANK}")).scalar()
     return {"total": total}
 
@@ -914,7 +913,7 @@ class FillDescIn(BaseModel):
 
 @router.post("/fill-descriptions")
 def fill_descriptions(body: FillDescIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
-    """One batch: the next few kept parts (by id, after `after_id`) with a blank description. For each, the part's
+    """One batch: the next few products (by id, after `after_id`) with a blank description. For each, the part's
     eBay listings are read (the kept part's own listing first, active ones first) and the first real description is
     cleaned and saved. The page calls this again with `next_after_id` until `done`."""
     from app.ebay_edit import _read_item

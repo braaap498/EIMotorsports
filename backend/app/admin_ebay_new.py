@@ -475,6 +475,20 @@ def create_and_link(body: CreateIn, db: Session = Depends(get_db), user: AuthUse
         db.rollback()
         raise
 
+    # The new product starts with the listing's description from eBay (read only; if eBay can't be reached the
+    # product is still made, and Parts clean-up > "Fill from eBay" can fill it later).
+    try:
+        from app.ebay_edit import _read_item
+        from app.sanitize import clean_description
+
+        desc = clean_description(_read_item(db, store_key, item_id).get("description"))
+        if desc:
+            db.execute(text("update products set description = :d where id = :p and description is null"), {"d": desc, "p": new_id})
+            db.commit()
+    except Exception:
+        db.rollback()
+        log.warning("Could not read the description of eBay item %s for the new product", item_id)
+
     log.info("eBay item %s (store %s): new product %s created and linked by %s", item_id, store_key, new_id, user.email or user.user_id)
     return {
         "ok": True, "created": True, "item_id": item_id, "sku": f"{SKU_PREFIX}{item_id}", "store": store_key,
