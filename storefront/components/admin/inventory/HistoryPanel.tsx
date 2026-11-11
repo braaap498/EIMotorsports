@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
-import { Badge, Notice, btn2Cls, inputCls } from "../ui";
+import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
 import OrderActivityLog from "./OrderActivityLog";
 
 type Batch = {
@@ -16,9 +16,9 @@ type Batch = {
   lines: { product_id: number; sku: string | null; title: string | null; quantity: number }[];
 };
 
-/** Who received or shipped what, and when. */
+/** Who received or shipped what, who changed warehouse stock by hand, and order activity. */
 export default function HistoryPanel({ active }: { active: boolean }) {
-  const [view, setView] = useState<"orders" | "stock">("orders");
+  const [view, setView] = useState<"orders" | "stock" | "warehouse">("orders");
   return (
     <div className="space-y-4">
       <div className="inline-flex overflow-hidden rounded border border-gray-300 text-sm">
@@ -28,12 +28,18 @@ export default function HistoryPanel({ active }: { active: boolean }) {
         <button className={`px-4 py-2 ${view === "stock" ? "bg-black text-white" : "bg-white text-gray-700"}`} onClick={() => setView("stock")}>
           Receiving and shipping
         </button>
+        <button className={`px-4 py-2 ${view === "warehouse" ? "bg-black text-white" : "bg-white text-gray-700"}`} onClick={() => setView("warehouse")}>
+          Warehouse changes
+        </button>
       </div>
       <div className={view === "orders" ? "" : "hidden"}>
         <OrderActivityLog active={active && view === "orders"} />
       </div>
       <div className={view === "stock" ? "" : "hidden"}>
         <StockHistory active={active && view === "stock"} />
+      </div>
+      <div className={view === "warehouse" ? "" : "hidden"}>
+        <WarehouseChanges active={active && view === "warehouse"} />
       </div>
     </div>
   );
@@ -121,6 +127,180 @@ function StockHistory({ active }: { active: boolean }) {
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+type Change = {
+  id: number;
+  at: string;
+  user_email: string | null;
+  warehouse_id: number | null;
+  warehouse_name: string | null;
+  product_id: number | null;
+  sku: string | null;
+  title: string | null;
+  action: "added" | "count" | "removed" | "bin" | "restock";
+  old_value: string | null;
+  new_value: string | null;
+};
+const CHANGE_LIMIT = 50;
+
+function describe(c: Change): string {
+  const none = (v: string | null) => (v === null || v === "" ? "none" : v);
+  switch (c.action) {
+    case "added":
+      return `Added to the warehouse with ${c.new_value}`;
+    case "removed":
+      return `Removed from the warehouse (had ${c.old_value})`;
+    case "count": {
+      const d = Number(c.new_value) - Number(c.old_value);
+      return `Count ${c.old_value} → ${c.new_value} (${d > 0 ? "+" : ""}${d})`;
+    }
+    case "bin":
+      return `Bin/Shelf ${none(c.old_value)} → ${none(c.new_value)}`;
+    case "restock":
+      return `Restock level ${none(c.old_value)} → ${none(c.new_value)}`;
+  }
+}
+
+/** Manual stock changes in each warehouse: who made them, when, and where. Automatic picks are not listed here. */
+function WarehouseChanges({ active }: { active: boolean }) {
+  const [whs, setWhs] = useState<{ id: number; name: string }[]>([]);
+  const [wh, setWh] = useState("");
+  const [action, setAction] = useState("");
+  const [qInput, setQInput] = useState("");
+  const [q, setQ] = useState("");
+  const [fFrom, setFFrom] = useState("");
+  const [fTo, setFTo] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [items, setItems] = useState<Change[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!active) return;
+    api<{ items: { id: number; name: string }[] }>("/inventory/warehouses")
+      .then((r) => setWhs(r.items))
+      .catch(() => {});
+  }, [active]);
+
+  // Wait for a pause in typing before searching.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQ(qInput.trim());
+      setOffset(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [qInput]);
+
+  const load = useCallback(() => {
+    const p = new URLSearchParams({ limit: String(CHANGE_LIMIT), offset: String(offset) });
+    if (wh) p.set("warehouse_id", wh);
+    if (action) p.set("action", action);
+    if (q) p.set("q", q);
+    if (fFrom) p.set("date_from", fFrom);
+    if (fTo) p.set("date_to", fTo);
+    api<{ total: number; items: Change[] }>(`/inventory/warehouses/changes?${p.toString()}`)
+      .then((r) => {
+        setItems(r.items);
+        setTotal(r.total);
+        setError("");
+        setLoaded(true);
+      })
+      .catch((e) => setError(errMsg(e)));
+  }, [wh, action, q, fFrom, fTo, offset]);
+  useEffect(() => {
+    if (active) load();
+  }, [active, load]);
+
+  const reset = () => setOffset(0);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <select className={`${inputCls} !w-56`} value={wh} onChange={(e) => { setWh(e.target.value); reset(); }}>
+          <option value="">All warehouses</option>
+          {whs.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+            </option>
+          ))}
+        </select>
+        <select className={`${inputCls} !w-52`} value={action} onChange={(e) => { setAction(e.target.value); reset(); }}>
+          <option value="">All changes</option>
+          <option value="count">Count changes</option>
+          <option value="added">Parts added</option>
+          <option value="removed">Parts removed</option>
+          <option value="bin">Bin/Shelf changes</option>
+          <option value="restock">Restock level changes</option>
+        </select>
+        <input className={`${inputCls} !w-64`} placeholder="Search SKU, part or person" value={qInput} onChange={(e) => setQInput(e.target.value)} />
+        <label className="text-xs text-gray-500">
+          <span className="mb-1 block">From</span>
+          <input type="date" className={`${inputCls} !w-auto`} value={fFrom} max={fTo || undefined} onChange={(e) => { setFFrom(e.target.value); reset(); }} />
+        </label>
+        <label className="text-xs text-gray-500">
+          <span className="mb-1 block">To</span>
+          <input type="date" className={`${inputCls} !w-auto`} value={fTo} min={fFrom || undefined} onChange={(e) => { setFTo(e.target.value); reset(); }} />
+        </label>
+        {(fFrom || fTo) && (
+          <button type="button" className={btn2Cls} onClick={() => { setFFrom(""); setFTo(""); reset(); }}>
+            Clear dates
+          </button>
+        )}
+        <button className={btn2Cls} onClick={load}>
+          Refresh
+        </button>
+      </div>
+      {error && <Notice kind="error">{error}</Notice>}
+      <Pager total={total} limit={CHANGE_LIMIT} offset={offset} onChange={setOffset} />
+      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+        <table className="w-full min-w-[70rem] table-fixed text-left text-sm">
+          <colgroup>
+            <col className="w-[9rem]" />
+            <col className="w-[16rem]" />
+            <col className="w-[12rem]" />
+            <col />
+            <col className="w-[20rem]" />
+          </colgroup>
+          <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+            <tr>
+              <th className="whitespace-nowrap px-3 py-2">When</th>
+              <th className="whitespace-nowrap px-3 py-2">Who</th>
+              <th className="whitespace-nowrap px-3 py-2">Warehouse</th>
+              <th className="whitespace-nowrap px-3 py-2">Part</th>
+              <th className="whitespace-nowrap px-3 py-2">Change</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {items.map((c) => (
+              <tr key={c.id}>
+                <td className="whitespace-nowrap px-3 py-2">
+                  <div>{new Date(c.at).toLocaleDateString()}</div>
+                  <div className="text-gray-500">{new Date(c.at).toLocaleTimeString()}</div>
+                </td>
+                <td className="truncate px-3 py-2" title={c.user_email ?? ""}>{c.user_email ?? "—"}</td>
+                <td className="truncate px-3 py-2" title={c.warehouse_name ?? ""}>{c.warehouse_name ?? "—"}</td>
+                <td className="px-3 py-2">
+                  <div>{c.sku ?? "—"}</div>
+                  <div className="truncate text-gray-500" title={c.title ?? ""}>{c.title}</div>
+                </td>
+                <td className="px-3 py-2">{describe(c)}</td>
+              </tr>
+            ))}
+            {loaded && items.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-3 py-6 text-center text-gray-500">
+                  Nothing recorded for these filters yet.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <Pager total={total} limit={CHANGE_LIMIT} offset={offset} onChange={setOffset} />
     </div>
   );
 }
