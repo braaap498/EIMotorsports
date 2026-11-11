@@ -2,9 +2,9 @@
 
   POST /inventory/warehouses                       add a warehouse (name, address, manager, phone, email, notes)
   PUT  /inventory/warehouses/{id}/details          change a warehouse's name and details
+  GET  /inventory/warehouses/all/stock             every part with its total across warehouses (read-only)
   GET  /inventory/warehouses/{id}/stock            the parts a warehouse holds, with view (all/low/out), status and search
   PUT  /inventory/warehouses/{id}/stock/{product}  set how many of a part a warehouse holds (adds the part if new; 0 keeps it)
-  PUT  /inventory/warehouses/{id}/stock/{product}/bin            set the bin/shelf of a part in this warehouse
   PUT  /inventory/warehouses/{id}/stock/{product}/restock-level  set the restock level of a part in this warehouse
   DELETE /inventory/warehouses/{id}/stock/{product}              take a part out of a (non-main) warehouse
   GET  /inventory/warehouses/changes               who changed what, when and where (manual changes only)
@@ -90,7 +90,6 @@ def ensure_tables() -> None:
             )
         )
         db.execute(text("alter table warehouse_stock add column if not exists updated_by text"))
-        db.execute(text("alter table warehouse_stock add column if not exists bin_location text"))
         db.execute(text("alter table warehouse_stock add column if not exists reorder_point integer"))
         db.execute(
             text(
@@ -279,7 +278,7 @@ _OTHERS = "(select product_id, sum(quantity) as s from warehouse_stock group by 
 
 
 def log_change(db: Session, who: Optional[str], w, product_id: int, action: str, old, new) -> None:
-    """Write one line to the warehouse change log (inside the caller's transaction). action: added, count, removed, bin, restock."""
+    """Write one line to the warehouse change log (inside the caller's transaction). action: added, count, removed, restock."""
     p = db.execute(text("select sku_display as sku, title from products where id = :p"), {"p": product_id}).first()
     db.execute(
         text(
@@ -300,9 +299,10 @@ def log_change(db: Session, who: Optional[str], w, product_id: int, action: str,
     )
 
 
-def _stock_cte(is_main: bool, status: str, words: int) -> str:
-    """One row per part this warehouse lists, with its count, bin, restock level, and its share of the part's reservations."""
-    binx = "p.bin_location" if is_main else "s.bin_location"
+def _stock_cte(kind: str, status: str, words: int) -> str:
+    """kind: "main", "other" or "all". One row per part this warehouse lists (or every part, for "all"), with its count, bin, restock level, and its share of the part's reservations."""
+    is_main = kind == "main"
+    binx = "p.bin_location"  # the bin/shelf comes from the Barcodes and labels page and belongs to the part
     conds = []
     if status == "active":
         conds.append("coalesce(p.is_active, true)")
@@ -317,7 +317,13 @@ def _stock_cte(is_main: bool, status: str, words: int) -> str:
         )
     extra = (" and " + " and ".join(conds)) if conds else ""
     main_qty = "greatest(0, coalesce(p.quantity_on_hand, 0) - coalesce(o.s, 0))"
-    if is_main:
+    if kind == "all":
+        base = (
+            f"select p.id, p.sku_display as sku, p.title, coalesce(p.is_active, true) as is_active, coalesce(p.quantity_on_hand, 0) as qty, "
+            f"       p.bin_location as bin_location, p.reorder_point as reorder_point, {set_aside_sql('p')} as set_aside, 0 as before_qty "
+            f"from products p where true{extra}"
+        )
+    elif is_main:
         base = (
             f"select p.id, p.sku_display as sku, p.title, coalesce(p.is_active, true) as is_active, {main_qty} as qty, "
             f"       p.bin_location as bin_location, p.reorder_point as reorder_point, {set_aside_sql('p')} as set_aside, 0 as before_qty "
@@ -327,7 +333,7 @@ def _stock_cte(is_main: bool, status: str, words: int) -> str:
     else:
         base = (
             f"select p.id, p.sku_display as sku, p.title, coalesce(p.is_active, true) as is_active, s.quantity as qty, "
-            f"       s.bin_location as bin_location, s.reorder_point as reorder_point, {set_aside_sql('p')} as set_aside, "
+            f"       p.bin_location as bin_location, s.reorder_point as reorder_point, {set_aside_sql('p')} as set_aside, "
             f"       {main_qty} + coalesce((select sum(x.quantity) from warehouse_stock x where x.product_id = p.id and x.warehouse_id < :w), 0) as before_qty "
             f"from warehouse_stock s join products p on p.id = s.product_id left join {_OTHERS} o on o.product_id = p.id "
             f"where s.warehouse_id = :w{extra}"
@@ -347,7 +353,7 @@ _OUT = "(wr.available <= 0)"
 @needs(*ANY_INVENTORY)
 def stock_changes(
     warehouse_id: Optional[int] = Query(None),
-    action: Optional[str] = Query(None, pattern="^(added|count|removed|bin|restock)$"),
+    action: Optional[str] = Query(None, pattern="^(added|count|removed|restock)$"),
     q: Optional[str] = Query(None, max_length=100),
     date_from: str = Query("", max_length=10),
     date_to: str = Query("", max_length=10),
@@ -388,19 +394,7 @@ def stock_changes(
     return {"total": int(total or 0), "items": [dict(r._mapping) for r in rows]}
 
 
-@router.get("/{warehouse_id}/stock")
-@needs(*ANY_INVENTORY)
-def warehouse_stock_list(
-    warehouse_id: int,
-    q: Optional[str] = Query(None, max_length=100),
-    view: str = Query("all", pattern="^(all|low|out)$"),
-    status: str = Query("active", pattern="^(all|active|inactive)$"),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    _ensure_warehouses(db)
-    w = _warehouse(db, warehouse_id)
+def _stock_response(db: Session, kind: str, warehouse_id: int, q, view: str, status: str, limit: int, offset: int) -> dict:
     params: dict = {"w": warehouse_id, "limit": limit, "offset": offset}
     words = [x for x in (q or "").split() if x][:6]
     for i, word in enumerate(words):
@@ -409,12 +403,12 @@ def warehouse_stock_list(
 
     counts = db.execute(
         text(
-            _stock_cte(bool(w.is_default), status, 0)
+            _stock_cte(kind, status, 0)
             + f"select count(*) filter (where {_LOW}) as low_count, count(*) filter (where {_OUT}) as out_count from wr"
         ),
         {"w": warehouse_id},
     ).first()
-    cte = _stock_cte(bool(w.is_default), status, len(words))
+    cte = _stock_cte(kind, status, len(words))
     total = db.execute(text(cte + f"select count(*) from wr where {cond}"), params).scalar()
     order = "(wr.reorder_point - wr.available) desc, wr.title, wr.id" if view == "low" else "wr.title, wr.id"
     rows = db.execute(
@@ -433,9 +427,40 @@ def warehouse_stock_list(
         "total": int(total or 0),
         "low_count": int(counts.low_count) if counts else 0,
         "out_count": int(counts.out_count) if counts else 0,
-        "is_main": bool(w.is_default),
+        "is_main": kind == "main",
         "items": [dict(r._mapping) for r in rows],
     }
+
+
+@router.get("/all/stock")
+@needs(*ANY_INVENTORY)
+def all_warehouses_stock(
+    q: Optional[str] = Query(None, max_length=100),
+    view: str = Query("all", pattern="^(all|low|out)$"),
+    status: str = Query("active", pattern="^(all|active|inactive)$"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Every part with its total across all warehouses (read-only; counts are changed inside a warehouse)."""
+    _ensure_warehouses(db)
+    return _stock_response(db, "all", 0, q, view, status, limit, offset)
+
+
+@router.get("/{warehouse_id}/stock")
+@needs(*ANY_INVENTORY)
+def warehouse_stock_list(
+    warehouse_id: int,
+    q: Optional[str] = Query(None, max_length=100),
+    view: str = Query("all", pattern="^(all|low|out)$"),
+    status: str = Query("active", pattern="^(all|active|inactive)$"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    _ensure_warehouses(db)
+    w = _warehouse(db, warehouse_id)
+    return _stock_response(db, "main" if w.is_default else "other", warehouse_id, q, view, status, limit, offset)
 
 
 class QtyIn(BaseModel):
@@ -555,47 +580,18 @@ def remove_warehouse_part(warehouse_id: int, product_id: int, db: Session = Depe
         raise HTTPException(500, f"That did not work and nothing was changed. ({type(exc).__name__})")
 
 
-class BinIn(BaseModel):
-    bin_location: Optional[str] = Field(None, max_length=40)
-
-
 class LevelIn(BaseModel):
     reorder_point: Optional[int] = Field(None, ge=0, le=MAX_QTY)  # empty / 0 = no restock level
 
 
 def _lock_part(db: Session, w, product_id: int):
-    """The part's current bin and restock level in this warehouse (None if it isn't listed there)."""
+    """The part's current restock level in this warehouse (None if it isn't listed there)."""
     if w.is_default:
-        return db.execute(text("select bin_location, reorder_point from products where id = :p for update"), {"p": product_id}).first()
+        return db.execute(text("select reorder_point from products where id = :p for update"), {"p": product_id}).first()
     return db.execute(
-        text("select bin_location, reorder_point from warehouse_stock where warehouse_id = :w and product_id = :p for update"),
+        text("select reorder_point from warehouse_stock where warehouse_id = :w and product_id = :p for update"),
         {"w": w.id, "p": product_id},
     ).first()
-
-
-@router.put("/{warehouse_id}/stock/{product_id}/bin")
-@needs("inventory.adjust", "inventory.barcodes")
-def set_part_bin(warehouse_id: int, product_id: int, body: BinIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
-    _ensure_warehouses(db)
-    w = _warehouse(db, warehouse_id)
-    value = " ".join((body.bin_location or "").split()) or None
-    if value and _CONTROL.search(value):
-        raise HTTPException(400, "The bin has characters that can't be saved.")
-    cur = _lock_part(db, w, product_id)
-    if not cur:
-        db.rollback()
-        raise HTTPException(404, "That part is not in this warehouse.")
-    if (cur.bin_location or None) != value:
-        if w.is_default:
-            db.execute(text("update products set bin_location = :b, updated_at = now() where id = :p"), {"b": value, "p": product_id})
-        else:
-            db.execute(
-                text("update warehouse_stock set bin_location = :b, updated_at = now(), updated_by = :u where warehouse_id = :w and product_id = :p"),
-                {"b": value, "u": user.email, "w": warehouse_id, "p": product_id},
-            )
-        log_change(db, user.email, w, product_id, "bin", cur.bin_location, value)
-    db.commit()
-    return {"bin_location": value}
 
 
 @router.put("/{warehouse_id}/stock/{product_id}/restock-level")

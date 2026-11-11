@@ -3,7 +3,7 @@
 import ClearableInput from "../ClearableInput";
 import ClickRow from "../ClickRow";
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
 import ProductPicker, { type PickRow } from "./ProductPicker";
@@ -34,7 +34,8 @@ const LIMIT = 50;
 const isLow = (r: Row) => (r.reorder_point ?? 0) > 0 && r.available > 0 && r.available <= (r.reorder_point ?? 0);
 
 /** One warehouse's parts: counts, bin/shelf, restock levels, and its own low and out of stock lists. */
-export default function WarehouseStock({ warehouseId, name, isMain, canEdit, active }: { warehouseId: number; name: string; isMain: boolean; canEdit: boolean; active: boolean }) {
+export default function WarehouseStock({ warehouseId, name, isMain, canEdit, active }: { warehouseId: number | "all"; name: string; isMain: boolean; canEdit: boolean; active: boolean }) {
+  const isAll = warehouseId === "all";
   const [view, setView] = useState<View>("all");
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
@@ -48,6 +49,25 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
   const [qty, setQty] = useState("");
   const [busy, setBusy] = useState(false);
   const seq = useRef(0);
+
+  // Every column is as wide as its widest content seen so far and never shrinks, so nothing shifts between pages or tabs.
+  const tableRef = useRef<HTMLTableElement>(null);
+  const [colW, setColW] = useState<Record<string, number>>({});
+  useLayoutEffect(() => {
+    const ths = tableRef.current?.querySelectorAll("thead th");
+    if (!ths) return;
+    const next = { ...colW };
+    let changed = false;
+    ths.forEach((th) => {
+      const k = th.getAttribute("data-col");
+      const w = Math.ceil(th.getBoundingClientRect().width);
+      if (k && w > (next[k] ?? 0)) {
+        next[k] = w;
+        changed = true;
+      }
+    });
+    if (changed) setColW(next);
+  });
 
   // Wait for a pause in typing before searching.
   useEffect(() => {
@@ -78,7 +98,7 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
 
   async function addPart() {
     const n = parseInt(qty, 10);
-    if (!picked || !Number.isFinite(n) || n < 0) return setError("Pick a part and enter how many are in this warehouse (0 is fine).");
+    if (isAll || !picked || !Number.isFinite(n) || n < 0) return setError("Pick a part and enter how many are in this warehouse (0 is fine).");
     setBusy(true);
     setError("");
     try {
@@ -120,12 +140,13 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
       {label}
     </button>
   );
-  const cols = (view === "low" ? 9 : 8) + (isMain ? 0 : 1);
+  const hasAction = !isMain && !isAll;
+  const cols = (view === "low" ? 9 : 8) + (hasAction ? 1 : 0);
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-gray-600">
-        “On hand” is what is physically on the shelf: type the real number and press Enter (or click away) to save it. Every
+        {isAll && "Totals across every warehouse, read-only: pick a warehouse to change a count, bin or restock level. "}“On hand” is what is physically on the shelf: type the real number and press Enter (or click away) to save it. Every
         change is recorded in History with who made it. “Reserved” is promised to paid orders that haven’t been picked yet,
         taken from the main warehouse first, and “Available” is what is left to sell. Set a restock level on a part and it
         shows up under Low stock when available reaches or drops below it (and under Out of stock once none are left).
@@ -162,7 +183,7 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
         <button type="button" className={btn2Cls} onClick={load}>
           Refresh
         </button>
-        {canEdit && !isMain && (
+        {canEdit && !isMain && !isAll && (
           <button type="button" className={btn2Cls} onClick={() => setAdding((a) => !a)}>
             {adding ? "Close" : "Add part"}
           </button>
@@ -199,37 +220,29 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
       <Pager total={data.total} limit={LIMIT} offset={offset} onChange={setOffset} />
 
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        {/* fixed column widths, sized for the longest content, so nothing shifts from page to page */}
-        <table className={`w-full table-fixed text-left text-sm ${view === "low" ? "min-w-[92rem]" : "min-w-[86rem]"}`}>
+        <table ref={tableRef} className="w-max text-left text-sm">
           <colgroup>
-            <col className="w-[8rem]" />
-            <col />
-            <col className="w-[9rem]" />
-            <col className="w-[9.5rem]" />
-            <col className="w-[6rem]" />
-            <col className="w-[6.5rem]" />
-            <col className="w-[9.5rem]" />
-            {view === "low" && <col className="w-[6rem]" />}
-            <col className="w-[16rem]" />
-            {!isMain && <col className="w-[5rem]" />}
+            {["sku", "part", "bin", "onhand", "reserved", "available", "level", ...(view === "low" ? ["short"] : []), "status", ...(hasAction ? ["action"] : [])].map((k) => (
+              <col key={k} style={colW[k] ? { width: colW[k] } : undefined} />
+            ))}
           </colgroup>
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
-              <th className="whitespace-nowrap px-3 py-2">SKU</th>
-              <th className="whitespace-nowrap px-3 py-2">Part</th>
-              <th className="whitespace-nowrap px-3 py-2">Bin/Shelf</th>
-              <th className="whitespace-nowrap px-3 py-2">On hand</th>
-              <th className="whitespace-nowrap px-3 py-2">Reserved</th>
-              <th className="whitespace-nowrap px-3 py-2">Available</th>
-              <th className="whitespace-nowrap px-3 py-2">Restock level</th>
-              {view === "low" && <th className="whitespace-nowrap px-3 py-2">Short by</th>}
-              <th className="whitespace-nowrap px-3 py-2">Status</th>
-              {!isMain && <th className="px-3 py-2"></th>}
+              <th data-col="sku" className="whitespace-nowrap px-3 py-2">SKU</th>
+              <th data-col="part" className="whitespace-nowrap px-3 py-2">Part</th>
+              <th data-col="bin" className="whitespace-nowrap px-3 py-2">Bin/Shelf</th>
+              <th data-col="onhand" className="whitespace-nowrap px-3 py-2">On hand</th>
+              <th data-col="reserved" className="whitespace-nowrap px-3 py-2">Reserved</th>
+              <th data-col="available" className="whitespace-nowrap px-3 py-2">Available</th>
+              <th data-col="level" className="whitespace-nowrap px-3 py-2">Restock level</th>
+              {view === "low" && <th data-col="short" className="whitespace-nowrap px-3 py-2">Short by</th>}
+              <th data-col="status" className="whitespace-nowrap px-3 py-2">Status</th>
+              {hasAction && <th data-col="action" className="px-3 py-2"></th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {data.items.map((r) => (
-              <StockRow key={r.id} row={r} warehouseId={warehouseId} isMain={isMain} canEdit={canEdit} busy={busy} showShort={view === "low"} onChanged={load} onError={setError} onRemove={() => void removePart(r)} />
+              <StockRow key={r.id} row={r} warehouseId={warehouseId} hasAction={hasAction} canEdit={canEdit} busy={busy} showShort={view === "low"} onChanged={load} onError={setError} onRemove={() => void removePart(r)} />
             ))}
             {loaded && data.items.length === 0 && (
               <tr>
@@ -238,7 +251,7 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
                     ? "Nothing is at or below its restock level."
                     : view === "out"
                     ? "Nothing is out of stock."
-                    : isMain
+                    : isMain || isAll
                     ? "No parts match."
                     : "No parts in this warehouse yet."}
                 </td>
@@ -325,7 +338,7 @@ function EditCell({
 function StockRow({
   row,
   warehouseId,
-  isMain,
+  hasAction,
   canEdit,
   busy,
   showShort,
@@ -334,8 +347,8 @@ function StockRow({
   onRemove,
 }: {
   row: Row;
-  warehouseId: number;
-  isMain: boolean;
+  warehouseId: number | "all";
+  hasAction: boolean;
   canEdit: boolean;
   busy: boolean;
   showShort: boolean;
@@ -372,7 +385,6 @@ function StockRow({
     }
     return put("/restock-level", { reorder_point: n === 0 ? null : n });
   };
-  const saveBin = (t: string) => put("/bin", { bin_location: t || null });
 
   const low = isLow(row);
   const out = row.available <= 0;
@@ -425,24 +437,22 @@ function StockRow({
   return (
     <ClickRow href={`/admin/products/${row.id}`}>
       <td className="whitespace-nowrap px-3 py-2">{row.sku}</td>
-      <td className="px-3 py-2">
+      <td className="min-w-[14rem] max-w-[34rem] px-3 py-2">
         <Link href={`/admin/products/${row.id}`} className="font-medium hover:underline">
           {row.title}
         </Link>
         {!row.is_active && <div className="text-gray-500">inactive</div>}
       </td>
-      <td className="px-3 py-2 font-semibold">
-        <EditCell value={row.bin_location ?? ""} canEdit={canEdit} onSave={saveBin} type="text" placeholder="none" widthCls="w-full" />
-      </td>
+      <td className="whitespace-nowrap px-3 py-2 font-semibold">{row.bin_location || "—"}</td>
       <td className="whitespace-nowrap px-3 py-2">
         <EditCell value={String(row.quantity)} canEdit={canEdit} onSave={saveCount} type="number" widthCls="w-24" center />
       </td>
-      <td className="px-3 py-2 text-gray-700">{row.reserved}</td>
-      <td className="px-3 py-2 font-semibold">{row.available}</td>
+      <td className="whitespace-nowrap px-3 py-2 text-gray-700">{row.reserved}</td>
+      <td className="whitespace-nowrap px-3 py-2 font-semibold">{row.available}</td>
       <td className="whitespace-nowrap px-3 py-2">
         <EditCell value={row.reorder_point ? String(row.reorder_point) : ""} canEdit={canEdit} onSave={saveLevel} type="number" placeholder="none" widthCls="w-24" />
       </td>
-      {showShort && <td className="px-3 py-2 font-semibold">{Math.max(0, (row.reorder_point ?? 0) - row.available)}</td>}
+      {showShort && <td className="whitespace-nowrap px-3 py-2 font-semibold">{Math.max(0, (row.reorder_point ?? 0) - row.available)}</td>}
       <td className="whitespace-nowrap px-3 py-2">
         <span className="flex flex-wrap items-center gap-1 whitespace-nowrap">
           {row.oversold && <span className="rounded bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-800">OVERSOLD</span>}
@@ -466,7 +476,7 @@ function StockRow({
         )}
         {!canEdit && onOrder && row.expected_date && <div className="mt-1 text-xs text-gray-600">Expected {row.expected_date}</div>}
       </td>
-      {!isMain && (
+      {hasAction && (
         <td className="whitespace-nowrap px-3 py-2">
           {canEdit && (
             <button type="button" className="text-xs text-red-700 underline disabled:opacity-40" disabled={busy} onClick={onRemove}>

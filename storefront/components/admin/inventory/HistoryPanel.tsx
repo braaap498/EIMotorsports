@@ -140,7 +140,7 @@ type Change = {
   product_id: number | null;
   sku: string | null;
   title: string | null;
-  action: "added" | "count" | "removed" | "bin" | "restock";
+  action: "added" | "count" | "removed" | "restock";
   old_value: string | null;
   new_value: string | null;
 };
@@ -157,8 +157,6 @@ function describe(c: Change): string {
       const d = Number(c.new_value) - Number(c.old_value);
       return `Count ${c.old_value} → ${c.new_value} (${d > 0 ? "+" : ""}${d})`;
     }
-    case "bin":
-      return `Bin/Shelf ${none(c.old_value)} → ${none(c.new_value)}`;
     case "restock":
       return `Restock level ${none(c.old_value)} → ${none(c.new_value)}`;
   }
@@ -233,7 +231,6 @@ function WarehouseChanges({ active }: { active: boolean }) {
           <option value="count">Count changes</option>
           <option value="added">Parts added</option>
           <option value="removed">Parts removed</option>
-          <option value="bin">Bin/Shelf changes</option>
           <option value="restock">Restock level changes</option>
         </select>
         <input className={`${inputCls} !w-64`} placeholder="Search SKU, part or person" value={qInput} onChange={(e) => setQInput(e.target.value)} />
