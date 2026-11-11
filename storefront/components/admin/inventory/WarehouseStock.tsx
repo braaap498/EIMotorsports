@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
+import { SortTh, useSort } from "../SortHeader";
 import ProductPicker, { type PickRow } from "./ProductPicker";
 
 type Row = {
@@ -28,6 +29,7 @@ type Resp = { total: number; low_count: number; out_count: number; items: Row[] 
 type View = "all" | "low" | "out";
 type Status = "all" | "active" | "inactive";
 type Note = "" | "saving" | "saved";
+type SortKey = "sku" | "part" | "bin" | "onhand" | "reserved" | "available" | "level" | "short" | "status";
 
 const LIMIT = 50;
 // Low = something left to sell but at or under the restock level. Nothing left is "Out", never both.
@@ -49,6 +51,14 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
   const [qty, setQty] = useState("");
   const [busy, setBusy] = useState(false);
   const seq = useRef(0);
+  const { sort, toggle } = useSort<SortKey>(); // nothing chosen = by part name (Low stock: furthest below first)
+  const onSort = (k: SortKey) => {
+    toggle(k);
+    setOffset(0);
+  };
+
+  const hasAction = !isMain && !isAll;
+  const colKeys = ["sku", "part", "bin", "onhand", "reserved", "available", "level", ...(view === "low" ? ["short"] : []), "status", ...(hasAction ? ["action"] : [])];
 
   // Every column is as wide as its widest content seen so far and never shrinks, so nothing shifts between pages or tabs.
   const tableRef = useRef<HTMLTableElement>(null);
@@ -58,10 +68,11 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
     if (!ths) return;
     const next = { ...colW };
     let changed = false;
-    ths.forEach((th) => {
-      const k = th.getAttribute("data-col");
+    ths.forEach((th, i) => {
+      const k = colKeys[i];
       const w = Math.ceil(th.getBoundingClientRect().width);
-      if (k && w > (next[k] ?? 0)) {
+      // The Part column takes whatever room is left over, so only the others are held at their widest.
+      if (k && k !== "part" && w > (next[k] ?? 0)) {
         next[k] = w;
         changed = true;
       }
@@ -81,6 +92,10 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
   const load = useCallback(() => {
     const my = ++seq.current;
     const p = new URLSearchParams({ limit: String(LIMIT), offset: String(offset), view, status });
+    if (sort.key && !(sort.key === "short" && view !== "low")) {
+      p.set("sort", sort.key);
+      p.set("dir", sort.dir);
+    }
     if (q) p.set("q", q);
     api<Resp>(`/inventory/warehouses/${warehouseId}/stock?${p}`)
       .then((d) => {
@@ -90,7 +105,7 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
         setLoaded(true);
       })
       .catch((e) => my === seq.current && setError(errMsg(e)));
-  }, [warehouseId, offset, view, q, status]);
+  }, [warehouseId, offset, view, q, status, sort.key, sort.dir]);
 
   useEffect(() => {
     if (active) load();
@@ -140,7 +155,6 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
       {label}
     </button>
   );
-  const hasAction = !isMain && !isAll;
   const cols = (view === "low" ? 9 : 8) + (hasAction ? 1 : 0);
 
   return (
@@ -220,24 +234,24 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
       <Pager total={data.total} limit={LIMIT} offset={offset} onChange={setOffset} />
 
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table ref={tableRef} className="w-max text-left text-sm">
+        <table ref={tableRef} className="w-full text-left text-sm">
           <colgroup>
-            {["sku", "part", "bin", "onhand", "reserved", "available", "level", ...(view === "low" ? ["short"] : []), "status", ...(hasAction ? ["action"] : [])].map((k) => (
-              <col key={k} style={colW[k] ? { width: colW[k] } : undefined} />
+            {colKeys.map((k) => (
+              <col key={k} style={k === "part" ? { width: "100%" } : colW[k] ? { width: colW[k] } : undefined} />
             ))}
           </colgroup>
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
-              <th data-col="sku" className="whitespace-nowrap px-3 py-2">SKU</th>
-              <th data-col="part" className="whitespace-nowrap px-3 py-2">Part</th>
-              <th data-col="bin" className="whitespace-nowrap px-3 py-2">Bin/Shelf</th>
-              <th data-col="onhand" className="whitespace-nowrap px-3 py-2">On hand</th>
-              <th data-col="reserved" className="whitespace-nowrap px-3 py-2">Reserved</th>
-              <th data-col="available" className="whitespace-nowrap px-3 py-2">Available</th>
-              <th data-col="level" className="whitespace-nowrap px-3 py-2">Restock level</th>
-              {view === "low" && <th data-col="short" className="whitespace-nowrap px-3 py-2">Short by</th>}
-              <th data-col="status" className="whitespace-nowrap px-3 py-2">Status</th>
-              {hasAction && <th data-col="action" className="px-3 py-2"></th>}
+              <SortTh label="SKU" k="sku" sort={sort} onSort={onSort} />
+              <SortTh label="Part" k="part" sort={sort} onSort={onSort} />
+              <SortTh label="Bin/Shelf" k="bin" sort={sort} onSort={onSort} />
+              <SortTh label="On hand" k="onhand" sort={sort} onSort={onSort} />
+              <SortTh label="Reserved" k="reserved" sort={sort} onSort={onSort} />
+              <SortTh label="Available" k="available" sort={sort} onSort={onSort} />
+              <SortTh label="Restock level" k="level" sort={sort} onSort={onSort} />
+              {view === "low" && <SortTh label="Short by" k="short" sort={sort} onSort={onSort} />}
+              <SortTh label="Status" k="status" sort={sort} onSort={onSort} />
+              {hasAction && <th className="px-3 py-2"></th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
@@ -330,7 +344,7 @@ function EditCell({
         // Scrolling the page over a focused number box would otherwise change the number.
         onWheel={(e) => (e.target as HTMLInputElement).blur()}
       />
-      <span className="w-14 text-xs text-gray-500">{note === "saving" ? "Saving…" : note === "saved" ? "Saved" : ""}</span>
+      <span className="w-14 shrink-0 text-xs text-gray-500">{note === "saving" ? "Saving…" : note === "saved" ? "Saved" : ""}</span>
     </div>
   );
 }
@@ -437,7 +451,7 @@ function StockRow({
   return (
     <ClickRow href={`/admin/products/${row.id}`}>
       <td className="whitespace-nowrap px-3 py-2">{row.sku}</td>
-      <td className="min-w-[14rem] max-w-[34rem] px-3 py-2">
+      <td className="min-w-[14rem] px-3 py-2">
         <Link href={`/admin/products/${row.id}`} className="font-medium hover:underline">
           {row.title}
         </Link>
@@ -445,12 +459,12 @@ function StockRow({
       </td>
       <td className="whitespace-nowrap px-3 py-2 font-semibold">{row.bin_location || "—"}</td>
       <td className="whitespace-nowrap px-3 py-2">
-        <EditCell value={String(row.quantity)} canEdit={canEdit} onSave={saveCount} type="number" widthCls="w-24" center />
+        <EditCell value={String(row.quantity)} canEdit={canEdit} onSave={saveCount} type="number" widthCls="w-28 min-w-[7rem] shrink-0" center />
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-gray-700">{row.reserved}</td>
       <td className="whitespace-nowrap px-3 py-2 font-semibold">{row.available}</td>
       <td className="whitespace-nowrap px-3 py-2">
-        <EditCell value={row.reorder_point ? String(row.reorder_point) : ""} canEdit={canEdit} onSave={saveLevel} type="number" placeholder="none" widthCls="w-24" />
+        <EditCell value={row.reorder_point ? String(row.reorder_point) : ""} canEdit={canEdit} onSave={saveLevel} type="number" placeholder="none" widthCls="w-28 min-w-[7rem] shrink-0" />
       </td>
       {showShort && <td className="whitespace-nowrap px-3 py-2 font-semibold">{Math.max(0, (row.reorder_point ?? 0) - row.available)}</td>}
       <td className="whitespace-nowrap px-3 py-2">

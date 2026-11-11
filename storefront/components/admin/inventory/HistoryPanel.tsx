@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
+import { SortTh, useSort } from "../SortHeader";
 import OrderActivityLog from "./OrderActivityLog";
 
 type Batch = {
@@ -145,6 +146,7 @@ type Change = {
   new_value: string | null;
 };
 const CHANGE_LIMIT = 50;
+type ChangeSort = "when" | "who" | "warehouse" | "part" | "change";
 
 function describe(c: Change): string {
   const none = (v: string | null) => (v === null || v === "" ? "none" : v);
@@ -176,6 +178,7 @@ function WarehouseChanges({ active }: { active: boolean }) {
   const [total, setTotal] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
+  const { sort, toggle } = useSort<ChangeSort>(); // nothing chosen = newest first
 
   useEffect(() => {
     if (!active) return;
@@ -200,6 +203,10 @@ function WarehouseChanges({ active }: { active: boolean }) {
     if (q) p.set("q", q);
     if (fFrom) p.set("date_from", fFrom);
     if (fTo) p.set("date_to", fTo);
+    if (sort.key) {
+      p.set("sort", sort.key);
+      p.set("dir", sort.dir);
+    }
     api<{ total: number; items: Change[] }>(`/inventory/warehouses/changes?${p.toString()}`)
       .then((r) => {
         setItems(r.items);
@@ -208,12 +215,16 @@ function WarehouseChanges({ active }: { active: boolean }) {
         setLoaded(true);
       })
       .catch((e) => setError(errMsg(e)));
-  }, [wh, action, q, fFrom, fTo, offset]);
+  }, [wh, action, q, fFrom, fTo, offset, sort.key, sort.dir]);
   useEffect(() => {
     if (active) load();
   }, [active, load]);
 
   const reset = () => setOffset(0);
+  const onSort = (k: ChangeSort) => {
+    toggle(k);
+    setOffset(0);
+  };
 
   return (
     <div className="space-y-4">
@@ -264,11 +275,11 @@ function WarehouseChanges({ active }: { active: boolean }) {
           </colgroup>
           <thead className="bg-gray-50 text-xs uppercase text-gray-500">
             <tr>
-              <th className="whitespace-nowrap px-3 py-2">When</th>
-              <th className="whitespace-nowrap px-3 py-2">Who</th>
-              <th className="whitespace-nowrap px-3 py-2">Warehouse</th>
-              <th className="whitespace-nowrap px-3 py-2">Part</th>
-              <th className="whitespace-nowrap px-3 py-2">Change</th>
+              <SortTh label="When" k="when" sort={sort} onSort={onSort} />
+              <SortTh label="Who" k="who" sort={sort} onSort={onSort} />
+              <SortTh label="Warehouse" k="warehouse" sort={sort} onSort={onSort} />
+              <SortTh label="Part" k="part" sort={sort} onSort={onSort} />
+              <SortTh label="Change" k="change" sort={sort} onSort={onSort} />
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">

@@ -359,9 +359,11 @@ def stock_changes(
     date_to: str = Query("", max_length=10),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    sort: Optional[str] = Query(None, pattern="^(when|who|warehouse|part|change)$"),
+    dir: str = Query("desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
-    """Manual stock changes made in the warehouses, newest first."""
+    """Manual stock changes made in the warehouses, newest first unless a column is chosen."""
     params: dict = {"limit": limit, "offset": offset, "wid": warehouse_id, "action": action}
     for key, raw in (("df", date_from), ("dt", date_to)):
         params[key] = None
@@ -381,20 +383,38 @@ def stock_changes(
         params[f"q{i}"] = f"%{word}%"
         conds.append(f"(l.sku ilike cast(:q{i} as text) or l.title ilike cast(:q{i} as text) or l.user_email ilike cast(:q{i} as text))")
     where = " and ".join(conds)
+    cols = {"when": "l.at", "who": "lower(l.user_email)", "warehouse": "lower(coalesce(w.name, l.warehouse_name))", "part": "l.sku", "change": "l.action"}
+    d = "asc" if dir == "asc" else "desc"
+    order = f"{cols[sort]} {d} nulls last, l.id {d}" if sort in cols else "l.at desc, l.id desc"
     total = db.execute(text(f"select count(*) from warehouse_change_log l where {where}"), params).scalar()
     rows = db.execute(
         text(
             "select l.id, l.at, l.user_email, l.warehouse_id, coalesce(w.name, l.warehouse_name) as warehouse_name, "
             "       l.product_id, l.sku, l.title, l.action, l.old_value, l.new_value "
             f"from warehouse_change_log l left join warehouses w on w.id = l.warehouse_id where {where} "
-            "order by l.at desc, l.id desc limit :limit offset :offset"
+            f"order by {order} limit :limit offset :offset"
         ),
         params,
     ).all()
     return {"total": int(total or 0), "items": [dict(r._mapping) for r in rows]}
 
 
-def _stock_response(db: Session, kind: str, warehouse_id: int, q, view: str, status: str, limit: int, offset: int) -> dict:
+_STOCK_SORTS = {
+    "sku": "wr.sku",
+    "part": "lower(wr.title)",
+    "bin": "wr.bin_location",
+    "onhand": "wr.qty",
+    "reserved": "wr.reserved",
+    "available": "wr.available",
+    "level": "wr.reorder_point",
+    "short": "greatest(0, coalesce(wr.reorder_point, 0) - wr.available)",
+    "status": f"(case when {_OUT} then 0 when {_LOW} then 1 else 2 end)",
+}
+
+
+def _stock_response(
+    db: Session, kind: str, warehouse_id: int, q, view: str, status: str, limit: int, offset: int, sort: Optional[str] = None, direction: str = "asc"
+) -> dict:
     params: dict = {"w": warehouse_id, "limit": limit, "offset": offset}
     words = [x for x in (q or "").split() if x][:6]
     for i, word in enumerate(words):
@@ -410,7 +430,10 @@ def _stock_response(db: Session, kind: str, warehouse_id: int, q, view: str, sta
     ).first()
     cte = _stock_cte(kind, status, len(words))
     total = db.execute(text(cte + f"select count(*) from wr where {cond}"), params).scalar()
-    order = "(wr.reorder_point - wr.available) desc, wr.title, wr.id" if view == "low" else "wr.title, wr.id"
+    if sort in _STOCK_SORTS:
+        order = f"{_STOCK_SORTS[sort]} {'desc' if direction == 'desc' else 'asc'} nulls last, wr.title, wr.id"
+    else:
+        order = "(wr.reorder_point - wr.available) desc, wr.title, wr.id" if view == "low" else "wr.title, wr.id"
     rows = db.execute(
         text(
             cte
@@ -440,11 +463,13 @@ def all_warehouses_stock(
     status: str = Query("active", pattern="^(all|active|inactive)$"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    sort: Optional[str] = Query(None, pattern="^(sku|part|bin|onhand|reserved|available|level|short|status)$"),
+    dir: str = Query("asc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
     """Every part with its total across all warehouses (read-only; counts are changed inside a warehouse)."""
     _ensure_warehouses(db)
-    return _stock_response(db, "all", 0, q, view, status, limit, offset)
+    return _stock_response(db, "all", 0, q, view, status, limit, offset, sort, dir)
 
 
 @router.get("/{warehouse_id}/stock")
@@ -456,11 +481,13 @@ def warehouse_stock_list(
     status: str = Query("active", pattern="^(all|active|inactive)$"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    sort: Optional[str] = Query(None, pattern="^(sku|part|bin|onhand|reserved|available|level|short|status)$"),
+    dir: str = Query("asc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
     _ensure_warehouses(db)
     w = _warehouse(db, warehouse_id)
-    return _stock_response(db, "main" if w.is_default else "other", warehouse_id, q, view, status, limit, offset)
+    return _stock_response(db, "main" if w.is_default else "other", warehouse_id, q, view, status, limit, offset, sort, dir)
 
 
 class QtyIn(BaseModel):
