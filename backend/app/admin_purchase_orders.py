@@ -2,7 +2,7 @@
 Purchase orders: what to reorder, who from, and a permanent searchable record of every PO.
 Mounted at /admin/purchase-orders/* (owner / admin, plus staff holding "inventory.purchase").
 
-  GET    /purchase-orders/parts            low and out-of-stock parts (or all parts) to pick from
+  GET    /purchase-orders/parts            all / low / out-of-stock parts to pick from (view=all|low|out, sortable)
   GET    /purchase-orders/distributors     the distributors you order from
   POST   /purchase-orders/distributors     add one
   PUT    /purchase-orders/distributors/{id}   edit one
@@ -20,8 +20,10 @@ Mounted at /admin/purchase-orders/* (owner / admin, plus staff holding "inventor
 A PO has a type: "stock" (buying inventory, received into stock) or "drop_ship" (ships straight to a customer). The type
 is chosen when it is made. Rows made before the type existed count as stock.
 
-The "Cost" on a PO line is what you pay the distributor. It starts from the product's cost (admin only, never shown
-to customers) and can be changed per PO line.
+The "Cost" on a PO line is what you pay the distributor. For a part tied to a distributor (Edit product > Distributor
+parts) it is that distributor part's cost (the catalog's dealer cost, else the cost typed on the part), and the Part # is the
+distributor's part number; a part with no distributor parts starts from the product's own cost. Admin only, never shown
+to customers, and it can be changed per PO line.
 
 A PO is never deleted. It is "open" until every line has been received (then "received"), or "cancelled".
 PO numbers count up from the highest one used (cancelled POs keep theirs), so the first PO ever made is 1.
@@ -150,47 +152,96 @@ def _release_parts(db: Session, product_ids) -> None:
 # --------------------------------------------------------------------------
 # parts to reorder
 # --------------------------------------------------------------------------
+_PARTS_SORTS = {
+    "sku": "sku",
+    "part": "lower(title)",
+    "partnumber": "part_number",
+    "onhand": "on_hand",
+    "reserved": "reserved",
+    "available": "available",
+    "level": "reorder_point",
+    "cost": "cost",
+    "po": "coalesce(array_length(open_pos, 1), 0)",
+}
+
+# Our cost from the distributor: what the product's distributor parts (Edit product > Distributor parts) cost, at the
+# catalog's current dealer cost when it has one, otherwise the cost typed on the part. Same rule as expand_rows() in
+# kits.py, so the price here is the price that lands on the PO. A product with no distributor parts keeps its own cost.
+_PIECE_COST = "coalesce(si.effective_cost, si.dealer_cost, k.unit_cost)"
+
+
 @router.get("/parts")
 @needs("inventory.purchase")
 def parts(
     q: Optional[str] = Query(None, max_length=100),
     show_all: bool = False,
     include_inactive: bool = False,
+    view: Optional[str] = Query(None, pattern="^(all|low|out)$"),
+    sort: Optional[str] = Query(None, pattern="^(sku|part|partnumber|onhand|reserved|available|level|cost|po)$"),
+    dir: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """Low and out-of-stock parts by default (parts with a restock level come first, biggest shortfall
-    first). show_all lists every part so anything can be added to a PO."""
+    """view = all / low / out (like Inventory > Stock). With no view, low AND out-of-stock parts (or every part with show_all).
+    Parts with a restock level come first, biggest shortfall first, unless a column is chosen to sort by.
+    Part # and Cost come from the product's distributor parts (one entry per piece in `pieces`)."""
     avail = available_sql("p")
+    low = f"(coalesce(p.reorder_point, 0) > 0 and {avail} > 0 and {avail} <= p.reorder_point)"
+    out = f"({avail} <= 0)"
     params: dict = {"limit": limit, "offset": offset}
-    conds = [] if include_inactive else ["coalesce(p.is_active, true)"]
-    if not show_all:
-        conds.append(f"({avail} <= 0 or (coalesce(p.reorder_point, 0) > 0 and {avail} <= p.reorder_point))")
+    scope = [] if include_inactive else ["coalesce(p.is_active, true)"]
+    conds = list(scope)
     import re
 
     for i, w in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:6]):
         params[f"w{i}"] = f"%{w}%"
         conds.append(
-            f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) "
+            f"(p.title ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text) or p.sku_display ilike cast(:w{i} as text) "
+            f"or p.ebay_item_id ilike cast(:w{i} as text) "
             f"or p.manufacturer_part_number ilike cast(:w{i} as text) "
-            f"or {_MPN} ilike cast(:w{i} as text))"
+            f"or {_MPN} ilike cast(:w{i} as text) "
+            f"or exists (select 1 from product_kit_parts kk where kk.product_id = p.id and kk.part_number ilike cast(:w{i} as text)))"
         )
+    mode = view or ("all" if show_all else "needs")
+    view_cond = {"low": low, "out": out, "needs": f"({low} or {out})"}.get(mode)
+    if view_cond:
+        conds.append(view_cond)
     where = ("where " + " and ".join(conds)) if conds else ""
+    scope_where = ("where " + " and ".join(scope)) if scope else ""
+
     total = db.execute(text(f"select count(*) from products p {where}"), params).scalar()
+    counts = db.execute(
+        text(f"select count(*) filter (where {low}) as low_count, count(*) filter (where {out}) as out_count from products p {scope_where}")
+    ).first()
+    if sort in _PARTS_SORTS:
+        order = f"{_PARTS_SORTS[sort]} {'desc' if dir == 'desc' else 'asc'} nulls last, lower(title), id"
+    else:
+        order = "(coalesce(reorder_point, 0) > 0) desc, greatest(coalesce(reorder_point, 0) - available, 0) desc, title, id"
     rows = db.execute(
         text(
             f"""
-            select p.id, p.sku_display as sku, p.title, {_MPN} as part_number, p.cost,
-                   coalesce(p.quantity_on_hand, 0) as on_hand, {set_aside_sql('p')} as reserved,
-                   {avail} as available, p.reorder_point, coalesce(p.on_order, false) as on_order,
-                   (select array_agg(h.po_number order by h.po_number)
-                      from po_lines l join po_headers h on h.id = l.po_id
-                     where l.product_id = p.id and l.received_at is null and h.status <> 'cancelled') as open_pos
-            from products p {where}
-            order by (coalesce(p.reorder_point, 0) > 0) desc,
-                     greatest(coalesce(p.reorder_point, 0) - {avail}, 0) desc, p.title, p.id
-            limit :limit offset :offset
+            with b as (
+              select p.id, p.sku_display as sku, p.title,
+                     coalesce((select string_agg(k.part_number, ' / ' order by k.sort_order, k.id)
+                                 from product_kit_parts k where k.product_id = p.id), {_MPN}) as part_number,
+                     coalesce((select sum({_PIECE_COST} * k.quantity)
+                                 from product_kit_parts k left join supplier_items si on si.id = k.supplier_item_id
+                                where k.product_id = p.id), p.cost) as cost,
+                     (select jsonb_agg(jsonb_build_object('part_number', k.part_number, 'quantity', k.quantity,
+                                                          'vendor', d.name, 'cost', {_PIECE_COST}) order by k.sort_order, k.id)
+                        from product_kit_parts k
+                        left join supplier_items si on si.id = k.supplier_item_id
+                        left join po_distributors d on d.id = k.distributor_id
+                       where k.product_id = p.id) as pieces,
+                     coalesce(p.quantity_on_hand, 0) as on_hand, {set_aside_sql('p')} as reserved,
+                     {avail} as available, p.reorder_point, coalesce(p.on_order, false) as on_order,
+                     (select array_agg(h.po_number order by h.po_number)
+                        from po_lines l join po_headers h on h.id = l.po_id
+                       where l.product_id = p.id and l.received_at is null and h.status <> 'cancelled') as open_pos
+              from products p {where}
+            )
+            select * from b order by {order} limit :limit offset :offset
             """
         ),
         params,
@@ -200,10 +251,18 @@ def parts(
         d = dict(r._mapping)
         d["cost"] = float(d["cost"]) if d["cost"] is not None else None
         d["open_pos"] = d["open_pos"] or []
+        d["pieces"] = [
+            {**pc, "cost": float(pc["cost"]) if pc.get("cost") is not None else None} for pc in (d["pieces"] or [])
+        ]
         rp = d["reorder_point"] or 0
         d["suggested_qty"] = max(1, rp - d["available"]) if rp > 0 else 1
         items.append(d)
-    return {"total": total, "items": items}
+    return {
+        "total": total,
+        "low_count": int(counts.low_count) if counts else 0,
+        "out_count": int(counts.out_count) if counts else 0,
+        "items": items,
+    }
 
 
 # --------------------------------------------------------------------------
