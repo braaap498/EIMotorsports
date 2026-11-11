@@ -346,8 +346,8 @@ def _import_rows(db: Session, linker: _Linker, rows) -> dict:
                 pid = db.execute(
                     text(
                         "insert into products (title, slug, ebay_item_id, custom_label_sku, list_price, "
-                        "quantity_on_hand, is_published, is_active) "
-                        "values (:t, :s, :e, :l, :p, 0, false, true) returning id"
+                        "quantity_on_hand, is_published, is_active, condition) "
+                        "values (:t, :s, :e, :l, :p, 0, false, true, 'New') returning id"
                     ),
                     {"t": title, "s": slug, "e": clean_ebay_item_id(r.item), "l": label, "p": r.price},
                 ).scalar()

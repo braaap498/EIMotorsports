@@ -22,7 +22,7 @@ What a merge does (and does not do):
     photo rows, custom label) keyed by eBay item id and store, so the listing can still be edited
     later. Those rows follow the part to the survivor.
   * If the kept product has no description, the fullest description among the duplicates is copied onto it (like photos).
-  * (Later) /blank-descriptions and /fill-descriptions refill blank product descriptions from their live eBay listings (read only).
+  * (Later) /blank-descriptions and /fill-descriptions fill blank descriptions, conditions and item specifics from their live eBay listings (read only).
   * The other products are deleted, after a full snapshot is saved in part_merge_log.
   * If anything unexpected is found (an unknown table pointing at products, changed data
     since the preview, a count that doesn't add up) the merge refuses or rolls back.
@@ -889,19 +889,22 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
 
 
 # --------------------------------------------------------------------------
-# 6. refill blank descriptions (merged parts, and products made from eBay listings) from the live eBay listings
+# 6. fill a missing description, condition and item specifics from the live eBay listings
 #    Reads eBay only (GetItem). Nothing is ever sent to eBay. Only blank descriptions are written.
 # --------------------------------------------------------------------------
 _BLANK_DESC = "nullif(btrim(coalesce(p.description, '')), '') is null"
+_BLANK_COND = "nullif(btrim(coalesce(p.condition::text, '')), '') is null"
+_NO_SPECS = "not exists (select 1 from product_item_specifics s where s.product_id = p.id)"
+# every product that has an eBay listing and is missing its description, its condition or its item specifics
 _MERGED_BLANK = (
-    f"from products p where {_BLANK_DESC} "
+    f"from products p where ({_BLANK_DESC} or {_BLANK_COND} or {_NO_SPECS}) "
     "and exists (select 1 from channel_listings cl where cl.product_id = p.id)"
-)  # every product with an eBay listing and no description (merged or not)
+)
 
 
 @router.get("/blank-descriptions")
 def blank_descriptions(db: Session = Depends(get_db)):
-    """Products that have no description and have an eBay listing to read it from."""
+    """Products with an eBay listing that are missing a description, a condition or item specifics."""
     total = db.execute(text(f"select count(*) {_MERGED_BLANK}")).scalar()
     return {"total": total}
 
@@ -911,14 +914,29 @@ class FillDescIn(BaseModel):
     limit: int = Field(5, ge=1, le=10)
 
 
+def _specifics_columns_ok(db: Session) -> Optional[str]:
+    """None when product_item_specifics can be filled with (product_id, name, value, sort_order); otherwise why not."""
+    cols = db.execute(
+        text(
+            "select column_name from information_schema.columns where table_schema = 'public' "
+            "and table_name = 'product_item_specifics' and is_nullable = 'NO' and column_default is null "
+            "and is_identity <> 'YES' and is_generated = 'NEVER'"
+        )
+    ).all()
+    extra = [c[0] for c in cols if c[0] not in {"product_id", "name", "value", "sort_order"}]
+    return ("product_item_specifics has required columns this screen does not fill in: " + ", ".join(extra)) if extra else None
+
+
 @router.post("/fill-descriptions")
 def fill_descriptions(body: FillDescIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
-    """One batch: the next few products (by id, after `after_id`) with a blank description. For each, the part's
-    eBay listings are read (the kept part's own listing first, active ones first) and the first real description is
-    cleaned and saved. The page calls this again with `next_after_id` until `done`."""
+    """One batch: the next few products (by id, after `after_id`) missing a description, a condition or item specifics.
+    For each, the product's eBay listings are read (its own listing first, active ones first) and the first listing
+    that has something to give fills in ONLY what is blank: description (cleaned), condition, item specifics (only when
+    the product has none). Nothing is sent to eBay. The page calls this again with `next_after_id` until `done`."""
     from app.ebay_edit import _read_item
     from app.sanitize import clean_description
 
+    specs_problem = _specifics_columns_ok(db)
     ids = [
         r[0]
         for r in db.execute(
@@ -928,6 +946,10 @@ def fill_descriptions(body: FillDescIn, db: Session = Depends(get_db), user: Aut
     ]
     results = []
     for pid in ids:
+        need = db.execute(
+            text(f"select ({_BLANK_DESC}) as d, ({_BLANK_COND}) as c, ({_NO_SPECS}) as s from products p where p.id = :p"),
+            {"p": pid},
+        ).first()
         listings = db.execute(
             text(
                 "select coalesce(nullif(btrim(cl.store), ''), :main) as store, "
@@ -940,7 +962,7 @@ def fill_descriptions(body: FillDescIn, db: Session = Depends(get_db), user: Aut
             ),
             {"p": pid, "main": MAIN_STORE},
         ).all()
-        status, why = "none", "no eBay listing had a description"
+        status, why = "none", "eBay had nothing to fill in"
         for lst in listings:
             if not lst.item:
                 continue
@@ -953,19 +975,46 @@ def fill_descriptions(body: FillDescIn, db: Session = Depends(get_db), user: Aut
                 db.rollback()
                 why = f"eBay item {lst.item}: {type(e).__name__}"
                 continue
-            cleaned = clean_description(item.get("description"))
-            if not cleaned:
-                continue
-            done = db.execute(
-                text(
-                    "update products p set description = :d, updated_at = now() "
-                    f"where p.id = :p and {_BLANK_DESC}"
-                ),
-                {"d": cleaned, "p": pid},
-            ).rowcount
-            db.commit()
-            status, why = ("filled", f"from eBay item {lst.item}") if done else ("skipped", "it was filled in meanwhile")
-            break
+            filled = []
+            try:
+                if need.d:
+                    cleaned = clean_description(item.get("description"))
+                    if cleaned and db.execute(
+                        text(f"update products p set description = :d, updated_at = now() where p.id = :p and {_BLANK_DESC}"),
+                        {"d": cleaned, "p": pid},
+                    ).rowcount:
+                        filled.append("description")
+                if need.c:
+                    # every part is sold as New, so a blank condition becomes New (eBay's wording is not used)
+                    if db.execute(
+                        text(f"update products p set condition = 'New', updated_at = now() where p.id = :p and {_BLANK_COND}"),
+                        {"p": pid},
+                    ).rowcount:
+                        filled.append("condition")
+                if need.s and not specs_problem:
+                    rows = [
+                        (str(sp.get("name") or "").strip()[:100], ", ".join(sp.get("values") or [])[:500])
+                        for sp in (item.get("item_specifics") or [])
+                    ]
+                    rows = [(n, v) for n, v in rows if n and v]
+                    if rows and db.execute(text(f"select {_NO_SPECS} from products p where p.id = :p"), {"p": pid}).scalar():
+                        for i, (n, v) in enumerate(rows):
+                            db.execute(
+                                text("insert into product_item_specifics (product_id, name, value, sort_order) values (:p, :n, :v, :o)"),
+                                {"p": pid, "n": n, "v": v, "o": i},
+                            )
+                        filled.append(f"{len(rows)} item specifics")
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                status, why = "error", f"{type(e).__name__}: {str(e)[:150]}"
+                break
+            if filled:
+                status, why = "filled", f"{', '.join(filled)} (from eBay item {lst.item})"
+                break
+            why = f"eBay item {lst.item} had nothing new to add"
+        if specs_problem and need.s and status != "filled":
+            why += f"; item specifics skipped: {specs_problem}"
         results.append({"id": pid, "status": status, "note": why})
     return {
         "results": results,

@@ -461,6 +461,7 @@ def create_and_link(body: CreateIn, db: Session = Depends(get_db), user: AuthUse
         "quantity_on_hand": body.quantity_on_hand,
         "is_published": False,
         "is_active": True,
+        "condition": "New",
     }
     try:
         cols = ", ".join(fields)  # keys are fixed above, not from the client
