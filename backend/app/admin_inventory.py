@@ -264,15 +264,21 @@ def search_products(
             f"or exists (select 1 from product_barcodes b where b.product_id = p.id "
             f"           and b.code ilike cast(:w{i} as text)))"
         )
+    where = " and ".join(conds) or "true"
+    # how many match in all, so the picker can offer pages
+    total = db.execute(
+        text(f"select count(*) from products p where {where}"),
+        {k: v for k, v in params.items() if k not in ("limit", "offset")},
+    ).scalar() or 0
     rows = db.execute(
         text(
             "select p.id, p.sku_display as sku, p.title, p.quantity_on_hand, p.bin_location, "
             "       (select count(*) from product_barcodes b where b.product_id = p.id) as barcode_count "
-            f"from products p where {' and '.join(conds) or 'true'} order by p.title, p.id limit :limit offset :offset"
+            f"from products p where {where} order by p.title, p.id limit :limit offset :offset"
         ),
         params,
     ).all()
-    return {"items": [dict(r._mapping) for r in rows]}
+    return {"items": [dict(r._mapping) for r in rows], "total": int(total)}
 
 
 # --------------------------------------------------------------------------

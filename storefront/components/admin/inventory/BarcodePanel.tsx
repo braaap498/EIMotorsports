@@ -212,12 +212,12 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
   return (
     <div className="space-y-5">
       <p className="text-sm text-gray-600">
-        Find a part, then link every barcode that should mean it (the box label, the manufacturer’s UPC, a label on the part).
-        Each barcode can belong to only one part. Print the part’s shelf label here too.
+        Search for a part, then link every barcode that should scan as that part, such as the box label, the manufacturer’s UPC
+        or a label on the part itself. A barcode can be linked to only one part. You can also print the part’s shelf label from here.
       </p>
 
       {!data ? (
-        <ProductPicker browse onPick={(p) => load(p.id)} />
+        <ProductPicker browse paged onPick={(p) => load(p.id)} />
       ) : (
         <div className="space-y-5">
           <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-gray-200 bg-white p-4">
