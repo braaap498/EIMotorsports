@@ -27,6 +27,7 @@ type Row = {
 };
 type Resp = { total: number; low_count: number; out_count: number; oversold_count?: number; primary_name?: string; items: Row[] };
 type View = "all" | "low" | "out";
+type Status = "all" | "active" | "inactive";
 type Note = "" | "saving" | "saved";
 
 const LIMIT = 50;
@@ -41,7 +42,7 @@ function MainStock({ active }: { active: boolean }) {
   const [view, setView] = useState<View>("all");
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
-  const [inactive, setInactive] = useState(false);
+  const [status, setStatus] = useState<Status>("active");
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<Resp>({ total: 0, low_count: 0, out_count: 0, items: [] });
   const [error, setError] = useState("");
@@ -59,7 +60,7 @@ function MainStock({ active }: { active: boolean }) {
   const load = useCallback(() => {
     const p = new URLSearchParams({ limit: String(LIMIT), offset: String(offset), view });
     if (q) p.set("q", q);
-    if (inactive) p.set("include_inactive", "true");
+    p.set("status", status);
     api<Resp>(`/inventory/stock?${p}`)
       .then((d) => {
         setData(d);
@@ -67,7 +68,7 @@ function MainStock({ active }: { active: boolean }) {
         setLoaded(true);
       })
       .catch((e) => setError(errMsg(e)));
-  }, [offset, view, q, inactive]);
+  }, [offset, view, q, status]);
 
   useEffect(() => {
     if (active) load();
@@ -75,12 +76,11 @@ function MainStock({ active }: { active: boolean }) {
 
   // After a change, update just the badge counts. The rows stay put so you can keep clicking.
   const refreshCounts = useCallback(() => {
-    const p = new URLSearchParams({ limit: "1", offset: "0", view: "all" });
-    if (inactive) p.set("include_inactive", "true");
+    const p = new URLSearchParams({ limit: "1", offset: "0", view: "all", status });
     api<Resp>(`/inventory/stock?${p}`)
       .then((d) => setData((prev) => ({ ...prev, low_count: d.low_count, out_count: d.out_count })))
       .catch(() => {});
-  }, [inactive]);
+  }, [status]);
 
   // Merge only the field that changed, so a slow save can never overwrite a newer edit to another field.
   function onUpdate(id: number, patch: Partial<Row>) {
@@ -118,21 +118,25 @@ function MainStock({ active }: { active: boolean }) {
           {tabBtn("out", `Out of stock (${data.out_count})`)}
         </div>
         <ClearableInput
-          className={`${inputCls} max-w-xs`}
+          className={`${inputCls} w-[24rem] max-w-full`}
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}
           placeholder="Search title, SKU, part number, bin or barcode"
         />
         <label className="flex items-center gap-2 text-sm text-gray-600">
-          <input
-            type="checkbox"
-            checked={inactive}
+          Status
+          <select
+            className={`${inputCls} !w-auto`}
+            value={status}
             onChange={(e) => {
-              setInactive(e.target.checked);
+              setStatus(e.target.value as Status);
               setOffset(0);
             }}
-          />
-          Include inactive
+          >
+            <option value="all">All</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
         </label>
         <button type="button" className={btn2Cls} onClick={load}>
           Refresh
