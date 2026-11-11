@@ -21,6 +21,7 @@ What a merge does (and does not do):
     ebay_listings (title, price, condition, description, item specifics, compatible vehicles,
     photo rows, custom label) keyed by eBay item id and store, so the listing can still be edited
     later. Those rows follow the part to the survivor.
+  * If the kept product has no description, the fullest description among the duplicates is copied onto it (like photos).
   * The other products are deleted, after a full snapshot is saved in part_merge_log.
   * If anything unexpected is found (an unknown table pointing at products, changed data
     since the preview, a count that doesn't add up) the merge refuses or rolls back.
@@ -735,7 +736,10 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
                 join products sv on sv.id = :sid
                 where p.id = any(cast(:ids as bigint[])) and d.digits <> ''
                 on conflict (ebay_item_id) do update
-                  set product_id = excluded.product_id, sku = excluded.sku, updated_at = now()
+                  set product_id = excluded.product_id, sku = excluded.sku,
+                      -- a saved copy that has no description yet gets the product's, never the other way round
+                      description = coalesce(nullif(btrim(ebay_listings.description), ''), excluded.description),
+                      updated_at = now()
                 """
             ),
             {"main": MAIN_STORE, "sid": sid, "log": log_id, "ids": ids},
@@ -811,6 +815,30 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
                 db.execute(
                     text("update product_photos set product_id = :sid where product_id = :d"),
                     {"sid": sid, "d": donor},
+                )
+
+        # ---- description: if the kept product has none, adopt the fullest duplicate's ----
+        # (like photos above; the duplicates are deleted next, so this is the only chance to keep it)
+        kept_has_desc = db.execute(
+            text("select nullif(btrim(coalesce(description, '')), '') is not null from products where id = :s"),
+            {"s": sid},
+        ).scalar()
+        if not kept_has_desc:
+            donor_desc = db.execute(
+                text(
+                    "select id from products where id = any(cast(:m as bigint[])) "
+                    "and nullif(btrim(coalesce(description, '')), '') is not null "
+                    "order by length(description) desc, id limit 1"
+                ),
+                {"m": merged},
+            ).scalar()
+            if donor_desc:
+                db.execute(
+                    text(
+                        "update products set description = (select description from products where id = :d), "
+                        "updated_at = now() where id = :s"
+                    ),
+                    {"d": donor_desc, "s": sid},
                 )
 
         # ---- delete the duplicates (descriptive child rows cascade) ---------------------
