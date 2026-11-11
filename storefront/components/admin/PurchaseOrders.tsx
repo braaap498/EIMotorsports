@@ -224,9 +224,9 @@ function Reorder({
   setFlash: FlashFn;
 }) {
   const [view, setView] = useState<View>("all");
-  const { sort, toggle } = useSort<PartSort>();
+  const { sort, toggle: toggleSort } = useSort<PartSort>();
   const onSort = (k: PartSort) => {
-    toggle(k);
+    toggleSort(k);
     setOffset(0);
   };
   const [qInput, setQInput] = useState("");
