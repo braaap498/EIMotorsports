@@ -17,6 +17,8 @@ type Preview = {
   to_create: number;
   to_create_no_photo: number;
   missing_parts: number;
+  no_category: number;
+  no_description: number;
   state: State;
 };
 const n = (x: number | null | undefined) => (x ?? 0).toLocaleString("en-US");
@@ -93,13 +95,45 @@ export default function AutodistProducts() {
     }
   }
 
+  async function assignCategories() {
+    setErr(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const r = await api<{ checked: number; assigned: number; top: { category: string; products: number }[] }>(
+        "/autodist/api/website-products/assign-categories",
+        { method: "POST", body: { redo: false } },
+      );
+      const top = r.top.slice(0, 5).map((c) => `${c.category} (${n(c.products)})`).join(", ");
+      setNote(`Set a category on ${n(r.assigned)} of ${n(r.checked)} product${r.checked === 1 ? "" : "s"}.${top ? ` Most: ${top}.` : ""}`);
+      await loadPreview();
+    } catch (e) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  }
+
+  async function fillDescriptions() {
+    setErr(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const r = await api<{ filled: number }>("/autodist/api/website-products/fill-descriptions", { method: "POST" });
+      setNote(`Added a starting description to ${n(r.filled)} product${r.filled === 1 ? "" : "s"}.`);
+      await loadPreview();
+    } catch (e) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  }
+
   const running = !!st?.running;
   return (
     <div className="space-y-4 text-sm">
       <Notice kind="info">
         Makes one published website product for each Automatic Distributors part that is in stock at Indiana or Nevada and that we do not
         already have as a single item. A part that is only inside one of our kits still gets its own product. The shelf count stays at 0
-        (distributor stock is never added to it). Products have no category or vehicle fit yet.
+        (distributor stock is never added to it). Each product gets the best-fitting category from your category tree (picked from the part name); each gets a short starting description (brand, condition, package size, weight) to build on; products have no vehicle fit yet.
       </Notice>
       {err && <Notice kind="error">{err}</Notice>}
 
@@ -127,6 +161,26 @@ export default function AutodistProducts() {
           </span>
           <button type="button" className={btnCls} disabled={running || busy} onClick={() => void addParts()}>
             Add distributor parts
+          </button>
+        </div>
+      )}
+      {pv && pv.no_category > 0 && (
+        <div className="flex max-w-xl items-center justify-between gap-3 rounded border border-amber-300 bg-amber-50 p-3">
+          <span>
+            {n(pv.no_category)} product{pv.no_category === 1 ? "" : "s"} made here {pv.no_category === 1 ? "has" : "have"} no category yet.
+          </span>
+          <button type="button" className={btnCls} disabled={running || busy} onClick={() => void assignCategories()}>
+            Assign categories
+          </button>
+        </div>
+      )}
+      {pv && pv.no_description > 0 && (
+        <div className="flex max-w-xl items-center justify-between gap-3 rounded border border-amber-300 bg-amber-50 p-3">
+          <span>
+            {n(pv.no_description)} product{pv.no_description === 1 ? "" : "s"} made here {pv.no_description === 1 ? "has" : "have"} no description yet.
+          </span>
+          <button type="button" className={btnCls} disabled={running || busy} onClick={() => void fillDescriptions()}>
+            Add starting descriptions
           </button>
         </div>
       )}

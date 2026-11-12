@@ -3042,6 +3042,246 @@ def _product_title(brand: Optional[str], name: Optional[str], mfr: Optional[str]
     return " ".join(parts)[:250]
 
 
+# --------------------------------------------------------------------------
+# Category for a website product made from a catalog part
+# --------------------------------------------------------------------------
+# The feed has no category column, so the category comes from the part's name, matched against the store's own category tree
+# (the categories table, the same one the product screen's Category dropdown uses). Nothing here is tied to category ids or
+# names: it reads the tree at run time, so renamed or new categories are picked up. Order of tries:
+#   1. a category whose whole name is in the part's name ("Brake Pads" for "Front Brake Pads Kit"), most specific first
+#   2. the keyword rules below (each lists category-name patterns, most specific first)
+#   3. the category whose name (and parent names) shares the most words with the part's name
+#   4. a general parts category, only as a last resort
+# Only products with no category are filled by the bulk action, so a category picked by hand is never changed.
+_CAT_NOISE = {"and", "the", "for", "with", "other", "others", "misc", "miscellaneous", "universal", "general", "part", "parts",
+              "accessory", "accessories", "kit", "kits", "aftermarket", "oem", "set", "assembly", "assy"}
+
+_CAT_RULES: list[tuple[str, list[str]]] = [
+    (r"\bbrake (pad|shoe)s?\b|\bpads?\b.*\bbrake\b", ["brake pad", "brake"]),
+    (r"\brotors?\b|\bbrake disc", ["rotor|disc", "brake"]),
+    (r"\bcaliper|master cylinder|brake (line|hose|lever|fluid)|\bbrake\b", ["brake"]),
+    (r"\bspark plug|\bglow plug|\bplug cap|\bplug wire", ["spark plug", "ignition", "electric"]),
+    (r"\bignition|\bcoil\b|\bcdi\b|\bmagneto|\bpickup coil|\btrigger", ["ignition", "electric"]),
+    (r"\bbatter(y|ies)\b|\bbattery", ["batter", "electric"]),
+    (r"\bstator|\bregulator|\brectifier|\bflywheel|\bstarter|\bsolenoid|\brelay\b|\bharness|\bwiring|\bfuse|\bswitch|\bconnector|\bsensor|\bgauge|\bspeedometer|\btachometer", ["electric", "ignition"]),
+    (r"\bheadlight|\bhead light|\btail ?light|\bbrake light|\bturn signal|\bbulb|\bled\b|\blight bar|\blens\b|\blamp\b|\blighting", ["light"]),
+    (r"\bair filter|\bair cleaner|\bintake\b", ["air filter|filter", "intake", "engine"]),
+    (r"\boil filter", ["oil filter|filter", "engine"]),
+    (r"\bfuel filter", ["fuel", "filter"]),
+    (r"\bfilter", ["filter", "engine"]),
+    (r"\bmotor oil|\boil\b|\blube|\blubricant|\bgrease|\bcoolant|\bantifreeze|\bfluid|\bgear oil|\bchaincase|\btransmission oil|\bdegreaser|\bcleaner|\bpolish|\bwax\b|\bchemical|\bspray\b|\bsealant|\badhesive|\bthreadlock", ["oil|lubric|fluid|chemical", "maintenance", "care|clean"]),
+    (r"\bcarb(uretor)?\b|\bjet\b|\bneedle\b|\bfloat\b|\bpilot|\bthrottle body|\bfuel pump|\bpetcock|\bfuel (valve|line|tank|cap)|\bfuel\b|\bchoke", ["carb|fuel", "engine"]),
+    (r"\bexhaust|\bmuffler|\bsilencer|\bheader\b|\bpipe\b|\bspark arrest", ["exhaust"]),
+    (r"\bpiston|\bring set|\bpiston ring", ["piston|ring", "engine"]),
+    (r"\bcylinder|\bgasket|\bcrank|\bconnecting rod|\bcam(shaft)?\b|\brocker|\bvalve|\btop end|\bbottom end|\bengine|\bhead cover|\bvalve cover|\boil pump|\bwater pump|\bthermostat|\bradiator|\bcooling", ["gasket", "engine"]),
+    (r"\bsprocket|\bchain\b|\bdrive chain", ["chain|sprocket", "drive"]),
+    (r"\bdrive belt|\bclutch|\bvariator|\bprimary|\bsecondary|\bbelt\b|\btorque converter", ["belt|clutch", "drive|transmission", "engine"]),
+    (r"\btransmission|\bgearbox|\bshift|\bgear\b|\bdifferential|\bdriveshaft|\bprop shaft", ["transmission|drivetrain|drive", "engine"]),
+    (r"\bcv (axle|boot|joint)|\baxle\b|\bhalf shaft|\bcv\b", ["axle|drive", "suspension"]),
+    (r"\bwheel bearing|\bbearing|\bseal kit|\boil seal|\bdust seal|\bfork seal|\bbushing", ["bearing|seal|bushing", "suspension"]),
+    (r"\btire|\btyre|\binner tube|\btube\b|\bvalve stem|\bsealant tire|\btire (plug|repair)", ["tire"]),
+    (r"\bwheel|\brim\b|\blug nut|\bwheel spacer|\bhub cap|\bbeadlock|\bcenter cap", ["wheel", "tire"]),
+    (r"\bshock|\bstrut|\bspring\b|\ba-?arm|\bcontrol arm|\bball joint|\bsway bar|\bstabilizer|\blift kit|\bleveling|\bsuspension|\bfork\b|\bradius arm|\btrailing arm|\bbump stop", ["suspension", "shock"]),
+    (r"\btie rod|\bsteering|\bsteering stem|\bpitman|\bidler arm|\bhandlebar|\bhandle bar|\bgrip\b|\bgrips\b|\bperch|\blever\b|\bthrottle cable|\bclutch cable|\bcable\b|\bthrottle (tube|housing)|\bbar (pad|clamp|riser)|\bmirror", ["steering|control|handlebar", "cable"]),
+    (r"\bwinch|\bfairlead|\bsynthetic rope|\bwinch cable|\bwinch mount", ["winch"]),
+    (r"\bsnow ?plow|\bplow|\bblade\b|\bplow mount", ["plow|snow"]),
+    (r"\bskid plate|\bbumper|\bbrush guard|\bnerf|\brock slider|\bsliders?\b|\bguard\b|\bprotector|\bhand guard|\bframe guard|\bcage|\broof\b|\bdoor\b|\bhalf door|\bwindshield|\bwind ?screen|\bfender|\bbody panel|\bplastic|\bfairing|\bmud flap|\bflap\b|\bseat\b|\bseat cover|\bfoot ?peg|\bfloorboard|\bfoot ?rest|\bhitch|\btow\b", ["armor|guard|bumper|protect", "body", "accessor"]),
+    (r"\brack\b|\bluggage|\bsaddle ?bag|\bcargo|\bbox\b|\bbag\b|\bcase\b|\bstorage|\bmount kit|\bgun (boot|rack|mount)|\bcooler", ["cargo|rack|luggage|storage|bag", "accessor"]),
+    (r"\bhelmet|\bgoggle|\bgloves?\b|\bjacket|\bboots?\b|\bpants\b|\bjersey|\bapparel|\bchest protector|\bknee|\belbow|\bvisor|\bshirt|\bhat\b|\bcap\b|\bhood(ie|y)", ["apparel|gear|rider|helmet", "accessor"]),
+    (r"\btool\b|\btools\b|\bwrench|\bsocket|\bpuller|\bpress\b|\bjack\b|\btester|\bmeter\b|\bpump\b|\bcompressor|\bstand\b|\bcaliper tool|\bhand tool|\bpliers|\bscrewdriver", ["tool", "shop"]),
+    (r"\bbolt|\bnut\b|\bscrew|\bwasher|\bclip\b|\brivet|\bfastener|\bhardware|\bcotter|\bpin\b|\bo-?ring|\bplug\b|\bgrommet|\bhose clamp|\bclamp\b|\bhose\b|\bfitting|\btie.?down|\bstrap", ["hardware|fastener", "hose", "accessor"]),
+    (r"\btrailer|\bramp\b|\btie down|\bloading", ["trailer|ramp|transport", "accessor"]),
+    (r"\bsticker|\bdecal|\bgraphic|\bnumber plate|\bbadge|\bemblem", ["graphic|decal|sticker", "accessor"]),
+]
+_CAT_RULES_RE = [(re.compile(rx, re.I), pats) for rx, pats in _CAT_RULES]
+
+
+def _cat_tokens(value: Optional[str]) -> list[str]:
+    out = []
+    for w in re.findall(r"[a-z0-9]+", (value or "").lower()):
+        if len(w) > 3 and w.endswith("ies"):
+            w = w[:-3] + "y"
+        elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.append(w)
+    return out
+
+
+def _load_categories(db: Session) -> list[dict]:
+    """The store's category tree, each with its depth and the words of its name (own words, and its parents' words)."""
+    rows = db.execute(text("select id, parent_id, name, coalesce(sort_order, 0) as so from categories")).all()
+    by_id = {r.id: r for r in rows}
+    cats = []
+    for r in rows:
+        depth, parents, seen, p = 0, [], {r.id}, r.parent_id
+        while p is not None and p in by_id and p not in seen:
+            seen.add(p)
+            parents.append(by_id[p].name)
+            depth += 1
+            p = by_id[p].parent_id
+        own = [t for t in _cat_tokens(r.name) if t not in _CAT_NOISE]
+        cats.append({
+            "id": r.id, "name": r.name or "", "depth": depth, "so": r.so,
+            "own": own, "parent_tokens": [t for nm in parents for t in _cat_tokens(nm) if t not in _CAT_NOISE],
+            "has_children": False,
+        })
+    ids_with_kids = {r.parent_id for r in rows if r.parent_id is not None}
+    for c in cats:
+        c["has_children"] = c["id"] in ids_with_kids
+    return cats
+
+
+def _pick_category(cats: list[dict], title: str) -> Optional[int]:
+    """The best category id for a part name, or None when the store has no categories."""
+    if not cats:
+        return None
+    words = _cat_tokens(title)
+    wset = set(words)
+
+    # 1. a category whose whole name is in the part name; the longest name, then the deepest, wins
+    full = [c for c in cats if c["own"] and all(t in wset for t in c["own"])]
+    if full:
+        full.sort(key=lambda c: (-len(c["own"]), -c["depth"], c["so"], c["id"]))
+        return full[0]["id"]
+
+    # 2. keyword rules; within a pattern the shallowest match is the safer pick
+    for rx, pats in _CAT_RULES_RE:
+        if not rx.search(title):
+            continue
+        for pat in pats:
+            prx = re.compile(pat, re.I)
+            hit = [c for c in cats if prx.search(c["name"])]
+            if hit:
+                hit.sort(key=lambda c: (c["depth"], c["so"], c["id"]))
+                return hit[0]["id"]
+
+    # 3. the most words in common (the category's own words count double, its parents' words once)
+    best, best_score = None, 0
+    for c in cats:
+        score = 2 * sum(1 for t in c["own"] if t in wset) + sum(1 for t in set(c["parent_tokens"]) if t in wset)
+        if score > best_score or (score == best_score and score > 0 and best and (c["depth"], -c["so"]) > (best["depth"], -best["so"])):
+            best, best_score = c, score
+    if best and best_score > 0:
+        return best["id"]
+
+    # 4. last resort: a general parts / accessories category
+    for pat in (r"aftermarket|general|universal", r"parts", r"accessor"):
+        prx = re.compile(pat, re.I)
+        hit = [c for c in cats if prx.search(c["name"])]
+        if hit:
+            hit.sort(key=lambda c: (c["depth"], c["so"], c["id"]))
+            return hit[0]["id"]
+    return None
+
+
+def _assign_categories(db: Session, redo: bool = False) -> dict:
+    """Set the category of every product made from the catalog. By default only products with no category are touched.
+    Commits nothing; the caller does."""
+    cats = _load_categories(db)
+    if not cats:
+        raise HTTPException(400, "The store has no categories yet; add them first.")
+    names = {c["id"]: c["name"] for c in cats}
+    rows = db.execute(
+        text(
+            "select p.id, p.title, s.name, s.manufacturer from supplier_product_links l "
+            "join products p on p.id = l.product_id "
+            "join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku "
+            "where l.supplier = :s " + ("" if redo else "and p.category_id is null")
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    updates, tally = [], {}
+    for r in rows:
+        cid = _pick_category(cats, f"{r.name or ''} {r.title or ''}")
+        if cid is None:
+            continue
+        updates.append({"c": cid, "p": r.id})
+        tally[cid] = tally.get(cid, 0) + 1
+    for i in range(0, len(updates), 500):
+        db.execute(text("update products set category_id = :c, updated_at = now() where id = :p"), updates[i:i + 500])
+    top = sorted(tally.items(), key=lambda kv: -kv[1])[:15]
+    return {"checked": len(rows), "assigned": len(updates), "top": [{"category": names.get(k, str(k)), "products": v} for k, v in top]}
+
+
+class CategoriesIn(BaseModel):
+    redo: bool = False
+
+
+@router.post("/api/website-products/assign-categories")
+def api_website_products_assign_categories(body: CategoriesIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Give every product made from the catalog a category (the best fit in the store's category tree). Only products with no
+    category are changed unless redo is true. Safe to run again."""
+    try:
+        res = _assign_categories(db, body.redo)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not assign the categories: {str(e)[:300]}")
+    return res
+
+
+def _starter_description(brand: Optional[str], title: str, length, width, height, ship_lb) -> str:
+    """A plain starting description (HTML limited to the tags the editor allows) from what the catalog really knows: the title, brand,
+    package size and shipping weight. It claims nothing else; staff add features and fitment in the editor."""
+    import html as _h
+
+    def num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f > 0 else None
+
+    b = _nice_case(brand)
+    items = []
+    if b:
+        items.append(f"<li>Brand: {_h.escape(b)}</li>")
+    items.append("<li>Condition: New</li>")
+    l, w, h = num(length), num(width), num(height)
+    if l and w and h:
+        items.append(f"<li>Package size: {l:g} x {w:g} x {h:g} in</li>")
+    wt = num(ship_lb)
+    if wt:
+        items.append(f"<li>Shipping weight: {wt:g} lb</li>")
+    return (
+        f"<p>{_h.escape(title)}.</p><ul>{''.join(items)}</ul>"
+        "<p>Please confirm this part fits your machine before ordering.</p>"
+    )
+
+
+def _fill_descriptions(db: Session) -> int:
+    """Give every product made from the catalog that has no description the starting description. Never changes one that has text."""
+    rows = db.execute(
+        text(
+            "select p.id, p.title, s.manufacturer, s.length_in, s.width_in, s.height_in, "
+            "       coalesce(nullif(s.ship_weight_lb, 0), s.weight_lb) as lb "
+            "from supplier_product_links l join products p on p.id = l.product_id "
+            "join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku "
+            "where l.supplier = :s and coalesce(btrim(p.description), '') = ''"
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    ups = [{"d": _starter_description(r.manufacturer, r.title or "", r.length_in, r.width_in, r.height_in, r.lb), "p": r.id} for r in rows]
+    for i in range(0, len(ups), 500):
+        db.execute(text("update products set description = :d, updated_at = now() where id = :p"), ups[i:i + 500])
+    return len(ups)
+
+
+@router.post("/api/website-products/fill-descriptions")
+def api_website_products_fill_descriptions(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Add a starting description to every product made from the catalog that has none. Safe to run again."""
+    try:
+        n = _fill_descriptions(db)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not add the descriptions: {str(e)[:300]}")
+    return {"filled": n}
+
+
 # Which in-stock catalog parts still need a product. The flags are separate so the preview can count each reason.
 _NEW_PRODUCT_CTE = f"""
 with existing as (
@@ -3167,7 +3407,14 @@ def api_website_products_preview(db: Session = Depends(get_db)):
         ),
         {"s": SUPPLIER},
     ).scalar()
-    return {**dict(r._mapping), "missing_parts": int(missing or 0), "state": {k: v for k, v in _prod_state.items()}}
+    no_cat = db.execute(
+        text(
+            "select count(*) from supplier_product_links l join products p on p.id = l.product_id "
+            "where l.supplier = :s and p.category_id is null"
+        ),
+        {"s": SUPPLIER},
+    ).scalar()
+    return {**dict(r._mapping), "missing_parts": int(missing or 0), "no_category": int(no_cat or 0), "no_description": int(db.execute(text("select count(*) from supplier_product_links l join products p on p.id = l.product_id where l.supplier = :s and coalesce(btrim(p.description), '') = ''"), {"s": SUPPLIER}).scalar() or 0), "state": {k: v for k, v in _prod_state.items()}}
 
 
 @router.get("/api/website-products/status")
@@ -3195,6 +3442,11 @@ def _make_products_job(limit: int) -> None:
             {"s": SUPPLIER, "lim": limit},
         ).all()
         _prod_state.update(total=len(rows), done=0)
+        try:
+            cats = _load_categories(db)
+        except Exception:
+            db.rollback()
+            cats = []
         for r in rows:
             try:
                 title = _product_title(r.manufacturer, r.name, r.mfr_number)
@@ -3211,14 +3463,16 @@ def _make_products_job(limit: int) -> None:
                     pid = db.execute(
                         text(
                             "insert into products (title, slug, manufacturer_part_number, barcode, list_price, cost, quantity_on_hand, "
-                            "weight_oz, length_in, width_in, height_in, condition, is_published, is_active, is_universal, show_part_number) "
-                            "values (:title, :slug, :mpn, :bc, :price, :cost, 0, :wt, :l, :w, :h, 'New', true, true, false, false) returning id"
+                            "weight_oz, length_in, width_in, height_in, condition, is_published, is_active, is_universal, show_part_number, category_id, description) "
+                            "values (:title, :slug, :mpn, :bc, :price, :cost, 0, :wt, :l, :w, :h, 'New', true, true, false, false, :cat, :desc) returning id"
                         ),
                         {
                             "title": title, "slug": slug, "mpn": (r.mfr_number or "").strip() or None,
                             "bc": re.sub(r"\D", "", r.upc or "") or None, "price": r.price,
                             "cost": r.effective_cost, "wt": (float(ship_lb) * 16) if ship_lb else None,
                             "l": r.length_in, "w": r.width_in, "h": r.height_in,
+                            "cat": _pick_category(cats, f"{r.name or ''} {title}"),
+                            "desc": _starter_description(r.manufacturer, title, r.length_in, r.width_in, r.height_in, ship_lb),
                         },
                     ).scalar()
                     db.execute(
@@ -3250,6 +3504,15 @@ def _make_products_job(limit: int) -> None:
         except Exception as e:
             db.rollback()
             extra = f" The products were made but their distributor part entries were NOT added ({str(e)[:150]}); use the Add distributor parts button."
+        try:
+            cres = _assign_categories(db)
+            db.commit()
+            extra += f" Categories set on {cres['assigned']} product{'' if cres['assigned'] == 1 else 's'}."
+            extra += f" Descriptions added to {_fill_descriptions(db)} product(s)."
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            extra += f" Categories were NOT set ({str(e)[:150]}); use the Assign categories button."
         _prod_state["message"] = f"Created {created} product{'' if created == 1 else 's'}; {skipped} skipped; {failed} failed.{extra}"
     except Exception as e:
         db.rollback()
