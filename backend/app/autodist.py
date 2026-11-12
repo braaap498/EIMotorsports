@@ -2074,6 +2074,10 @@ def api_order_place(body: OrderIn, db: Session = Depends(get_db), user: AuthUser
             "AUTOMATIC_DIST_ALLOW_LIVE_ORDERS=yes in Render when you are ready for real ones.",
         )
     payload = _order_payload(body)
+    if mode == "test":
+        # The test server is shared and already holds low PO numbers, so it refuses plain ones ("PO number exists already").
+        # Send a unique test number to the distributor; our own PO number is still what is saved and linked below.
+        payload["PONumber"] = f"T{time.strftime('%m%d%H%M%S')}-{po}"[:30]
     try:
         dup = db.execute(
             text("select order_number from supplier_orders where supplier = :s and mode = :m and po_number = :p and order_number <> '' limit 1"),
