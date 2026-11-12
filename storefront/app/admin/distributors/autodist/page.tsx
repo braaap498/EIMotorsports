@@ -8,6 +8,7 @@ import { useAccess } from "../../../../components/admin/AdminAccess";
 import AutodistCatalog from "../../../../components/admin/AutodistCatalog";
 import AutodistOpportunities from "../../../../components/admin/AutodistOpportunities";
 import AutodistOrders from "../../../../components/admin/AutodistOrders";
+import AutodistInvoices from "../../../../components/admin/AutodistInvoices";
 
 // Automatic Distributors supplier data (owners and admins only). Licensed data: dealer cost and stock
 // are for this screen only and must never be shown on the public store.
@@ -92,10 +93,11 @@ const n = (x: number) => x.toLocaleString("en-US");
 const money = (v: string | null) => (v == null ? "—" : `$${Number(v).toFixed(2)}`);
 const tone = (s: string) => (s === "done" ? "green" : s === "running" ? "blue" : "amber");
 
-type Tab = "catalog" | "opps" | "orders" | "data" | "match";
+type Tab = "catalog" | "opps" | "orders" | "invoices" | "data" | "match";
 const TABS: { key: Tab; label: string }[] = [
   { key: "catalog", label: "Catalog" },
   { key: "orders", label: "Orders" },
+  { key: "invoices", label: "Invoices" },
   { key: "data", label: "Data feed" },
   { key: "match", label: "Match report" },
   { key: "opps", label: "Opportunities" },
@@ -442,6 +444,12 @@ function AutodistInner() {
         </div>
       )}
 
+      {opened.invoices && (
+        <div className={tab === "invoices" ? "" : "hidden"}>
+          <AutodistInvoices active={tab === "invoices"} />
+        </div>
+      )}
+
       {tab === "data" && (
         <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-white p-4 text-sm">
@@ -551,7 +559,7 @@ function AutodistInner() {
                     disabled={busy === "sched"}
                     onChange={(e) => void saveSched({ tracking_enabled: e.target.checked })}
                   />
-                  <span>Check order tracking every</span>
+                  <span>Check order tracking and invoices every</span>
                 </label>
                 <select
                   className={`${inputCls} !w-auto`}
@@ -571,7 +579,7 @@ function AutodistInner() {
               </div>
               <div className="text-xs text-gray-500">
                 {sched.tracking_enabled ? "Automatic tracking is ON." : "Automatic tracking is OFF."} Asks Automatic Distributors about orders that have not
-                finished yet. When tracking comes back, the drop ship PO closes, and an eBay order gets the number filled in for Mark shipped. Last
+                finished yet. When tracking comes back, the drop ship PO closes, and an eBay order gets the number filled in for Mark shipped. The same check saves the last 3 days of invoices (see the Invoices tab). Last
                 run {ago(sched.tracking_last_run_at ?? null)}
                 {sched.tracking_last_summary ? ` · ${sched.tracking_last_summary}` : ""}
               </div>

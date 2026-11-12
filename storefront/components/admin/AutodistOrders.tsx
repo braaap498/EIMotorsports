@@ -127,17 +127,53 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
     setTrackMsg(null);
     try {
       if (id === "all") {
-        const r = await api<{ checked: number; with_tracking: number; problems: string[]; closed_pos?: number[] }>("/autodist/api/orders/refresh-tracking", { method: "POST" });
+        const r = await api<{ checked: number; with_tracking: number; problems: string[]; closed_pos?: number[]; ebay_filled?: string[] }>("/autodist/api/orders/refresh-tracking", { method: "POST" });
         const closed = r.closed_pos && r.closed_pos.length ? ` Drop ship PO ${r.closed_pos.join(", ")} closed out.` : "";
-        const base = `Checked ${r.checked} order${r.checked === 1 ? "" : "s"}; ${r.with_tracking} have tracking.${closed}`;
+        const ebay = r.ebay_filled && r.ebay_filled.length ? ` Tracking added to eBay order${r.ebay_filled.length === 1 ? "" : "s"} ${r.ebay_filled.join(", ")}: open Pick and Ship and press Mark shipped.` : "";
+        const base = `Checked ${r.checked} order${r.checked === 1 ? "" : "s"}; ${r.with_tracking} have tracking.${closed}${ebay}`;
         setTrackMsg(r.problems.length ? { kind: "error", text: `${base} Problems: ${r.problems.join(" | ")}` } : { kind: "success", text: base });
       } else {
-        const r = await api<{ tracking: TrackItem[]; po_closed?: number | null }>(`/autodist/api/orders/${id}/tracking`, { method: "POST" });
+        const r = await api<{ tracking: TrackItem[]; po_closed?: number | null; ebay_filled?: string | null }>(`/autodist/api/orders/${id}/tracking`, { method: "POST" });
         setTrackMsg({
           kind: "success",
-          text: (r.tracking.length ? "Tracking updated." : "Checked: no tracking numbers yet.") + (r.po_closed ? ` Drop ship PO ${r.po_closed} closed out.` : ""),
+          text: (r.tracking.length ? "Tracking updated." : "Checked: no tracking numbers yet.") + (r.po_closed ? ` Drop ship PO ${r.po_closed} closed out.` : "") + (r.ebay_filled ? ` Tracking added to eBay order ${r.ebay_filled}: press Mark shipped in Pick and Ship.` : ""),
         });
       }
+      await loadPast();
+    } catch (e) {
+      setTrackMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setTrackBusy(null);
+    }
+  }
+  async function cancelOrder(o: PastOrder) {
+    if (
+      !window.confirm(
+        `Cancel order ${o.order_number} (PO ${o.po_number}) with Automatic Distributors?\n\nThis stops it from shipping and can't be undone. It only works while the order has not been invoiced. If you place it again later, it needs a new PO number.`
+      )
+    )
+      return;
+    setTrackBusy(o.id);
+    setTrackMsg(null);
+    try {
+      const r = await api<{
+        order_number: string; already_cancelled: boolean; cancelled: string[]; failed: string[];
+        po_number: string; po_id: number | null; ebay_order_id: string | null;
+      }>(`/autodist/api/orders/${o.id}/cancel`, { method: "POST", body: { confirm: true } });
+      let text = r.already_cancelled ? `Order ${r.order_number} was already cancelled.` : `Order ${r.cancelled.join(", ")} cancelled with Automatic Distributors.`;
+      if (r.failed.length) text += ` These could not be cancelled: ${r.failed.join(" | ")}`;
+      if (r.po_id && window.confirm(`Also cancel purchase order ${r.po_number}, so it leaves the open lists?`)) {
+        try {
+          await api(`/purchase-orders/${r.po_id}/cancel`, { method: "POST", body: { reason: "Cancelled with Automatic Distributors" } });
+          text += ` Purchase order ${r.po_number} cancelled.`;
+        } catch (e) {
+          text += ` The purchase order was NOT cancelled (${errMsg(e)}); cancel it in PO history.`;
+        }
+      } else if (r.po_id) {
+        text += ` Purchase order ${r.po_number} is still open.`;
+      }
+      if (r.ebay_order_id) text += ` The customer's eBay order ${r.ebay_order_id} is still open: ship it from stock, order it another way, or cancel it on eBay.`;
+      setTrackMsg({ kind: r.failed.length ? "error" : "success", text });
       await loadPast();
     } catch (e) {
       setTrackMsg({ kind: "error", text: errMsg(e) });
@@ -592,7 +628,14 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
                   <td className="py-0.5 pr-3">{o.po_number}</td>
                   <td className="py-0.5 pr-3">{o.order_number || "—"}</td>
                   <td className="py-0.5 pr-3">{money(o.invoice_amount)}</td>
-                  <td className="py-0.5 pr-3">{o.status || "—"}</td>
+                  <td className="py-0.5 pr-3">
+                    {o.status === "9" || /cancel/i.test(o.status ?? "") ? <span className="font-medium text-red-700">Cancelled</span> : o.status || "—"}
+                    {o.order_number && o.status !== "9" && !/cancel/i.test(o.status ?? "") && o.tracking.length === 0 && (
+                      <button type="button" className="ml-2 text-red-700 underline" disabled={trackBusy !== null} onClick={() => void cancelOrder(o)}>
+                        Cancel
+                      </button>
+                    )}
+                  </td>
                   <td className="py-0.5 pr-3">
                     {o.tracking.map((t) => {
                       const url = trackUrl(t);

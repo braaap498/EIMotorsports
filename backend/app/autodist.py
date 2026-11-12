@@ -13,7 +13,9 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /api/order/place        places an order (confirm required; real orders also need AUTOMATIC_DIST_ALLOW_LIVE_ORDERS)
   GET  /api/orders             the orders placed from this screen, with their status and tracking numbers
   POST /api/orders/{id}/tracking   ask Automatic Distributors for this order's status and tracking now
+  POST /api/orders/{id}/cancel     cancel the order with Automatic Distributors (refused once it is invoiced)
   POST /api/orders/refresh-tracking  the same for every recent order that is not finished (runs from a button)
+  GET  /api/invoices           stored invoices: search, filters, sort, paging (also /export CSV, /{id}, POST /sync)
   GET  /api/pos                open purchase orders to Automatic Distributors that can be ordered from here
   GET  /api/pos/{id}           one of them: lines matched to Automatic Distributors part numbers, ship-to split into fields
   GET  /opportunities          ranked lists of the parts most worth selling (margin, stock, our own sales)
@@ -61,10 +63,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from datetime import date as _date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -1242,6 +1245,7 @@ def _ensure_tracking_settings(db: Session) -> bool:
             "alter table supplier_sync_settings add column if not exists tracking_interval_minutes integer not null default 180",
             "alter table supplier_sync_settings add column if not exists tracking_last_run_at timestamptz",
             "alter table supplier_sync_settings add column if not exists tracking_last_summary text",
+            "alter table supplier_sync_settings add column if not exists invoices_last_sync_at timestamptz",
         ):
             db.execute(text(ddl))
         db.commit()
@@ -2160,6 +2164,8 @@ def _collect_tracking(data) -> list[dict]:
         for key, kind in (("trackingNumber", "tracking"), ("trackingNumbers", "tracking"), ("proNumber", "pro")):
             raw = h.get(key)
             for v in raw if isinstance(raw, list) else [raw]:
+                if isinstance(v, (dict, list)):
+                    continue  # a wrapper holding the parcels, not a number: walk() finds the parcels inside it
                 v = str(v or "").strip()
                 if v and (v, kind) not in seen:
                     seen.add((v, kind))
@@ -2279,7 +2285,72 @@ def _hand_off_to_ebay(db: Session, po_number: Optional[str], status: Optional[st
 
 
 
+def _has_unshipped_lines(data: dict) -> bool:
+    """True when the order's own lines show something backordered or shipped short. Unknown or missing numbers count as
+    fine. Reads both shapes the API uses: details.item[] with orderQty/shipQty/backOrdQty (order create and lookup) and
+    details[] with quantityOrdered/quantityShipped/quantityBackOrdered (the find endpoints)."""
+    def num(v):
+        try:
+            return Decimal(str(v))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+
+    def pick(i: dict, *keys):
+        for k in keys:
+            if k in i:
+                return num(i[k])
+        return None
+
+    d = data.get("details")
+    if isinstance(d, dict):
+        d = d.get("item") or d.get("items") or []
+    for i in d or []:
+        if not isinstance(i, dict):
+            continue
+        back = pick(i, "backOrdQty", "quantityBackOrdered")
+        ordered = pick(i, "orderQty", "quantityOrdered")
+        shipped = pick(i, "shipQty", "quantityShipped")
+        if back is not None and back > 0:
+            return True
+        if ordered is not None and shipped is not None and shipped < ordered:
+            return True
+    return False
+
+
+# GET /order/number/{order}/tracking-numbers lists every parcel (number, carrier, service, ship date, weight); the order's
+# own header carries only one tracking number. Asked only for an order that already has a number, so an order that has
+# not shipped costs one call, not two. A 429 is passed on so the round stops; anything else just means "no extra parcels".
+def _parcels_for(order_number: str) -> list[dict]:
+    try:
+        data = _api_get("/order/number/" + urllib.parse.quote(order_number, safe="") + "/tracking-numbers", not_found="No parcels listed.")
+    except HTTPException as e:
+        if e.status_code == 429:
+            raise
+        return []
+    out = _collect_tracking(data)
+    for i in out:
+        i["order_number"] = i.get("order_number") or order_number
+    return out
+
+
+_tracking_done_ready = False
+
+
+def _ensure_tracking_done_col(db: Session) -> None:
+    """supplier_orders.tracking_done: set once an order has its tracking and is fully shipped, so it is not asked about again."""
+    global _tracking_done_ready
+    if _tracking_done_ready:
+        return
+    try:
+        db.execute(text("alter table supplier_orders add column if not exists tracking_done boolean not null default false"))
+        db.commit()
+        _tracking_done_ready = True
+    except Exception:
+        db.rollback()
+
+
 def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict:
+    _ensure_tracking_done_col(db)
     data = _api_get(
         "/order/number/" + urllib.parse.quote(order_number, safe=""),
         not_found="Automatic Distributors does not have this order on the server the app points at (a test order only exists on the test server).",
@@ -2289,18 +2360,33 @@ def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict
     head = data.get("header") or {}
     status = str(head.get("orderStatus") or "").strip() or None
     items = _collect_tracking(data)
+    if items:
+        seen = {(i["number"], i["kind"]) for i in items}
+        for extra in _parcels_for(order_number):
+            if (extra["number"], extra["kind"]) not in seen:
+                seen.add((extra["number"], extra["kind"]))
+                items.append(extra)
+    # The API's status is a code ("H", "9"...), not a word, so the words in _NOT_SHIPPED_YET rarely match it. The lines are
+    # the better evidence: if any line is backordered or shipped short, treat the order as partial and do not close or hand off.
+    partial = _has_unshipped_lines(data)
+    judged = "partial" if partial else status
+    done = bool(items) and not partial and status != "9"
     try:
         db.execute(
-            text("update supplier_orders set status = :st, tracking = cast(:t as jsonb), tracking_checked_at = now() where id = :i"),
-            {"st": status, "t": json.dumps(items), "i": row_id},
+            text(
+                "update supplier_orders set status = :st, tracking = cast(:t as jsonb), tracking_checked_at = now()"
+                + (", tracking_done = :d" if _tracking_done_ready else "")
+                + " where id = :i"
+            ),
+            {"st": status, "t": json.dumps(items), "i": row_id, **({"d": done} if _tracking_done_ready else {})},
         )
         db.commit()
     except Exception:
         db.rollback()
         raise HTTPException(503, "The tracking columns are missing. Run sql/autodist_tracking.sql in Supabase, then try again.")
     po_no = db.execute(text("select po_number from supplier_orders where id = :i"), {"i": row_id}).scalar()
-    closed = _close_drop_ship_po(db, po_no, order_number, status, items)
-    ebay_filled = _hand_off_to_ebay(db, po_no, status, items)
+    closed = _close_drop_ship_po(db, po_no, order_number, judged, items)
+    ebay_filled = _hand_off_to_ebay(db, po_no, judged, items)
     return {"order_number": order_number, "status": status, "tracking": items, "po_closed": closed, "ebay_filled": ebay_filled}
 
 
@@ -2309,12 +2395,14 @@ def api_orders_refresh_tracking(db: Session = Depends(get_db)):
     """Status and tracking for recent orders on the server we point at that are not finished. Oldest-checked first."""
     url, _key = _api_settings()
     mode = _api_mode(url)
+    _ensure_tracking_done_col(db)
     try:
         rows = db.execute(
             text(
                 "select id, order_number from supplier_orders where supplier = :s and mode = :m and order_number <> '' "
                 "and created_at > now() - make_interval(days => :d) "
                 "and coalesce(lower(status), '') not similar to '%(cancel|deliver|complete)%' "
+                "and coalesce(status, '') <> '9' and not coalesce(tracking_done, false) "
                 "order by tracking_checked_at asc nulls first, id desc limit :n"
             ),
             {"s": SUPPLIER, "m": mode, "d": TRACK_WINDOW_DAYS, "n": TRACK_BATCH},
@@ -2371,23 +2459,39 @@ def _auto_tracking_tick() -> None:
         ).first()
         if cfg is None or not cfg.tracking_enabled:
             return
+        _ensure_tracking_done_col(db)
         mins = int(cfg.tracking_interval_minutes or 180)
+        parts: list[str] = []
+
+        # invoices: the last 3 days, once per interval (claimed first so two copies of the server never both do it)
+        claimed_inv = db.execute(
+            text(
+                "update supplier_sync_settings set invoices_last_sync_at = now() where supplier = :s "
+                "and (invoices_last_sync_at is null or invoices_last_sync_at <= now() - make_interval(mins => :m)) returning 1"
+            ),
+            {"s": SUPPLIER, "m": mins},
+        ).first()
+        db.commit()
+        if claimed_inv is not None:
+            done, stored, why = _sync_invoice_days(db, 3)
+            parts.append(f"{stored} invoice{'' if stored == 1 else 's'} saved")
+            if why:
+                parts.append(f"invoice sync stopped: {why[:120]}")
+
         rows = db.execute(
             text(
                 "select id, order_number from supplier_orders where supplier = :s and mode = :m and order_number <> '' "
                 "and created_at > now() - make_interval(days => :d) "
                 "and coalesce(lower(status), '') not similar to '%(cancel|deliver|complete)%' "
+                "and coalesce(status, '') <> '9' and not coalesce(tracking_done, false) "
                 "and (tracking_checked_at is null or tracking_checked_at <= now() - make_interval(mins => :i)) "
                 "order by tracking_checked_at asc nulls first, id desc limit :n"
             ),
             {"s": SUPPLIER, "m": mode, "d": TRACK_WINDOW_DAYS, "i": mins, "n": TRACK_BATCH},
         ).all()
-        if not rows:
-            return
-        checked = with_tracking = 0
+        checked = with_tracking = problems = 0
         closed: list = []
         filled: list = []
-        problems = 0
         for r in rows:
             claimed = db.execute(
                 text(
@@ -2413,18 +2517,21 @@ def _auto_tracking_tick() -> None:
                 if e.status_code in (429, 503):
                     break
             time.sleep(1.5)
-        summary = f"Checked {checked} order{'' if checked == 1 else 's'}, {with_tracking} with tracking"
-        if closed:
-            summary += f"; closed drop ship PO {', '.join(str(c) for c in closed)}"
-        if filled:
-            summary += f"; tracking added to eBay order {', '.join(filled)}"
-        if problems:
-            summary += f"; {problems} problem{'' if problems == 1 else 's'} (see the server log)"
-        db.execute(
-            text("update supplier_sync_settings set tracking_last_run_at = now(), tracking_last_summary = :m where supplier = :s"),
-            {"m": summary + ".", "s": SUPPLIER},
-        )
-        db.commit()
+        if checked or problems:
+            t = f"Checked {checked} order{'' if checked == 1 else 's'}, {with_tracking} with tracking"
+            if closed:
+                t += f"; closed drop ship PO {', '.join(str(c) for c in closed)}"
+            if filled:
+                t += f"; tracking added to eBay order {', '.join(filled)}"
+            if problems:
+                t += f"; {problems} problem{'' if problems == 1 else 's'} (see the server log)"
+            parts.insert(0, t)
+        if parts:
+            db.execute(
+                text("update supplier_sync_settings set tracking_last_run_at = now(), tracking_last_summary = :m where supplier = :s"),
+                {"m": "; ".join(parts) + ".", "s": SUPPLIER},
+            )
+            db.commit()
     except Exception:
         db.rollback()
         log.exception("autodist automatic tracking check failed")
@@ -2444,6 +2551,411 @@ def _tracking_loop() -> None:
 
 if os.environ.get("AUTODIST_SCHEDULER", "1").strip().lower() not in ("0", "false", "no", "off"):
     threading.Thread(target=_tracking_loop, daemon=True, name="autodist-auto-tracking").start()
+
+
+# --------------------------------------------------------------------------
+# cancel: POST /order/number/cancel/{order}
+# --------------------------------------------------------------------------
+# Cancelling is immediate (not a request): the API answers OrderStatus "9", which is what "cancelled" looks like in its
+# data. It is refused (503) once the order has been invoiced, because the parts have shipped; after that it is a return,
+# which has to be arranged with the distributor. The order is looked up first so that split (related) orders that were
+# made from it are cancelled too, and so an already-invoiced order is refused before anything is sent. Only this order
+# and its own related orders are touched: never "everything with this PO number", because a short number like 14 could
+# also be on an unrelated order.
+def _invoiced(v) -> bool:
+    return str(v or "").strip() not in ("", "0")
+
+
+def _cancel_call(order_number: str) -> None:
+    try:
+        _api_post("/order/number/cancel/" + urllib.parse.quote(order_number, safe=""), {})
+    except HTTPException as e:
+        d = str(e.detail)
+        if "(503)" in d:
+            raise HTTPException(
+                409,
+                f"Order {order_number} was not cancelled: Automatic Distributors says it has already been invoiced (it has shipped), "
+                "or their system had a problem. Press Recheck to see its status. A shipped order can only be handled as a return with them.",
+            )
+        if "(404)" in d:
+            raise HTTPException(404, f"Automatic Distributors does not have order {order_number} on the server the app points at.")
+        if "Could not reach" in d:
+            raise HTTPException(
+                504,
+                f"No answer came back for order {order_number}, so it MAY be cancelled. Press Recheck to see its status before trying again.",
+            )
+        raise
+
+
+class CancelOrderIn(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/api/orders/{order_id}/cancel")
+def api_order_cancel(order_id: int, body: CancelOrderIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Cancel an order with Automatic Distributors (and its split orders). Needs confirm=true. The purchase order is NOT
+    changed here; the answer says which PO it was, so the screen can offer to cancel it too."""
+    if not body.confirm:
+        raise HTTPException(400, "Not cancelled: it has to be confirmed first.")
+    url, _key = _api_settings()
+    mode = _api_mode(url)
+    row = db.execute(
+        text("select id, order_number, po_number, mode, status from supplier_orders where supplier = :s and id = :i"), {"s": SUPPLIER, "i": order_id}
+    ).first()
+    if not row or not row.order_number:
+        raise HTTPException(404, "That order is not in the list, or it has no order number yet.")
+    if row.mode != mode:
+        raise HTTPException(409, f"That order was placed on the {row.mode} server, but the app now points at the {mode} server.")
+    data = _api_get(
+        "/order/number/" + urllib.parse.quote(row.order_number, safe=""),
+        not_found="Automatic Distributors does not have this order on the server the app points at.",
+    )
+    if not isinstance(data, dict):
+        raise HTTPException(502, "The API sent something unexpected for that order.")
+    head = data.get("header") or {}
+    main_cancelled = str(head.get("orderStatus") or "").strip() == "9"
+    if not main_cancelled and _invoiced(head.get("invoiceNumber")):
+        raise HTTPException(409, f"Order {row.order_number} has already been invoiced, so it has shipped and can't be cancelled. Arrange a return with Automatic Distributors.")
+    cancelled: list[str] = []
+    failed: list[str] = []
+    if not main_cancelled:
+        _cancel_call(row.order_number)  # refusing here stops everything: nothing else was touched
+        cancelled.append(row.order_number)
+    for r in data.get("relatedOrders") or []:
+        rh = (r or {}).get("header") or {}
+        n = str(rh.get("orderNumber") or "").strip()
+        if not n or n == row.order_number or str(rh.get("orderStatus") or "").strip() == "9" or _invoiced(rh.get("invoiceNumber")):
+            continue
+        try:
+            _cancel_call(n)
+            cancelled.append(n)
+        except HTTPException as e:
+            failed.append(f"{n}: {e.detail}")
+            if e.status_code == 429:
+                break
+    try:
+        db.execute(text("update supplier_orders set status = '9', tracking_checked_at = now() where id = :i"), {"i": row.id})
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("order %s cancelled but the list could not be updated", row.order_number)
+    log.info("autodist order cancelled by %s: PO %s -> order %s (+%s related)", user.email or user.user_id, row.po_number, row.order_number, len(cancelled) - (0 if main_cancelled else 1))
+    po_id = ebay_id = None
+    try:
+        cols = _po_columns(db)
+        src = "h.source" if "source" in cols else "null::text"
+        po = db.execute(
+            text(f"select h.id, h.status, {src} as source from po_headers h where cast(h.po_number as text) = :pn and {_PO_VENDOR} order by h.id desc limit 1"),
+            {"pn": row.po_number},
+        ).first()
+        if po:
+            po_id = po.id if po.status == "open" else None
+            ebay_id = str(po.source)[5:] if po.source and str(po.source).startswith("ebay:") else None
+    except Exception:
+        db.rollback()
+    return {
+        "order_number": row.order_number, "already_cancelled": main_cancelled, "cancelled": cancelled, "failed": failed,
+        "po_number": row.po_number, "po_id": po_id, "ebay_order_id": ebay_id,
+    }
+
+
+# --------------------------------------------------------------------------
+# invoices: stored from GET /order/find/range/details (dateType I = by invoice date), one day at a time
+# --------------------------------------------------------------------------
+# Every order Automatic Distributors invoices on our account is kept in supplier_invoices (the table is created the first
+# time it is needed), whether or not it was placed from this app. Asking one day at a time means the day asked is the
+# invoice date, because that endpoint's reply does not always carry one. A order invoiced again later (a backorder that
+# ships) comes back as another row of the same order, so the row key is the order number plus its generation number.
+# "special charges" is the distributor's shipping and handling line; confirm that on one real invoice.
+_invoices_ready = False
+
+
+def _ensure_invoices_table(db: Session) -> bool:
+    global _invoices_ready
+    if _invoices_ready:
+        return True
+    try:
+        db.execute(
+            text(
+                "create table if not exists supplier_invoices ("
+                " id bigserial primary key, supplier text not null, mode text not null, order_number text not null,"
+                " generation text not null default '', parent_order_number text, po_number text, invoice_number text,"
+                " invoice_date date, invoice_amount numeric(12,2), order_value numeric(12,2), item_amount numeric(12,2),"
+                " special_charges numeric(12,2), carrier_code text, tracking_number text, order_status text,"
+                " ship_to_name text, ship_to_city text, ship_to_state text, ship_to_zip text,"
+                " lines jsonb not null default '[]'::jsonb, first_seen_at timestamptz not null default now(),"
+                " synced_at timestamptz not null default now(), unique (supplier, mode, order_number, generation))"
+            )
+        )
+        db.execute(text("create index if not exists supplier_invoices_date_idx on supplier_invoices (invoice_date desc)"))
+        db.execute(text("create index if not exists supplier_invoices_po_idx on supplier_invoices (po_number)"))
+        db.commit()
+        _invoices_ready = True
+        return True
+    except Exception:
+        db.rollback()
+        log.exception("could not create supplier_invoices")
+        return False
+
+
+def _money(v) -> Optional[Decimal]:
+    try:
+        d = Decimal(str(v).strip())
+        return d.quantize(Decimal("0.01"))
+    except (InvalidOperation, AttributeError, ValueError):
+        return None
+
+
+def _parse_invoice_date(v) -> Optional[_date]:
+    """The API writes it as MM/DD/YY (08/04/25). Anything else is ignored."""
+    m = re.fullmatch(r"\s*(\d{1,2})/(\d{1,2})/(\d{2}|\d{4})\s*", str(v or ""))
+    if not m:
+        return None
+    mo, da, yr = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    yr = yr + 2000 if yr < 100 else yr
+    try:
+        return _date(yr, mo, da)
+    except ValueError:
+        return None
+
+
+def _store_invoice(db: Session, mode: str, entry: dict, day: Optional[_date]) -> bool:
+    h = entry.get("header") or {}
+    order_no = str(h.get("orderNumber") or "").strip()
+    if not order_no:
+        return False
+    addr = h.get("shipToAddress") or {}
+    lines = []
+    for d in entry.get("details") or []:
+        if not isinstance(d, dict):
+            continue
+        lines.append(
+            {
+                "number": d.get("itemNumber"),
+                "description": d.get("description"),
+                "ordered": d.get("quantityOrdered"),
+                "shipped": d.get("quantityShipped"),
+                "backordered": d.get("quantityBackOrdered"),
+                "price": d.get("actualSellPrice"),
+                "warehouse": API_WAREHOUSES.get(str(d.get("warehouseID") or "")),  # Maine (1) is never shown
+            }
+        )
+    inv_no = str(h.get("invoiceNumber") or "").strip()
+    db.execute(
+        text(
+            "insert into supplier_invoices (supplier, mode, order_number, generation, parent_order_number, po_number, invoice_number,"
+            " invoice_date, invoice_amount, order_value, item_amount, special_charges, carrier_code, tracking_number, order_status,"
+            " ship_to_name, ship_to_city, ship_to_state, ship_to_zip, lines) values (:s, :m, :o, :g, :par, :po, :inv, :dt, :ia, :ov,"
+            " :im, :sc, :cc, :tn, :st, :nm, :ct, :sta, :zp, cast(:ln as jsonb)) "
+            "on conflict (supplier, mode, order_number, generation) do update set parent_order_number = excluded.parent_order_number,"
+            " po_number = excluded.po_number, invoice_number = excluded.invoice_number,"
+            " invoice_date = coalesce(excluded.invoice_date, supplier_invoices.invoice_date), invoice_amount = excluded.invoice_amount,"
+            " order_value = excluded.order_value, item_amount = excluded.item_amount, special_charges = excluded.special_charges,"
+            " carrier_code = excluded.carrier_code, tracking_number = excluded.tracking_number, order_status = excluded.order_status,"
+            " ship_to_name = excluded.ship_to_name, ship_to_city = excluded.ship_to_city, ship_to_state = excluded.ship_to_state,"
+            " ship_to_zip = excluded.ship_to_zip, lines = excluded.lines, synced_at = now()"
+        ),
+        {
+            "s": SUPPLIER, "m": mode, "o": order_no[:40], "g": str(h.get("orderGenerationNumber") or "")[:10],
+            "par": str(h.get("parentOrderNumber") or "")[:40] or None, "po": str(h.get("poNumber") or "").strip()[:60] or None,
+            "inv": inv_no[:40] or None, "dt": _parse_invoice_date(h.get("invoiceDate")) or day,
+            "ia": _money(h.get("invoiceAmount")), "ov": _money(h.get("totalOrderValue")), "im": _money(h.get("itemSalesAmount")),
+            "sc": _money(h.get("totalSpecialCharges")), "cc": str(h.get("carrierCode") or "")[:20] or None,
+            "tn": (str(h.get("trackingNumber") or "").strip() or str(h.get("proNumber") or "").strip())[:80] or None, "st": str(h.get("orderStatus") or "")[:20] or None,
+            "nm": str(addr.get("name") or "")[:100] or None, "ct": str(addr.get("city") or "")[:60] or None,
+            "sta": str(addr.get("state") or "")[:30] or None, "zp": str(addr.get("zipCode") or "")[:20] or None,
+            "ln": json.dumps(lines),
+        },
+    )
+    return True
+
+
+def _sync_invoice_days(db: Session, days: int) -> tuple[int, int, Optional[str]]:
+    """Fetch the last `days` days (today first), one call per day. Returns (days done, invoices stored, why it stopped early)."""
+    if not _ensure_invoices_table(db):
+        return 0, 0, "The invoices table could not be created."
+    url, _key = _api_settings()
+    mode = _api_mode(url)
+    done = stored = 0
+    today = _date.today()
+    for back in range(days):
+        day = today - timedelta(days=back)
+        ymd = day.strftime("%Y%m%d")
+        try:
+            data = _api_get(
+                "/order/find/range/details", {"dateType": "I", "startDate": ymd, "endDate": ymd}, not_found="No invoices that day."
+            )
+        except HTTPException as e:
+            if e.status_code == 404:  # nothing invoiced that day
+                done += 1
+                time.sleep(1.2)
+                continue
+            db.rollback()
+            return done, stored, str(e.detail)
+        for entry in (data.get("list") if isinstance(data, dict) else None) or []:
+            if isinstance(entry, dict) and _store_invoice(db, mode, entry, day):
+                stored += 1
+        db.commit()
+        done += 1
+        time.sleep(1.2)  # stay inside the API's rate limit
+    return done, stored, None
+
+
+_inv_state: dict = {"running": False, "message": "", "finished_at": None}
+_inv_lock = threading.Lock()
+
+
+def _inv_job(days: int) -> None:
+    gen = get_db()
+    db = next(gen)
+    try:
+        done, stored, why = _sync_invoice_days(db, days)
+        msg = f"Looked at {done} day{'' if done == 1 else 's'}; {stored} invoice{'' if stored == 1 else 's'} saved or updated."
+        if why:
+            msg += f" Stopped early: {why}"
+        _inv_state["message"] = msg
+    except Exception as e:
+        db.rollback()
+        log.exception("invoice sync failed")
+        _inv_state["message"] = f"The invoice sync failed: {e}"
+    finally:
+        _inv_state["running"] = False
+        _inv_state["finished_at"] = time.time()
+        gen.close()
+
+
+class InvoiceSyncIn(BaseModel):
+    days: int = Field(30, ge=1, le=90)
+
+
+@router.post("/api/invoices/sync")
+def api_invoices_sync(body: InvoiceSyncIn):
+    """Fetch the invoices of the last N days in the background (one API call per day, so 30 days takes about 40 seconds)."""
+    _url, key = _api_settings()
+    if not key:
+        raise HTTPException(400, "The API key is not set. Add AUTOMATIC_DIST_API_KEY in the Render environment.")
+    with _inv_lock:
+        if _inv_state["running"]:
+            raise HTTPException(409, "An invoice sync is already running.")
+        _inv_state.update(running=True, message="Starting…")
+    threading.Thread(target=_inv_job, args=(body.days,), daemon=True, name="autodist-invoice-sync").start()
+    return {"running": True}
+
+
+@router.get("/api/invoices/sync-status")
+def api_invoices_sync_status():
+    return {"running": _inv_state["running"], "message": _inv_state["message"]}
+
+
+_INV_SORT = {
+    "date": "i.invoice_date", "invoice": "i.invoice_number", "order": "i.order_number", "po": "i.po_number",
+    "customer": "i.ship_to_name", "amount": "i.invoice_amount", "shipping": "i.special_charges",
+}
+
+
+def _inv_query(db: Session, q: str, date_from: str, date_to: str, link: str, invoiced: str):
+    """The shared FROM / WHERE for the list, the totals and the export. Returns (from_sql, where_sql, params)."""
+    cols = _po_columns(db)
+    type_sql = "h2.po_type" if "po_type" in cols else "null::text"
+    src_sql = "h2.source" if "source" in cols else "null::text"
+    from_sql = (
+        "supplier_invoices i left join lateral (select h.id, " + type_sql.replace("h2", "h") + " as po_type, " + src_sql.replace("h2", "h") + " as source "
+        "from po_headers h where cast(h.po_number as text) = i.po_number and " + _PO_VENDOR + " order by h.id desc limit 1) p on true"
+    )
+    url, _key = _api_settings()
+    where, params = ["i.supplier = :s", "i.mode = :m"], {"s": SUPPLIER, "m": _api_mode(url)}
+    if q.strip():
+        where.append(
+            "(i.invoice_number ilike :q or i.order_number ilike :q or i.po_number ilike :q or i.ship_to_name ilike :q "
+            "or i.tracking_number ilike :q or cast(i.lines as text) ilike :q)"
+        )
+        params["q"] = "%" + q.strip().replace("%", "").replace("_", "") + "%"
+    for key, val, op in (("df", date_from, ">="), ("dt", date_to, "<=")):
+        if val.strip():
+            try:
+                params[key] = _date.fromisoformat(val.strip())
+            except ValueError:
+                raise HTTPException(422, "Dates look like 2026-11-30.")
+            where.append(f"i.invoice_date {op} :{key}")
+    if link == "po":
+        where.append("p.id is not null")
+    elif link == "nopo":
+        where.append("p.id is null")
+    elif link == "ebay":
+        where.append("p.source like 'ebay:%'")
+    if invoiced == "yes":
+        where.append("coalesce(i.invoice_number, '') not in ('', '0')")
+    elif invoiced == "no":
+        where.append("coalesce(i.invoice_number, '') in ('', '0')")
+    return from_sql, " and ".join(where), params
+
+
+_INV_COLS = (
+    "i.id, i.order_number, i.po_number, i.invoice_number, i.invoice_date, i.invoice_amount, i.order_value, i.item_amount, "
+    "i.special_charges, i.carrier_code, i.tracking_number, i.order_status, i.ship_to_name, i.ship_to_city, i.ship_to_state, "
+    "jsonb_array_length(i.lines) as line_count, p.id as po_id, "
+    "case when p.source like 'ebay:%' then substr(p.source, 6) end as ebay_order_id"
+)
+
+
+def _f(v):
+    return float(v) if isinstance(v, Decimal) else v
+
+
+@router.get("/api/invoices")
+def api_invoices(
+    q: str = Query("", max_length=80), date_from: str = Query("", alias="from", max_length=10), date_to: str = Query("", alias="to", max_length=10),
+    link: str = Query("", pattern="^(|po|nopo|ebay)$"), invoiced: str = Query("", pattern="^(|yes|no)$"),
+    sort: str = Query("date"), dir: str = Query("desc", pattern="^(asc|desc)$"),
+    limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), db: Session = Depends(get_db),
+):
+    if not _ensure_invoices_table(db):
+        raise HTTPException(503, "The invoices table could not be created.")
+    from_sql, where, params = _inv_query(db, q, date_from, date_to, link, invoiced)
+    order = _INV_SORT.get(sort, "i.invoice_date")
+    tot = db.execute(
+        text(f"select count(*), coalesce(sum(i.invoice_amount), 0), coalesce(sum(i.special_charges), 0) from {from_sql} where {where}"), params
+    ).first()
+    rows = db.execute(
+        text(f"select {_INV_COLS} from {from_sql} where {where} order by {order} {dir} nulls last, i.id desc limit :l offset :o"),
+        {**params, "l": limit, "o": offset},
+    ).all()
+    last = db.execute(text("select max(synced_at) from supplier_invoices where supplier = :s"), {"s": SUPPLIER}).scalar()
+    return {
+        "total": tot[0], "sum_invoice": _f(tot[1]), "sum_shipping": _f(tot[2]), "last_synced_at": last,
+        "items": [{k: _f(v) for k, v in r._mapping.items()} for r in rows],
+    }
+
+
+@router.get("/api/invoices/export")
+def api_invoices_export(
+    q: str = Query("", max_length=80), date_from: str = Query("", alias="from", max_length=10), date_to: str = Query("", alias="to", max_length=10),
+    link: str = Query("", pattern="^(|po|nopo|ebay)$"), invoiced: str = Query("", pattern="^(|yes|no)$"), db: Session = Depends(get_db),
+):
+    """The same filters as the list, as a CSV file (up to 20,000 invoices)."""
+    if not _ensure_invoices_table(db):
+        raise HTTPException(503, "The invoices table could not be created.")
+    from_sql, where, params = _inv_query(db, q, date_from, date_to, link, invoiced)
+    rows = db.execute(text(f"select {_INV_COLS} from {from_sql} where {where} order by i.invoice_date desc nulls last, i.id desc limit 20000"), params).all()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Invoice date", "Invoice #", "Order #", "Our PO #", "eBay order", "Customer", "City", "State", "Carrier", "Tracking", "Parts $", "Shipping and handling $", "Invoice $", "Order value $", "Status code"])
+    for r in rows:
+        w.writerow([r.invoice_date, r.invoice_number, r.order_number, r.po_number, r.ebay_order_id, r.ship_to_name, r.ship_to_city, r.ship_to_state, r.carrier_code, r.tracking_number, r.item_amount, r.special_charges, r.invoice_amount, r.order_value, r.order_status])
+    return Response(buf.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="autodist-invoices.csv"'})
+
+
+@router.get("/api/invoices/{invoice_id}")
+def api_invoice(invoice_id: int, db: Session = Depends(get_db)):
+    if not _ensure_invoices_table(db):
+        raise HTTPException(503, "The invoices table could not be created.")
+    from_sql, where, params = _inv_query(db, "", "", "", "", "")
+    row = db.execute(
+        text(f"select {_INV_COLS}, i.parent_order_number, i.ship_to_zip, i.lines from {from_sql} where {where} and i.id = :i"), {**params, "i": invoice_id}
+    ).first()
+    if not row:
+        raise HTTPException(404, "That invoice is not in the list.")
+    return {k: _f(v) for k, v in row._mapping.items()}
 
 
 # --------------------------------------------------------------------------
