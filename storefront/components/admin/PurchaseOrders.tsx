@@ -762,7 +762,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
   return (
     <div className="space-y-4">
       <ClearableInput
-        className={`${inp} w-full max-w-3xl`}
+        className={`${inp} w-full`}
         value={qInput}
         onChange={(e) => setQInput(e.target.value)}
         placeholder="Search PO number, distributor, part number, SKU or description"
@@ -997,7 +997,7 @@ function Issues({ reloadKey, active, setFlash }: { reloadKey: number; active: bo
       </p>
       <div className="flex flex-wrap items-center gap-3">
         <ClearableInput
-          className={`${inp} w-full max-w-3xl`}
+          className={`${inp} min-w-[16rem] flex-1`}
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}
           placeholder="Search PO number, distributor, part number, SKU or description"

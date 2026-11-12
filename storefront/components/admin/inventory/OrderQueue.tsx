@@ -305,13 +305,13 @@ export default function OrderQueue({ active }: { active: boolean }) {
       {msg && <Notice kind="error">{msg}</Notice>}
       {okMsg && <Notice kind="success">{okMsg}</Notice>}
 
-      <div className="max-w-xl">
+      <div>
         <ScanBox ref={scanRef} onScan={(c) => void scanOrder(c)} placeholder="Scan or type an order number to open it…" />
       </div>
 
       <div className="flex flex-wrap items-end gap-2">
         <ClearableInput
-          className="w-[36rem] max-w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
+          className="min-w-[16rem] flex-1 rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900"
           placeholder="Search title, order number, item number, custom label or SKU"
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}

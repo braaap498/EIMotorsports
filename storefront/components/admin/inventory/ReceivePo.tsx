@@ -130,7 +130,7 @@ export default function ReceivePo({ active }: { active: boolean }) {
       </p>
       <div className="flex flex-wrap items-center gap-3">
         <ClearableInput
-          className={`${inputCls} w-full max-w-xl`}
+          className={`${inputCls} min-w-[16rem] flex-1`}
           value={qInput}
           onChange={(e) => setQInput(e.target.value)}
           placeholder="Search PO number, distributor, part number, SKU or description"
