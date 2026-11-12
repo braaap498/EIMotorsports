@@ -110,14 +110,17 @@ def products(
     offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    # Universal products fit every machine, so they are always included.
+    # A universal product shows for every machine only when the admin left
+    # "show in vehicle search" on. With it off, the product still appears under
+    # its category and still shows for any model it has specific fitment rows
+    # for (oil that is universal but also listed for particular machines).
     # No year = every year of this model; exists() keeps a part that fits
     # several years from showing up more than once.
     base = f"""
         from products p
         where {PUBLISHED_FILTER}
           and (
-            p.is_universal
+            (p.is_universal and p.universal_in_vehicle_search)
             or exists (
               select 1 from product_fitment pf
               join vehicles v on v.id = pf.vehicle_id
