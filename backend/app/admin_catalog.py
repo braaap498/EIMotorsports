@@ -19,7 +19,7 @@ Notes on how the data is shaped:
     needed.
 """
 import re
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -639,6 +639,12 @@ class ProductFields(BaseModel):
     is_active: Optional[bool] = None
     is_published: Optional[bool] = None
     is_universal: Optional[bool] = None
+    # A universal product shows in the Year/Make/Model search only while this is true.
+    # When false it is found under its category (and for any model it has fitment rows for).
+    universal_in_vehicle_search: Optional[bool] = None
+    # "No vehicle fitment needed" (helmets, apparel, gear): never shown in a vehicle search,
+    # and left out of the needs-fitment work list.
+    fitment_exempt: Optional[bool] = None
 
 
 class ProductCreate(ProductFields):
@@ -733,7 +739,14 @@ def _product_or_404(db: Session, product_id: int):
 
 # A new product starts from these values, so a form that always sends them
 # (published = off, active = on, universal = off) is not treated as a change.
-_NEW_PRODUCT_DEFAULTS = {"is_published": False, "is_active": True, "is_universal": False, "show_part_number": False}
+_NEW_PRODUCT_DEFAULTS = {
+    "is_published": False,
+    "is_active": True,
+    "is_universal": False,
+    "show_part_number": False,
+    "universal_in_vehicle_search": True,
+    "fitment_exempt": False,
+}
 
 
 def _same(old, new) -> bool:
@@ -793,6 +806,86 @@ _PRODUCT_SORTS = {
 }
 
 
+# What each Fitment filter means. The client sends only a key; the SQL is chosen here.
+_HAS_FITMENT = "exists (select 1 from product_fitment pf where pf.product_id = p.id)"
+FITMENT_FILTERS = {
+    # the work list: needs vehicle fitment and has none yet
+    "needs_fitment": f"(not coalesce(p.is_universal, false) and not p.fitment_exempt and not {_HAS_FITMENT})",
+    "has_fitment": _HAS_FITMENT,
+    "universal": "coalesce(p.is_universal, false)",
+    "universal_search": "(coalesce(p.is_universal, false) and p.universal_in_vehicle_search)",
+    "universal_category": "(coalesce(p.is_universal, false) and not p.universal_in_vehicle_search)",
+    "not_vehicle": "p.fitment_exempt",
+}
+
+# The one status shown for each product (a product with fitment rows AND a universal setting shows the setting).
+_STATUS_SQL = (
+    "case when p.fitment_exempt then 'not_vehicle'"
+    " when coalesce(p.is_universal, false) and p.universal_in_vehicle_search then 'universal_search'"
+    " when coalesce(p.is_universal, false) then 'universal_category'"
+    f" when {_HAS_FITMENT} then 'has_fitment'"
+    " else 'needs_fitment' end"
+)
+
+# The four ways a product can be matched to vehicles: (is_universal, universal_in_vehicle_search, fitment_exempt).
+FITMENT_MODES = {
+    "vehicle": (False, True, False),
+    "universal_search": (True, True, False),
+    "universal_category": (True, False, False),
+    "not_vehicle": (False, True, True),
+}
+FitmentMode = Literal["vehicle", "universal_search", "universal_category", "not_vehicle"]
+
+# A product's category plus everything under it, so choosing "Apparel" also finds "Apparel > Jackets".
+_CATEGORY_TREE = (
+    "with recursive tree as ("
+    " select id from categories where id = cast(:category_id as bigint)"
+    " union all"
+    " select c.id from categories c join tree t on c.parent_id = t.id) "
+)
+
+
+def _product_where(
+    q: Optional[str] = None,
+    category_id: Optional[int] = None,
+    published: Optional[bool] = None,
+    universal: Optional[bool] = None,
+    no_fitment: bool = False,
+    fitment: Optional[str] = None,
+    source: Optional[str] = None,
+) -> tuple[str, dict]:
+    """The WHERE clause and parameters shared by the products list, the fitment summary and the bulk change."""
+    if fitment and fitment not in FITMENT_FILTERS:
+        raise HTTPException(400, "Unknown fitment filter.")
+    if source and source != "autodist":
+        raise HTTPException(400, "Unknown source.")
+    params = {
+        "like": like(q),
+        "category_id": category_id,
+        "published": published,
+        "universal": universal,
+        "no_fitment": no_fitment,
+        "supplier": "autodist",
+    }
+    where = """
+        where (cast(:like as text) is null
+               or p.title ilike cast(:like as text)
+               or p.ebay_item_id ilike cast(:like as text)
+               or p.sku ilike cast(:like as text)
+               or p.manufacturer_part_number ilike cast(:like as text)
+               or p.custom_label_sku ilike cast(:like as text))
+          and (cast(:category_id as bigint) is null or p.category_id in (select id from tree))
+          and (cast(:published as boolean) is null or p.is_published = cast(:published as boolean))
+          and (cast(:universal as boolean) is null or p.is_universal = cast(:universal as boolean))
+          and (not :no_fitment or %s)
+    """ % FITMENT_FILTERS["needs_fitment"]
+    if fitment:
+        where += f" and {FITMENT_FILTERS[fitment]}"
+    if source == "autodist":
+        where += " and exists (select 1 from supplier_product_links l where l.product_id = p.id and l.supplier = :supplier)"
+    return where, params
+
+
 @router.get("/products")
 @needs(*READ_LISTS)
 def list_products(
@@ -801,6 +894,8 @@ def list_products(
     published: Optional[bool] = None,
     universal: Optional[bool] = None,
     no_fitment: bool = False,
+    fitment: Optional[str] = None,
+    source: Optional[str] = None,
     sort: Optional[str] = None,
     dir: str = "asc",
     limit: int = Query(50, le=200),
@@ -812,35 +907,18 @@ def list_products(
         raise HTTPException(400, "Unknown sort column.")
     direction = "desc" if dir == "desc" else "asc"
     order_by = f"{sort_expr} {direction} nulls last, p.id desc" if sort_expr else "p.id desc"
-    params = {
-        "like": like(q),
-        "category_id": category_id,
-        "published": published,
-        "universal": universal,
-        "no_fitment": no_fitment,
-        "limit": limit,
-        "offset": offset,
-    }
-    where = """
-        where (cast(:like as text) is null
-               or p.title ilike cast(:like as text)
-               or p.ebay_item_id ilike cast(:like as text)
-               or p.sku ilike cast(:like as text)
-               or p.manufacturer_part_number ilike cast(:like as text)
-               or p.custom_label_sku ilike cast(:like as text))
-          and (cast(:category_id as bigint) is null or p.category_id = cast(:category_id as bigint))
-          and (cast(:published as boolean) is null or p.is_published = cast(:published as boolean))
-          and (cast(:universal as boolean) is null or p.is_universal = cast(:universal as boolean))
-          and (not :no_fitment or (not p.is_universal and not exists
-                 (select 1 from product_fitment pf where pf.product_id = p.id)))
-    """
-    total = db.execute(text(f"select count(*) from products p {where}"), params).scalar()
+    where, params = _product_where(q, category_id, published, universal, no_fitment, fitment, source)
+    params.update({"limit": limit, "offset": offset})
+    total = db.execute(text(f"{_CATEGORY_TREE} select count(*) from products p {where}"), params).scalar()
     rows = db.execute(
         text(
             f"""
+            {_CATEGORY_TREE}
             select p.id, p.sku as sku, p.custom_label_sku, p.ebay_item_id, p.title, p.slug, p.list_price, p.quantity_on_hand,
                    p.category_id, p.is_published, p.is_active, p.is_universal,
-                   (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count
+                   p.universal_in_vehicle_search, p.fitment_exempt,
+                   (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
+                   {_STATUS_SQL} as fitment_status
             from products p {where}
             order by {order_by} limit :limit offset :offset
             """
@@ -848,6 +926,82 @@ def list_products(
         params,
     ).all()
     return {"total": total, "items": [dict(r._mapping) for r in rows]}
+
+
+@router.get("/products/fitment-summary")
+@needs(*READ_LISTS)
+def fitment_summary(
+    q: Optional[str] = None,
+    category_id: Optional[int] = None,
+    published: Optional[bool] = None,
+    universal: Optional[bool] = None,
+    source: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """How many products are in each fitment status, for the current search and category (the status filter itself is not applied)."""
+    where, params = _product_where(q, category_id, published, universal, False, None, source)
+    row = db.execute(
+        text(
+            f"""
+            {_CATEGORY_TREE}
+            select count(*) as total,
+                   count(*) filter (where {FITMENT_FILTERS['needs_fitment']}) as needs_fitment,
+                   count(*) filter (where {_STATUS_SQL} = 'has_fitment') as has_fitment,
+                   count(*) filter (where {_STATUS_SQL} = 'universal_search') as universal_search,
+                   count(*) filter (where {_STATUS_SQL} = 'universal_category') as universal_category,
+                   count(*) filter (where {_STATUS_SQL} = 'not_vehicle') as not_vehicle
+            from products p {where}
+            """
+        ),
+        params,
+    ).one()
+    return {k: int(v or 0) for k, v in row._mapping.items()}
+
+
+class FitmentModeIn(BaseModel):
+    mode: FitmentMode
+    ids: Optional[list[int]] = Field(None, max_length=1000)  # these products ...
+    # ... or every product the list is showing (same filters as the list). expected_count is the number
+    # the screen showed, so a list that changed in the meantime is refused instead of changing the wrong products.
+    q: Optional[str] = None
+    category_id: Optional[int] = None
+    published: Optional[bool] = None
+    universal: Optional[bool] = None
+    fitment: Optional[str] = None
+    source: Optional[str] = None
+    expected_count: Optional[int] = None
+
+
+@router.post("/products/fitment-mode")
+@needs("fitment.add")
+def set_fitment_mode(body: FitmentModeIn, db: Session = Depends(get_db)):
+    """Choose how many products match vehicles at once: vehicle-specific, universal (in vehicle search or category only), or not vehicle-based."""
+    uni, in_search, exempt = FITMENT_MODES[body.mode]
+    sets = (
+        "is_universal = :uni, universal_in_vehicle_search = :in_search, fitment_exempt = :exempt, updated_at = now()"
+    )
+    values = {"uni": uni, "in_search": in_search, "exempt": exempt}
+    if body.ids is not None:
+        ids = sorted(set(body.ids))
+        if not ids:
+            raise HTTPException(400, "No products selected.")
+        n = db.execute(text(f"update products set {sets} where id = any(:ids)"), {**values, "ids": ids}).rowcount
+    else:
+        has_filter = any(
+            v not in (None, "") for v in (body.q, body.category_id, body.published, body.universal, body.fitment, body.source)
+        )
+        if not has_filter:
+            raise HTTPException(400, "Pick a category, search or filter first. This will not change the whole catalog at once.")
+        where, params = _product_where(body.q, body.category_id, body.published, body.universal, False, body.fitment, body.source)
+        matched = db.execute(text(f"{_CATEGORY_TREE} select count(*) from products p {where}"), params).scalar() or 0
+        if body.expected_count is None or matched != body.expected_count:
+            conflict(db, f"The list now has {matched} products, not {body.expected_count}. Nothing was changed. Reload the list and try again.")
+        n = db.execute(
+            text(f"{_CATEGORY_TREE} update products set {sets} where id in (select p.id from products p {where})"),
+            {**params, **values},
+        ).rowcount
+    finish(db, refresh=True)
+    return {"updated": n, "mode": body.mode}
 
 
 @router.get("/products/{product_id}")

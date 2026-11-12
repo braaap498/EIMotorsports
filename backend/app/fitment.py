@@ -119,6 +119,7 @@ def products(
     base = f"""
         from products p
         where {PUBLISHED_FILTER}
+          and not p.fitment_exempt
           and (
             (p.is_universal and p.universal_in_vehicle_search)
             or exists (

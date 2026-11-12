@@ -83,7 +83,14 @@ function orderCategories(cats: Cat[]): { cat: Cat; depth: number }[] {
   return out;
 }
 
-type Flags = { is_published: boolean; is_active: boolean; is_universal: boolean; show_part_number: boolean };
+type Flags = {
+  is_published: boolean;
+  is_active: boolean;
+  is_universal: boolean;
+  universal_in_vehicle_search: boolean; // a universal product also shows in the vehicle search
+  fitment_exempt: boolean; // no vehicle fitment needed (helmets, apparel)
+  show_part_number: boolean;
+};
 
 // Turns what is on screen into what the API expects. Used for saving, and once
 // at load time so that saving can send only what the person actually changed.
@@ -128,7 +135,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [original, setOriginal] = useState<{ vals: Record<string, string>; flags: Flags } | null>(null);
   const router = useRouter();
   const [vals, setVals] = useState<Record<string, string>>({});
-  const [flags, setFlags] = useState<Flags>({ is_published: false, is_active: true, is_universal: false, show_part_number: false });
+  const [flags, setFlags] = useState<Flags>({ is_published: false, is_active: true, is_universal: false, universal_in_vehicle_search: true, fitment_exempt: false, show_part_number: false });
   const [cats, setCats] = useState<Cat[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [photosDirty, setPhotosDirty] = useState(false); // unsaved main-photo / order changes in the photos panel
@@ -189,6 +196,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
           is_published: !!p.is_published,
           is_active: !!p.is_active,
           is_universal: !!p.is_universal,
+          universal_in_vehicle_search: p.universal_in_vehicle_search !== false,
+          fitment_exempt: !!p.fitment_exempt,
           show_part_number: !!p.show_part_number,
         };
         setVals(next);
@@ -519,7 +528,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
         {!productId && <p className="text-xs text-gray-500">Fitment and photos can be added after the product is created.</p>}
       </form>
 
-      {productId && <FitmentPanel productId={productId} isUniversal={flags.is_universal} onUniversalChange={(v) => setFlags((f) => ({ ...f, is_universal: v }))} />}
+      {productId && <FitmentPanel productId={productId} flags={flags} onFlagsChange={(v) => setFlags((f) => ({ ...f, ...v }))} />}
 
       {productId && <PhotosPanel productId={productId} photos={photos} onChange={setPhotos} cardCls={card} onDirtyChange={setPhotosDirty} />}
 

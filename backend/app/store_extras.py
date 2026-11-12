@@ -101,25 +101,29 @@ def search(
         and (cast(:cat as text) is null or p.category_id in (select id from tree))
         and (
           cast(:vtype as text) is null
-          or p.is_universal
-          or exists (
-            select 1 from product_fitment pf
-            join vehicles v on v.id = pf.vehicle_id
-            join vehicle_models vm on vm.id = v.model_id
-            join vehicle_types vt on vt.id = vm.vehicle_type_id
-            where pf.product_id = p.id and vt.slug = cast(:vtype as text)
-          )
+          or (not p.fitment_exempt and (
+            (p.is_universal and p.universal_in_vehicle_search)
+            or exists (
+              select 1 from product_fitment pf
+              join vehicles v on v.id = pf.vehicle_id
+              join vehicle_models vm on vm.id = v.model_id
+              join vehicle_types vt on vt.id = vm.vehicle_type_id
+              where pf.product_id = p.id and vt.slug = cast(:vtype as text)
+            )
+          ))
         )
         and (
           cast(:model_id as bigint) is null
-          or p.is_universal
-          or exists (
-            select 1 from product_fitment pf
-            join vehicles v on v.id = pf.vehicle_id
-            where pf.product_id = p.id
-              and v.model_id = cast(:model_id as bigint)
-              and (cast(:year as int) is null or v.year = cast(:year as int))
-          )
+          or (not p.fitment_exempt and (
+            (p.is_universal and p.universal_in_vehicle_search)
+            or exists (
+              select 1 from product_fitment pf
+              join vehicles v on v.id = pf.vehicle_id
+              where pf.product_id = p.id
+                and v.model_id = cast(:model_id as bigint)
+                and (cast(:year as int) is null or v.year = cast(:year as int))
+            )
+          ))
         )
     """
     total = db.execute(text(f"{cte} select count(*) from products p {where}"), params).scalar()

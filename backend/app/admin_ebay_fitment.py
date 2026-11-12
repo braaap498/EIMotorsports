@@ -161,6 +161,7 @@ _SCOPE = _sql("""
     join ebay_compat_items c on @D@ = c.item_id
     join products p on p.id = cl.product_id
     where not coalesce(p.is_universal, false)
+      and not coalesce(p.fitment_exempt, false)
       and (cast(:inc as boolean)
            or not exists (select 1 from product_fitment pf where pf.product_id = cl.product_id))
 """)

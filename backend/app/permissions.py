@@ -74,6 +74,8 @@ FIELD_PERMS: dict[str, str] = {
     "is_published": "products.publish",
     "is_active": "products.publish",
     "is_universal": "fitment.add",
+    "universal_in_vehicle_search": "fitment.add",
+    "fitment_exempt": "fitment.add",
 }
 
 

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Field, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "./ui";
 import { useAccess } from "./AdminAccess";
+import { MODE_FLAGS, MODE_OPTIONS, modeOf, type FitmentFlags } from "../../lib/fitmentMode";
 
 type FitYear = { vehicle_id: number; year: number; submodel: string | null };
 type FitModel = {
@@ -19,14 +20,15 @@ type YearRow = { vehicle_id: number; year: number };
 
 export default function FitmentPanel({
   productId,
-  isUniversal,
-  onUniversalChange,
+  flags,
+  onFlagsChange,
 }: {
   productId: number;
-  isUniversal: boolean;
-  onUniversalChange: (v: boolean) => void;
+  flags: FitmentFlags;
+  onFlagsChange: (v: FitmentFlags) => void;
 }) {
   const { can } = useAccess();
+  const mode = modeOf(flags);
   const mayAdd = can("fitment.add");
   const mayRemove = can("fitment.remove");
   const [sel, setSel] = useState<Set<number>>(new Set()); // machines (models) ticked for removal
@@ -252,19 +254,34 @@ export default function FitmentPanel({
   return (
     <details className="rounded-lg border border-gray-200 bg-white p-4">
       <summary className="cursor-pointer text-lg font-semibold">
-        Fitment <span className="text-sm font-normal text-gray-500">({fits.length} machine{fits.length === 1 ? "" : "s"}{isUniversal ? ", universal" : ""})</span>
+        Fitment <span className="text-sm font-normal text-gray-500">({fits.length} machine{fits.length === 1 ? "" : "s"}{mode === "vehicle" ? "" : `, ${MODE_OPTIONS.find((o) => o.value === mode)?.short.toLowerCase()}`})</span>
       </summary>
 
       <div className="mt-3 space-y-5">
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" disabled={!mayAdd} checked={isUniversal} onChange={(e) => onUniversalChange(e.target.checked)} />
-        Universal fit (shows for every machine)
-        <span className="text-xs text-gray-500">– saved with the Save button</span>
-      </label>
-      {isUniversal && (
+      <fieldset className="space-y-2" disabled={!mayAdd}>
+        <legend className="mb-1 text-sm font-medium text-gray-700">
+          How this product matches vehicles <span className="text-xs font-normal text-gray-500">– saved with the Save button</span>
+        </legend>
+        {MODE_OPTIONS.map((o) => (
+          <label key={o.value} className="flex cursor-pointer items-start gap-2 text-sm">
+            <input type="radio" name="fitment-mode" className="mt-1" checked={mode === o.value} onChange={() => onFlagsChange(MODE_FLAGS[o.value])} />
+            <span>
+              <span className="font-medium">{o.label}</span>
+              <span className="block text-xs text-gray-500">{o.help}</span>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+      {mode === "universal_search" && (
+        <Notice kind="info">This product fits every machine, so it shows in every vehicle search. You don&apos;t need to add fitment below.</Notice>
+      )}
+      {mode === "universal_category" && (
         <Notice kind="info">
-          This product is marked universal, so it shows for every machine. You don&apos;t need to add fitment below.
+          This product is universal but stays out of the vehicle search, except for the models you add below. Customers find it under its category.
         </Notice>
+      )}
+      {mode === "not_vehicle" && (
+        <Notice kind="info">This product doesn&apos;t need vehicle fitment. It never appears in a vehicle search and is not on the needs-fitment list.</Notice>
       )}
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
 
