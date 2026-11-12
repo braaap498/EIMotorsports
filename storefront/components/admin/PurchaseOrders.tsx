@@ -60,6 +60,7 @@ type PoDetail = {
   lines: PoLine[];
   po_type?: "stock" | "drop_ship" | null;
   supplier_order_number?: string | null;
+  supplier_tracking?: { number: string; kind: string; carrier: string | null }[];
   missing_part_numbers?: string[];
   renumbered?: boolean;
 };
@@ -949,6 +950,11 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                 <div className="whitespace-pre-line text-gray-600">{open.ship_to}</div>
                 {open.po_type === "drop_ship" && <div className="mt-1"><Badge tone="blue">drop ship</Badge></div>}
                 {open.supplier_order_number && <div className="mt-1 text-xs text-gray-600">Distributor order {open.supplier_order_number}</div>}
+                {open.supplier_tracking && open.supplier_tracking.length > 0 && (
+                  <div className="mt-1 text-xs text-gray-600">
+                    Tracking {open.supplier_tracking.map((t) => `${t.carrier ? t.carrier + " " : ""}${t.number}${t.kind === "pro" ? " (freight PRO)" : ""}`).join(", ")}
+                  </div>
+                )}
               </div>
             </div>
             <div className="text-gray-600">

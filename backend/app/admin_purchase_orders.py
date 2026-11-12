@@ -393,8 +393,19 @@ def _po_detail(db: Session, po_id: int) -> dict:
     out_lines = [
         {**dict(l._mapping), "rate": float(l.rate), "amount": float(Decimal(str(l.rate)) * l.quantity)} for l in lines
     ]
+    # tracking numbers the distributor sent back for the order placed from this PO (Automatic Distributors orders page)
+    tracking: list = []
+    try:
+        trow = db.execute(
+            text("select tracking from supplier_orders where supplier = 'autodist' and po_number = :pn and tracking is not null order by id desc limit 1"),
+            {"pn": str(h.po_number)},
+        ).first()
+        tracking = (trow.tracking if trow else None) or []
+    except Exception:
+        db.rollback()  # the table or its tracking column isn't there: just no tracking to show
     return {
         **dict(h._mapping),
+        "supplier_tracking": tracking,
         "created_by_name": _who(h.created_by),
         "cancelled_by_name": _who(h.cancelled_by),
         "date": _local_date(h.created_at).isoformat(),

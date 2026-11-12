@@ -127,12 +127,16 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
     setTrackMsg(null);
     try {
       if (id === "all") {
-        const r = await api<{ checked: number; with_tracking: number; problems: string[] }>("/autodist/api/orders/refresh-tracking", { method: "POST" });
-        const base = `Checked ${r.checked} order${r.checked === 1 ? "" : "s"}; ${r.with_tracking} have tracking.`;
+        const r = await api<{ checked: number; with_tracking: number; problems: string[]; closed_pos?: number[] }>("/autodist/api/orders/refresh-tracking", { method: "POST" });
+        const closed = r.closed_pos && r.closed_pos.length ? ` Drop ship PO ${r.closed_pos.join(", ")} closed out.` : "";
+        const base = `Checked ${r.checked} order${r.checked === 1 ? "" : "s"}; ${r.with_tracking} have tracking.${closed}`;
         setTrackMsg(r.problems.length ? { kind: "error", text: `${base} Problems: ${r.problems.join(" | ")}` } : { kind: "success", text: base });
       } else {
-        const r = await api<{ tracking: TrackItem[] }>(`/autodist/api/orders/${id}/tracking`, { method: "POST" });
-        setTrackMsg({ kind: "success", text: r.tracking.length ? "Tracking updated." : "Checked: no tracking numbers yet." });
+        const r = await api<{ tracking: TrackItem[]; po_closed?: number | null }>(`/autodist/api/orders/${id}/tracking`, { method: "POST" });
+        setTrackMsg({
+          kind: "success",
+          text: (r.tracking.length ? "Tracking updated." : "Checked: no tracking numbers yet.") + (r.po_closed ? ` Drop ship PO ${r.po_closed} closed out.` : ""),
+        });
       }
       await loadPast();
     } catch (e) {

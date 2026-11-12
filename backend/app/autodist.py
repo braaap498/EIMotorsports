@@ -2133,6 +2133,49 @@ def _collect_tracking(data) -> list[dict]:
     return found
 
 
+# A drop ship PO is closed out when the distributor sends back a tracking number for the order placed from it: the parts
+# go straight to the customer, so nothing is received into stock. Not closed while the order is cancelled, on hold,
+# backordered or only partly shipped (the status words are read loosely, see the note on _collect_tracking).
+_NOT_SHIPPED_YET = re.compile(r"partial|back ?order|hold|cancel", re.I)
+
+
+def _close_drop_ship_po(db: Session, po_number: Optional[str], order_number: str, status: Optional[str], items: list[dict]) -> Optional[int]:
+    """Close the open DROP SHIP purchase order this order was placed from. Its lines are marked done (received_by says why),
+    NOTHING is added to stock, and the PO becomes 'received' so it leaves the open lists. Returns the PO number, or None."""
+    if not po_number or not any(i.get("number") for i in items):
+        return None
+    if status and _NOT_SHIPPED_YET.search(status):
+        return None
+    try:
+        cols = _po_columns(db)
+        if "po_type" not in cols:
+            return None
+        extra = " and (h.supplier_order_number is null or h.supplier_order_number = :on)" if "supplier_order_number" in cols else ""
+        h = db.execute(
+            text(
+                "select h.id, h.po_number from po_headers h where cast(h.po_number as text) = :pn and " + _PO_VENDOR +
+                " and h.po_type = 'drop_ship' and h.status = 'open' and h.sent_at is not null" + extra
+            ),
+            {"pn": po_number, "on": order_number},
+        ).first()
+        if not h:
+            return None
+        db.execute(
+            text("update po_lines set received_at = now(), received_qty = quantity, received_by = :by where po_id = :i and received_at is null"),
+            {"by": "Automatic Distributors tracking", "i": h.id},
+        )
+        db.execute(
+            text("update po_headers set status = 'received', received_at = now(), updated_at = now() where id = :i and status = 'open'"),
+            {"i": h.id},
+        )
+        db.commit()
+        return int(h.po_number)
+    except Exception:
+        db.rollback()
+        log.exception("tracking came back for order %s but PO %s could not be closed", order_number, po_number)
+        return None
+
+
 def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict:
     data = _api_get(
         "/order/number/" + urllib.parse.quote(order_number, safe=""),
@@ -2152,7 +2195,9 @@ def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict
     except Exception:
         db.rollback()
         raise HTTPException(503, "The tracking columns are missing. Run sql/autodist_tracking.sql in Supabase, then try again.")
-    return {"order_number": order_number, "status": status, "tracking": items}
+    po_no = db.execute(text("select po_number from supplier_orders where id = :i"), {"i": row_id}).scalar()
+    closed = _close_drop_ship_po(db, po_no, order_number, status, items)
+    return {"order_number": order_number, "status": status, "tracking": items, "po_closed": closed}
 
 
 @router.post("/api/orders/refresh-tracking")
@@ -2173,17 +2218,19 @@ def api_orders_refresh_tracking(db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
         raise HTTPException(503, "The tracking columns are missing. Run sql/autodist_tracking.sql in Supabase, then try again.")
-    checked, with_tracking, problems = 0, 0, []
+    checked, with_tracking, problems, closed_pos = 0, 0, [], []
     for r in rows:
         try:
             res = _refresh_order_tracking(db, r.id, r.order_number)
             checked += 1
             with_tracking += 1 if res["tracking"] else 0
+            if res.get("po_closed"):
+                closed_pos.append(res["po_closed"])
         except HTTPException as e:
             problems.append(f"{r.order_number}: {e.detail}")
             if e.status_code in (429, 503):  # rate limited, or the columns are missing: stop instead of hammering
                 break
-    return {"mode": mode, "checked": checked, "with_tracking": with_tracking, "problems": problems}
+    return {"mode": mode, "checked": checked, "with_tracking": with_tracking, "problems": problems, "closed_pos": closed_pos}
 
 
 @router.post("/api/orders/{order_id}/tracking")
