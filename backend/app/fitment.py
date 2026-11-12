@@ -138,10 +138,10 @@ def products(
             f"""
             select p.id, p.title, p.slug, p.list_price, p.is_universal,
               (select ph.source_url from product_photos ph
-                where ph.product_id = p.id
+                where ph.product_id = p.id and not ph.hidden
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_source_url,
               (select ph.image_key from product_photos ph
-                where ph.product_id = p.id
+                where ph.product_id = p.id and not ph.hidden
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_image_key
             {base}
             order by p.is_universal, p.title limit :limit offset :offset
@@ -182,7 +182,7 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
     photos = db.execute(
         text(
             "select source_url, image_key from product_photos "
-            "where product_id = :id order by is_primary desc, sort_order, id"
+            "where product_id = :id and not hidden order by is_primary desc, sort_order, id"
         ),
         {"id": p.id},
     ).all()

@@ -133,10 +133,10 @@ def search(
             {cte}
             select p.id, p.title, p.slug, p.list_price, p.is_universal,
               (select ph.source_url from product_photos ph
-                where ph.product_id = p.id
+                where ph.product_id = p.id and not ph.hidden
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_source_url,
               (select ph.image_key from product_photos ph
-                where ph.product_id = p.id
+                where ph.product_id = p.id and not ph.hidden
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_image_key
             from products p {where}
             order by p.title limit :limit offset :offset
@@ -187,10 +187,10 @@ def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
               (p.expected_date - current_date) as days_until,
               {available_sql("p")} as available_qty,
               (select ph.source_url from product_photos ph
-                where ph.product_id = p.id
+                where ph.product_id = p.id and not ph.hidden
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_source_url,
               (select ph.image_key from product_photos ph
-                where ph.product_id = p.id
+                where ph.product_id = p.id and not ph.hidden
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_image_key
             from products p
             where p.id in :ids and {PUBLISHED_FILTER}

@@ -63,6 +63,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date as _date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -72,6 +73,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app import photo_store
 from app.auth import AuthUser, require_admin
 from app.database import get_db
 
@@ -3363,6 +3365,129 @@ def _add_distributor_parts(db: Session) -> dict:
     return {"parts_added": int(added or 0), "labels_set": int(labelled or 0)}
 
 
+# ---------------------------------------------------------------- photos into storage
+# New products start with only the distributor's photo LINKS (product_photos.source_url, no image_key). This downloads each
+# one into our own storage (same bucket, same resizing, same keys as an uploaded photo) and fills in image_key, so the
+# shop and eBay listings no longer depend on the distributor's image server. The link is kept on the row as a record.
+# A photo that is turned off (hidden) is skipped. Only rows still missing a stored file are touched, so running it again
+# is harmless and a run that stopped part-way simply carries on.
+_PHOTO_PENDING = (
+    "from product_photos pp "
+    "join supplier_product_links l on l.product_id = pp.product_id and l.supplier = :s "
+    "where pp.image_key is null and nullif(btrim(pp.source_url), '') is not null "
+    "and not pp.hidden and pp.source_url not ilike '%ebay%'"
+)
+_PHOTO_WORKERS = 6
+_photo_state: dict = {"running": False, "message": "", "done": 0, "total": 0, "stored": 0, "failed": 0, "errors": [], "finished_at": None}
+_photo_lock = threading.Lock()
+
+
+def _begin_photo_run() -> bool:
+    """Claim the photo run. False when one is already going."""
+    with _photo_lock:
+        if _photo_state["running"]:
+            return False
+        _photo_state.update(running=True, message="Starting…", done=0, total=0, stored=0, failed=0, errors=[], finished_at=None)
+        return True
+
+
+def _fetch_and_store(url: str, stop: threading.Event) -> str:
+    """Worker: download one photo, resize it, put it in storage. Returns its key."""
+    if stop.is_set():
+        raise photo_store.StorageError("stopped")
+    p = photo_store.process_image(photo_store.fetch_remote(url))
+    try:
+        photo_store.upload(p)
+    except photo_store.StorageError as e:
+        if "not set up" in str(e):
+            stop.set()  # every other photo would fail the same way
+        raise
+    return p.key
+
+
+def _store_product_photos(limit: int = 2000) -> dict:
+    """Download the pending distributor photos into storage. The caller has already claimed the run with _begin_photo_run().
+    Never raises; the outcome is in the returned counts and in _photo_state["message"]."""
+    gen = get_db()
+    db = next(gen)
+    stored = failed = dup = 0
+    errors: list[str] = []
+    total = 0
+    try:
+        rows = db.execute(
+            text(f"select pp.id, pp.product_id, pp.source_url {_PHOTO_PENDING} order by pp.product_id, pp.sort_order, pp.id limit :lim"),
+            {"s": SUPPLIER, "lim": limit},
+        ).all()
+        total = len(rows)
+        _photo_state.update(total=total, done=0, message=f"Saving {total:,} photo{'' if total == 1 else 's'} to storage…")
+        stop = threading.Event()
+        with ThreadPoolExecutor(max_workers=_PHOTO_WORKERS) as pool:
+            futs = {pool.submit(_fetch_and_store, r.source_url.strip(), stop): r for r in rows}
+            for n, fut in enumerate(as_completed(futs), 1):
+                r = futs[fut]
+                try:
+                    key = fut.result()
+                except Exception as e:
+                    failed += 1
+                    if len(errors) < 5 and str(e) != "stopped":
+                        errors.append(f"product {r.product_id}: {str(e)[:150]}")
+                else:
+                    try:
+                        on_product = db.execute(
+                            text("select 1 from product_photos where product_id = :p and image_key = :k and id <> :id limit 1"),
+                            {"p": r.product_id, "k": key, "id": r.id},
+                        ).first()
+                        if on_product:
+                            # the same picture is already on this product: turn this copy off rather than list it twice
+                            db.execute(text("update product_photos set hidden = true where id = :id"), {"id": r.id})
+                            dup += 1
+                        else:
+                            db.execute(
+                                text("update product_photos set image_key = :k, storage_path = :sp where id = :id"),
+                                {"k": key, "sp": photo_store.full_path(key), "id": r.id},
+                            )
+                            stored += 1
+                    except Exception as e:
+                        db.rollback()
+                        failed += 1
+                        if len(errors) < 5:
+                            errors.append(f"product {r.product_id}: {str(e)[:150]}")
+                if n % 25 == 0:
+                    db.commit()
+                _photo_state.update(done=n, stored=stored, failed=failed, errors=errors)
+        db.commit()
+        left = db.execute(text(f"select count(*) {_PHOTO_PENDING}"), {"s": SUPPLIER}).scalar() or 0
+        msg = f"Saved {stored:,} photo{'' if stored == 1 else 's'} to storage; {failed:,} could not be saved."
+        if dup:
+            msg += f" {dup:,} duplicate{'' if dup == 1 else 's'} turned off."
+        if left:
+            msg += f" {left:,} still waiting; run it again to continue."
+        _photo_state["message"] = msg
+    except Exception as e:
+        db.rollback()
+        log.exception("saving distributor photos failed")
+        _photo_state["message"] = f"Stopped: {str(e)[:300]}"
+    finally:
+        _photo_state.update(running=False, stored=stored, failed=failed, errors=errors, finished_at=time.time())
+        gen.close()
+    return {"total": total, "stored": stored, "failed": failed, "duplicates": dup, "message": _photo_state["message"]}
+
+
+class StorePhotosIn(BaseModel):
+    limit: int = Field(500, ge=1, le=5000)
+
+
+@router.post("/api/website-products/store-photos")
+def api_website_products_store_photos(body: StorePhotosIn, user: AuthUser = Depends(require_admin)):
+    """Download the distributor photos of products made here into our storage. Runs in the background."""
+    if _prod_state["running"]:
+        raise HTTPException(409, "Products are being created right now; the photos are saved at the end of that run.")
+    if not _begin_photo_run():
+        raise HTTPException(409, "Photos are already being saved.")
+    threading.Thread(target=_store_product_photos, args=(body.limit,), daemon=True, name="autodist-store-photos").start()
+    return {"running": True}
+
+
 @router.post("/api/website-products/add-parts")
 def api_website_products_add_parts(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     """Add the Distributor parts entry (and custom label) to every product made from the catalog that does not have one yet."""
@@ -3414,12 +3539,25 @@ def api_website_products_preview(db: Session = Depends(get_db)):
         ),
         {"s": SUPPLIER},
     ).scalar()
-    return {**dict(r._mapping), "missing_parts": int(missing or 0), "no_category": int(no_cat or 0), "no_description": int(db.execute(text("select count(*) from supplier_product_links l join products p on p.id = l.product_id where l.supplier = :s and coalesce(btrim(p.description), '') = ''"), {"s": SUPPLIER}).scalar() or 0), "state": {k: v for k, v in _prod_state.items()}}
+    try:
+        pending = db.execute(text(f"select count(*) {_PHOTO_PENDING}"), {"s": SUPPLIER}).scalar()
+    except Exception:
+        db.rollback()  # product_photos.hidden is not there yet
+        pending = None
+    return {
+        **dict(r._mapping),
+        "missing_parts": int(missing or 0),
+        "no_category": int(no_cat or 0),
+        "no_description": int(db.execute(text("select count(*) from supplier_product_links l join products p on p.id = l.product_id where l.supplier = :s and coalesce(btrim(p.description), '') = ''"), {"s": SUPPLIER}).scalar() or 0),
+        "photos_pending": None if pending is None else int(pending or 0),
+        "state": {k: v for k, v in _prod_state.items()},
+        "photos": {k: v for k, v in _photo_state.items()},
+    }
 
 
 @router.get("/api/website-products/status")
 def api_website_products_status():
-    return {k: v for k, v in _prod_state.items()}
+    return {**{k: v for k, v in _prod_state.items()}, "photos": {k: v for k, v in _photo_state.items()}}
 
 
 class WebsiteProductsIn(BaseModel):
@@ -3513,6 +3651,15 @@ def _make_products_job(limit: int) -> None:
         except Exception as e:
             db.rollback()
             extra += f" Categories were NOT set ({str(e)[:150]}); use the Assign categories button."
+        if created and _begin_photo_run():
+            _prod_state["message"] = "Saving photos to storage…"
+            try:
+                ph = _store_product_photos()
+                extra += f" Photos: {ph['stored']} saved to storage, {ph['failed']} could not be saved."
+                if ph["failed"] or ph["total"] > ph["stored"] + ph["failed"] + ph["duplicates"]:
+                    extra += " Use Save photos to storage to retry or continue."
+            except Exception as e:  # _store_product_photos never raises; this is only a safety net
+                extra += f" Photos were NOT saved to storage ({str(e)[:150]}); use Save photos to storage."
         _prod_state["message"] = f"Created {created} product{'' if created == 1 else 's'}; {skipped} skipped; {failed} failed.{extra}"
     except Exception as e:
         db.rollback()

@@ -33,6 +33,7 @@ from app.ebay_sales import ship_router as ebay_ship_router
 from app.ebay_sales import start_background as start_ebay_sales
 from app.admin_ebay_photos import router as admin_ebay_photos_router
 from app.admin_inventory import router as admin_inventory_router
+from app.admin_photos import ensure_columns as ensure_photo_columns
 from app.admin_photos import router as admin_photos_router
 from app.admin_purchase_orders import router as admin_purchase_orders_router
 from app.admin_users import router as admin_users_router
@@ -159,3 +160,9 @@ def _order_activity_tables():
     """The order activity log's tables (History tab > Order activity)."""
     ensure_order_activity_tables()
     ensure_warehouse_tables()
+
+
+@app.on_event("startup")
+def _photo_columns():
+    """product_photos.hidden: lets a photo be turned off for the website and eBay without deleting it."""
+    ensure_photo_columns()

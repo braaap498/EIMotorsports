@@ -9,6 +9,7 @@ import { Notice, btnCls, inputCls } from "./ui";
    results before making the rest. Requires sql/autodist_products.sql. */
 
 type State = { running: boolean; message: string; done: number; total: number; created: number; skipped: number; failed: number; errors: string[] };
+type PhotoState = { running: boolean; message: string; done: number; total: number; stored: number; failed: number; errors: string[] };
 type Preview = {
   in_stock: number;
   already_made: number;
@@ -19,13 +20,16 @@ type Preview = {
   missing_parts: number;
   no_category: number;
   no_description: number;
+  photos_pending: number | null;
   state: State;
+  photos: PhotoState;
 };
 const n = (x: number | null | undefined) => (x ?? 0).toLocaleString("en-US");
 
 export default function AutodistProducts() {
   const [pv, setPv] = useState<Preview | null>(null);
   const [st, setSt] = useState<State | null>(null);
+  const [ph, setPh] = useState<PhotoState | null>(null);
   const [limit, setLimit] = useState("25");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -39,6 +43,8 @@ export default function AutodistProducts() {
       const p = await api<Preview>("/autodist/api/website-products/preview");
       setPv(p);
       setSt(p.state);
+      setPh(p.photos);
+      if (p.photos?.running) watch();
     } catch (e) {
       setErr(errMsg(e));
     } finally {
@@ -56,9 +62,10 @@ export default function AutodistProducts() {
     if (timer.current) clearInterval(timer.current);
     timer.current = setInterval(async () => {
       try {
-        const s = await api<State>("/autodist/api/website-products/status");
+        const s = await api<State & { photos: PhotoState }>("/autodist/api/website-products/status");
         setSt(s);
-        if (!s.running) {
+        setPh(s.photos);
+        if (!s.running && !s.photos?.running) {
           if (timer.current) clearInterval(timer.current);
           void loadPreview();
         }
@@ -127,7 +134,19 @@ export default function AutodistProducts() {
     }
   }
 
-  const running = !!st?.running;
+  async function storePhotos() {
+    setErr(null);
+    try {
+      await api("/autodist/api/website-products/store-photos", { method: "POST", body: { limit: 500 } });
+      setPh({ running: true, message: "Starting…", done: 0, total: 0, stored: 0, failed: 0, errors: [] });
+      watch();
+    } catch (e) {
+      setErr(errMsg(e));
+    }
+  }
+
+  const photosRunning = !!ph?.running;
+  const running = !!st?.running || photosRunning;
   return (
     <div className="space-y-4 text-sm">
       <Notice kind="info">
@@ -186,6 +205,31 @@ export default function AutodistProducts() {
       )}
       {note && <Notice kind="info">{note}</Notice>}
 
+      {pv && ((pv.photos_pending ?? 0) > 0 || photosRunning) && (
+        <div className="flex max-w-xl items-center justify-between gap-3 rounded border border-amber-300 bg-amber-50 p-3">
+          <span>
+            {photosRunning
+              ? `Saving photos to storage: ${n(ph?.done)} of ${n(ph?.total)}`
+              : `${n(pv.photos_pending)} distributor photo${pv.photos_pending === 1 ? " is" : "s are"} still only a link to their server, not saved in our storage.`}
+          </span>
+          <button type="button" className={btnCls} disabled={running || busy} onClick={() => void storePhotos()}>
+            Save photos to storage
+          </button>
+        </div>
+      )}
+      {ph && !ph.running && ph.message && (
+        <div className="max-w-xl rounded border border-gray-200 bg-white p-3">
+          <div>{ph.message}</div>
+          {ph.errors?.length > 0 && (
+            <ul className="mt-1 list-disc pl-5 text-xs text-red-700">
+              {ph.errors.map((e, i) => (
+                <li key={i}>{e}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       <div className="flex items-end gap-3">
         <label className="flex flex-col gap-0.5 text-xs text-gray-600">
           How many to make now
@@ -214,6 +258,7 @@ export default function AutodistProducts() {
           )}
         </div>
       )}
+      <p className="text-xs text-gray-500">New products have their distributor photos saved to storage at the end of each batch. In Products, “Don&apos;t use” on a photo keeps it but leaves it off the website and eBay.</p>
       <p className="text-xs text-gray-500">Start with 25, open a few in Products to check them, then raise the number.</p>
     </div>
   );

@@ -1010,7 +1010,7 @@ def get_product(product_id: int, db: Session = Depends(get_db), user: AuthUser =
     row = _product_or_404(db, product_id)
     photos = db.execute(
         text(
-            "select id, source_url, storage_path, image_key, is_primary, sort_order from product_photos "
+            "select id, source_url, storage_path, image_key, is_primary, hidden, sort_order from product_photos "
             "where product_id = :id order by is_primary desc, sort_order, id"
         ),
         {"id": product_id},
