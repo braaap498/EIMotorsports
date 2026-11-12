@@ -16,6 +16,7 @@ type Preview = {
   no_price: number;
   to_create: number;
   to_create_no_photo: number;
+  missing_parts: number;
   state: State;
 };
 const n = (x: number | null | undefined) => (x ?? 0).toLocaleString("en-US");
@@ -26,6 +27,7 @@ export default function AutodistProducts() {
   const [limit, setLimit] = useState("25");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   async function loadPreview() {
@@ -77,6 +79,20 @@ export default function AutodistProducts() {
     }
   }
 
+  async function addParts() {
+    setErr(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const r = await api<{ parts_added: number; labels_set: number }>("/autodist/api/website-products/add-parts", { method: "POST" });
+      setNote(`Added ${n(r.parts_added)} distributor part entr${r.parts_added === 1 ? "y" : "ies"}; set ${n(r.labels_set)} custom label${r.labels_set === 1 ? "" : "s"}.`);
+      await loadPreview();
+    } catch (e) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  }
+
   const running = !!st?.running;
   return (
     <div className="space-y-4 text-sm">
@@ -103,6 +119,18 @@ export default function AutodistProducts() {
           <span className="text-right text-gray-500">{n(pv.to_create_no_photo)}</span>
         </div>
       )}
+
+      {pv && pv.missing_parts > 0 && (
+        <div className="flex max-w-xl items-center justify-between gap-3 rounded border border-amber-300 bg-amber-50 p-3">
+          <span>
+            {n(pv.missing_parts)} product{pv.missing_parts === 1 ? "" : "s"} made here {pv.missing_parts === 1 ? "has" : "have"} no Distributor parts entry yet.
+          </span>
+          <button type="button" className={btnCls} disabled={running || busy} onClick={() => void addParts()}>
+            Add distributor parts
+          </button>
+        </div>
+      )}
+      {note && <Notice kind="info">{note}</Notice>}
 
       <div className="flex items-end gap-3">
         <label className="flex flex-col gap-0.5 text-xs text-gray-600">

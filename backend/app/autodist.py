@@ -3073,6 +3073,71 @@ _prod_state: dict = {"running": False, "message": "", "done": 0, "total": 0, "cr
 _prod_lock = threading.Lock()
 
 
+def _add_distributor_parts(db: Session) -> dict:
+    """Give every product made from the catalog its Distributor parts entry (what the product screen shows under "Distributor parts"):
+    one row in product_kit_parts, quantity 1, pointing at the catalog part. Also sets the custom label (the manufacturer number,
+    or the distributor SKU when that cannot be used) on products that have none, the same default the product screen uses. A label
+    another product already has, or two new products would share, is left blank, never changed. Only products with no entry yet
+    are touched, so it is safe to run again. Commits nothing; the caller does."""
+    dist = db.execute(
+        text("select id from po_distributors where name ilike '%autodist%' or name ilike '%automatic dist%' order by id limit 1")
+    ).scalar()
+    if dist is None:
+        raise HTTPException(400, "Add Automatic Distributors under Distributors first; the part entries need it.")
+    added = db.execute(
+        text(
+            "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order) "
+            "select l.product_id, :d, s.id, s.sku, nullif(left(btrim(coalesce(s.manufacturer, '') || ' ' || coalesce(s.name, '')), 250), ''), "
+            "       coalesce(s.effective_cost, s.dealer_cost), 1, 0 "
+            "from supplier_product_links l "
+            "join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku "
+            "join products p on p.id = l.product_id "
+            "where l.supplier = :s and not exists (select 1 from product_kit_parts k where k.product_id = l.product_id)"
+        ),
+        {"d": dist, "s": SUPPLIER},
+    ).rowcount
+    labelled = db.execute(
+        text(
+            """
+            with t as (
+              select p.id as product_id,
+                     case when m <> '' and m !~* 'xx' and length(m) <= 50 then m
+                          when k <> '' and k !~* 'xx' and length(k) <= 50 then k end as tok
+              from supplier_product_links l
+              join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku
+              join products p on p.id = l.product_id
+              cross join lateral (select regexp_replace(coalesce(s.mfr_number, ''), '[^A-Za-z0-9._-]', '', 'g') as m,
+                                         regexp_replace(coalesce(s.sku, ''), '[^A-Za-z0-9._-]', '', 'g') as k) x
+              where l.supplier = :s and nullif(btrim(p.custom_label_sku), '') is null
+            ), u as (
+              select lower(tok) as key from t where tok is not null group by lower(tok) having count(*) = 1
+            )
+            update products p set custom_label_sku = t.tok, updated_at = now()
+            from t join u on u.key = lower(t.tok)
+            where p.id = t.product_id
+              and not exists (select 1 from products o where lower(o.custom_label_sku) = lower(t.tok))
+            """
+        ),
+        {"s": SUPPLIER},
+    ).rowcount
+    return {"parts_added": int(added or 0), "labels_set": int(labelled or 0)}
+
+
+@router.post("/api/website-products/add-parts")
+def api_website_products_add_parts(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Add the Distributor parts entry (and custom label) to every product made from the catalog that does not have one yet."""
+    try:
+        res = _add_distributor_parts(db)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not add the distributor parts: {str(e)[:300]}")
+    return res
+
+
 @router.get("/api/website-products/preview")
 def api_website_products_preview(db: Session = Depends(get_db)):
     """Counts only. Nothing is created."""
@@ -3095,7 +3160,14 @@ def api_website_products_preview(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(500, f"Could not count: {str(e)[:300]}. Has sql/autodist_products.sql been run in Supabase?")
-    return {**dict(r._mapping), "state": {k: v for k, v in _prod_state.items()}}
+    missing = db.execute(
+        text(
+            "select count(*) from supplier_product_links l where l.supplier = :s "
+            "and not exists (select 1 from product_kit_parts k where k.product_id = l.product_id)"
+        ),
+        {"s": SUPPLIER},
+    ).scalar()
+    return {**dict(r._mapping), "missing_parts": int(missing or 0), "state": {k: v for k, v in _prod_state.items()}}
 
 
 @router.get("/api/website-products/status")
@@ -3170,7 +3242,15 @@ def _make_products_job(limit: int) -> None:
                 db.commit()
             _prod_state.update(done=created + failed + skipped, created=created, skipped=skipped, failed=failed, errors=errors)
         db.commit()
-        _prod_state["message"] = f"Created {created} product{'' if created == 1 else 's'}; {skipped} skipped; {failed} failed."
+        extra = ""
+        try:
+            res = _add_distributor_parts(db)
+            db.commit()
+            extra = f" Distributor part entries added: {res['parts_added']}; custom labels set: {res['labels_set']}."
+        except Exception as e:
+            db.rollback()
+            extra = f" The products were made but their distributor part entries were NOT added ({str(e)[:150]}); use the Add distributor parts button."
+        _prod_state["message"] = f"Created {created} product{'' if created == 1 else 's'}; {skipped} skipped; {failed} failed.{extra}"
     except Exception as e:
         db.rollback()
         log.exception("website product creation failed")
