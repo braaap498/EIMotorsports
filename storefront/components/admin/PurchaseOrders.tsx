@@ -21,7 +21,7 @@ type Part = {
   open_pos: number[];
   suggested_qty: number;
   // The distributor parts (Edit product > Distributor parts) that make up this part. Part # and Cost above come from these.
-  pieces: { part_number: string; quantity: number; vendor: string | null; cost: number | null }[];
+  pieces: { part_number: string; quantity: number; vendor: string | null; distributor_id: number | null; cost: number | null }[];
 };
 type PartsResp = { total: number; low_count: number; out_count: number; items: Part[] };
 type View = "all" | "low" | "out";
@@ -235,7 +235,8 @@ function Reorder({
   const [data, setData] = useState<PartsResp>({ total: 0, low_count: 0, out_count: 0, items: [] });
   const [loaded, setLoaded] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [made, setMade] = useState<PoDetail | null>(null);
+  const [made, setMade] = useState<PoDetail[] | null>(null);
+  const [distId, setDistId] = useState<number | "">(""); // "" = All distributors
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -252,13 +253,14 @@ function Reorder({
       p.set("dir", sort.dir);
     }
     if (q) p.set("q", q);
+    if (distId !== "") p.set("distributor_id", String(distId));
     api<PartsResp>(`/purchase-orders/parts?${p}`)
       .then((d) => {
         setData(d);
         setLoaded(true);
       })
       .catch((e) => setFlash({ kind: "error", text: errMsg(e) }));
-  }, [q, offset, view, sort.key, sort.dir, partsKey, setFlash]);
+  }, [q, offset, view, distId, sort.key, sort.dir, partsKey, setFlash]);
 
   function toggle(p: Part) {
     setSel((s) => {
@@ -270,6 +272,7 @@ function Reorder({
   }
 
   const ticked = Object.values(sel);
+  const shown = (p: Part) => (distId === "" ? p.pieces : p.pieces.filter((pc) => pc.distributor_id === distId));
   const viewBtn = (v: View, label: string) => (
     <button
       type="button"
@@ -288,7 +291,8 @@ function Reorder({
       <p className="text-sm text-gray-600">
         Pick All, Low stock or Out of stock, the same lists as Inventory &gt; Stock. Low stock parts with the biggest shortfall come
         first. Part # and Cost are the distributor’s part number and our cost from the distributor (Edit product &gt; Distributor
-        parts). Tick the parts you want to reorder, then press Create PO.
+        parts). Pick a distributor to see only the parts bought from them. Tick the parts you want to reorder, then press Create PO: you get one PO
+        for each distributor the ticked parts are bought from.
       </p>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -297,6 +301,22 @@ function Reorder({
           {viewBtn("low", `Low stock (${data.low_count})`)}
           {viewBtn("out", `Out of stock (${data.out_count})`)}
         </div>
+        <select
+          className={`${inp} w-auto`}
+          value={distId}
+          onChange={(e) => {
+            setDistId(e.target.value ? Number(e.target.value) : "");
+            setOffset(0);
+          }}
+          aria-label="Distributor"
+        >
+          <option value="">All distributors</option>
+          {dists.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
         <ClearableInput
           className={`${inp} w-[24rem] max-w-full`}
           value={qInput}
@@ -340,9 +360,9 @@ function Reorder({
                   <div className="font-medium">{p.title}</div>
                 </td>
                 <td className="px-3 py-2">
-                  {p.pieces.length > 0 ? (
+                  {shown(p).length > 0 ? (
                     <div className="space-y-0.5">
-                      {p.pieces.map((pc, n) => (
+                      {shown(p).map((pc, n) => (
                         <div key={n} className="whitespace-nowrap">
                           {pc.part_number}
                           {pc.quantity > 1 && <span className="text-gray-500"> ×{pc.quantity}</span>}
@@ -360,7 +380,7 @@ function Reorder({
                 <td className="px-3 py-2">{p.reorder_point ?? "—"}</td>
                 <td className="whitespace-nowrap px-3 py-2">
                   {p.cost != null ? money(p.cost) : "—"}
-                  {p.pieces.length > 1 && <div className="text-xs text-gray-500">all pieces</div>}
+                  {shown(p).length > 1 && <div className="text-xs text-gray-500">all pieces</div>}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2">
                   {p.open_pos.length > 0 ? <Badge tone="blue">PO {p.open_pos.join(", ")}</Badge> : "—"}
@@ -370,7 +390,7 @@ function Reorder({
             {loaded && data.items.length === 0 && (
               <tr>
                 <td colSpan={10} className="px-3 py-6 text-center text-gray-500">
-                  {q || view === "all" ? "No parts match." : view === "low" ? "Nothing is low on stock." : "Nothing is out of stock."}
+                  {q || view === "all" || distId !== "" ? "No parts match." : view === "low" ? "Nothing is low on stock." : "Nothing is out of stock."}
                 </td>
               </tr>
             )}
@@ -389,9 +409,9 @@ function Reorder({
             goDistributors();
           }}
           onClose={() => setCreating(false)}
-          onCreated={(po) => {
+          onCreated={(pos) => {
             setCreating(false);
-            setMade(po);
+            setMade(pos);
             onCreated();
           }}
           setFlash={setFlash}
@@ -399,36 +419,43 @@ function Reorder({
       )}
 
       {made && (
-        <Modal title={`PO ${made.po_number} created`} onClose={() => setMade(null)}>
+        <Modal
+          title={made.length === 1 ? `PO ${made[0].po_number} created` : `${made.length} purchase orders created`}
+          onClose={() => setMade(null)}
+        >
           <div className="space-y-4 text-sm">
             <p>
-              Purchase order <b>{made.po_number}</b> to <b>{made.vendor_name}</b> for <b>{money(made.total)}</b> is saved in
-              PO history. Its parts are now marked Backordered on the Stock tab (un-tick any you don’t want shown that way).
+              {made.length === 1 ? "This purchase order is" : "These purchase orders are"} saved in PO history, one for each distributor.
+              The parts on {made.length === 1 ? "it are" : "them are"} now marked Backordered on the Stock tab (un-tick any you don’t want shown that way).
+              To order from Automatic Distributors, open its Orders page, load the PO, get a quote and place the order.
             </p>
-            {made.missing_part_numbers && made.missing_part_numbers.length > 0 && (
-              <Notice kind="error">
-                No manufacturer part number is on file for: {made.missing_part_numbers.join("; ")}. The Item column is blank for
-                those lines. Add the part number on the product page and download the PO again.
-              </Notice>
-            )}
-            <p className="font-medium">Download it as:</p>
-            <div className="flex flex-wrap gap-2">
-              <button
-                className={btnCls}
-                onClick={() => download(made, "pdf").catch((e) => setFlash({ kind: "error", text: errMsg(e) }))}
-              >
-                PDF
-              </button>
-              <button
-                className={btnCls}
-                onClick={() => download(made, "xlsx").catch((e) => setFlash({ kind: "error", text: errMsg(e) }))}
-              >
-                Excel
-              </button>
-              <button className={btn2Cls} onClick={() => setMade(null)}>
-                Done
-              </button>
+            <div className="space-y-3">
+              {made.map((po) => (
+                <div key={po.id} className="space-y-2 rounded border border-gray-200 p-3">
+                  <div>
+                    <b>PO {po.po_number}</b> to <b>{po.vendor_name}</b> · {po.lines.length} line{po.lines.length === 1 ? "" : "s"} · <b>{money(po.total)}</b>
+                    {po.po_type === "drop_ship" && <span className="ml-2"><Badge tone="amber">drop ship</Badge></span>}
+                  </div>
+                  {po.missing_part_numbers && po.missing_part_numbers.length > 0 && (
+                    <Notice kind="error">
+                      No part number is on file for: {po.missing_part_numbers.join("; ")}. The Item column is blank for those lines. Add the
+                      part number on the product page and download the PO again.
+                    </Notice>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    <button className={btnCls} onClick={() => download(po, "pdf").catch((e) => setFlash({ kind: "error", text: errMsg(e) }))}>
+                      PDF
+                    </button>
+                    <button className={btnCls} onClick={() => download(po, "xlsx").catch((e) => setFlash({ kind: "error", text: errMsg(e) }))}>
+                      Excel
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
+            <button className={btn2Cls} onClick={() => setMade(null)}>
+              Done
+            </button>
           </div>
         </Modal>
       )}
@@ -451,10 +478,11 @@ function CreatePo({
   setSel: React.Dispatch<React.SetStateAction<Record<number, Sel>>>;
   goDistributors: () => void;
   onClose: () => void;
-  onCreated: (po: PoDetail) => void;
+  onCreated: (pos: PoDetail[]) => void;
   setFlash: FlashFn;
 }) {
-  const [distId, setDistId] = useState<number | "">(dists.length === 1 ? dists[0].id : "");
+  // Only used for parts that have no distributor part: who they are ordered from.
+  const [fallbackId, setFallbackId] = useState<number | "">(dists.length === 1 ? dists[0].id : "");
   const [shipTo, setShipTo] = useState("");
   const [defaultShip, setDefaultShip] = useState("");
   const [poType, setPoType] = useState<"stock" | "drop_ship">("stock");
@@ -475,19 +503,46 @@ function CreatePo({
   }, []);
 
   const edit = (id: number, patch: Partial<Sel>) => setSel((s) => (s[id] ? { ...s, [id]: { ...s[id], ...patch } } : s));
-  const bad = lines.some((l) => !Number.isInteger(Number(l.qty)) || Number(l.qty) < 1 || (l.rate !== "" && !(Number(l.rate) >= 0)));
-  const total = lines.reduce((n, l) => n + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0);
+  const bad = lines.some(
+    (l) =>
+      !Number.isInteger(Number(l.qty)) ||
+      Number(l.qty) < 1 ||
+      (l.part.pieces.length === 0 && l.rate !== "" && !(Number(l.rate) >= 0))
+  );
+
+  // The plan: one PO per distributor the parts are bought from (their distributor parts), same rule as the server.
+  const distName = (id: number) => dists.find((d) => d.id === id)?.name ?? `Distributor ${id}`;
+  const loose = lines.filter((l) => !l.part.pieces.some((pc) => pc.distributor_id != null));
+  const plan = new Map<number, { total: number; parts: number }>();
+  for (const l of lines) {
+    const qty = Number(l.qty) || 0;
+    const ids = Array.from(new Set(l.part.pieces.map((pc) => pc.distributor_id).filter((x): x is number => x != null)));
+    for (const id of ids) {
+      const cost = l.part.pieces.filter((pc) => pc.distributor_id === id).reduce((n, pc) => n + (pc.cost ?? 0) * pc.quantity, 0);
+      const g = plan.get(id) ?? { total: 0, parts: 0 };
+      plan.set(id, { total: g.total + cost * qty, parts: g.parts + 1 });
+    }
+  }
+  if (loose.length > 0 && fallbackId !== "") {
+    const g = plan.get(fallbackId) ?? { total: 0, parts: 0 };
+    plan.set(fallbackId, {
+      total: g.total + loose.reduce((n, l) => n + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0),
+      parts: g.parts + loose.length,
+    });
+  }
+  const planned = Array.from(plan.entries()).sort((a, b) => distName(a[0]).localeCompare(distName(b[0])));
+  const total = planned.reduce((n, [, g]) => n + g.total, 0);
 
   async function create() {
-    if (distId === "") return setError("Pick a distributor first.");
+    if (loose.length > 0 && fallbackId === "") return setError("Pick a distributor for the parts that have no distributor part.");
     if (bad) return setError("Every line needs a whole-number quantity of at least 1 and a cost of 0 or more.");
     setBusy(true);
     setError("");
     try {
-      const po = await api<PoDetail>("/purchase-orders", {
+      const r = await api<{ pos: PoDetail[] }>("/purchase-orders/reorder", {
         method: "POST",
         body: {
-          distributor_id: distId,
+          fallback_distributor_id: loose.length > 0 && fallbackId !== "" ? fallbackId : null,
           ship_to: shipTo.trim(),
           po_type: poType,
           note: note.trim() || null,
@@ -495,11 +550,11 @@ function CreatePo({
           lines: lines.map((l) => ({
             product_id: l.part.id,
             quantity: Number(l.qty),
-            rate: l.rate === "" ? null : Number(l.rate),
+            rate: l.part.pieces.length > 0 || l.rate === "" ? null : Number(l.rate),
           })),
         },
       });
-      onCreated(po);
+      onCreated(r.pos);
     } catch (e) {
       setError(errMsg(e));
       setFlash(null);
@@ -509,33 +564,58 @@ function CreatePo({
   }
 
   return (
-    <Modal title="Create purchase order" onClose={onClose}>
+    <Modal title={planned.length > 1 ? "Create purchase orders" : "Create purchase order"} onClose={onClose}>
       <div className="space-y-4 text-sm">
         {error && <Notice kind="error">{error}</Notice>}
 
         <div className="space-y-2">
-          <div className="font-medium">1. Distributor</div>
-          {dists.length === 0 ? (
-            <p className="text-gray-600">
-              You haven’t added a distributor yet.{" "}
-              <button className="underline" onClick={goDistributors}>
-                Add one on the Distributors page
-              </button>{" "}
-              (it opens in a new tab, so your ticked parts are kept).
-            </p>
-          ) : (
-            <div className="flex flex-wrap items-center gap-3">
-              <select className={`${inp} max-w-sm`} value={distId} onChange={(e) => setDistId(e.target.value ? Number(e.target.value) : "")}>
-                <option value="">Choose a distributor…</option>
-                {dists.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
-              <button className="underline" onClick={goDistributors}>
-                Add / edit / delete distributors (opens in a new tab)
-              </button>
+          <div className="font-medium">1. Distributors</div>
+          <p className="text-gray-600">
+            Each part is ordered from the distributors on its distributor parts (Edit product &gt; Distributor parts). You get one PO for each
+            distributor, with that distributor’s name at the top, and only the parts and quantities for them.
+          </p>
+          {planned.length > 0 && (
+            <ul className="divide-y divide-gray-100 rounded border border-gray-200">
+              {planned.map(([id, g]) => (
+                <li key={id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5">
+                  <span className="font-medium">{distName(id)}</span>
+                  <span className="text-gray-600">
+                    {g.parts} part{g.parts === 1 ? "" : "s"} · {money(g.total)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {loose.length > 0 && (
+            <div className="space-y-2 rounded border border-amber-300 bg-amber-50 p-3">
+              <div className="text-amber-900">
+                {loose.length} ticked part{loose.length === 1 ? " has" : "s have"} no distributor part, so it can’t be matched to a distributor:{" "}
+                {loose.slice(0, 3).map((l) => l.part.title).join("; ")}
+                {loose.length > 3 ? "…" : ""}. Order {loose.length === 1 ? "it" : "them"} from:
+              </div>
+              {dists.length === 0 ? (
+                <p className="text-gray-600">
+                  You haven’t added a distributor yet.{" "}
+                  <button className="underline" onClick={goDistributors}>
+                    Add one on the Distributors page
+                  </button>{" "}
+                  (it opens in a new tab, so your ticked parts are kept).
+                </p>
+              ) : (
+                <div className="flex flex-wrap items-center gap-3">
+                  <select className={`${inp} max-w-sm`} value={fallbackId} onChange={(e) => setFallbackId(e.target.value ? Number(e.target.value) : "")}>
+                    <option value="">Choose a distributor…</option>
+                    {dists.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button className="underline" onClick={goDistributors}>
+                    Add / edit / delete distributors (opens in a new tab)
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -572,7 +652,7 @@ function CreatePo({
         </div>
 
         <div className="space-y-2">
-          <div className="font-medium">2. Parts, quantities and cost</div>
+          <div className="font-medium">2. Parts and quantities</div>
           <div className="overflow-x-auto rounded border border-gray-200">
             <table className="w-full text-left">
               <thead className="bg-gray-50 text-xs uppercase text-gray-500">
@@ -593,6 +673,7 @@ function CreatePo({
                           <div key={n} className="whitespace-nowrap">
                             {pc.part_number}
                             {pc.quantity > 1 && <span className="text-gray-500"> ×{pc.quantity}</span>}
+                            {pc.vendor && <span className="text-xs text-gray-500"> · {pc.vendor}</span>}
                           </div>
                         ))
                       ) : (
@@ -603,8 +684,14 @@ function CreatePo({
                     <td className="px-2 py-1">
                       <input type="number" min={1} className={`${inp} w-20`} value={l.qty} onChange={(e) => edit(l.part.id, { qty: e.target.value })} />
                     </td>
-                    <td className="px-2 py-1">
-                      <input type="number" min={0} step="0.01" className={`${inp} w-24`} value={l.rate} onChange={(e) => edit(l.part.id, { rate: e.target.value })} />
+                    <td className="whitespace-nowrap px-2 py-1">
+                      {l.part.pieces.length > 0 ? (
+                        <span className="text-gray-700" title="The distributor’s cost for each piece, from Distributor parts">
+                          {money(l.part.pieces.reduce((n, pc) => n + (pc.cost ?? 0) * pc.quantity, 0))} each
+                        </span>
+                      ) : (
+                        <input type="number" min={0} step="0.01" className={`${inp} w-24`} value={l.rate} onChange={(e) => edit(l.part.id, { rate: e.target.value })} />
+                      )}
                     </td>
                     <td className="px-2 py-1">
                       <button
@@ -625,13 +712,11 @@ function CreatePo({
               </tbody>
             </table>
           </div>
-          <div className="text-right font-semibold">Total {money(total)}</div>
-          {lines.some((l) => l.part.pieces.length > 0) && (
-            <p className="text-xs text-gray-500">
-              A part made of distributor parts goes on the PO one line per piece, at that distributor’s current cost. Pieces bought
-              from a different distributor are left off and reported after the PO is made.
-            </p>
-          )}
+          <div className="text-right font-semibold">Total of {planned.length} PO{planned.length === 1 ? "" : "s"} {money(total)}</div>
+          <p className="text-xs text-gray-500">
+            A part made of distributor parts goes on each PO as one line per piece, at that distributor’s current cost. A part with pieces
+            from two distributors goes on both POs, each with its own pieces. The same type, ship to, date and note are used on every PO.
+          </p>
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
@@ -663,7 +748,7 @@ function CreatePo({
 
         <div className="flex items-center gap-3">
           <button className={btnCls} disabled={busy || lines.length === 0} onClick={create}>
-            {busy ? "Creating…" : "Create PO"}
+            {busy ? "Creating…" : `Create ${Math.max(planned.length, 1)} PO${planned.length > 1 ? "s" : ""}`}
           </button>
           <button className={btn2Cls} disabled={busy} onClick={onClose}>
             Cancel

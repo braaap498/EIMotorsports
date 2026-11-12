@@ -7,7 +7,8 @@ Mounted at /admin/purchase-orders/* (owner / admin, plus staff holding "inventor
   POST   /purchase-orders/distributors     add one
   PUT    /purchase-orders/distributors/{id}   edit one
   DELETE /purchase-orders/distributors/{id}   delete one (old POs keep their own copy of the vendor)
-  POST   /purchase-orders                  create a PO from the ticked parts
+  POST   /purchase-orders                  create a PO from the ticked parts (one distributor)
+  POST   /purchase-orders/reorder          reorder the ticked parts: one PO per distributor (from their distributor parts)
   GET    /purchase-orders                  history, searchable (PO number, vendor, part number, SKU, title)
   GET    /purchase-orders/defaults         the default Ship To address and the next unused PO number
   GET    /purchase-orders/{id}             one PO with its lines
@@ -176,6 +177,7 @@ def parts(
     q: Optional[str] = Query(None, max_length=100),
     show_all: bool = False,
     include_inactive: bool = False,
+    distributor_id: Optional[int] = Query(None, description="only parts that have a distributor part from this distributor"),
     view: Optional[str] = Query(None, pattern="^(all|low|out)$"),
     sort: Optional[str] = Query(None, pattern="^(sku|part|partnumber|onhand|reserved|available|level|cost|po)$"),
     dir: str = Query("asc", pattern="^(asc|desc)$"),
@@ -191,6 +193,12 @@ def parts(
     out = f"({avail} <= 0)"
     params: dict = {"limit": limit, "offset": offset}
     scope = [] if include_inactive else ["coalesce(p.is_active, true)"]
+    if distributor_id is not None:
+        # the Low / Out counts follow the distributor filter too
+        scope.append(
+            "exists (select 1 from product_kit_parts kd where kd.product_id = p.id and kd.distributor_id = :dist)"
+        )
+        params["dist"] = distributor_id
     conds = list(scope)
     import re
 
@@ -212,24 +220,27 @@ def parts(
 
     total = db.execute(text(f"select count(*) from products p {where}"), params).scalar()
     counts = db.execute(
-        text(f"select count(*) filter (where {low}) as low_count, count(*) filter (where {out}) as out_count from products p {scope_where}")
+        text(f"select count(*) filter (where {low}) as low_count, count(*) filter (where {out}) as out_count from products p {scope_where}"),
+        {"dist": distributor_id} if distributor_id is not None else {},
     ).first()
     if sort in _PARTS_SORTS:
         order = f"{_PARTS_SORTS[sort]} {'desc' if dir == 'desc' else 'asc'} nulls last, lower(title), id"
     else:
         order = "(coalesce(reorder_point, 0) > 0) desc, greatest(coalesce(reorder_point, 0) - available, 0) desc, title, id"
+    dist_k = " and k.distributor_id = :dist" if distributor_id is not None else ""
     rows = db.execute(
         text(
             f"""
             with b as (
               select p.id, p.sku_display as sku, p.title,
                      coalesce((select string_agg(k.part_number, ' / ' order by k.sort_order, k.id)
-                                 from product_kit_parts k where k.product_id = p.id), {_MPN}) as part_number,
+                                 from product_kit_parts k where k.product_id = p.id{dist_k}), {_MPN}) as part_number,
                      coalesce((select sum({_PIECE_COST} * k.quantity)
                                  from product_kit_parts k left join supplier_items si on si.id = k.supplier_item_id
-                                where k.product_id = p.id), p.cost) as cost,
+                                where k.product_id = p.id{dist_k}), p.cost) as cost,
                      (select jsonb_agg(jsonb_build_object('part_number', k.part_number, 'quantity', k.quantity,
-                                                          'vendor', d.name, 'cost', {_PIECE_COST}) order by k.sort_order, k.id)
+                                                          'vendor', d.name, 'distributor_id', k.distributor_id,
+                                                          'cost', {_PIECE_COST}) order by k.sort_order, k.id)
                         from product_kit_parts k
                         left join supplier_items si on si.id = k.supplier_item_id
                         left join po_distributors d on d.id = k.distributor_id
@@ -395,6 +406,10 @@ def _po_detail(db: Session, po_id: int) -> dict:
 @router.post("", status_code=201)
 @needs("inventory.purchase")
 def create_po(body: PoIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    return _create_po(body, db, user)
+
+
+def _create_po(body: PoIn, db: Session, user: AuthUser) -> dict:
     dist = db.execute(
         text("select id, name, address from po_distributors where id = :id"), {"id": body.distributor_id}
     ).first()
@@ -495,6 +510,89 @@ def create_po(body: PoIn, db: Session = Depends(get_db), user: AuthUser = Depend
     po["missing_part_numbers"] = [r["description"] for r in rows if not r["item"]]
     po["kit_notes"] = kit_notes
     return po
+
+
+class ReorderLine(BaseModel):
+    product_id: int
+    quantity: int = Field(..., ge=1, le=MAX_QTY)
+    rate: Optional[float] = Field(None, ge=0, le=1_000_000)   # only used for a part with no distributor parts
+
+
+class ReorderIn(BaseModel):
+    lines: list[ReorderLine] = Field(..., min_length=1, max_length=200)
+    fallback_distributor_id: Optional[int] = None   # who a part with NO distributor parts is ordered from
+    ship_to: Optional[str] = Field(None, max_length=400)
+    note: Optional[str] = Field(None, max_length=300)
+    expected_date: Optional[date] = None
+    po_type: str = Field("stock", pattern="^(stock|drop_ship)$")
+
+
+@router.post("/reorder", status_code=201)
+@needs("inventory.purchase")
+def reorder(body: ReorderIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Reorder the ticked parts from whoever they are bought from: ONE PO PER DISTRIBUTOR.
+    A part's distributors are the ones on its distributor parts (Edit product > Distributor parts). Each PO gets that
+    distributor's pieces (pieces x quantity asked for), at the distributor's cost. A part with pieces from two
+    distributors goes on both POs (each gets its own pieces). A part with no distributor parts goes on a PO to
+    `fallback_distributor_id`; if there is one and none is given nothing is made and the answer says which parts.
+    Every PO has the same type (stock or drop ship), ship-to, note and expected date.
+    The POs are made one after another, so if one fails the earlier ones stay (they are in PO history) and the
+    error says which."""
+    merged: dict[int, ReorderLine] = {}
+    for l in body.lines:
+        if l.product_id in merged:
+            merged[l.product_id].quantity += l.quantity
+        else:
+            merged[l.product_id] = l.model_copy()
+    ids = sorted(merged)
+    found = {r[0]: r[1] for r in db.execute(text("select id, title from products where id = any(cast(:ids as bigint[]))"), {"ids": ids}).all()}
+    if len(found) != len(ids):
+        raise HTTPException(404, "One of those parts no longer exists. Nothing was ordered.")
+
+    by_dist: dict[int, list[int]] = {}
+    for pid, did in db.execute(
+        text("select distinct product_id, distributor_id from product_kit_parts where product_id = any(cast(:ids as bigint[])) and distributor_id is not null"),
+        {"ids": ids},
+    ).all():
+        by_dist.setdefault(int(did), []).append(int(pid))
+    covered = {pid for pids in by_dist.values() for pid in pids}
+    loose = [pid for pid in ids if pid not in covered]
+    if loose:
+        if body.fallback_distributor_id is None:
+            names = "; ".join(str(found[p])[:60] for p in loose[:5]) + ("…" if len(loose) > 5 else "")
+            raise HTTPException(
+                422,
+                f"{len(loose)} part{'s' if len(loose) != 1 else ''} ha{'ve' if len(loose) != 1 else 's'} no distributor part, so there is no distributor to order "
+                f"{'them' if len(loose) != 1 else 'it'} from. Pick a distributor for those, or add a distributor part on the product page. ({names}) Nothing was ordered.",
+            )
+        by_dist.setdefault(int(body.fallback_distributor_id), []).extend(loose)
+
+    dists = {
+        r[0]: r[1]
+        for r in db.execute(text("select id, name from po_distributors where id = any(cast(:d as bigint[]))"), {"d": sorted(by_dist)}).all()
+    }
+    missing = [d for d in by_dist if d not in dists]
+    if missing:
+        raise HTTPException(404, "A distributor on these parts no longer exists in the distributor list. Nothing was ordered.")
+
+    made: list[dict] = []
+    for did in sorted(by_dist, key=lambda d: str(dists[d]).lower()):
+        po_in = PoIn(
+            distributor_id=did,
+            ship_to=body.ship_to,
+            note=body.note,
+            expected_date=body.expected_date,
+            po_type=body.po_type,
+            lines=[PoLineIn(product_id=pid, quantity=merged[pid].quantity, rate=merged[pid].rate) for pid in sorted(set(by_dist[did]))],
+        )
+        try:
+            po = _create_po(po_in, db, user)
+        except HTTPException as e:
+            done = ", ".join(f"PO {m['po_number']} ({m['vendor_name']})" for m in made)
+            raise HTTPException(e.status_code, f"{e.detail} " + (f"Already made before this: {done}." if done else "Nothing was made."))
+        po.pop("kit_notes", None)  # pieces bought from another distributor are on that distributor's own PO here
+        made.append(po)
+    return {"pos": made}
 
 
 class FromWebOrderIn(BaseModel):
