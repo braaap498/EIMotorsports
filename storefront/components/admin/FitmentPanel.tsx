@@ -341,7 +341,8 @@ export default function FitmentPanel({
         )}
       </div>
 
-      {mayAdd && addForm("bottom")}
+      {/* a second Add form under the list, only once the list is long enough to need scrolling back up */}
+      {mayAdd && fits.length >= 10 && addForm("bottom")}
       </div>
     </details>
   );
