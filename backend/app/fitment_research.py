@@ -78,7 +78,7 @@ def run_names(body: NamesRun, db: Session = Depends(get_db)):
     link = "and exists (select 1 from supplier_product_links l where l.product_id = p.id)" if body.catalog_only else ""
     rows = db.execute(
         text(
-            f"select p.id, p.name from products p where {_NEEDS} {link} "
+            f"select p.id, p.title as name from products p where {_NEEDS} {link} "
             "and not exists (select 1 from fitment_proposals fp where fp.product_id = p.id and fp.status in ('pending', 'rejected')) "
             "order by p.id limit :n"
         ),
@@ -154,7 +154,7 @@ _SYSTEM = (
 @needs("fitment.add")
 def research_product(product_id: int, db: Session = Depends(get_db)):
     p = db.execute(
-        text(f"select p.id, p.name, p.manufacturer, {_MPN} as mpn, p.custom_label_sku as cls from products p where p.id = :i"),
+        text(f"select p.id, p.title as name, {_MPN} as mpn, p.custom_label_sku as cls from products p where p.id = :i"),
         {"i": product_id},
     ).first()
     if not p:
@@ -164,7 +164,7 @@ def research_product(product_id: int, db: Session = Depends(get_db)):
              "on s.supplier = l.supplier and s.sku = l.supplier_sku where l.product_id = :i limit 1"), {"i": product_id}).first()
     pns = [x for x in [p.mpn, sup.mfr_number if sup else None, sup.sku if sup else None] if x]
     pages = _pdf_context(db, pns)
-    brief = f"Product: {p.name}\nBrand: {p.manufacturer or (sup.manufacturer if sup else '') or ''}\nPart numbers: {', '.join(pns) or 'none'}\n"
+    brief = f"Product: {p.name}\nBrand: {(sup.manufacturer if sup else '') or ''}\nPart numbers: {', '.join(pns) or 'none'}\n"
     if sup:
         brief += f"Distributor listing: {sup.name}\n"
     if pages:
@@ -201,10 +201,10 @@ def queue(status: str = Query("pending"), q: Optional[str] = None, limit: int = 
     like = f"%{q.strip()}%" if q and q.strip() else None
     rows = db.execute(
         text(
-            "select fp.id, fp.product_id, fp.origin, fp.verdict, fp.notes, fp.created_at, p.name, p.sku, "
+            "select fp.id, fp.product_id, fp.origin, fp.verdict, fp.notes, fp.created_at, p.title as name, p.sku, "
             "(select count(*) from fitment_proposal_items i where i.proposal_id = fp.id) as items "
             "from fitment_proposals fp join products p on p.id = fp.product_id "
-            "where fp.status = :s and (cast(:q as text) is null or p.name ilike cast(:q as text) or p.sku ilike cast(:q as text)) "
+            "where fp.status = :s and (cast(:q as text) is null or p.title ilike cast(:q as text) or p.sku ilike cast(:q as text)) "
             "order by fp.id desc limit :l offset :o"
         ),
         {"s": status, "q": like, "l": min(limit, 500), "o": offset},
