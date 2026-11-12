@@ -2785,9 +2785,12 @@ def _sync_invoice_days(db: Session, days: int) -> tuple[int, int, Optional[str]]
     for back in range(days):
         day = today - timedelta(days=back)
         ymd = day.strftime("%Y%m%d")
+        # the API refuses a range whose end is not after its start ("End date should be greater than start date"),
+        # so ask for this day through the next one; invoices are saved by invoice number, so any overlap is harmless
+        ymd_end = (day + timedelta(days=1)).strftime("%Y%m%d")
         try:
             data = _api_get(
-                "/order/find/range/details", {"dateType": "I", "startDate": ymd, "endDate": ymd}, not_found="No invoices that day."
+                "/order/find/range/details", {"dateType": "I", "startDate": ymd, "endDate": ymd_end}, not_found="No invoices that day."
             )
         except HTTPException as e:
             if e.status_code == 404:  # nothing invoiced that day
