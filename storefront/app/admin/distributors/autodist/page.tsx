@@ -9,6 +9,7 @@ import AutodistCatalog from "../../../../components/admin/AutodistCatalog";
 import AutodistOpportunities from "../../../../components/admin/AutodistOpportunities";
 import AutodistOrders from "../../../../components/admin/AutodistOrders";
 import AutodistInvoices from "../../../../components/admin/AutodistInvoices";
+import AutodistProducts from "../../../../components/admin/AutodistProducts";
 
 // Automatic Distributors supplier data (owners and admins only). Licensed data: dealer cost and stock
 // are for this screen only and must never be shown on the public store.
@@ -93,13 +94,14 @@ const n = (x: number) => x.toLocaleString("en-US");
 const money = (v: string | null) => (v == null ? "—" : `$${Number(v).toFixed(2)}`);
 const tone = (s: string) => (s === "done" ? "green" : s === "running" ? "blue" : "amber");
 
-type Tab = "catalog" | "opps" | "orders" | "invoices" | "data" | "match";
+type Tab = "catalog" | "opps" | "orders" | "invoices" | "data" | "match" | "products";
 const TABS: { key: Tab; label: string }[] = [
   { key: "catalog", label: "Catalog" },
   { key: "orders", label: "Orders" },
   { key: "invoices", label: "Invoices" },
   { key: "data", label: "Data feed" },
   { key: "match", label: "Match report" },
+  { key: "products", label: "Website products" },
   { key: "opps", label: "Opportunities" },
 ];
 const SOURCE_LABEL: Record<string, string> = {
@@ -447,6 +449,12 @@ function AutodistInner() {
       {opened.invoices && (
         <div className={tab === "invoices" ? "" : "hidden"}>
           <AutodistInvoices active={tab === "invoices"} />
+        </div>
+      )}
+
+      {opened.products && (
+        <div className={tab === "products" ? "" : "hidden"}>
+          <AutodistProducts />
         </div>
       )}
 

@@ -3004,6 +3004,193 @@ def _parse_ship_to(txt: Optional[str]) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------
+# website products made from the catalog (parts in stock at an Automatic Distributors warehouse)
+# --------------------------------------------------------------------------
+# One website product per distributor part that is in stock at Indiana or Nevada (Maine is never counted, the same rule as
+# everywhere else here). A part is NOT made when we already have it as a single item (barcode, manufacturer number, or an
+# eBay custom label that is just that one part). A part that only appears inside a kit (a label with xx between parts) still
+# gets its own single-part product. Every product made here is recorded in supplier_product_links (sql/autodist_products.sql),
+# which is also what makes them quick to find and remove together. The shelf count (quantity_on_hand) is left at 0: distributor
+# stock is never added to it.
+_ACRONYMS = {"ATV", "UTV", "OEM", "LED", "CV", "PWC", "KTM", "EFI", "CDI", "ECU", "DOT", "USA", "XT", "RZR", "SXS", "SS", "HD"}
+
+
+def _nice_case(value: Optional[str]) -> str:
+    """ALL CAPS distributor text as normal title case; text that already has lower case is kept as it is."""
+    v = re.sub(r"\s+", " ", (value or "").strip())
+    if not v or v != v.upper():
+        return v
+    words = []
+    for w in v.split(" "):
+        if w in _ACRONYMS or any(ch.isdigit() for ch in w):
+            words.append(w)
+        else:
+            words.append("-".join(part.capitalize() for part in w.split("-")))
+    return " ".join(words)
+
+
+def _product_title(brand: Optional[str], name: Optional[str], mfr: Optional[str]) -> str:
+    b, n_, m = _nice_case(brand), _nice_case(name), (mfr or "").strip()
+    parts = []
+    if b and not n_.lower().startswith(b.lower()):
+        parts.append(b)
+    if n_:
+        parts.append(n_)
+    if m and m.lower() not in " ".join(parts).lower():
+        parts.append(m)
+    return " ".join(parts)[:250]
+
+
+# Which in-stock catalog parts still need a product. The flags are separate so the preview can count each reason.
+_NEW_PRODUCT_CTE = f"""
+with existing as (
+  select p.id,
+         nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') as upc_n,
+         nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n,
+         nullif(btrim(p.custom_label_sku), '') as label
+  from products p
+), single as (
+  select * from existing where label is null or array_length(regexp_split_to_array(label, 'xx', 'i'), 1) <= 1
+), cand as (
+  select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.upc, s.upc_norm, s.mfr_number_norm,
+         s.list_price, s.map_price, s.effective_cost, s.weight_lb, s.ship_weight_lb, s.length_in, s.width_in, s.height_in,
+         s.images,
+         coalesce(s.map_price, s.list_price) as price,
+         exists (select 1 from supplier_product_links l where l.supplier = :s and l.supplier_sku = s.sku) as linked,
+         (  (s.upc_norm is not null and s.upc_norm in (select upc_n from single where upc_n is not null))
+         or (s.mfr_number_norm is not null and s.mfr_number_norm in (select mpn_n from single where mpn_n is not null))
+         or upper(s.sku) in (select upper(label) from single where label is not null)
+         or (s.mfr_number_norm is not null and s.mfr_number_norm in
+              (select upper(regexp_replace(label, '[^A-Za-z0-9]', '', 'g')) from single where label is not null and length(label) >= 4))
+         ) as have_single
+  from supplier_items s
+  where s.supplier = :s and s.active and (s.qty_indiana + s.qty_nevada) > 0
+)
+"""
+
+_prod_state: dict = {"running": False, "message": "", "done": 0, "total": 0, "created": 0, "skipped": 0, "failed": 0, "errors": [], "finished_at": None}
+_prod_lock = threading.Lock()
+
+
+@router.get("/api/website-products/preview")
+def api_website_products_preview(db: Session = Depends(get_db)):
+    """Counts only. Nothing is created."""
+    try:
+        r = db.execute(
+            text(
+                _NEW_PRODUCT_CTE
+                + """
+                select count(*) as in_stock,
+                       count(*) filter (where linked) as already_made,
+                       count(*) filter (where not linked and have_single) as have_single,
+                       count(*) filter (where not linked and not have_single and (price is null or price <= 0)) as no_price,
+                       count(*) filter (where not linked and not have_single and price > 0) as to_create,
+                       count(*) filter (where not linked and not have_single and price > 0 and (images is null or array_length(images, 1) is null)) as to_create_no_photo
+                from cand
+                """
+            ),
+            {"s": SUPPLIER},
+        ).first()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not count: {str(e)[:300]}. Has sql/autodist_products.sql been run in Supabase?")
+    return {**dict(r._mapping), "state": {k: v for k, v in _prod_state.items()}}
+
+
+@router.get("/api/website-products/status")
+def api_website_products_status():
+    return {k: v for k, v in _prod_state.items()}
+
+
+class WebsiteProductsIn(BaseModel):
+    limit: int = Field(25, ge=1, le=100000)
+
+
+def _make_products_job(limit: int) -> None:
+    from app.admin_catalog import slugify  # late import: that module imports this one's helpers
+
+    gen = get_db()
+    db = next(gen)
+    created = skipped = failed = 0
+    errors: list[str] = []
+    try:
+        rows = db.execute(
+            text(
+                _NEW_PRODUCT_CTE
+                + " select * from cand where not linked and not have_single and price > 0 order by manufacturer, sku limit :lim"
+            ),
+            {"s": SUPPLIER, "lim": limit},
+        ).all()
+        _prod_state.update(total=len(rows), done=0)
+        for r in rows:
+            try:
+                title = _product_title(r.manufacturer, r.name, r.mfr_number)
+                if not title:
+                    skipped += 1
+                    continue
+                base = slugify(title) or slugify(f"part {r.sku}")
+                slug, k = base, 1
+                while db.execute(text("select 1 from products where slug = :s"), {"s": slug}).first():
+                    k += 1
+                    slug = f"{base}-{k}"
+                ship_lb = r.ship_weight_lb if r.ship_weight_lb else r.weight_lb
+                with db.begin_nested():
+                    pid = db.execute(
+                        text(
+                            "insert into products (title, slug, manufacturer_part_number, barcode, list_price, cost, quantity_on_hand, "
+                            "weight_oz, length_in, width_in, height_in, condition, is_published, is_active, is_universal, show_part_number) "
+                            "values (:title, :slug, :mpn, :bc, :price, :cost, 0, :wt, :l, :w, :h, 'New', true, true, false, false) returning id"
+                        ),
+                        {
+                            "title": title, "slug": slug, "mpn": (r.mfr_number or "").strip() or None,
+                            "bc": re.sub(r"\D", "", r.upc or "") or None, "price": r.price,
+                            "cost": r.effective_cost, "wt": (float(ship_lb) * 16) if ship_lb else None,
+                            "l": r.length_in, "w": r.width_in, "h": r.height_in,
+                        },
+                    ).scalar()
+                    db.execute(
+                        text("insert into supplier_product_links (supplier, supplier_sku, product_id) values (:s, :k, :p)"),
+                        {"s": SUPPLIER, "k": r.sku, "p": pid},
+                    )
+                    for i, url in enumerate(r.images or []):
+                        if not str(url or "").strip():
+                            continue
+                        db.execute(
+                            text("insert into product_photos (product_id, source_url, is_primary, sort_order) values (:p, :u, :pr, :o)"),
+                            {"p": pid, "u": str(url).strip(), "pr": i == 0, "o": i},
+                        )
+                created += 1
+            except Exception as e:  # one bad part must not stop the rest
+                failed += 1
+                if len(errors) < 5:
+                    errors.append(f"{r.sku}: {str(e)[:200]}")
+                log.warning("website product for %s failed: %s", r.sku, e)
+            if (created + failed + skipped) % 100 == 0:
+                db.commit()
+            _prod_state.update(done=created + failed + skipped, created=created, skipped=skipped, failed=failed, errors=errors)
+        db.commit()
+        _prod_state["message"] = f"Created {created} product{'' if created == 1 else 's'}; {skipped} skipped; {failed} failed."
+    except Exception as e:
+        db.rollback()
+        log.exception("website product creation failed")
+        _prod_state["message"] = f"Stopped: {str(e)[:300]}"
+    finally:
+        _prod_state.update(running=False, created=created, skipped=skipped, failed=failed, errors=errors, finished_at=time.time())
+        gen.close()
+
+
+@router.post("/api/website-products/create")
+def api_website_products_create(body: WebsiteProductsIn, user: AuthUser = Depends(require_admin)):
+    """Create website products (published) for in-stock catalog parts we do not already have. Runs in the background."""
+    with _prod_lock:
+        if _prod_state["running"]:
+            raise HTTPException(409, "A product creation run is already going.")
+        _prod_state.update(running=True, message="Starting…", done=0, total=0, created=0, skipped=0, failed=0, errors=[], finished_at=None)
+    threading.Thread(target=_make_products_job, args=(body.limit,), daemon=True, name="autodist-make-products").start()
+    return {"running": True}
+
+
 @router.get("/api/pos")
 def api_pos(db: Session = Depends(get_db)):
     """Open purchase orders to Automatic Distributors that have not been placed through the API yet."""
