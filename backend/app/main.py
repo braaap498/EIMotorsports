@@ -49,6 +49,7 @@ from app.auth import AuthUser, require_staff
 from app.config import get_settings
 from app.database import get_db
 from app.fitment import router as fitment_router
+from app.fitment_research import router as fitment_research_router
 from app.help_pages import admin_router as admin_help_router
 from app.help_pages import store_router as store_help_router
 from app.quickbooks import admin_router as admin_quickbooks_router
@@ -122,6 +123,7 @@ admin_router.include_router(admin_about_router)
 admin_router.include_router(admin_reviews_router)
 admin_router.include_router(admin_help_router)
 admin_router.include_router(autodist_router)
+admin_router.include_router(fitment_research_router)
 admin_router.include_router(kits_router)
 admin_router.include_router(analytics_router)
 admin_router.include_router(analytics_qb_router)

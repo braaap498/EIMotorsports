@@ -42,6 +42,7 @@ const tabOn = (t: Tab, path: string) => (t.match ?? [t.href]).some((m) => path.s
 const FITMENT_TABS: Tab[] = [
   { href: "/admin/models", label: "Models & years" },
   { href: "/admin/fitment", label: "Types & makes" },
+  { href: "/admin/fitment-research", label: "Fitment research" },
 ];
 
 // Store API: the setup and import pages, shown as a second row of tabs when the Store API tab is open.

@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     # Secret key used ONLY by the server to add/edit staff accounts. Never put it in the browser.
     supabase_service_key: str | None = None
 
+    # Fitment research (AI step). Blank = the AI button says it isn't set up.
+    anthropic_api_key: str | None = None
+    fitment_ai_model: str = "claude-sonnet-4-6"
+
     allowed_origins: str = "http://localhost:3000"
 
     # Public base address of the Supabase Storage bucket that holds the photos.

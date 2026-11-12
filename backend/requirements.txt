@@ -9,3 +9,4 @@ stripe>=10.0
 openpyxl
 reportlab
 cryptography>=42
+pypdf
