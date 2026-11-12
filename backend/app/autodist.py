@@ -3007,17 +3007,17 @@ def api_pos(db: Session = Depends(get_db)):
     sql = (
         f"select h.id, h.po_number, h.vendor_name, h.sent_at, h.created_at, {type_sel} as po_type, "
         f"(select count(*) from po_lines l where l.po_id = h.id and l.received_at is null) as open_lines "
-        f"from po_headers h where h.status = 'open' and {_PO_VENDOR} %s order by h.po_number desc limit 100"
+        f"from po_headers h where h.status = 'open' and {_PO_VENDOR} @@PLACED@@ order by h.po_number desc limit 100"
     )
     placed = (
         "and not exists (select 1 from supplier_orders o where o.supplier = :s and o.mode = :m "
         "and o.po_number = cast(h.po_number as text) and o.order_number <> '')"
     )
     try:
-        rows = db.execute(text(sql % placed), {"s": SUPPLIER, "m": mode}).all()
+        rows = db.execute(text(sql.replace("@@PLACED@@", placed)), {"s": SUPPLIER, "m": mode}).all()
     except Exception:
         db.rollback()  # the orders table is not there yet: show every open PO
-        rows = db.execute(text(sql % ""), {}).all()
+        rows = db.execute(text(sql.replace("@@PLACED@@", "")), {}).all()
     return {"mode": mode, "items": [dict(r._mapping) for r in rows]}
 
 

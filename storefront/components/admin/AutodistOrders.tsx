@@ -74,6 +74,7 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
   const [addr, setAddr] = useState({ ...emptyAddr });
   const [lines, setLines] = useState<{ number: string; quantity: string; label?: string; cands?: Cand[] }[]>([{ number: "", quantity: "1" }]);
   const [pos, setPos] = useState<PoRow[] | null>(null);
+  const [posError, setPosError] = useState("");
   const [poId, setPoId] = useState<number | "">("");
   const [poInfo, setPoInfo] = useState<PoFull | null>(null);
   const [chk, setChk] = useState({ addr: false, parts: false, total: false }); // the "I checked it" boxes; cleared whenever the order changes
@@ -183,9 +184,11 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
   }
   async function loadPos() {
     try {
+      setPosError("");
       setPos((await api<{ items: PoRow[] }>("/autodist/api/pos")).items);
-    } catch {
+    } catch (e) {
       setPos([]);
+      setPosError(e instanceof Error ? e.message : "Could not load the purchase order list.");
     }
   }
   useEffect(() => {
@@ -319,6 +322,8 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
               </option>
             ))}
           </select>
+          <button type="button" className="self-start text-xs text-blue-700 underline" onClick={() => void loadPos()}>Refresh list</button>
+          {posError && <span className="text-red-700">Could not load the list: {posError}</span>}
         </label>
         {poInfo && (
           <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
