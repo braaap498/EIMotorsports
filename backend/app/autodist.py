@@ -23,7 +23,7 @@ Mounted at /admin/autodist/* (owner/admin only).
   POST /import/ftp-photos      read the photo links from the big All Products file (manual only; runs in the background)
   POST /import/ftp             pull the live inventory file, then our own prices (priceupdate.txt), from the FTP server (runs in the background)
   GET  /ftp/schedule           the automatic-sync setting (off by default) and what the last check found
-  PUT  /ftp/schedule           turn automatic sync on/off and set how often the server checks (minutes)
+  PUT  /ftp/schedule           turn automatic sync on/off and set how often the server checks (minutes); also the automatic order tracking check
   GET  /items                  browse / search / filter / sort the stored supplier parts (see items() for every filter)
   GET  /items/{id}             one part in full: every stored field, our matching products, same-barcode / same-number parts
   GET  /catalog/overview       the whole catalog at a glance: totals, data gaps, stock by warehouse, brands, price bands
@@ -1150,6 +1150,8 @@ SCHEDULER_TICK_SECONDS = 30
 class ScheduleIn(BaseModel):
     enabled: Optional[bool] = None
     interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
+    tracking_enabled: Optional[bool] = None  # automatic order tracking check (separate from the feed check)
+    tracking_interval_minutes: Optional[int] = Field(None, ge=30, le=1440)
 
 
 def _auto_tick() -> None:
@@ -1225,11 +1227,42 @@ def _start_scheduler() -> None:
 _start_scheduler()
 
 
+_tracking_settings_ready = False
+
+
+def _ensure_tracking_settings(db: Session) -> bool:
+    """The automatic tracking check keeps its setting beside the feed setting. The four columns are added the first time
+    they are needed, so there is no SQL to run. Returns False if they could not be added."""
+    global _tracking_settings_ready
+    if _tracking_settings_ready:
+        return True
+    try:
+        for ddl in (
+            "alter table supplier_sync_settings add column if not exists tracking_enabled boolean not null default true",
+            "alter table supplier_sync_settings add column if not exists tracking_interval_minutes integer not null default 180",
+            "alter table supplier_sync_settings add column if not exists tracking_last_run_at timestamptz",
+            "alter table supplier_sync_settings add column if not exists tracking_last_summary text",
+        ):
+            db.execute(text(ddl))
+        db.commit()
+        _tracking_settings_ready = True
+        return True
+    except Exception:
+        db.rollback()
+        log.exception("could not add the tracking settings columns")
+        return False
+
+
 def _schedule_row(db: Session) -> dict:
+    extra = (
+        ", tracking_enabled, tracking_interval_minutes, tracking_last_run_at, tracking_last_summary"
+        if _ensure_tracking_settings(db)
+        else ""
+    )
     row = db.execute(
         text(
-            "select auto_enabled, interval_minutes, last_checked_at, last_changed_at, last_summary, last_error "
-            "from supplier_sync_settings where supplier = :s"
+            "select auto_enabled, interval_minutes, last_checked_at, last_changed_at, last_summary, last_error" + extra +
+            " from supplier_sync_settings where supplier = :s"
         ),
         {"s": SUPPLIER},
     ).first()
@@ -1274,6 +1307,19 @@ def ftp_schedule_set(body: ScheduleIn, db: Session = Depends(get_db)):
             text("update supplier_sync_settings set interval_minutes = :m, updated_at = now() where supplier = :s"),
             {"m": body.interval_minutes, "s": SUPPLIER},
         )
+    if body.tracking_enabled is not None or body.tracking_interval_minutes is not None:
+        if not _ensure_tracking_settings(db):
+            raise HTTPException(503, "The tracking setting could not be saved (the settings table could not be changed).")
+        if body.tracking_enabled is not None:
+            db.execute(
+                text("update supplier_sync_settings set tracking_enabled = :e, updated_at = now() where supplier = :s"),
+                {"e": body.tracking_enabled, "s": SUPPLIER},
+            )
+        if body.tracking_interval_minutes is not None:
+            db.execute(
+                text("update supplier_sync_settings set tracking_interval_minutes = :m, updated_at = now() where supplier = :s"),
+                {"m": body.tracking_interval_minutes, "s": SUPPLIER},
+            )
     db.commit()
     return _schedule_row(db)
 
@@ -2176,6 +2222,63 @@ def _close_drop_ship_po(db: Session, po_number: Optional[str], order_number: str
         return None
 
 
+# When the drop ship PO came from an eBay order (its source is "ebay:<order id>"), the first parcel tracking number is
+# copied onto that eBay order so Pick and Ship opens "Mark shipped" with it already filled in. We do NOT tell eBay
+# here: a person still presses Mark shipped, which is what sends it to eBay and notifies the buyer. A freight PRO number
+# is not copied (eBay wants a parcel carrier + number). An order already shipped on eBay, or one that already has a
+# tracking number, is left alone.
+def _guess_carrier(number: str, code: Optional[str]) -> Optional[str]:
+    c = (code or "").upper()
+    if "UPS" in c or number.upper().startswith("1Z"):
+        return "UPS"
+    if "FED" in c or "FDX" in c:
+        return "FedEx"
+    if "USPS" in c or "POST" in c:
+        return "USPS"
+    if "DHL" in c:
+        return "DHL"
+    return None
+
+
+def _hand_off_to_ebay(db: Session, po_number: Optional[str], status: Optional[str], items: list[dict]) -> Optional[str]:
+    """Returns the eBay order id that was filled in, or None."""
+    parcel = next((i for i in items if i.get("kind") == "tracking" and i.get("number")), None)
+    if not po_number or not parcel or (status and _NOT_SHIPPED_YET.search(status)):
+        return None
+    try:
+        src = db.execute(
+            text(
+                "select h.source from po_headers h where cast(h.po_number as text) = :pn and " + _PO_VENDOR +
+                " and h.po_type = 'drop_ship' and h.status <> 'cancelled' and h.source like 'ebay:%' order by h.id desc limit 1"
+            ),
+            {"pn": po_number},
+        ).scalar()
+        if not src:
+            return None
+        ebay_id = str(src)[5:]
+        from app import ebay_sales  # imported here so a problem in that module cannot stop this one loading
+
+        ebay_sales._ensure_tracking_cols(db)
+        num = re.sub(r"\s+", "", parcel["number"])
+        if not ebay_sales._TRACK_OK.match(num):
+            return None
+        got = db.execute(
+            text(
+                "update ebay_orders set tracking_number = :tn, tracking_carrier = :tc, updated_at = now() "
+                "where ebay_order_id = :o and not cancelled and shipped_at_ebay is null "
+                "and coalesce(tracking_number, '') = '' returning ebay_order_id"
+            ),
+            {"tn": num, "tc": _guess_carrier(num, parcel.get("carrier")), "o": ebay_id},
+        ).first()
+        db.commit()
+        return str(got[0]) if got else None
+    except Exception:
+        db.rollback()
+        log.exception("tracking came back for PO %s but the eBay order could not be filled in", po_number)
+        return None
+
+
+
 def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict:
     data = _api_get(
         "/order/number/" + urllib.parse.quote(order_number, safe=""),
@@ -2197,7 +2300,8 @@ def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict
         raise HTTPException(503, "The tracking columns are missing. Run sql/autodist_tracking.sql in Supabase, then try again.")
     po_no = db.execute(text("select po_number from supplier_orders where id = :i"), {"i": row_id}).scalar()
     closed = _close_drop_ship_po(db, po_no, order_number, status, items)
-    return {"order_number": order_number, "status": status, "tracking": items, "po_closed": closed}
+    ebay_filled = _hand_off_to_ebay(db, po_no, status, items)
+    return {"order_number": order_number, "status": status, "tracking": items, "po_closed": closed, "ebay_filled": ebay_filled}
 
 
 @router.post("/api/orders/refresh-tracking")
@@ -2218,7 +2322,7 @@ def api_orders_refresh_tracking(db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
         raise HTTPException(503, "The tracking columns are missing. Run sql/autodist_tracking.sql in Supabase, then try again.")
-    checked, with_tracking, problems, closed_pos = 0, 0, [], []
+    checked, with_tracking, problems, closed_pos, ebay_filled = 0, 0, [], [], []
     for r in rows:
         try:
             res = _refresh_order_tracking(db, r.id, r.order_number)
@@ -2226,11 +2330,13 @@ def api_orders_refresh_tracking(db: Session = Depends(get_db)):
             with_tracking += 1 if res["tracking"] else 0
             if res.get("po_closed"):
                 closed_pos.append(res["po_closed"])
+            if res.get("ebay_filled"):
+                ebay_filled.append(res["ebay_filled"])
         except HTTPException as e:
             problems.append(f"{r.order_number}: {e.detail}")
             if e.status_code in (429, 503):  # rate limited, or the columns are missing: stop instead of hammering
                 break
-    return {"mode": mode, "checked": checked, "with_tracking": with_tracking, "problems": problems, "closed_pos": closed_pos}
+    return {"mode": mode, "checked": checked, "with_tracking": with_tracking, "problems": problems, "closed_pos": closed_pos, "ebay_filled": ebay_filled}
 
 
 @router.post("/api/orders/{order_id}/tracking")
@@ -2241,6 +2347,103 @@ def api_order_tracking(order_id: int, db: Session = Depends(get_db)):
     if not row or not row.order_number:
         raise HTTPException(404, "That order is not in the list, or it has no order number yet.")
     return _refresh_order_tracking(db, row.id, row.order_number)
+
+
+# --------------------------------------------------------------------------
+# automatic tracking check (no button; set on the Distributor data feed tab)
+# --------------------------------------------------------------------------
+# On or off, and how often, is set on the Distributor data feed tab (saved in supplier_sync_settings). Each round looks at
+# the orders that are not finished, a few at a time, with the same code the button uses. Each order is claimed in the
+# database before it is asked about, so two copies of the server never ask twice, and an order is asked about at most
+# once per interval. The batch is small and spaced out so it stays inside the API's rate limit; a 429 stops the round.
+def _auto_tracking_tick() -> None:
+    url, key = _api_settings()
+    if not key:
+        return
+    mode = _api_mode(url)
+    gen = get_db()
+    db = next(gen)
+    try:
+        if not _ensure_tracking_settings(db):
+            return
+        cfg = db.execute(
+            text("select tracking_enabled, tracking_interval_minutes from supplier_sync_settings where supplier = :s"), {"s": SUPPLIER}
+        ).first()
+        if cfg is None or not cfg.tracking_enabled:
+            return
+        mins = int(cfg.tracking_interval_minutes or 180)
+        rows = db.execute(
+            text(
+                "select id, order_number from supplier_orders where supplier = :s and mode = :m and order_number <> '' "
+                "and created_at > now() - make_interval(days => :d) "
+                "and coalesce(lower(status), '') not similar to '%(cancel|deliver|complete)%' "
+                "and (tracking_checked_at is null or tracking_checked_at <= now() - make_interval(mins => :i)) "
+                "order by tracking_checked_at asc nulls first, id desc limit :n"
+            ),
+            {"s": SUPPLIER, "m": mode, "d": TRACK_WINDOW_DAYS, "i": mins, "n": TRACK_BATCH},
+        ).all()
+        if not rows:
+            return
+        checked = with_tracking = 0
+        closed: list = []
+        filled: list = []
+        problems = 0
+        for r in rows:
+            claimed = db.execute(
+                text(
+                    "update supplier_orders set tracking_checked_at = now() where id = :i "
+                    "and (tracking_checked_at is null or tracking_checked_at <= now() - make_interval(mins => :m)) returning id"
+                ),
+                {"i": r.id, "m": mins},
+            ).first()
+            db.commit()
+            if claimed is None:
+                continue  # another copy of the server took it
+            try:
+                res = _refresh_order_tracking(db, r.id, r.order_number)
+                checked += 1
+                with_tracking += 1 if res["tracking"] else 0
+                if res.get("po_closed"):
+                    closed.append(res["po_closed"])
+                if res.get("ebay_filled"):
+                    filled.append(res["ebay_filled"])
+            except HTTPException as e:
+                problems += 1
+                log.warning("autodist auto tracking %s: %s", r.order_number, e.detail)
+                if e.status_code in (429, 503):
+                    break
+            time.sleep(1.5)
+        summary = f"Checked {checked} order{'' if checked == 1 else 's'}, {with_tracking} with tracking"
+        if closed:
+            summary += f"; closed drop ship PO {', '.join(str(c) for c in closed)}"
+        if filled:
+            summary += f"; tracking added to eBay order {', '.join(filled)}"
+        if problems:
+            summary += f"; {problems} problem{'' if problems == 1 else 's'} (see the server log)"
+        db.execute(
+            text("update supplier_sync_settings set tracking_last_run_at = now(), tracking_last_summary = :m where supplier = :s"),
+            {"m": summary + ".", "s": SUPPLIER},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("autodist automatic tracking check failed")
+    finally:
+        gen.close()
+
+
+def _tracking_loop() -> None:
+    time.sleep(90)
+    while True:
+        try:
+            _auto_tracking_tick()
+        except Exception:
+            log.exception("autodist tracking scheduler")
+        time.sleep(300)  # wake every 5 minutes; each order is only asked about once per interval
+
+
+if os.environ.get("AUTODIST_SCHEDULER", "1").strip().lower() not in ("0", "false", "no", "off"):
+    threading.Thread(target=_tracking_loop, daemon=True, name="autodist-auto-tracking").start()
 
 
 # --------------------------------------------------------------------------

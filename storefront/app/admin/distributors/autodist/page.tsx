@@ -69,10 +69,15 @@ type Schedule = {
   last_summary: string | null;
   last_error: string | null;
   running: boolean;
+  tracking_enabled?: boolean;
+  tracking_interval_minutes?: number;
+  tracking_last_run_at?: string | null;
+  tracking_last_summary?: string | null;
 };
 type Finish = { ok: boolean; needs_review: boolean; missing?: number; held?: number; stored: number; new: number; skipped?: number; retired?: number };
 
 const MINUTES = [1, 2, 5, 10, 15, 30, 60, 120, 360, 1440];
+const TRACK_MINUTES = [30, 60, 120, 180, 360, 720, 1440];
 const minLabel = (m: number) => (m < 60 ? `${m} minute${m === 1 ? "" : "s"}` : m === 60 ? "1 hour" : m === 1440 ? "24 hours" : `${m / 60} hours`);
 function ago(iso: string | null) {
   if (!iso) return "never";
@@ -190,7 +195,7 @@ function AutodistInner() {
     }
   }
 
-  async function saveSched(body: { enabled?: boolean; interval_minutes?: number }) {
+  async function saveSched(body: { enabled?: boolean; interval_minutes?: number; tracking_enabled?: boolean; tracking_interval_minutes?: number }) {
     setBusy("sched");
     setMsg(null);
     try {
@@ -536,6 +541,42 @@ function AutodistInner() {
             <div className="text-xs text-amber-700">Automatic sync needs the new settings table: run sql/autodist_sync_settings.sql in Supabase, then reload.</div>
           )}
           {sched?.last_error && <div className="text-xs text-red-700">Last problem: {sched.last_error}</div>}
+          {sched && sched.tracking_enabled !== undefined && (
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={!!sched.tracking_enabled}
+                    disabled={busy === "sched"}
+                    onChange={(e) => void saveSched({ tracking_enabled: e.target.checked })}
+                  />
+                  <span>Check order tracking every</span>
+                </label>
+                <select
+                  className={`${inputCls} !w-auto`}
+                  value={sched.tracking_interval_minutes ?? 180}
+                  disabled={busy === "sched"}
+                  onChange={(e) => void saveSched({ tracking_interval_minutes: Number(e.target.value) })}
+                >
+                  {!TRACK_MINUTES.includes(sched.tracking_interval_minutes ?? 180) && (
+                    <option value={sched.tracking_interval_minutes ?? 180}>{minLabel(sched.tracking_interval_minutes ?? 180)}</option>
+                  )}
+                  {TRACK_MINUTES.map((m) => (
+                    <option key={m} value={m}>
+                      {minLabel(m)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="text-xs text-gray-500">
+                {sched.tracking_enabled ? "Automatic tracking is ON." : "Automatic tracking is OFF."} Asks Automatic Distributors about orders that have not
+                finished yet. When tracking comes back, the drop ship PO closes, and an eBay order gets the number filled in for Mark shipped. Last
+                run {ago(sched.tracking_last_run_at ?? null)}
+                {sched.tracking_last_summary ? ` · ${sched.tracking_last_summary}` : ""}
+              </div>
+            </div>
+          )}
           {peek && (
             <div className="space-y-3 rounded bg-gray-50 p-3 text-xs">
               {peek.files.map((f) => (
