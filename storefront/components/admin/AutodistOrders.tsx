@@ -234,12 +234,12 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
     }
   }
 
-  async function getQuote() {
+  async function getQuote(shipMethod?: string) {
     setBusy("quote");
     setErr(null);
     setPlaced(null);
     try {
-      const q = await api<Quote>("/autodist/api/order/quote", { method: "POST", body: body(false) });
+      const q = await api<Quote>("/autodist/api/order/quote", { method: "POST", body: shipMethod != null ? { ...body(false), shipping_method: shipMethod } : body(false) });
       setQuote({ q, key: keyNow });
     } catch (e) {
       setQuote(null);
@@ -467,8 +467,13 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
                 <button
                   key={i}
                   type="button"
-                  className="mr-2 rounded border border-gray-300 bg-white px-2 py-1 hover:bg-gray-100"
-                  onClick={() => setMethod(o.carrier_code || o.name || "")}
+                  disabled={busy !== ""}
+                  className={`mr-2 rounded border px-2 py-1 hover:bg-gray-100 ${method === (o.carrier_code || o.name || "") ? "border-black bg-gray-100 font-medium" : "border-gray-300 bg-white"}`}
+                  onClick={() => {
+                    const m = o.carrier_code || o.name || "";
+                    setMethod(m);
+                    void getQuote(m);
+                  }}
                 >
                   {o.name || o.carrier_code} · {money(o.cost)}
                   {o.date ? ` · ${new Date(o.date).toLocaleDateString()}` : ""}
