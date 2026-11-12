@@ -14,6 +14,7 @@ export type Photo = {
   thumb?: string | null;
   url?: string | null;
   is_primary: boolean;
+  hidden?: boolean; // turned off: kept, but not used on the website or in eBay listings
 };
 
 type Listing = { photos: Photo[] };
@@ -57,7 +58,7 @@ function storageInfo(p: Photo): { file: string; path: string | null; inStorage: 
     return { file: p.image_key.split("/").pop() ?? p.image_key, path: `full/${p.image_key}`, inStorage: true };
   }
   if (p.storage_path) return { file: "Not in storage yet", path: `local: ${p.storage_path}`, inStorage: false };
-  return { file: "Not in storage (eBay link only)", path: null, inStorage: false };
+  return { file: "Not in storage (link only)", path: null, inStorage: false };
 }
 
 const HOVER_MS = 700; // how long the pointer must rest on a photo before the file name appears
@@ -237,6 +238,25 @@ export default function PhotosPanel({
     void requestDelete([photo]);
   }
 
+  // Turn photos off (or back on). Nothing is deleted: the photo stays on the product and in storage,
+  // but the website and eBay listings leave it out. Saved straight away, like a delete.
+  async function setHidden(list: Photo[], hidden: boolean) {
+    const ok = await call(hidden ? "Turning off…" : "Turning on…", `${base}/hidden`, {
+      method: "POST",
+      body: { photo_ids: list.map((p) => p.id), hidden },
+    });
+    if (ok) {
+      setSelected([]);
+      const n = list.length;
+      setMsg({
+        kind: "success",
+        text: hidden
+          ? `${n === 1 ? "Photo" : `${n} photos`} turned off. ${n === 1 ? "It is" : "They are"} kept, but not used on the website or eBay.`
+          : `${n === 1 ? "Photo" : `${n} photos`} turned back on.`,
+      });
+    }
+  }
+
   function toggle(id: number) {
     setSelected((sel) => (sel.includes(id) ? sel.filter((i) => i !== id) : [...sel, id]));
   }
@@ -267,6 +287,7 @@ export default function PhotosPanel({
     const isMain = photo.id === mainPhoto?.id;
     const posInOthers = others.findIndex((p) => p.id === photo.id);
     const picked = selected.includes(photo.id);
+    const off = !!photo.hidden;
     return (
       <li key={photo.id} className="w-36 space-y-1.5">
         <div
@@ -279,12 +300,17 @@ export default function PhotosPanel({
           {src ? (
             // eslint-disable-next-line @next/next/no-img-element
             <a href={photo.url ?? src} target="_blank" rel="noopener noreferrer" aria-label="Open full size">
-              <img src={src} alt={`Product photo ${index + 1}`} className="h-36 w-36 object-cover" />
+              <img src={src} alt={`Product photo ${index + 1}`} className={`h-36 w-36 object-cover ${off ? "opacity-40 grayscale" : ""}`} />
             </a>
           ) : (
             <div className="flex h-36 w-36 items-center justify-center bg-gray-100 text-xs text-gray-500">No picture</div>
           )}
-          {isMain && (
+          {off && (
+            <span className="absolute bottom-1 left-1 rounded bg-gray-800 px-1.5 py-0.5 text-xs font-semibold text-white">
+              Not used
+            </span>
+          )}
+          {isMain && !off && (
             <span className="absolute left-1 top-1 rounded bg-blue-600 px-1.5 py-0.5 text-xs font-semibold text-white">
               Main photo
             </span>
@@ -297,7 +323,7 @@ export default function PhotosPanel({
         </div>
         {mayEdit && (
           <div className="flex flex-wrap gap-1">
-            {!isMain && (
+            {!isMain && !off && (
               <button type="button" className={small} disabled={!!busy} onClick={() => makeMain(photo)}>
                 Make main
               </button>
@@ -322,6 +348,15 @@ export default function PhotosPanel({
               }}
             >
               Replace
+            </button>
+            <button
+              type="button"
+              className={small}
+              disabled={locked}
+              onClick={() => void setHidden([photo], !off)}
+              title={off ? "Use this photo on the website and eBay again" : "Keep it, but do not use it on the website or eBay"}
+            >
+              {off ? "Use again" : "Don't use"}
             </button>
             <button type="button" className={`${small} text-red-700`} disabled={locked} onClick={() => remove(photo)}>
               Delete
@@ -405,6 +440,16 @@ export default function PhotosPanel({
               <button type="button" className={small} disabled={!!busy} onClick={() => setSelected([])}>
                 Clear
               </button>
+              {selectedPhotos.some((p) => !p.hidden) && (
+                <button type="button" className={small} disabled={locked} onClick={() => void setHidden(selectedPhotos.filter((p) => !p.hidden), true)}>
+                  Don&apos;t use selected
+                </button>
+              )}
+              {selectedPhotos.some((p) => p.hidden) && (
+                <button type="button" className={small} disabled={locked} onClick={() => void setHidden(selectedPhotos.filter((p) => p.hidden), false)}>
+                  Use selected again
+                </button>
+              )}
               <button
                 type="button"
                 className="rounded border border-red-300 bg-white px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40"
@@ -416,6 +461,10 @@ export default function PhotosPanel({
             </>
           )}
         </div>
+      )}
+
+      {ordered.length > 0 && ordered.every((p) => p.hidden) && (
+        <Notice kind="error">Every photo is turned off, so this product shows no picture on the website or in eBay listings.</Notice>
       )}
 
       {ordered.length === 0 ? (
@@ -479,6 +528,10 @@ export default function PhotosPanel({
                   {mainGoes && !all ? " The next remaining photo becomes the main photo." : ""}
                 </p>
 
+                <p className="text-xs text-gray-600">
+                  To keep a photo but stop using it on the website and eBay, cancel and use “Don&apos;t use” instead.
+                </p>
+
                 {danger && (
                   <div className="space-y-1">
                     <p className="font-semibold text-red-700">
@@ -521,7 +574,7 @@ export default function PhotosPanel({
         );
       })()}
       <p className="text-xs text-gray-500">
-        The main photo is the one shoppers see first, on the product page and in search results.
+        The main photo is the one shoppers see first, on the product page and in search results. Photos marked “Not used” are kept but left out of the website and eBay listings.
         {mayEdit ? " JPG, PNG or WEBP. Large pictures are shrunk automatically." : " You do not have permission to change photos."}
       </p>
     </section>

@@ -7,6 +7,7 @@ Admin: manage the photos of an existing product.
     POST   /admin/products/{id}/photos/order            set the order of the others
     POST   /admin/products/{id}/photos/arrange          set the main photo and the order together
     POST   /admin/products/{id}/photos/{photo}/delete   remove a photo
+    POST   /admin/products/{id}/photos/hidden           turn photos off (or back on) without deleting them
     POST   /admin/products/{id}/photos/delete-preview   which stored files a delete would remove
     GET    /admin/photo-library?q=...                   find pictures already in storage, by product
     POST   /admin/products/{id}/photos/attach           add pictures already in storage (no upload)
@@ -18,6 +19,9 @@ photo list so the screen can simply show it.
 How the store picks photos (unchanged): the main photo is the one with
 is_primary = true, then the rest by sort_order. After every change the
 order is tidied here so there is exactly one main photo and sort_order is 0, 1, 2...
+
+A photo can be "hidden" (product_photos.hidden = true): it stays on the product, in the admin screen and in storage,
+but is left out of the website and of eBay listings. The main photo is always a visible one when the product has any.
 
 Employees need the "products.photos" permission (see app/permissions.py).
 """
@@ -32,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from app import photo_store
 from app.auth import require_route_access, needs
-from app.database import get_db
+from app.database import _session_factory, get_db
 from app.images import full_url, thumb_url
 
 log = logging.getLogger(__name__)
@@ -40,6 +44,19 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["admin-photos"], dependencies=[Depends(require_route_access)])
 
 MAX_BASE64_CHARS = 21 * 1024 * 1024  # a 15 MB file is about 20 MB as text
+
+
+def ensure_columns() -> None:
+    """Add product_photos.hidden if it is missing (every photo starts as not hidden). Called once at startup."""
+    db = _session_factory()()
+    try:
+        db.execute(text("alter table product_photos add column if not exists hidden boolean not null default false"))
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("could not add product_photos.hidden; hiding photos will not work until it exists")
+    finally:
+        db.close()
 
 
 class NewPhoto(BaseModel):
@@ -52,6 +69,11 @@ class PhotoOrder(BaseModel):
 
 class PhotoArrangement(BaseModel):
     photo_ids: list[int] = Field(..., max_length=500, description="all the photos, main photo first")
+
+
+class HiddenIn(BaseModel):
+    photo_ids: list[int] = Field(..., min_length=1, max_length=200)
+    hidden: bool
 
 
 class DeletePreview(BaseModel):
@@ -103,12 +125,13 @@ def _photo_or_404(db: Session, product_id: int, photo_id: int):
 
 def _tidy(db: Session, product_id: int, first_ids: list[int] | None = None) -> None:
     """
-    Exactly one main photo (the first one if none is set), and sort_order 0..n-1
-    in display order. `first_ids` pins the order of the non-main photos.
+    Exactly one main photo, and sort_order 0..n-1 in display order. `first_ids` pins the order of the
+    non-main photos. The main photo is the current one, unless it is hidden and a visible photo exists:
+    then the first visible photo takes over (a hidden photo is never the one the shop leads with).
     """
     rows = db.execute(
         text(
-            "select id, is_primary from product_photos where product_id = :p "
+            "select id, is_primary, hidden from product_photos where product_id = :p "
             "order by is_primary desc, sort_order, id"
         ),
         {"p": product_id},
@@ -116,11 +139,17 @@ def _tidy(db: Session, product_id: int, first_ids: list[int] | None = None) -> N
     if not rows:
         return
     ids = [r.id for r in rows]
-    main = next((r.id for r in rows if r.is_primary), ids[0])
+    main = next((r.id for r in rows if r.is_primary and not r.hidden), None)
+    if main is None:
+        main = next((r.id for r in rows if not r.hidden), None)
+    if main is None:  # every photo is hidden: keep the current main one
+        main = next((r.id for r in rows if r.is_primary), ids[0])
     rest = [i for i in ids if i != main]
     if first_ids:
         wanted = [i for i in first_ids if i in rest]
         rest = wanted + [i for i in rest if i not in wanted]
+    # Clear the old main first, so two photos are never "main" at the same moment.
+    db.execute(text("update product_photos set is_primary = false where product_id = :p"), {"p": product_id})
     for position, pid in enumerate([main] + rest):
         db.execute(
             text("update product_photos set is_primary = :m, sort_order = :o where id = :id"),
@@ -131,7 +160,7 @@ def _tidy(db: Session, product_id: int, first_ids: list[int] | None = None) -> N
 def _listing(db: Session, product_id: int) -> dict:
     rows = db.execute(
         text(
-            "select id, source_url, storage_path, image_key, is_primary, sort_order from product_photos "
+            "select id, source_url, storage_path, image_key, is_primary, hidden, sort_order from product_photos "
             "where product_id = :p order by is_primary desc, sort_order, id"
         ),
         {"p": product_id},
@@ -222,6 +251,7 @@ def arrange_photos(product_id: int, body: PhotoArrangement, db: Session = Depend
             text("update product_photos set is_primary = :m, sort_order = :o where id = :id and product_id = :p"),
             {"m": position == 0, "o": position, "id": pid, "p": product_id},
         )
+    _tidy(db, product_id)  # a hidden photo moved to the front does not stay the main one
     db.commit()
     return _listing(db, product_id)
 
@@ -230,6 +260,8 @@ def arrange_photos(product_id: int, body: PhotoArrangement, db: Session = Depend
 @needs("products.photos")
 def make_main(product_id: int, photo_id: int, db: Session = Depends(get_db)):
     _photo_or_404(db, product_id, photo_id)
+    if db.execute(text("select hidden from product_photos where id = :id"), {"id": photo_id}).scalar():
+        raise HTTPException(409, "That photo is turned off. Turn it back on before making it the main photo.")
     db.execute(
         text("update product_photos set is_primary = (id = :id) where product_id = :p"),
         {"id": photo_id, "p": product_id},
@@ -252,12 +284,32 @@ def replace_photo(product_id: int, photo_id: int, body: NewPhoto, db: Session = 
     _upload(p)
     # The old eBay link (source_url) pointed at the old picture, so it is cleared.
     db.execute(
-        text("update product_photos set image_key = :k, storage_path = :sp, source_url = null where id = :id"),
+        text("update product_photos set image_key = :k, storage_path = :sp, source_url = null, hidden = false where id = :id"),
         {"k": p.key, "sp": photo_store.full_path(p.key), "id": photo_id},
     )
     db.commit()
     if old.image_key and old.image_key != p.key:
         _forget_files(db, [old.image_key])
+    return _listing(db, product_id)
+
+
+@router.post("/products/{product_id}/photos/hidden")
+@needs("products.photos")
+def set_hidden(product_id: int, body: HiddenIn, db: Session = Depends(get_db)):
+    """
+    Turn photos off (hidden = true) or back on. A hidden photo is kept: it stays on the product and in storage, but
+    the website and eBay listings do not use it. If the main photo is turned off, the first visible photo becomes main.
+    """
+    _require_product(db, product_id)
+    ids = list(dict.fromkeys(body.photo_ids))
+    db.execute(
+        text("update product_photos set hidden = :h where product_id = :p and id in :ids").bindparams(
+            bindparam("ids", expanding=True)
+        ),
+        {"h": body.hidden, "p": product_id, "ids": ids},
+    )
+    _tidy(db, product_id)
+    db.commit()
     return _listing(db, product_id)
 
 

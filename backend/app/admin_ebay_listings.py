@@ -405,7 +405,7 @@ def repo_listings(
                      (select ph.image_key from product_photos ph
                        where split_part(ph.storage_path, '/', 1) = 'EBAY-' || {_DIGITS}
                        order by ph.is_primary desc, ph.sort_order, ph.id limit 1),
-                     (select ph.image_key from product_photos ph where ph.product_id = p.id
+                     (select ph.image_key from product_photos ph where ph.product_id = p.id and not ph.hidden
                        order by ph.is_primary desc, ph.sort_order, ph.id limit 1)
                    ) as image_key
             from channel_listings cl {_LISTING_JOINS}

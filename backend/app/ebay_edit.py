@@ -1046,8 +1046,9 @@ def _stored_photos(db: Session, store: str, item_id: str) -> list[dict]:
         cols = {r[0] for r in db.execute(text("select column_name from information_schema.columns where table_name = 'product_photos'")).all()}
         order = next((c for c in _PHOTO_ORDER_COLS if c in cols), None)
         src = "source_url" if "source_url" in cols else "null"
+        visible = " and not hidden" if "hidden" in cols else ""  # photos turned off on the product are not sent to eBay
         rows = db.execute(
-            text(f"select image_key, {src} as source_url from product_photos where product_id = :p" + (f" order by {order}" if order else "")),
+            text(f"select image_key, {src} as source_url from product_photos where product_id = :p{visible}" + (f" order by {order}" if order else "")),
             {"p": pid},
         ).all()
         return [{"key": r.image_key, "source_url": r.source_url} for r in rows if r.image_key and KEY_RE.fullmatch(r.image_key)]

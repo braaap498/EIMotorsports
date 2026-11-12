@@ -16,8 +16,10 @@ SUPABASE_SERVICE_KEY (the same one the account screens already use).
 """
 import hashlib
 import io
+import ipaddress
 import json
 import logging
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -89,6 +91,31 @@ def process_image(raw: bytes) -> Processed:
 
     digest = hashlib.sha1(full).hexdigest()
     return Processed(key=f"{digest[:2]}/{digest}.jpg", full=full, thumb=thumb_buf.getvalue())
+
+
+def fetch_remote(url: str, timeout: int = 25) -> bytes:
+    """Download a picture from a public web address (the distributor's photo links).
+    Only http/https addresses that point at the public internet are fetched, and nothing over the upload limit."""
+    parts = urllib.parse.urlsplit((url or "").strip())
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise PhotoError("That is not a web address.")
+    try:
+        infos = socket.getaddrinfo(parts.hostname, parts.port or (443 if parts.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except OSError:
+        raise PhotoError("The photo's web address could not be found.")
+    if not infos or any(not ipaddress.ip_address(i[4][0]).is_global for i in infos):
+        raise PhotoError("That address is not on the public internet.")
+    req = urllib.request.Request(parts.geturl(), headers={"User-Agent": "Mozilla/5.0 (photo import)", "Accept": "image/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read(MAX_UPLOAD_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        raise PhotoError(f"The photo server answered {e.code}.")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise PhotoError("The photo could not be downloaded.")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise PhotoError("That photo is too large (the limit is 15 MB).")
+    return data
 
 
 def full_path(key: str) -> str:

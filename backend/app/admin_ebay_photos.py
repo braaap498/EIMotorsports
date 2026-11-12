@@ -478,7 +478,7 @@ def _sibling_keys(label: str) -> list[str]:
         if pid is not None:
             rows = c.execute(
                 text(
-                    "select image_key from product_photos where product_id = :p and image_key is not null "
+                    "select image_key from product_photos where product_id = :p and image_key is not null and not hidden "
                     "order by sort_order, id"
                 ),
                 {"p": pid},
