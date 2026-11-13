@@ -68,6 +68,22 @@ type PoFull = {
 const money = (v: string | number | null | undefined) => (v == null || v === "" || isNaN(Number(v)) ? "—" : `$${Number(v).toFixed(2)}`);
 const emptyAddr = { name: "", contact: "", addressLine1: "", addressLine2: "", city: "", state: "", zipCode: "", countryCode: "US", phone: "", classification: "" };
 
+
+// Automatic Distributors' order status codes: 1-3 their warehouse steps, 4 invoiced, 4S shipped today, H shipped on an earlier day, 9 a hold (not a cancel).
+function isShipped(status: string | null | undefined): boolean {
+  return ["4", "4S", "H"].includes((status ?? "").trim().toUpperCase());
+}
+function statusText(status: string | null | undefined) {
+  const st = (status ?? "").trim().toUpperCase();
+  if (!st) return "—";
+  if (st === "9") return <span className="font-medium text-amber-700" title="Automatic Distributors has a hold on this order. It usually needs their operations team; we keep checking.">On hold</span>;
+  if (["1", "2", "3"].includes(st)) return <span title={`Status ${st}: in their warehouse processing`}>Processing</span>;
+  if (st === "4") return <span title="Status 4: invoiced">Invoiced</span>;
+  if (st === "4S") return <span title="Status 4S: shipped today">Shipped</span>;
+  if (st === "H") return <span title="Status H: invoiced and shipped on an earlier day">Shipped</span>;
+  return st;
+}
+
 export default function AutodistOrders({ status, openPo }: { status: Status | null; openPo?: number | null }) {
   const [po, setPo] = useState("");
   const [comment, setComment] = useState("");
@@ -150,7 +166,7 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
   async function cancelOrder(o: PastOrder) {
     if (
       !window.confirm(
-        `Cancel order ${o.order_number} (PO ${o.po_number}) with Automatic Distributors?\n\nThis stops it from shipping and can't be undone. It only works while the order has not been invoiced. If you place it again later, it needs a new PO number.`
+        `Cancel order ${o.order_number} (PO ${o.po_number}) with Automatic Distributors?\n\nThis stops it from shipping and can't be undone. It only works while the order is still unprocessed: the window is short and varies (sometimes minutes, sometimes hours), and once it is invoiced it has shipped and can only be returned. If you place it again later, it needs a new PO number.`
       )
     )
       return;
@@ -639,8 +655,8 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
                   <td className="py-0.5 pr-3">{o.order_number || "—"}</td>
                   <td className="py-0.5 pr-3">{money(o.invoice_amount)}</td>
                   <td className="py-0.5 pr-3">
-                    {o.status === "9" || /cancel/i.test(o.status ?? "") ? <span className="font-medium text-red-700">Cancelled</span> : o.status || "—"}
-                    {o.order_number && o.status !== "9" && !/cancel/i.test(o.status ?? "") && o.tracking.length === 0 && (
+                    {/cancel/i.test(o.status ?? "") ? <span className="font-medium text-red-700">Cancelled</span> : statusText(o.status)}
+                    {o.order_number && !/cancel/i.test(o.status ?? "") && !isShipped(o.status) && o.tracking.length === 0 && (
                       <button type="button" className="ml-2 text-red-700 underline" disabled={trackBusy !== null} onClick={() => void cancelOrder(o)}>
                         Cancel
                       </button>

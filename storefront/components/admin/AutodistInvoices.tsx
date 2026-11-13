@@ -9,7 +9,7 @@ import { Badge, Modal, Notice, Pager, btnCls, btn2Cls, inputCls } from "./ui";
 
 /* The "Invoices" tab: every invoice Automatic Distributors has billed us, kept here so it can be searched.
    The server fetches them on its own (same schedule as the order tracking, set on the Data feed tab); "Fetch invoices"
-   pulls older days. Click an invoice to see its parts. "Shipping and handling" is the distributor's "special charges"
+   pulls older days. Click an invoice to see its parts. "Special charges" is everything the distributor adds beyond the parts: shipping, and sometimes a signature or COD fee
    line. */
 
 type Row = {
@@ -215,7 +215,7 @@ export default function AutodistInvoices({ active }: { active: boolean }) {
 
       {data && (
         <div className="text-sm text-gray-700">
-          {data.total} invoice{data.total === 1 ? "" : "s"} · invoiced {money(data.sum_invoice)} · shipping and handling {money(data.sum_shipping)}
+          {data.total} invoice{data.total === 1 ? "" : "s"} · invoiced {money(data.sum_invoice)} · special charges {money(data.sum_shipping)}
         </div>
       )}
 
@@ -290,7 +290,7 @@ export default function AutodistInvoices({ active }: { active: boolean }) {
                 {open.tracking_number ? ` · ${open.tracking_number}` : ""}
               </div>
               <div>Parts: {money(open.item_amount)}</div>
-              <div>Shipping and handling: {money(open.special_charges)}</div>
+              <div>Special charges (shipping etc.): {money(open.special_charges)}</div>
               <div className="font-medium">Invoice total: {money(open.invoice_amount)}</div>
               <div>Order value: {money(open.order_value)}</div>
             </div>

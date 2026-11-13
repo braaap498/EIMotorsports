@@ -1780,6 +1780,29 @@ def _api_mode(url: str) -> str:
     return "test" if host.startswith("test") else "live"
 
 
+# One limit for every endpoint: 30 requests a minute (Automatic Distributors). We stay under it by keeping at most
+# API_MAX_PER_MINUTE calls in any 60 seconds, from this server; a call that would go over waits its turn. This covers the
+# tracking button, the automatic check, invoice sync and part look-ups together.
+API_MAX_PER_MINUTE = 26
+_api_calls: list[float] = []
+_api_lock = threading.Lock()
+
+
+def _throttle() -> None:
+    with _api_lock:
+        now = time.monotonic()
+        while _api_calls and now - _api_calls[0] >= 60.0:
+            _api_calls.pop(0)
+        if len(_api_calls) >= API_MAX_PER_MINUTE:
+            wait = 60.0 - (now - _api_calls[0]) + 0.05
+            if wait > 0:
+                time.sleep(wait)
+            now = time.monotonic()
+            while _api_calls and now - _api_calls[0] >= 60.0:
+                _api_calls.pop(0)
+        _api_calls.append(time.monotonic())
+
+
 def _api_get(path: str, params: Optional[dict] = None, not_found: Optional[str] = None):
     """GET a JSON endpoint. Raises HTTPException with a plain-English message; the key is never put in a message."""
     url, key = _api_settings()
@@ -1787,6 +1810,7 @@ def _api_get(path: str, params: Optional[dict] = None, not_found: Optional[str] 
         raise HTTPException(400, "The API key is not set. Add AUTOMATIC_DIST_API_KEY in the Render environment.")
     full = url + path + (("?" + urllib.parse.urlencode(params)) if params else "")
     req = urllib.request.Request(full, headers={"Authorization": key, "Accept": "application/json"})
+    _throttle()
     try:
         with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8", errors="replace") or "null")
@@ -1949,6 +1973,7 @@ def _api_post(path: str, body: dict, may_have_happened: bool = False):
         method="POST",
         headers={"Authorization": key, "Accept": "application/json", "Content-Type": "application/json"},
     )
+    _throttle()
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.loads(resp.read().decode("utf-8", errors="replace") or "null")
@@ -2158,6 +2183,7 @@ def api_orders(db: Session = Depends(get_db)):
 # and stored on supplier_orders.tracking as a list of {number, kind, carrier, order_number, status}. Nothing here changes
 # an order. Checking is by button, one call per order, so it stays well inside the API's rate limit.
 TRACK_BATCH = 25
+TRACK_BUTTON_BATCH = 12  # the button waits for the answer, and the API allows 30 calls a minute (an order can take 2)
 TRACK_WINDOW_DAYS = 60
 
 
@@ -2194,7 +2220,31 @@ def _collect_tracking(data) -> list[dict]:
 # A drop ship PO is closed out when the distributor sends back a tracking number for the order placed from it: the parts
 # go straight to the customer, so nothing is received into stock. Not closed while the order is cancelled, on hold,
 # backordered or only partly shipped (the status words are read loosely, see the note on _collect_tracking).
-_NOT_SHIPPED_YET = re.compile(r"partial|back ?order|hold|cancel", re.I)
+# The API's orderStatus is a code, not a word (per Automatic Distributors): "1", "2", "3" are internal warehouse steps (not
+# shipped yet), "4" invoiced, "4S" shipped today, "H" history (invoiced and shipped on an earlier day), "9" a HOLD on the
+# order (usually needs their operations team; it is NOT a cancellation). "partial" is our own word for "some lines short".
+SHIPPED_CODES = ("4", "4S", "H")
+HOLD_CODE = "9"
+_NOT_SHIPPED_WORDS = re.compile(r"partial|back ?order|hold|cancel", re.I)
+
+
+def _not_shipped_yet(status: Optional[str]) -> bool:
+    """True when the status says the parts have not all gone out (warehouse steps 1-3, a hold, partial, cancelled)."""
+    st = str(status or "").strip()
+    if not st:
+        return False
+    if st.upper() in ("1", "2", "3", HOLD_CODE):
+        return True
+    return bool(_NOT_SHIPPED_WORDS.search(st))
+
+
+def status_label(status: Optional[str]) -> str:
+    """Plain-English meaning of an orderStatus code, for messages."""
+    st = str(status or "").strip().upper()
+    return {
+        "1": "being processed", "2": "being processed", "3": "being processed", "4": "invoiced", "4S": "shipped today",
+        "H": "shipped (invoiced earlier)", "9": "on hold (Automatic Distributors has to release it)", "CANCELLED": "cancelled",
+    }.get(st, st or "unknown")
 
 
 def _close_drop_ship_po(db: Session, po_number: Optional[str], order_number: str, status: Optional[str], items: list[dict]) -> Optional[int]:
@@ -2202,7 +2252,7 @@ def _close_drop_ship_po(db: Session, po_number: Optional[str], order_number: str
     NOTHING is added to stock, and the PO becomes 'received' so it leaves the open lists. Returns the PO number, or None."""
     if not po_number or not any(i.get("number") for i in items):
         return None
-    if status and _NOT_SHIPPED_YET.search(status):
+    if _not_shipped_yet(status):
         return None
     try:
         cols = _po_columns(db)
@@ -2255,7 +2305,7 @@ def _guess_carrier(number: str, code: Optional[str]) -> Optional[str]:
 def _hand_off_to_ebay(db: Session, po_number: Optional[str], status: Optional[str], items: list[dict]) -> Optional[str]:
     """Returns the eBay order id that was filled in, or None."""
     parcel = next((i for i in items if i.get("kind") == "tracking" and i.get("number")), None)
-    if not po_number or not parcel or (status and _NOT_SHIPPED_YET.search(status)):
+    if not po_number or not parcel or _not_shipped_yet(status):
         return None
     try:
         src = db.execute(
@@ -2372,11 +2422,12 @@ def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict
             if (extra["number"], extra["kind"]) not in seen:
                 seen.add((extra["number"], extra["kind"]))
                 items.append(extra)
-    # The API's status is a code ("H", "9"...), not a word, so the words in _NOT_SHIPPED_YET rarely match it. The lines are
-    # the better evidence: if any line is backordered or shipped short, treat the order as partial and do not close or hand off.
+    # The status is a code (see SHIPPED_CODES). The lines are extra evidence: if any line is backordered or shipped short,
+    # treat the order as partial and do not close or hand off. A code for "still in the warehouse" or "on hold" also holds
+    # everything back, even if a tracking number is already showing.
     partial = _has_unshipped_lines(data)
     judged = "partial" if partial else status
-    done = bool(items) and not partial and status != "9"
+    done = bool(items) and not partial and not _not_shipped_yet(status)
     try:
         db.execute(
             text(
@@ -2408,10 +2459,10 @@ def api_orders_refresh_tracking(db: Session = Depends(get_db)):
                 "select id, order_number from supplier_orders where supplier = :s and mode = :m and order_number <> '' "
                 "and created_at > now() - make_interval(days => :d) "
                 "and coalesce(lower(status), '') not similar to '%(cancel|deliver|complete)%' "
-                "and coalesce(status, '') <> '9' and not coalesce(tracking_done, false) "
+                "and not coalesce(tracking_done, false) "
                 "order by tracking_checked_at asc nulls first, id desc limit :n"
             ),
-            {"s": SUPPLIER, "m": mode, "d": TRACK_WINDOW_DAYS, "n": TRACK_BATCH},
+            {"s": SUPPLIER, "m": mode, "d": TRACK_WINDOW_DAYS, "n": TRACK_BUTTON_BATCH},
         ).all()
     except Exception:
         db.rollback()
@@ -2489,7 +2540,7 @@ def _auto_tracking_tick() -> None:
                 "select id, order_number from supplier_orders where supplier = :s and mode = :m and order_number <> '' "
                 "and created_at > now() - make_interval(days => :d) "
                 "and coalesce(lower(status), '') not similar to '%(cancel|deliver|complete)%' "
-                "and coalesce(status, '') <> '9' and not coalesce(tracking_done, false) "
+                "and not coalesce(tracking_done, false) "
                 "and (tracking_checked_at is null or tracking_checked_at <= now() - make_interval(mins => :i)) "
                 "order by tracking_checked_at asc nulls first, id desc limit :n"
             ),
@@ -2562,8 +2613,8 @@ if os.environ.get("AUTODIST_SCHEDULER", "1").strip().lower() not in ("0", "false
 # --------------------------------------------------------------------------
 # cancel: POST /order/number/cancel/{order}
 # --------------------------------------------------------------------------
-# Cancelling is immediate (not a request): the API answers OrderStatus "9", which is what "cancelled" looks like in its
-# data. It is refused (503) once the order has been invoiced, because the parts have shipped; after that it is a return,
+# Cancelling is immediate (not a request). We do not know what status code a cancelled order carries in their data ("9" is a
+# HOLD, not a cancel), so a cancel is recorded on OUR row as status "cancelled", and that row is never checked again. It is refused (503) once the order has been invoiced, because the parts have shipped; after that it is a return,
 # which has to be arranged with the distributor. The order is looked up first so that split (related) orders that were
 # made from it are cancelled too, and so an already-invoiced order is refused before anything is sent. Only this order
 # and its own related orders are touched: never "everything with this PO number", because a short number like 14 could
@@ -2619,7 +2670,7 @@ def api_order_cancel(order_id: int, body: CancelOrderIn, db: Session = Depends(g
     if not isinstance(data, dict):
         raise HTTPException(502, "The API sent something unexpected for that order.")
     head = data.get("header") or {}
-    main_cancelled = str(head.get("orderStatus") or "").strip() == "9"
+    main_cancelled = str(row.status or "").strip().lower() == "cancelled"
     if not main_cancelled and _invoiced(head.get("invoiceNumber")):
         raise HTTPException(409, f"Order {row.order_number} has already been invoiced, so it has shipped and can't be cancelled. Arrange a return with Automatic Distributors.")
     cancelled: list[str] = []
@@ -2630,7 +2681,7 @@ def api_order_cancel(order_id: int, body: CancelOrderIn, db: Session = Depends(g
     for r in data.get("relatedOrders") or []:
         rh = (r or {}).get("header") or {}
         n = str(rh.get("orderNumber") or "").strip()
-        if not n or n == row.order_number or str(rh.get("orderStatus") or "").strip() == "9" or _invoiced(rh.get("invoiceNumber")):
+        if not n or n == row.order_number or _invoiced(rh.get("invoiceNumber")):
             continue
         try:
             _cancel_call(n)
@@ -2640,7 +2691,7 @@ def api_order_cancel(order_id: int, body: CancelOrderIn, db: Session = Depends(g
             if e.status_code == 429:
                 break
     try:
-        db.execute(text("update supplier_orders set status = '9', tracking_checked_at = now() where id = :i"), {"i": row.id})
+        db.execute(text("update supplier_orders set status = 'cancelled', tracking_checked_at = now() where id = :i"), {"i": row.id})
         db.commit()
     except Exception:
         db.rollback()
@@ -2672,7 +2723,8 @@ def api_order_cancel(order_id: int, body: CancelOrderIn, db: Session = Depends(g
 # time it is needed), whether or not it was placed from this app. Asking one day at a time means the day asked is the
 # invoice date, because that endpoint's reply does not always carry one. A order invoiced again later (a backorder that
 # ships) comes back as another row of the same order, so the row key is the order number plus its generation number.
-# "special charges" is the distributor's shipping and handling line; confirm that on one real invoice.
+# "special charges" is everything the distributor adds beyond the parts: shipping, and also things like a signature fee or (on
+# the test server) a COD fee. It is not always only shipping, so the screens call it "special charges".
 _invoices_ready = False
 
 
@@ -2948,7 +3000,7 @@ def api_invoices_export(
     rows = db.execute(text(f"select {_INV_COLS} from {from_sql} where {where} order by i.invoice_date desc nulls last, i.id desc limit 20000"), params).all()
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Invoice date", "Invoice #", "Order #", "Our PO #", "eBay order", "Customer", "City", "State", "Carrier", "Tracking", "Parts $", "Shipping and handling $", "Invoice $", "Order value $", "Status code"])
+    w.writerow(["Invoice date", "Invoice #", "Order #", "Our PO #", "eBay order", "Customer", "City", "State", "Carrier", "Tracking", "Parts $", "Special charges $ (shipping etc.)", "Invoice $", "Order value $", "Status code"])
     for r in rows:
         w.writerow([r.invoice_date, r.invoice_number, r.order_number, r.po_number, r.ebay_order_id, r.ship_to_name, r.ship_to_city, r.ship_to_state, r.carrier_code, r.tracking_number, r.item_amount, r.special_charges, r.invoice_amount, r.order_value, r.order_status])
     return Response(buf.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="autodist-invoices.csv"'})
