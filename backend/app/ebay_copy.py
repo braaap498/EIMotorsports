@@ -41,6 +41,7 @@ from app.ebay_edit import (
     ITEM_RE, NS, _cdata, _errors, _failed, _first_message, _log, _money, _read_item, _trading,
 )
 from app.ebay_oauth import _store_row
+from app.availability import effective_sql
 from app.stock import available_sql
 
 log = logging.getLogger(__name__)
@@ -314,7 +315,7 @@ def _product_label(db: Session, product_id: int) -> str:
 
 
 def _quantity(db: Session, store: str, product_id: int) -> int:
-    avail = db.execute(text(f"select {available_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar()
+    avail = db.execute(text(f"select {effective_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar()
     avail = int(avail or 0)
     if avail < 1:
         raise HTTPException(

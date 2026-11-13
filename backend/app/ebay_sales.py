@@ -490,16 +490,19 @@ def _rematch(db: Session, store: str, channel_id: Optional[int]) -> tuple[set, d
 # --------------------------------------------------------------------------
 # keeping eBay's quantities in step (every listing of a product)
 # --------------------------------------------------------------------------
-def _available(db: Session, product_id: int) -> int:
-    return int(db.execute(text(f"select {available_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
+def _available(db: Session, product_id: int, listing_dropship: bool = False) -> int:
+    """What can be sold from this product: our own count, plus the distributor's where the availability rule allows
+    (app/availability.py; the same as the own count while its switch is OFF)."""
+    from app.availability import effective
+
+    return effective(db, product_id, listing_dropship)
 
 
 def enqueue_product(db: Session, product_id: int) -> int:
     """Queue a quantity update for each eBay listing of this product, on stores that allow it."""
-    avail = _available(db, product_id)
     rows = db.execute(
         text(
-            f"select cl.store, {DIGITS.replace('external_id', 'cl.external_id')} as item "
+            f"select cl.store, {DIGITS.replace('external_id', 'cl.external_id')} as item, coalesce(cl.dropship_ok, false) as dropship_ok "
             "from channel_listings cl join ebay_accounts a on a.store = cl.store "
             "where cl.product_id = :p and cl.external_id is not null "
             "and a.sales_qty_push_enabled and a.live_pushes_enabled and a.refresh_token_enc is not null"
@@ -509,6 +512,7 @@ def enqueue_product(db: Session, product_id: int) -> int:
     for r in rows:
         if not r.item:
             continue
+        avail = _available(db, product_id, bool(r.dropship_ok))
         db.execute(
             text(
                 "insert into ebay_qty_queue (store, ebay_item_id, product_id, target_qty) values (:s, :i, :p, :q) "
@@ -617,7 +621,12 @@ def run_queue(db: Session, store: str, limit: int = QTY_PER_RUN) -> dict:
         {"s": store, "n": limit},
     ).all()
     for r in rows:
-        target = _available(db, r.product_id) if r.product_id else r.target_qty
+        if r.product_id:
+            from app.availability import listing_override
+
+            target = _available(db, r.product_id, listing_override(db, store, r.ebay_item_id))
+        else:
+            target = r.target_qty
         held_note = _hold_gate(db, store, r.ebay_item_id, r.product_id, target) if r.product_id else None
         if held_note:
             db.execute(

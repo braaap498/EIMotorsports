@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.images import card_image, gallery
 from app.sanitize import clean_description
+from app.availability import effective_sql, stock_mode_sql
 from app.stock import available_sql
 
 router = APIRouter(prefix="/store/fitment", tags=["store"])
@@ -172,7 +173,7 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
             "select id, sku_display as sku, title, slug, list_price, condition, description, "
             "manufacturer_part_number, show_part_number, on_order, expected_date, "
             f"(expected_date - current_date) as days_until, "
-            f"{available_sql('p')} as available_qty from products p "
+            f"{effective_sql('p')} as available_qty, {stock_mode_sql('p')} as stock_mode from products p "
             f"where p.slug = :slug and {PUBLISHED_FILTER}"
         ),
         {"slug": slug},
@@ -204,6 +205,7 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         # The manufacturer part number is only shown when the admin ticked "show to customers".
         "part_number": p.manufacturer_part_number if p.show_part_number else None,
         "available": max(0, int(p.available_qty or 0)),
+        "stock_mode": p.stock_mode if p.stock_mode in ("available", "count") else "available",
         "backordered": backordered,
         "expected_date": p.expected_date.isoformat() if backordered and p.expected_date else None,
         "days_until": int(p.days_until) if backordered and p.days_until is not None else None,

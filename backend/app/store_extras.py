@@ -31,6 +31,7 @@ from app.admin_users import _call as _auth_admin_call
 from app.auth import AuthUser, current_user
 from app.database import get_db
 from app.images import card_image
+from app.availability import effective_sql, stock_mode_sql
 from app.stock import available_sql
 
 router = APIRouter(prefix="/store", tags=["store"])
@@ -185,7 +186,7 @@ def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
             f"""
             select p.id, p.slug, p.sku_display as sku, p.title, p.list_price, p.on_order, p.expected_date,
               (p.expected_date - current_date) as days_until,
-              {available_sql("p")} as available_qty,
+              {effective_sql("p")} as available_qty, {stock_mode_sql("p")} as stock_mode,
               (select ph.source_url from product_photos ph
                 where ph.product_id = p.id and not ph.hidden
                 order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as photo_source_url,
@@ -225,6 +226,7 @@ def cart_price(body: CartPriceIn, db: Session = Depends(get_db)):
                 "title": r.title,
                 "price": f"{r.list_price:.2f}" if r.list_price is not None else None,
                 "available": available,
+                "stock_mode": r.stock_mode if r.stock_mode in ("available", "count") else "available",
                 "backordered": bool(r.on_order) and available <= 0,
                 "expected_date": r.expected_date.isoformat() if r.on_order and available <= 0 and r.expected_date else None,
                 "days_until": int(r.days_until) if r.on_order and available <= 0 and r.days_until is not None else None,

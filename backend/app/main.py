@@ -34,6 +34,9 @@ from app.ebay_sales import start_background as start_ebay_sales
 from app.admin_ebay_photos import router as admin_ebay_photos_router
 from app.admin_inventory import router as admin_inventory_router
 from app.admin_photos import ensure_columns as ensure_photo_columns
+from app.availability import ensure_tables as ensure_availability_tables
+from app.availability import router as availability_router
+from app.availability import start_background as start_availability
 from app.admin_photos import router as admin_photos_router
 from app.admin_purchase_orders import router as admin_purchase_orders_router
 from app.admin_users import router as admin_users_router
@@ -119,6 +122,7 @@ admin_router.include_router(order_activity_router)
 admin_router.include_router(warehouse_stock_router)
 admin_router.include_router(admin_purchase_orders_router)
 admin_router.include_router(admin_photos_router)
+admin_router.include_router(availability_router)
 admin_router.include_router(admin_users_router)
 admin_router.include_router(admin_about_router)
 admin_router.include_router(admin_reviews_router)
@@ -166,3 +170,10 @@ def _order_activity_tables():
 def _photo_columns():
     """product_photos.hidden: lets a photo be turned off for the website and eBay without deleting it."""
     ensure_photo_columns()
+
+
+@app.on_event("startup")
+def _availability():
+    """Distributor-aware availability: its columns/tables, and the timer that notices distributor stock changes (does nothing while its switch is OFF)."""
+    ensure_availability_tables()
+    start_availability()

@@ -82,6 +82,9 @@ def place_holds(db: Session, order_id: int, wanted: dict[int, int]) -> None:
         {"ids": ids},
     )
     unavailable = False
+    from app.availability import extra_stock  # what the distributor adds (0 while that switch is off)
+
+    extra = extra_stock(db, ids)
     for pid, qty in wanted.items():
         row = locked.get(pid)
         if row is None:
@@ -94,7 +97,7 @@ def place_holds(db: Session, order_id: int, wanted: dict[int, int]) -> None:
             ),
             {"p": pid},
         ).scalar()
-        if qty > max(0, (row.quantity_on_hand or 0) - int(taken)):
+        if qty > max(0, (row.quantity_on_hand or 0) - int(taken)) + extra.get(pid, 0):
             unavailable = True
             break
     if unavailable:

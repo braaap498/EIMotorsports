@@ -56,6 +56,7 @@ from sqlalchemy.orm import Session
 from app import images, photo_store
 from app.auth import AuthUser, require_admin
 from app.database import get_db
+from app.availability import effective_sql
 from app.stock import available_sql
 from app.ebay_oauth import TRADING_URL, _access, _expected_username, _store_row, get_user_token
 
@@ -1070,7 +1071,7 @@ def _relist_quantity(db: Session, store: str, current: dict, ch: Changes) -> Cha
         return ch  # typed on purpose
     avail = db.execute(
         text(
-            f"select {available_sql('p')} from channel_listings cl join products p on p.id = cl.product_id "
+            f"select {effective_sql('p', 'coalesce(cl.dropship_ok, false)')} from channel_listings cl join products p on p.id = cl.product_id "
             "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i and lower(cl.store) = lower(:s) limit 1"
         ),
         {"i": current["item_id"], "s": store},
@@ -1338,7 +1339,7 @@ def restore_qty(body: RestoreIn, db: Session = Depends(get_db), user: AuthUser =
     if qty is None:
         qty = db.execute(
             text(
-                f"select {available_sql('p')} from channel_listings cl join products p on p.id = cl.product_id "
+                f"select {effective_sql('p', 'coalesce(cl.dropship_ok, false)')} from channel_listings cl join products p on p.id = cl.product_id "
                 "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i and cl.store = :s limit 1"
             ),
             {"i": current["item_id"], "s": row.store},

@@ -14,6 +14,7 @@ export default function AddToCart({
   backordered = false,
   expectedDate = null,
   daysUntil = null,
+  stockMode = "available",
 }: {
   productId: number;
   slug: string;
@@ -22,6 +23,7 @@ export default function AddToCart({
   backordered?: boolean;
   expectedDate?: string | null;
   daysUntil?: number | null;
+  stockMode?: "available" | "count"; // how stock is shown: "Available" or "35 Available" (set in Admin > Availability)
 }) {
   const { lines, add } = useCart();
   const inCart = lines.find((l) => l.product_id === productId)?.qty ?? 0;
@@ -62,7 +64,7 @@ export default function AddToCart({
   return (
     <div className="mt-6">
       <p className={`mb-2 text-sm font-semibold ${available <= 5 ? "text-amber-700" : "text-green-700"}`}>
-        {available <= 5 ? `Only ${available} left` : "In stock"}
+        {stockMode === "count" ? `${available} Available` : "Available"}
       </p>
 
       <div className="flex flex-wrap items-center gap-3">
