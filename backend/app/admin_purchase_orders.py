@@ -18,8 +18,12 @@ Mounted at /admin/purchase-orders/* (owner / admin, plus staff holding "inventor
   GET    /purchase-orders/issues           POs with receiving problems (short, over, or not on the PO), searchable
   GET    /purchase-orders/{id}/export?format=pdf|xlsx     download it again, any time
 
-A PO has a type: "stock" (buying inventory, received into stock) or "drop_ship" (ships straight to a customer). The type
-is chosen when it is made. Rows made before the type existed count as stock.
+A PO has a type, chosen when it is made:
+  "stock"            buying inventory: ships to us and is received into stock.
+  "stock_drop_ship"  INVENTORY DROP SHIP: ordered the drop ship way, but the parts are for our shelf, so it is received into stock
+                     exactly like a stock PO (it shows in the Receive list and marks its parts Backordered).
+  "drop_ship"        ships straight to a customer: never received into stock, and closed when the distributor's tracking comes back.
+Rows made before the type existed count as stock.
 
 The "Cost" on a PO line is what you pay the distributor. For a part tied to a distributor (Edit product > Distributor
 parts) it is that distributor part's cost (the catalog's dealer cost, else the cost typed on the part), and the Part # is the
@@ -37,6 +41,7 @@ The PO's "Item" column is the product's manufacturer part number (the field on t
 "Manufacturer Part Number" item specific when that field is empty), copied onto the PO when it is made.
 """
 import logging
+import re
 import time
 from datetime import date
 from decimal import Decimal
@@ -124,6 +129,37 @@ def _free_number(db: Session) -> int:
     so a number is never reused or skipped. The lock keeps two people creating a PO at once from getting the same number."""
     db.execute(text("select pg_advisory_xact_lock(7001)"))
     return int(db.execute(text("select coalesce(max(po_number), 0) + 1 from po_headers")).scalar())
+
+
+def ensure_po_types() -> None:
+    """Called once at startup. If the database limits po_headers.po_type to the old values (a CHECK rule, or an enum type),
+    allow 'stock_drop_ship' too. A rule that also mentions other columns is left alone."""
+    from app.database import _session_factory
+
+    db = _session_factory()()
+    try:
+        info = db.execute(
+            text("select data_type, udt_name from information_schema.columns where table_schema = current_schema() and table_name = 'po_headers' and column_name = 'po_type'")
+        ).first()
+        if not info:
+            return
+        if info.data_type == "USER-DEFINED":
+            db.execute(text(f'alter type "{info.udt_name}" add value if not exists \'stock_drop_ship\''))
+            db.commit()
+            return
+        others = {r[0] for r in db.execute(text("select column_name from information_schema.columns where table_schema = current_schema() and table_name = 'po_headers'")).all()} - {"po_type"}
+        for c in db.execute(
+            text("select c.conname, pg_get_constraintdef(c.oid) as d from pg_constraint c where c.conrelid = 'po_headers'::regclass and c.contype = 'c'")
+        ).all():
+            if "po_type" in c.d and "stock_drop_ship" not in c.d and not any(re.search(rf"\b{re.escape(o)}\b", c.d) for o in others):
+                db.execute(text(f'alter table po_headers drop constraint "{c.conname}"'))
+                db.execute(text(f'alter table po_headers add constraint "{c.conname}" check (po_type is null or po_type in (\'stock\', \'stock_drop_ship\', \'drop_ship\'))'))
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("could not allow the inventory drop ship PO type; creating one may fail until the database allows it")
+    finally:
+        db.close()
 
 
 def _po_cols(db: Session) -> set[str]:
@@ -363,7 +399,7 @@ class PoIn(BaseModel):
     ship_to: Optional[str] = Field(None, max_length=400)   # empty text = no ship-to; missing = the default address
     note: Optional[str] = Field(None, max_length=300)
     expected_date: Optional[date] = None   # when the parts are expected; sets the backorder date on each part
-    po_type: str = Field("stock", pattern="^(stock|drop_ship)$")   # stock = buying inventory; drop_ship = ships straight to a customer
+    po_type: str = Field("stock", pattern="^(stock|stock_drop_ship|drop_ship)$")   # stock = buying inventory; stock_drop_ship = inventory ordered the drop ship way; drop_ship = ships straight to a customer
     source: Optional[str] = Field(None, max_length=60)             # e.g. "web:1042" when made from a website order
     lines: list[PoLineIn] = Field(..., min_length=1, max_length=200)
 
@@ -500,6 +536,7 @@ def _create_po(body: PoIn, db: Session, user: AuthUser) -> dict:
             )
         # Backordered is ticked by default for every part on a new STOCK PO (it can be un-ticked on the Stock tab).
         # A drop ship PO never marks parts Backordered: nothing is coming to our shelf, so the website must not say so.
+        # An inventory drop ship PO does (it is received into stock like a stock PO).
         if body.po_type != "drop_ship":
             db.execute(
                 text(
@@ -535,7 +572,7 @@ class ReorderIn(BaseModel):
     ship_to: Optional[str] = Field(None, max_length=400)
     note: Optional[str] = Field(None, max_length=300)
     expected_date: Optional[date] = None
-    po_type: str = Field("stock", pattern="^(stock|drop_ship)$")
+    po_type: str = Field("stock", pattern="^(stock|stock_drop_ship|drop_ship)$")
 
 
 @router.post("/reorder", status_code=201)

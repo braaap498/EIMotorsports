@@ -34,6 +34,7 @@ from app.ebay_sales import start_background as start_ebay_sales
 from app.admin_ebay_photos import router as admin_ebay_photos_router
 from app.admin_inventory import router as admin_inventory_router
 from app.admin_photos import ensure_columns as ensure_photo_columns
+from app.admin_purchase_orders import ensure_po_types
 from app.availability import ensure_tables as ensure_availability_tables
 from app.availability import router as availability_router
 from app.availability import start_background as start_availability
@@ -177,3 +178,9 @@ def _availability():
     """Distributor-aware availability: its columns/tables, and the timer that notices distributor stock changes (does nothing while its switch is OFF)."""
     ensure_availability_tables()
     start_availability()
+
+
+@app.on_event("startup")
+def _po_types():
+    """Allow the 'stock_drop_ship' (inventory drop ship) purchase order type if the database restricts po_type."""
+    ensure_po_types()

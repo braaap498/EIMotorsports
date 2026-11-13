@@ -51,12 +51,12 @@ function trackUrl(t: TrackItem): string | null {
   return null;
 }
 type Status = { configured: boolean; server: string; mode: "live" | "test" };
-type PoRow = { id: number; po_number: number; vendor_name: string; sent_at: string | null; po_type: "stock" | "drop_ship"; open_lines: number };
+type PoRow = { id: number; po_number: number; vendor_name: string; sent_at: string | null; po_type: "stock" | "stock_drop_ship" | "drop_ship"; open_lines: number };
 type Cand = { sku: string; manufacturer: string | null; name: string | null; stock: number | null; cost: string | number | null };
 type PoFull = {
   id: number;
   po_number: number;
-  po_type: "stock" | "drop_ship";
+  po_type: "stock" | "stock_drop_ship" | "drop_ship";
   note: string | null;
   source?: string | null;
   sent_at: string | null;
@@ -317,7 +317,7 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
             <option value="">{pos && pos.length === 0 ? "No open purchase orders to Automatic Distributors" : "Or type an order by hand…"}</option>
             {(pos ?? []).map((p) => (
               <option key={p.id} value={p.id}>
-                PO {p.po_number} · {p.po_type === "drop_ship" ? "Drop ship" : "Stock"} · {p.open_lines} line{p.open_lines === 1 ? "" : "s"}
+                PO {p.po_number} · {p.po_type === "drop_ship" ? "Drop ship" : p.po_type === "stock_drop_ship" ? "Inventory drop ship" : "Stock"} · {p.open_lines} line{p.open_lines === 1 ? "" : "s"}
                 {p.sent_at ? " · marked sent" : ""}
               </option>
             ))}
@@ -327,7 +327,7 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
         </label>
         {poInfo && (
           <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
-            <Badge tone={poInfo.po_type === "drop_ship" ? "blue" : "gray"}>{poInfo.po_type === "drop_ship" ? "Drop ship: ships to the customer" : "Stock: ships to us"}</Badge>
+            <Badge tone={poInfo.po_type === "drop_ship" ? "blue" : "gray"}>{poInfo.po_type === "drop_ship" ? "Drop ship: ships to the customer" : poInfo.po_type === "stock_drop_ship" ? "Inventory drop ship: comes to our shelf" : "Stock: ships to us"}</Badge>
             {poInfo.sent_at && <span className="text-amber-700">This PO is already marked sent ({new Date(poInfo.sent_at).toLocaleDateString()}). Check it was not ordered another way.</span>}
             {poInfo.ship_to_text && !addr.addressLine1 && <span className="text-amber-700">The PO’s ship-to could not be split into fields. Fill them in on the right.</span>}
           </div>
@@ -488,7 +488,7 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
         <div className="space-y-2 rounded border-2 border-blue-200 bg-white p-3 text-xs">
           <div className="flex flex-wrap items-center gap-2 font-medium">
             Check before placing
-            {poInfo && <Badge tone={poInfo.po_type === "drop_ship" ? "blue" : "gray"}>{poInfo.po_type === "drop_ship" ? "Drop ship" : "Stock"}</Badge>}
+            {poInfo && <Badge tone={poInfo.po_type === "drop_ship" ? "blue" : "gray"}>{poInfo.po_type === "drop_ship" ? "Drop ship" : poInfo.po_type === "stock_drop_ship" ? "Inventory drop ship" : "Stock"}</Badge>}
             {sourceLabel && <span className="font-normal text-gray-600">for {sourceLabel}</span>}
             <span className="font-normal text-gray-600">· PO {po || "(none)"}</span>
           </div>

@@ -58,7 +58,7 @@ type PoDetail = {
   created_at: string;
   date: string;
   lines: PoLine[];
-  po_type?: "stock" | "drop_ship" | null;
+  po_type?: "stock" | "stock_drop_ship" | "drop_ship" | null;
   supplier_order_number?: string | null;
   supplier_tracking?: { number: string; kind: string; carrier: string | null }[];
   missing_part_numbers?: string[];
@@ -77,7 +77,7 @@ type PoRow = {
   open_lines: number;
   status: "open" | "received" | "cancelled";
   issue_count: number;
-  po_type?: "stock" | "drop_ship" | null;
+  po_type?: "stock" | "stock_drop_ship" | "drop_ship" | null;
 };
 type Issue = {
   id: number;
@@ -436,6 +436,7 @@ function Reorder({
                   <div>
                     <b>PO {po.po_number}</b> to <b>{po.vendor_name}</b> · {po.lines.length} line{po.lines.length === 1 ? "" : "s"} · <b>{money(po.total)}</b>
                     {po.po_type === "drop_ship" && <span className="ml-2"><Badge tone="amber">drop ship</Badge></span>}
+                    {po.po_type === "stock_drop_ship" && <span className="ml-2"><Badge tone="amber">inventory drop ship</Badge></span>}
                   </div>
                   {po.missing_part_numbers && po.missing_part_numbers.length > 0 && (
                     <Notice kind="error">
@@ -486,7 +487,7 @@ function CreatePo({
   const [fallbackId, setFallbackId] = useState<number | "">(dists.length === 1 ? dists[0].id : "");
   const [shipTo, setShipTo] = useState("");
   const [defaultShip, setDefaultShip] = useState("");
-  const [poType, setPoType] = useState<"stock" | "drop_ship">("stock");
+  const [poType, setPoType] = useState<"stock" | "stock_drop_ship" | "drop_ship">("stock");
   const [note, setNote] = useState("");
   const [expected, setExpected] = useState("");
   const [busy, setBusy] = useState(false);
@@ -648,7 +649,20 @@ function CreatePo({
               />{" "}
               Drop ship (ships straight to a customer)
             </label>
+            <label className="flex items-center gap-1">
+              <input
+                type="radio"
+                name="po_type"
+                checked={poType === "stock_drop_ship"}
+                onChange={() => {
+                  setPoType("stock_drop_ship");
+                  setShipTo(defaultShip);
+                }}
+              />{" "}
+              Inventory drop ship (ordered the drop ship way, comes to our shelf)
+            </label>
           </div>
+          {poType === "stock_drop_ship" && <div className="text-xs text-gray-600">Received into stock like a stock PO: it shows in Inventory › Receive and its parts are marked Backordered. Change Ship To below if it ships somewhere other than us.</div>}
           {poType === "drop_ship" && <div className="text-xs text-gray-600">Type the customer’s name and address in Ship To below. Make one PO per customer address.</div>}
         </div>
 
@@ -873,6 +887,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                 <td className="px-3 py-2 font-semibold">
                   {r.po_number}
                   {r.po_type === "drop_ship" && <span className="ml-2 font-normal"><Badge tone="blue">drop ship</Badge></span>}
+                  {r.po_type === "stock_drop_ship" && <span className="ml-2 font-normal"><Badge tone="blue">inventory drop ship</Badge></span>}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2">{new Date(r.created_at).toLocaleDateString()}</td>
                 <td className="px-3 py-2">{r.vendor_name}</td>
@@ -949,6 +964,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                 <div className="text-xs font-semibold uppercase text-gray-500">Ship to</div>
                 <div className="whitespace-pre-line text-gray-600">{open.ship_to}</div>
                 {open.po_type === "drop_ship" && <div className="mt-1"><Badge tone="blue">drop ship</Badge></div>}
+                {open.po_type === "stock_drop_ship" && <div className="mt-1"><Badge tone="blue">inventory drop ship</Badge></div>}
                 {open.supplier_order_number && <div className="mt-1 text-xs text-gray-600">Distributor order {open.supplier_order_number}</div>}
                 {open.supplier_tracking && open.supplier_tracking.length > 0 && (
                   <div className="mt-1 text-xs text-gray-600">
