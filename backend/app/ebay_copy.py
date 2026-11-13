@@ -147,6 +147,9 @@ def _shape(r) -> dict:
         "item_specifics": d.get("item_specifics", []), "currency": d.get("currency", "USD"),
         "category_name": d.get("category_name", ""), "compat_count": len(d.get("compat", [])),
         "condition_note": d.get("condition_note", ""),
+        # a draft started from a product (not copied from a live listing) has no store until one is chosen
+        "category_id": d.get("category_id", ""), "compat_notes": d.get("compat_notes", []),
+        "needs_store": not r.store, "model_item_id": d.get("model_item_id", ""),
     }
 
 
@@ -326,6 +329,16 @@ def _quantity(db: Session, store: str, product_id: int) -> int:
     return min(avail, 9999)
 
 
+def _ready(store: str, d: dict) -> None:
+    """A draft started from a product cannot be checked or listed until a store has been chosen for it."""
+    if not store:
+        raise HTTPException(409, "Choose the store to list this in first. The category and shipping settings come from a listing there.")
+    missing = [n for n, k in (("category", "category_id"), ("shipping policy", "ship_profile"),
+                              ("payment policy", "pay_profile"), ("return policy", "return_profile")) if not d.get(k)]
+    if missing:
+        raise HTTPException(409, "The draft has no " + ", ".join(missing) + " yet. Choose the store again, or pick a different model listing.")
+
+
 def _item_xml(d: dict, qty: int) -> str:
     price = _money(str(d.get("price") or ""))
     title = " ".join((d.get("title") or "").split())
@@ -441,6 +454,7 @@ def preview(copy_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
     if r.status != "draft":
         raise HTTPException(409, "This copy is already listed.")
     d = dict(r.data or {})
+    _ready(r.store, d)
     d["sku"] = _product_label(db, r.product_id) or d.get("sku", "")
     qty = _quantity(db, r.store, r.product_id)
     xml = _item_xml(d, qty)
@@ -478,9 +492,10 @@ def list_it(copy_id: int, body: ListIn, db: Session = Depends(get_db), user: Aut
     r = _row(db, copy_id)
     if r.status != "draft":
         raise HTTPException(409, "This copy is already listed.")
+    d = dict(r.data or {})
+    _ready(r.store, d)
     if not _live_on(db, r.store):
         raise HTTPException(403, f"Live pushes are OFF for {r.store}. Turn them on in the Stores box first.")
-    d = dict(r.data or {})
     d["sku"] = _product_label(db, r.product_id) or d.get("sku", "")
     qty = _quantity(db, r.store, r.product_id)
     xml = _item_xml(d, qty)

@@ -25,7 +25,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/distributors", label: "Distributors", any: ["inventory.purchase"], match: ["/admin/distributors", "/admin/supplier"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
-  { href: "/admin/ebay-listings", label: "Sales channels", match: ["/admin/ebay-listings", "/admin/ebay-edit", "/admin/ebay-sales", "/admin/ebay-stores", "/admin/ebay-connect", "/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/availability"] },
+  { href: "/admin/ebay-listings", label: "Sales channels", match: ["/admin/ebay-listings", "/admin/ebay-edit", "/admin/ebay-sales", "/admin/ebay-stores", "/admin/ebay-connect", "/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/availability", "/admin/ebay-copy"] },
   { href: "/admin/analytics", label: "Analytics" },
   { href: "/admin/quickbooks", label: "QuickBooks" },
   { href: "/admin/users", label: "Team" },
@@ -58,6 +58,7 @@ const STORE_API_TABS: Tab[] = [
 // Sub-pages shown as tabs under the eBay button: Listings and Orders on the left, then Store API.
 const EBAY_TABS: Tab[] = [
   { href: "/admin/ebay-listings", label: "Listings", match: ["/admin/ebay-listings", "/admin/ebay-edit"] },
+  { href: "/admin/ebay-copy", label: "New listing" },
   { href: "/admin/ebay-sales", label: "Orders" },
   { href: "/admin/availability", label: "Availability" },
   { href: "/admin/ebay-stores", label: "Store API", match: STORE_API_TABS.flatMap((t) => t.match ?? [t.href]) },

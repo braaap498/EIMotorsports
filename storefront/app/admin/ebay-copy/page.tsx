@@ -26,7 +26,13 @@ type Copy = {
   category_name: string;
   compat_count: number;
   condition_note: string;
+  category_id: string;
+  compat_notes: string[];
+  needs_store: boolean;
+  model_item_id: string;
 };
+type StoreChoice = { store: string; seller: string | null; live: boolean };
+type Hint = { name: string; value: string };
 type Preview = {
   ok: boolean;
   errors: { code: string; message: string }[];
@@ -52,6 +58,10 @@ function CopyEditor({ id }: { id: number }) {
   const [pv, setPv] = useState<Preview | null>(null);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const [stores, setStores] = useState<StoreChoice[]>([]);
+  const [pickStore, setPickStore] = useState("");
+  const [modelItem, setModelItem] = useState("");
+  const [hints, setHints] = useState<Hint[]>([]);
 
   function fill(c: Copy) {
     setCopy(c);
@@ -77,6 +87,39 @@ function CopyEditor({ id }: { id: number }) {
       cancelled = true;
     };
   }, [id]);
+
+  // A draft made from a product has no store yet: load the connected stores so one can be chosen.
+  useEffect(() => {
+    if (!copy || copy.source_item_id) return;
+    api<{ stores: StoreChoice[] }>("/ebay-draft/stores")
+      .then((r) => {
+        setStores(r.stores);
+        setPickStore((cur) => cur || copy.store || (r.stores[0]?.store ?? ""));
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [copy?.id]);
+
+  async function chooseStore() {
+    if (!pickStore) return;
+    if (dirty && !(await save())) return;
+    setBusy("store");
+    setMsg(null);
+    setPv(null);
+    try {
+      const r = await api<{ store: string; model_item_id: string; category_name: string; hint_specifics: Hint[] }>(`/ebay-draft/${id}/store`, {
+        method: "POST",
+        body: { store: pickStore, ...(modelItem.trim() ? { model_item_id: modelItem.trim() } : {}) },
+      });
+      fill(await api<Copy>(`/ebay-copy/${id}`));
+      setHints(r.hint_specifics);
+      setMsg({ kind: "success", text: `Set up for ${r.store}, using eBay item ${r.model_item_id} as the model${r.category_name ? ` (${r.category_name})` : ""}. Nothing has gone to eBay.` });
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
 
   function touch() {
     setDirty(true);
@@ -161,19 +204,70 @@ function CopyEditor({ id }: { id: number }) {
 
   const listed = copy.status === "listed";
   const off = listed || busy !== "";
+  const fromProduct = !copy.source_item_id;
+  const notReady = fromProduct && (!copy.store || !copy.category_id);
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold">Sell similar</h1>
-        <Link href="/admin/ebay-listings" className={btn2Cls}>Back to Listings</Link>
+        <h1 className="text-2xl font-semibold">{fromProduct ? "New listing from a product" : "Sell similar"}</h1>
+        <div className="flex gap-2">
+          {fromProduct && <Link href="/admin/ebay-copy" className={btn2Cls}>Other drafts</Link>}
+          <Link href="/admin/ebay-listings" className={btn2Cls}>Back to Listings</Link>
+        </div>
       </div>
       <p className="text-sm text-gray-600">
-        Copy of eBay item {copy.source_item_id} in {copy.store}
+        {fromProduct ? `New listing for product ${copy.product_id}` : `Copy of eBay item ${copy.source_item_id} in ${copy.store}`}
         {copy.category_name ? ` · ${copy.category_name}` : ""}
         {copy.compat_count ? ` · ${copy.compat_count} compatible vehicles` : ""}. This is a draft on the website only.
         When it is listed, the new item number is linked to the same product (id {copy.product_id}).
       </p>
+      {fromProduct && !listed && (
+        <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
+          <h2 className="font-semibold">Where to list it</h2>
+          <p className="text-xs text-gray-500">
+            Choose the store. The category, shipping / payment / return policies, location and handling time are taken from a live listing in that
+            store that is as close to this part as possible (same website category first). To use a particular listing as the model, type its eBay item number.
+          </p>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="block">
+              <span className="mb-1 block font-semibold">Store</span>
+              <select className={inputCls} value={pickStore} disabled={off} onChange={(e) => setPickStore(e.target.value)}>
+                {stores.length === 0 && <option value="">No connected stores</option>}
+                {stores.map((s) => (
+                  <option key={s.store} value={s.store}>{s.store}{s.live ? "" : " (live pushes off)"}</option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="mb-1 block font-semibold">Model it on item # (optional)</span>
+              <input className={inputCls} value={modelItem} disabled={off} placeholder="e.g. 177464505625" onChange={(e) => setModelItem(e.target.value)} />
+            </label>
+            <button type="button" className={btnCls} disabled={off || !pickStore} onClick={() => void chooseStore()}>
+              {busy === "store" ? "Reading eBay…" : copy.store ? "Use this store" : "Choose store"}
+            </button>
+          </div>
+          {copy.store ? (
+            <p className="text-xs text-gray-600">
+              Store: <strong>{copy.store}</strong>
+              {copy.category_name ? ` · category ${copy.category_name} (${copy.category_id})` : ""}
+              {copy.model_item_id ? ` · model listing ${copy.model_item_id}` : ""}
+            </p>
+          ) : (
+            <p className="text-xs text-amber-700">No store chosen yet, so this cannot be checked or listed.</p>
+          )}
+        </div>
+      )}
+      {(copy.compat_notes ?? []).length > 0 && (
+        <details className="rounded border border-amber-200 bg-amber-50 p-3 text-sm">
+          <summary className="cursor-pointer font-medium">
+            Compatibility: {copy.compat_count} vehicle rows converted to eBay&rsquo;s list; {(copy.compat_notes ?? []).length} note{(copy.compat_notes ?? []).length === 1 ? "" : "s"}
+          </summary>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs">
+            {(copy.compat_notes ?? []).map((n, i) => <li key={i}>{n}</li>)}
+          </ul>
+        </details>
+      )}
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
       {listed && (
         <Notice kind="success">
@@ -259,6 +353,31 @@ function CopyEditor({ id }: { id: number }) {
         ))}
       </div>
 
+      {hints.length > 0 && !listed && (
+        <div className="space-y-2 rounded border border-gray-200 bg-white p-4 text-sm">
+          <h2 className="font-semibold">Item specifics the model listing has</h2>
+          <p className="text-xs text-gray-500">These are that other listing&rsquo;s values. Add the ones that are also true for this part and correct the value if it differs.</p>
+          {hints.map((h) => (
+            <div key={h.name} className="flex flex-wrap items-center gap-2">
+              <span className="w-48 font-medium">{h.name}</span>
+              <span className="min-w-[10rem] flex-1 text-gray-600">{h.value}</span>
+              <button
+                type="button"
+                className="text-blue-700 hover:underline"
+                disabled={off}
+                onClick={() => {
+                  setSpecs([...specs, { name: h.name, value: h.value }]);
+                  setHints(hints.filter((x) => x.name !== h.name));
+                  touch();
+                }}
+              >
+                Add
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {pv && (
         <div className="space-y-2 rounded border border-gray-200 bg-white p-4 text-sm">
           <h2 className="font-semibold">What eBay says (nothing was listed)</h2>
@@ -287,7 +406,7 @@ function CopyEditor({ id }: { id: number }) {
           <button type="button" className={btn2Cls} disabled={off || !dirty} onClick={() => void save()}>
             {busy === "save" ? "Saving…" : "Save draft"}
           </button>
-          <button type="button" className={btn2Cls} disabled={off} onClick={() => void check()}>
+          <button type="button" className={btn2Cls} disabled={off || notReady} onClick={() => void check()}>
             {busy === "check" ? "Asking eBay…" : "Check with eBay"}
           </button>
           <button type="button" className={btnCls} disabled={off || !pv?.ok || !pv.fingerprint || !pv.live_pushes_enabled || dirty} onClick={() => void listIt()}>
@@ -302,10 +421,193 @@ function CopyEditor({ id }: { id: number }) {
   );
 }
 
+type FoundProduct = { id: number; title: string; sku: string | null; custom_label: string | null; price: number | null; listings: number };
+type Existing = { store: string; status: string | null; item_id: string; title: string };
+type Checked = {
+  product: { id: number; title: string; sku: string | null; custom_label: string | null; price: number | null };
+  listings: Existing[];
+  drafts: { id: number; store: string; title: string }[];
+};
+type DraftRow = { id: number; store: string; source_item_id: string; title: string };
+
+const go = (id: number) => {
+  window.location.href = `/admin/ebay-copy?id=${id}`;
+};
+
+/* Start here: pick a product. If it already has eBay listings they are listed and Sell similar is used; if not, a draft is
+   made from the product itself and the store is chosen afterwards. */
+function NewFromProduct() {
+  const [q, setQ] = useState("");
+  const [found, setFound] = useState<FoundProduct[] | null>(null);
+  const [checked, setChecked] = useState<Checked | null>(null);
+  const [drafts, setDrafts] = useState<DraftRow[]>([]);
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+
+  useEffect(() => {
+    api<{ drafts: DraftRow[] }>("/ebay-copy")
+      .then((r) => setDrafts(r.drafts))
+      .catch(() => {});
+  }, []);
+
+  async function search() {
+    if (q.trim().length < 2) return;
+    setBusy("search");
+    setMsg(null);
+    setChecked(null);
+    try {
+      setFound((await api<{ products: FoundProduct[] }>(`/ebay-draft/products?q=${encodeURIComponent(q.trim())}`)).products);
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function pick(id: number) {
+    setBusy("check");
+    setMsg(null);
+    try {
+      setChecked(await api<Checked>(`/ebay-draft/check/${id}`));
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function sellSimilar(store: string, item: string) {
+    setBusy("similar" + item);
+    setMsg(null);
+    try {
+      go((await api<{ id: number }>("/ebay-copy/create", { method: "POST", body: { store, item_id: item } })).id);
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+      setBusy("");
+    }
+  }
+
+  async function makeDraft(productId: number) {
+    setBusy("create");
+    setMsg(null);
+    try {
+      go((await api<{ id: number }>("/ebay-draft/create", { method: "POST", body: { product_id: productId } })).id);
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+      setBusy("");
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <h1 className="text-2xl font-semibold">New eBay listing</h1>
+      <p className="max-w-3xl text-sm text-gray-600">
+        Pick a product. If it has no eBay listing yet, a draft is made from the product (title, description, price, photos, item specifics and a
+        compatibility table converted from our fitment), and you then choose which store to list it in. If it already has listings, they are shown here and
+        you use Sell similar from one of them. Nothing goes to eBay until you check the draft and list it.
+      </p>
+      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+
+      <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="block">
+            <span className="mb-1 block font-semibold">Find a product (title, EI number, label, part number or id)</span>
+            <input className={`${inputCls} w-96 max-w-full`} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void search(); }} />
+          </label>
+          <button type="button" className={btnCls} disabled={busy !== "" || q.trim().length < 2} onClick={() => void search()}>
+            {busy === "search" ? "Searching…" : "Search"}
+          </button>
+        </div>
+        {found && found.length === 0 && <p className="text-gray-500">No product matched.</p>}
+        {found && found.length > 0 && (
+          <ul className="divide-y divide-gray-100">
+            {found.map((f) => (
+              <li key={f.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                <span>
+                  <span className="font-medium">{f.title}</span>{" "}
+                  <span className="text-xs text-gray-500">
+                    {f.sku ?? ""}{f.custom_label ? ` · label ${f.custom_label}` : ""} · id {f.id}{f.price !== null ? ` · $${f.price.toFixed(2)}` : ""}
+                  </span>
+                </span>
+                <span className="flex items-center gap-3">
+                  <span className={`text-xs ${f.listings ? "text-amber-700" : "text-gray-500"}`}>
+                    {f.listings ? `${f.listings} eBay listing${f.listings === 1 ? "" : "s"}` : "no eBay listing"}
+                  </span>
+                  <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={() => void pick(f.id)}>Choose</button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {checked && (
+        <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
+          <h2 className="font-semibold">
+            {checked.product.title} <span className="text-xs font-normal text-gray-500">id {checked.product.id}</span>
+          </h2>
+          {checked.drafts.length > 0 && (
+            <Notice>
+              This product already has {checked.drafts.length === 1 ? "a draft" : "drafts"} in progress:{" "}
+              {checked.drafts.map((d, i) => (
+                <span key={d.id}>{i > 0 ? ", " : ""}<Link className="underline" href={`/admin/ebay-copy?id=${d.id}`}>#{d.id}{d.store ? ` (${d.store})` : ""}</Link></span>
+              ))}
+              .
+            </Notice>
+          )}
+          {checked.listings.length > 0 ? (
+            <>
+              <p>
+                This product already has {checked.listings.length} eBay listing{checked.listings.length === 1 ? "" : "s"}, so use <strong>Sell similar</strong> from one of them. It
+                copies that listing, including its category and compatibility table.
+              </p>
+              <ul className="divide-y divide-gray-100">
+                {checked.listings.map((l) => (
+                  <li key={l.item_id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                    <span>
+                      <span className="font-medium">{l.store}</span> · item {l.item_id} · {l.status ?? "status unknown"}
+                      <span className="block text-xs text-gray-500">{l.title}</span>
+                    </span>
+                    <button type="button" className={btn2Cls} disabled={busy !== "" || (l.status ?? "").toLowerCase() !== "active"} onClick={() => void sellSimilar(l.store, l.item_id)}
+                      title={(l.status ?? "").toLowerCase() !== "active" ? "Only an active listing can be copied" : ""}>
+                      {busy === "similar" + l.item_id ? "Copying…" : "Sell similar"}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3">
+              <p>This product has no eBay listing yet.</p>
+              <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => void makeDraft(checked.product.id)}>
+                {busy === "create" ? "Making the draft…" : "Make a draft from this product"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {drafts.length > 0 && (
+        <div className="space-y-2 rounded border border-gray-200 bg-white p-4 text-sm">
+          <h2 className="font-semibold">Drafts in progress</h2>
+          <ul className="divide-y divide-gray-100">
+            {drafts.map((d) => (
+              <li key={d.id} className="py-2">
+                <Link className="text-blue-700 hover:underline" href={`/admin/ebay-copy?id=${d.id}`}>{d.title || `Draft ${d.id}`}</Link>
+                <span className="ml-2 text-xs text-gray-500">{d.source_item_id ? `copy of ${d.source_item_id}` : "from a product"} · {d.store || "no store yet"}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Inner() {
   const p = useSearchParams();
   const id = Number(p.get("id"));
-  if (!id) return <Notice kind="error">No copy was chosen. Go to Live listings, tick one listing and press Sell similar.</Notice>;
+  if (!id) return <NewFromProduct />;
   return <CopyEditor key={id} id={id} />;
 }
 
