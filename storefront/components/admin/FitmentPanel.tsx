@@ -285,8 +285,9 @@ export default function FitmentPanel({
       )}
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
 
-      {mayAdd && addForm("top")}
+      {mayAdd && mode !== "not_vehicle" && addForm("top")}
 
+      {(mode !== "not_vehicle" || fits.length > 0) && (
       <div>
         <h3 className="mb-2 text-sm font-medium text-gray-700">Fits these machines</h3>
         {fits.length === 0 ? (
@@ -357,9 +358,10 @@ export default function FitmentPanel({
           </>
         )}
       </div>
+      )}
 
       {/* a second Add form under the list, only once the list is long enough to need scrolling back up */}
-      {mayAdd && fits.length >= 10 && addForm("bottom")}
+      {mayAdd && mode !== "not_vehicle" && fits.length >= 10 && addForm("bottom")}
       </div>
     </details>
   );

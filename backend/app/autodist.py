@@ -3241,15 +3241,10 @@ def _starter_description(brand: Optional[str], title: str, length, width, height
     items = []
     if b:
         items.append(f"<li>Brand: {_h.escape(b)}</li>")
-    items.append("<li>Condition: New</li>")
-    l, w, h = num(length), num(width), num(height)
-    if l and w and h:
-        items.append(f"<li>Package size: {l:g} x {w:g} x {h:g} in</li>")
-    wt = num(ship_lb)
-    if wt:
-        items.append(f"<li>Shipping weight: {wt:g} lb</li>")
+    # Condition is shown by the website from the product's own Condition field, and package size / shipping weight are
+    # kept on the product (shipping), so none of them go in the description.
     return (
-        f"<p>{_h.escape(title)}.</p><ul>{''.join(items)}</ul>"
+        f"<p>{_h.escape(title)}.</p>{'<ul>' + ''.join(items) + '</ul>' if items else ''}"
         "<p>Please confirm this part fits your machine before ordering.</p>"
     )
 
@@ -3270,6 +3265,46 @@ def _fill_descriptions(db: Session) -> int:
     for i in range(0, len(ups), 500):
         db.execute(text("update products set description = :d, updated_at = now() where id = :p"), ups[i:i + 500])
     return len(ups)
+
+
+# The starting descriptions used to list Condition, Package size and Shipping weight. The website now shows Condition from the product's
+# Condition field, and size/weight are shipping data, so these three lines are taken back out. Only those list lines are removed, only
+# on products made from the catalog; the rest of a description (including anything staff wrote) is left exactly as it is.
+_OLD_DESC_LINE = re.compile(r"<li[^>]*>\s*(?:condition|package size|shipping weight)\s*:[^<]*</li>\s*", re.I)
+_EMPTY_LIST = re.compile(r"<ul[^>]*>\s*</ul>\s*", re.I)
+_OLD_DESC_SQL = "p.description ~* '<li[^>]*>[[:space:]]*(condition|package size|shipping weight)[[:space:]]*:'"
+
+
+def _clean_descriptions(db: Session) -> int:
+    """Remove the Condition, Package size and Shipping weight list lines from descriptions of products made from the catalog.
+    Commits nothing; the caller does. Returns how many products changed. Safe to run again."""
+    rows = db.execute(
+        text(
+            "select p.id, p.description from supplier_product_links l join products p on p.id = l.product_id "
+            f"where l.supplier = :s and {_OLD_DESC_SQL}"
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    ups = []
+    for r in rows:
+        new = _EMPTY_LIST.sub("", _OLD_DESC_LINE.sub("", r.description or ""))
+        if new != (r.description or ""):
+            ups.append({"d": new, "p": r.id})
+    for i in range(0, len(ups), 500):
+        db.execute(text("update products set description = :d, updated_at = now() where id = :p"), ups[i:i + 500])
+    return len(ups)
+
+
+@router.post("/api/website-products/clean-descriptions")
+def api_website_products_clean_descriptions(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Take the Condition, Package size and Shipping weight lines out of the descriptions of products made from the catalog."""
+    try:
+        n = _clean_descriptions(db)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not clean the descriptions: {str(e)[:300]}")
+    return {"cleaned": n}
 
 
 @router.post("/api/website-products/fill-descriptions")
@@ -3549,6 +3584,13 @@ def api_website_products_preview(db: Session = Depends(get_db)):
         "missing_parts": int(missing or 0),
         "no_category": int(no_cat or 0),
         "no_description": int(db.execute(text("select count(*) from supplier_product_links l join products p on p.id = l.product_id where l.supplier = :s and coalesce(btrim(p.description), '') = ''"), {"s": SUPPLIER}).scalar() or 0),
+        "old_description_lines": int(
+            db.execute(
+                text(f"select count(*) from supplier_product_links l join products p on p.id = l.product_id where l.supplier = :s and {_OLD_DESC_SQL}"),
+                {"s": SUPPLIER},
+            ).scalar()
+            or 0
+        ),
         "photos_pending": None if pending is None else int(pending or 0),
         "state": {k: v for k, v in _prod_state.items()},
         "photos": {k: v for k, v in _photo_state.items()},

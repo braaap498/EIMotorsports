@@ -20,6 +20,7 @@ type Preview = {
   missing_parts: number;
   no_category: number;
   no_description: number;
+  old_description_lines: number;
   photos_pending: number | null;
   state: State;
   photos: PhotoState;
@@ -134,6 +135,20 @@ export default function AutodistProducts() {
     }
   }
 
+  async function cleanDescriptions() {
+    setErr(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const r = await api<{ cleaned: number }>("/autodist/api/website-products/clean-descriptions", { method: "POST" });
+      setNote(`Removed the condition, size and weight lines from ${n(r.cleaned)} description${r.cleaned === 1 ? "" : "s"}.`);
+      await loadPreview();
+    } catch (e) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  }
+
   async function storePhotos() {
     setErr(null);
     try {
@@ -200,6 +215,17 @@ export default function AutodistProducts() {
           </span>
           <button type="button" className={btnCls} disabled={running || busy} onClick={() => void fillDescriptions()}>
             Add starting descriptions
+          </button>
+        </div>
+      )}
+      {pv && pv.old_description_lines > 0 && (
+        <div className="flex max-w-xl items-center justify-between gap-3 rounded border border-amber-300 bg-amber-50 p-3">
+          <span>
+            {n(pv.old_description_lines)} product{pv.old_description_lines === 1 ? "" : "s"} made here still {pv.old_description_lines === 1 ? "has" : "have"} Condition, Package size or
+            Shipping weight lines in the description. The website now shows Condition from the product, and weight and size are kept for shipping.
+          </span>
+          <button type="button" className={btnCls} disabled={running || busy} onClick={() => void cleanDescriptions()}>
+            Remove those lines
           </button>
         </div>
       )}

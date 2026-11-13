@@ -61,9 +61,9 @@ async function Product({ params }: { params: Promise<{ slug: string }> }) {
         {p.price && <p className="mt-2 text-2xl">${p.price}</p>}
         <AddToCart productId={p.id} slug={p.slug} price={p.price} available={p.available} backordered={p.backordered} expectedDate={p.expected_date} daysUntil={p.days_until} />
         <p className="mt-2 text-sm text-gray-500">
-          {p.condition ? `${p.condition} · ` : ""}
           {p.part_number ? `Part # ${p.part_number} · ` : ""}SKU {p.sku}
         </p>
+        {p.condition && <p className="text-sm text-gray-500">Condition: {p.condition}</p>}
 
         {p.specifics.length > 0 && (
           <dl className="mt-6 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
