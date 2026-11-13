@@ -436,7 +436,7 @@ function Reorder({
                   <div>
                     <b>PO {po.po_number}</b> to <b>{po.vendor_name}</b> · {po.lines.length} line{po.lines.length === 1 ? "" : "s"} · <b>{money(po.total)}</b>
                     {po.po_type === "drop_ship" && <span className="ml-2"><Badge tone="amber">drop ship</Badge></span>}
-                    {po.po_type === "stock_drop_ship" && <span className="ml-2"><Badge tone="amber">inventory drop ship</Badge></span>}
+                    {po.po_type === "stock_drop_ship" && <span className="ml-2"><Badge tone="amber">Stock Drop Ship</Badge></span>}
                   </div>
                   {po.missing_part_numbers && po.missing_part_numbers.length > 0 && (
                     <Notice kind="error">
@@ -659,7 +659,7 @@ function CreatePo({
                   setShipTo(defaultShip);
                 }}
               />{" "}
-              Inventory drop ship (ordered the drop ship way, comes to our shelf)
+              Stock Drop Ship (ordered the drop ship way, comes to our shelf)
             </label>
           </div>
           {poType === "stock_drop_ship" && <div className="text-xs text-gray-600">Received into stock like a stock PO: it shows in Inventory › Receive and its parts are marked Backordered. Change Ship To below if it ships somewhere other than us.</div>}
@@ -887,7 +887,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                 <td className="px-3 py-2 font-semibold">
                   {r.po_number}
                   {r.po_type === "drop_ship" && <span className="ml-2 font-normal"><Badge tone="blue">drop ship</Badge></span>}
-                  {r.po_type === "stock_drop_ship" && <span className="ml-2 font-normal"><Badge tone="blue">inventory drop ship</Badge></span>}
+                  {r.po_type === "stock_drop_ship" && <span className="ml-2 font-normal"><Badge tone="blue">Stock Drop Ship</Badge></span>}
                 </td>
                 <td className="whitespace-nowrap px-3 py-2">{new Date(r.created_at).toLocaleDateString()}</td>
                 <td className="px-3 py-2">{r.vendor_name}</td>
@@ -964,7 +964,7 @@ function History({ dists, reloadKey, active, setFlash }: { dists: Dist[]; reload
                 <div className="text-xs font-semibold uppercase text-gray-500">Ship to</div>
                 <div className="whitespace-pre-line text-gray-600">{open.ship_to}</div>
                 {open.po_type === "drop_ship" && <div className="mt-1"><Badge tone="blue">drop ship</Badge></div>}
-                {open.po_type === "stock_drop_ship" && <div className="mt-1"><Badge tone="blue">inventory drop ship</Badge></div>}
+                {open.po_type === "stock_drop_ship" && <div className="mt-1"><Badge tone="blue">Stock Drop Ship</Badge></div>}
                 {open.supplier_order_number && <div className="mt-1 text-xs text-gray-600">Distributor order {open.supplier_order_number}</div>}
                 {open.supplier_tracking && open.supplier_tracking.length > 0 && (
                   <div className="mt-1 text-xs text-gray-600">
