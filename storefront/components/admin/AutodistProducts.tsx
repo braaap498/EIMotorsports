@@ -21,6 +21,7 @@ type Preview = {
   no_category: number;
   no_description: number;
   old_description_lines: number;
+  wrong_labels: number;
   photos_pending: number | null;
   state: State;
   photos: PhotoState;
@@ -135,6 +136,23 @@ export default function AutodistProducts() {
     }
   }
 
+  async function fixLabels() {
+    setErr(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const r = await api<{ fixed: number; left: number; left_with_listings: number }>("/autodist/api/website-products/fix-labels", { method: "POST" });
+      setNote(
+        `Custom label changed to the Automatic SKU on ${n(r.fixed)} product${r.fixed === 1 ? "" : "s"}.` +
+          (r.left ? ` ${n(r.left)} left unchanged (${n(r.left_with_listings)} have eBay listings, the rest would clash with another label).` : "")
+      );
+      await loadPreview();
+    } catch (e) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  }
+
   async function cleanDescriptions() {
     setErr(null);
     setNote(null);
@@ -215,6 +233,17 @@ export default function AutodistProducts() {
           </span>
           <button type="button" className={btnCls} disabled={running || busy} onClick={() => void fillDescriptions()}>
             Add starting descriptions
+          </button>
+        </div>
+      )}
+      {pv && pv.wrong_labels > 0 && (
+        <div className="flex max-w-xl items-center justify-between gap-3 rounded border border-amber-300 bg-amber-50 p-3">
+          <span>
+            {n(pv.wrong_labels)} product{pv.wrong_labels === 1 ? "" : "s"} made here {pv.wrong_labels === 1 ? "has" : "have"} the manufacturer number as the
+            custom label. It should be the Automatic SKU. Products with eBay listings are left as they are.
+          </span>
+          <button type="button" className={btnCls} disabled={running || busy} onClick={() => void fixLabels()}>
+            Change to Automatic SKU
           </button>
         </div>
       )}

@@ -3378,8 +3378,7 @@ def _add_distributor_parts(db: Session) -> dict:
             """
             with t as (
               select p.id as product_id,
-                     case when m <> '' and m !~* 'xx' and length(m) <= 50 then m
-                          when k <> '' and k !~* 'xx' and length(k) <= 50 then k end as tok
+                     case when k <> '' and k !~* 'xx' and length(k) <= 50 then k end as tok
               from supplier_product_links l
               join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku
               join products p on p.id = l.product_id
@@ -3398,6 +3397,63 @@ def _add_distributor_parts(db: Session) -> dict:
         {"s": SUPPLIER},
     ).rowcount
     return {"parts_added": int(added or 0), "labels_set": int(labelled or 0)}
+
+
+# ---------------------------------------------------------------- custom labels: the Automatic SKU
+# The custom label of a product made from the catalog is the Automatic Distributors SKU. Earlier batches used the manufacturer number.
+# Only a label that is exactly that manufacturer number is changed (a label someone edited is left alone), never one that would
+# clash with another product's label, and never a product that already has eBay listings (their labels would stop matching;
+# change those on the product's kit screen, which sends the new label to each listing).
+_LABEL_FIX_FROM = """
+    from supplier_product_links l
+    join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku
+    join products p on p.id = l.product_id
+    cross join lateral (select regexp_replace(coalesce(s.mfr_number, ''), '[^A-Za-z0-9._-]', '', 'g') as m,
+                               regexp_replace(coalesce(s.sku, ''), '[^A-Za-z0-9._-]', '', 'g') as k) x
+    where l.supplier = :s and x.m <> '' and x.k <> '' and lower(x.m) <> lower(x.k)
+      and lower(btrim(p.custom_label_sku)) = lower(x.m)
+      and x.k !~* 'xx' and length(x.k) <= 50
+"""
+
+
+def _fix_labels(db: Session) -> dict:
+    """Change labels that are the manufacturer number to the Automatic SKU. Commits nothing; the caller does."""
+    fixed = db.execute(
+        text(
+            f"""
+            with t as (
+              select p.id as product_id, x.k as tok,
+                     exists (select 1 from channel_listings cl where cl.product_id = p.id) as listed
+              {_LABEL_FIX_FROM}
+            ), u as (
+              select lower(tok) as key from t group by lower(tok) having count(*) = 1
+            )
+            update products p set custom_label_sku = t.tok, updated_at = now()
+            from t join u on u.key = lower(t.tok)
+            where p.id = t.product_id and not t.listed
+              and not exists (select 1 from products o where lower(o.custom_label_sku) = lower(t.tok) and o.id <> p.id)
+            """
+        ),
+        {"s": SUPPLIER},
+    ).rowcount
+    left = db.execute(text(f"select count(*) {_LABEL_FIX_FROM}"), {"s": SUPPLIER}).scalar() or 0
+    listed = db.execute(
+        text(f"select count(*) {_LABEL_FIX_FROM} and exists (select 1 from channel_listings cl where cl.product_id = p.id)"),
+        {"s": SUPPLIER},
+    ).scalar() or 0
+    return {"fixed": int(fixed or 0), "left": int(left), "left_with_listings": int(listed)}
+
+
+@router.post("/api/website-products/fix-labels")
+def api_website_products_fix_labels(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Change the custom label of products made from the catalog from the manufacturer number to the Automatic SKU."""
+    try:
+        res = _fix_labels(db)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not fix the labels: {str(e)[:300]}")
+    return res
 
 
 # ---------------------------------------------------------------- photos into storage
@@ -3591,6 +3647,7 @@ def api_website_products_preview(db: Session = Depends(get_db)):
             ).scalar()
             or 0
         ),
+        "wrong_labels": int(db.execute(text(f"select count(*) {_LABEL_FIX_FROM}"), {"s": SUPPLIER}).scalar() or 0),
         "photos_pending": None if pending is None else int(pending or 0),
         "state": {k: v for k, v in _prod_state.items()},
         "photos": {k: v for k, v in _photo_state.items()},
