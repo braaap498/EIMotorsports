@@ -407,7 +407,7 @@ def _specifics_of(db: Session, product_id: int, brand: str, mpn: str) -> list[di
             specs.append({"name": n, "values": [v]})
     have = {s["name"].lower() for s in specs}
     if brand and "brand" not in have and len(brand) <= 65:
-        specs.append({"name": "Brand", "values": [brand]})
+        specs.insert(0, {"name": "Brand", "values": [brand]})   # Brand is always the first row
     if mpn and "manufacturer part number" not in have and len(mpn) <= 65:
         specs.append({"name": "Manufacturer Part Number", "values": [mpn]})
     return specs[:100]
@@ -602,7 +602,7 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
         _remember_brand(db, r.product_id, d["brand"])
     specs_now = list(d.get("item_specifics") or [])
     if d.get("brand") and not any(str(x.get("name", "")).lower() == "brand" for x in specs_now) and len(d["brand"]) <= 65:
-        specs_now.append({"name": "Brand", "values": [d["brand"]]})
+        specs_now.insert(0, {"name": "Brand", "values": [d["brand"]]})   # Brand is always the first row
         d["item_specifics"] = specs_now
     d["site"] = ex.get("site") or ""
     if cat_item and cat_store and cat_store.lower() != row.store.lower():
