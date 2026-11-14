@@ -122,17 +122,18 @@ function CopyEditor({ id }: { id: number }) {
     setMsg(null);
     setPv(null);
     try {
-      const r = await api<{ store: string; model_item_id: string; category_name: string; hint_specifics: Hint[]; compat_note?: string; category_item_id?: string; category_store?: string }>(`/ebay-draft/${id}/store`, {
+      const r = await api<{ store: string; model_item_id: string; category_name: string; hint_specifics: Hint[]; compat_note?: string; category_item_id?: string; category_store?: string; brand?: string }>(`/ebay-draft/${id}/store`, {
         method: "POST",
         body: { store: pickStore, ...(modelItem.trim() ? { model_item_id: modelItem.trim() } : {}) },
       });
       fill(await api<Copy>(`/ebay-copy/${id}`));
       setHints(r.hint_specifics);
+      const brandNote = r.brand ? ` Brand: ${r.brand}.` : " No brand was found for this product, so add a Brand item specific by hand (eBay requires it).";
       setMsg({
-        kind: "success",
-        text: r.category_item_id
+        kind: r.brand ? "success" : "error",
+        text: (r.category_item_id
           ? `Set up for ${r.store}: shipping and policies from eBay item ${r.model_item_id}, category${r.category_name ? ` ${r.category_name}` : ""} from item ${r.category_item_id} (${r.category_store}). ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.`
-          : `Set up for ${r.store}, using eBay item ${r.model_item_id} as the model${r.category_name ? ` (${r.category_name})` : ""}. ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.`,
+          : `Set up for ${r.store}, using eBay item ${r.model_item_id} as the model${r.category_name ? ` (${r.category_name})` : ""}. ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.`) + brandNote,
       });
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });

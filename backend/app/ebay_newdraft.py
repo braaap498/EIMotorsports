@@ -351,8 +351,12 @@ def _brand_for(db: Session, product_id: int) -> str:
     if not brand:
         try:
             raw = db.execute(
-                text("select s.manufacturer from supplier_product_links l join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku "
-                     "where l.product_id = :p and coalesce(btrim(s.manufacturer), '') <> '' order by l.supplier_sku limit 1"),
+                text("select m from ("
+                     " select s.manufacturer as m, 1 as o from supplier_product_links l join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku "
+                     "  where l.product_id = :p"
+                     " union all"
+                     " select s.manufacturer, 2 from product_kit_parts k join supplier_items s on s.id = k.supplier_item_id where k.product_id = :p"
+                     ") x where coalesce(btrim(m), '') <> '' order by o limit 1"),
                 {"p": product_id},
             ).scalar()
             if raw:
@@ -613,6 +617,7 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
         "store": row.store, "model_item_id": item, "category_id": d.get("category_id", ""), "category_name": d.get("category_name", ""),
         "hint_specifics": hints[:40], "tried": len(cands), "compat_note": compat_note,
         "category_item_id": d.get("category_item_id", ""), "category_store": cat_store or row.store,
+        "brand": d.get("brand") or "",
     }
 
 
