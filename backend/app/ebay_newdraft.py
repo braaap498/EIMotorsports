@@ -194,7 +194,7 @@ def convert_fitment(db: Session, product_id: int, rows=None, names=_ebay_names, 
         notes.append(f"{no_year} fitment {'entry has' if no_year == 1 else 'entries have'} no year, and eBay needs one, so {'it was' if no_year == 1 else 'they were'} left out.")
     for n, ((mid, make, model), g) in enumerate(sorted(groups.items(), key=lambda kv: (str(kv[0][1]), str(kv[0][2])))):
         if n >= MAX_MODELS:
-            notes.append(f"Only the first {MAX_MODELS} models were converted; the rest were left out.")
+            notes.append(f"Only the first {MAX_MODELS} models were converted here; choosing the store redoes the table with eBay's own list and no model limit.")
             break
         found = None
         for mk, mo in names(db, mid, make, model):
@@ -442,7 +442,7 @@ def create(body: CreateIn, db: Session = Depends(get_db), user: AuthUser = Depen
 # --------------------------------------------------------------------------
 class StoreIn(BaseModel):
     store: str
-    model_item_id: Optional[str] = None
+    model_item_id: Optional[str] = None   # an eBay item number from ANY of our stores, used for the category
 
 
 def _model_candidates(db: Session, store: str, product_id: int, category_id) -> list[str]:
@@ -482,15 +482,39 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
     row = _store_row(db, body.store)
     d = dict(r.data or {})
 
+    # The item typed in only supplies the CATEGORY, and may belong to any of our stores. Shipping, returns and policies always come
+    # from a live listing in the store chosen here.
+    cat_item = None
     if body.model_item_id and body.model_item_id.strip():
         mid = body.model_item_id.strip()
         if not ITEM_RE.fullmatch(mid):
             raise HTTPException(400, "That does not look like an eBay item number.")
-        cands = [mid]
-    else:
-        cands = _model_candidates(db, row.store, r.product_id, d.get("product_category_id"))
+        cat_item = mid
+    cands = _model_candidates(db, row.store, r.product_id, d.get("product_category_id"))
+    cat_src = cat_ex = cat_store = None
+    if cat_item:
+        known = db.execute(
+            text(f"select cl.store from channel_listings cl where {_DIG} = :i order by cl.id desc limit 1"), {"i": cat_item}).scalar()
+        others = [x.store for x in db.execute(text("select store from ebay_accounts where refresh_token_enc is not null order by store")).all()]
+        order = [row.store] + [o for o in others if o.lower() != row.store.lower()]
+        if known:
+            order = [known] + [o for o in order if o.lower() != known.lower()]
+        why = ""
+        for st in order:
+            try:
+                cat_src = _read_item(db, st, cat_item)
+                cat_ex = _extras(db, st, cat_item)
+                cat_store = st
+                break
+            except HTTPException as e:
+                why = f"{st}: {e.detail}"
+                continue
+        if not cat_src or not cat_ex or not cat_ex.get("category_id"):
+            raise HTTPException(409, f"Item {cat_item} could not be read from any connected store ({why or 'it has no category'}).")
+        if cat_store.lower() == row.store.lower():
+            cands = [cat_item]   # same store: the item also supplies the shipping and policy settings, as before
     if not cands:
-        raise HTTPException(409, f"{row.store} has no active listing to take the category and shipping settings from. Type an eBay item number to use as the model.")
+        raise HTTPException(409, f"{row.store} has no active listing to take the shipping settings from. Type an item number from {row.store} to use as the model.")
 
     chosen, last = None, ""
     for item in cands:
@@ -525,6 +549,11 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
     if not d.get("condition_id") and ex.get("condition_id"):
         d["condition_id"] = ex["condition_id"]
     d["model_item_id"] = item
+    if cat_item and cat_store and cat_store.lower() != row.store.lower():
+        d["category_id"] = cat_ex.get("category_id") or d.get("category_id", "")
+        d["category_name"] = cat_ex.get("category_name") or ""
+        d["category2_id"] = ""
+        d["category_item_id"] = cat_item
 
     compat_note = ""
     if not d.get("compat_edited") and d.get("category_id"):
@@ -538,7 +567,8 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
             compat_note = f"eBay's vehicle list could not be read ({getattr(e, 'detail', None) or getattr(e, 'message', None) or e}); the table made from the saved eBay tables is kept."
 
     have = {s["name"].lower() for s in d.get("item_specifics", [])}
-    hints = [{"name": s["name"], "value": "; ".join(s["values"])} for s in src["item_specifics"]
+    hint_src = cat_src if (cat_item and cat_store and cat_store.lower() != row.store.lower()) else src
+    hints = [{"name": s["name"], "value": "; ".join(s["values"])} for s in hint_src["item_specifics"]
              if s.get("name") and s.get("values") and s["name"].lower() not in have]
     db.execute(
         text("update ebay_listing_copies set store = :s, data = cast(:d as jsonb), updated_at = now() where id = :i"),
@@ -548,4 +578,5 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
     return {
         "store": row.store, "model_item_id": item, "category_id": d.get("category_id", ""), "category_name": d.get("category_name", ""),
         "hint_specifics": hints[:40], "tried": len(cands), "compat_note": compat_note,
+        "category_item_id": d.get("category_item_id", ""), "category_store": cat_store or row.store,
     }

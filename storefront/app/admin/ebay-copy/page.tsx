@@ -119,13 +119,18 @@ function CopyEditor({ id }: { id: number }) {
     setMsg(null);
     setPv(null);
     try {
-      const r = await api<{ store: string; model_item_id: string; category_name: string; hint_specifics: Hint[]; compat_note?: string }>(`/ebay-draft/${id}/store`, {
+      const r = await api<{ store: string; model_item_id: string; category_name: string; hint_specifics: Hint[]; compat_note?: string; category_item_id?: string; category_store?: string }>(`/ebay-draft/${id}/store`, {
         method: "POST",
         body: { store: pickStore, ...(modelItem.trim() ? { model_item_id: modelItem.trim() } : {}) },
       });
       fill(await api<Copy>(`/ebay-copy/${id}`));
       setHints(r.hint_specifics);
-      setMsg({ kind: "success", text: `Set up for ${r.store}, using eBay item ${r.model_item_id} as the model${r.category_name ? ` (${r.category_name})` : ""}. ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.` });
+      setMsg({
+        kind: "success",
+        text: r.category_item_id
+          ? `Set up for ${r.store}: shipping and policies from eBay item ${r.model_item_id}, category${r.category_name ? ` ${r.category_name}` : ""} from item ${r.category_item_id} (${r.category_store}). ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.`
+          : `Set up for ${r.store}, using eBay item ${r.model_item_id} as the model${r.category_name ? ` (${r.category_name})` : ""}. ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.`,
+      });
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -253,7 +258,7 @@ function CopyEditor({ id }: { id: number }) {
               </select>
             </label>
             <label className="block">
-              <span className="mb-1 block font-semibold">Model it on item # (optional)</span>
+              <span className="mb-1 block font-semibold">Take category from item # (any store, optional)</span>
               <input className={inputCls} value={modelItem} disabled={off} placeholder="e.g. 177464505625" onChange={(e) => setModelItem(e.target.value)} />
             </label>
             <button type="button" className={btnCls} disabled={off || !pickStore} onClick={() => void chooseStore()}>

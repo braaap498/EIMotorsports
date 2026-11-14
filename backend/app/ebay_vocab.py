@@ -203,7 +203,9 @@ def convert_with_ebay(db: Session, product_id: int, category_id: str, rows=None,
     Make and Model are matched with eBay's lists (the spellings the compat conversion mapped to our model first, then ours);
     Year must be one eBay lists for that make + model. Other properties (Trim, Engine) are not set. A model or year eBay
     does not list is left out and named in the notes."""
-    from app.ebay_newdraft import MAX_COMPAT_ROWS, MAX_MODELS, _ebay_names, _fitment_rows, _years_text
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.ebay_newdraft import MAX_COMPAT_ROWS, _ebay_names, _fitment_rows, _years_text
     rows = _fitment_rows(db, product_id) if rows is None else rows
     names = names or _ebay_names
     vals = vals or values
@@ -226,10 +228,9 @@ def convert_with_ebay(db: Session, product_id: int, category_id: str, rows=None,
     makes = vals(category_id, make_name, {})
     out: list[dict] = []
     seen: set = set()
-    for n, ((mid, make, model), years) in enumerate(sorted(groups.items(), key=lambda kv: (str(kv[0][1]), str(kv[0][2])))):
-        if n >= MAX_MODELS:
-            notes.append(f"Only the first {MAX_MODELS} models were converted; the rest were left out.")
-            break
+    # pass 1: match each of our models to eBay's make + model names (one list per make, cached)
+    todo = []
+    for (mid, make, model), years in sorted(groups.items(), key=lambda kv: (str(kv[0][1]), str(kv[0][2]))):
         cands = names(db, mid, make, model)
         ebay_make = _pick(makes, [m for m, _ in cands])
         if not ebay_make:
@@ -240,7 +241,20 @@ def convert_with_ebay(db: Session, product_id: int, category_id: str, rows=None,
         if not ebay_model:
             notes.append(f"{make} {model}: eBay has no model with that name under {ebay_make}, so it was left out.")
             continue
-        ok_years = set(vals(category_id, year_name, {make_name: ebay_make, model_name: ebay_model}))
+        todo.append((make, model, years, ebay_make, ebay_model))
+    # pass 2: the years eBay lists for each model, several at a time (answers are cached for hours)
+    def year_list(t):
+        try:
+            return set(vals(category_id, year_name, {make_name: t[3], model_name: t[4]}))
+        except Exception as e:  # one model failing must not lose the rest
+            return e
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        year_sets = list(pool.map(year_list, todo))
+    for (make, model, years, ebay_make, ebay_model), ok_years in zip(todo, year_sets):
+        if isinstance(ok_years, Exception):
+            notes.append(f"{make} {model}: eBay's year list could not be read ({ok_years}), so it was left out.")
+            continue
         keep = sorted(y for y in years if str(y) in ok_years)
         missing = sorted(y for y in years if str(y) not in ok_years)
         for y in keep:
