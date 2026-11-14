@@ -8,6 +8,7 @@ import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../components/ad
 import DescriptionEditor from "../../../components/admin/DescriptionEditor";
 import { sanitizeHtml } from "../../../components/admin/sanitizeHtml";
 import { shrink } from "../../../components/admin/PhotosPanel";
+import CompatEditor, { type CompatRow } from "../../../components/admin/CompatEditor";
 
 type Variation = { sku: string; price: string | null; quantity_available: number; quantity_sold: number; specifics: string };
 type Item = {
@@ -30,7 +31,16 @@ type Item = {
   item_specifics: { name: string; values: string[] }[];
   specifics_editable: boolean;
   condition: { id: string; name: string; note: string };
-  compatibility: { count: number; rows: Record<string, string>[]; truncated: boolean };
+  category_id?: string;
+  category_name?: string;
+  compatibility: {
+    count: number;
+    rows: Record<string, string>[];
+    truncated: boolean;
+    list: CompatRow[]; // the complete list as eBay has it
+    editable: boolean;
+    reason: string | null;
+  };
   photos: { url: string }[];
   photos_editable: boolean;
   editable: boolean;
@@ -49,6 +59,7 @@ type DraftChanges = {
   variations?: { sku: string; price?: string; quantity?: number }[];
   photos?: { url?: string; key?: string; thumb?: string }[];
   item_specifics?: { name: string; values: string[] }[];
+  compatibility?: CompatRow[];
 };
 type Diff = { field: string; before: string | null; after: string; note?: string };
 type Preview = {
@@ -81,8 +92,9 @@ const specSig = (list: { name: string; value: string }[]) =>
 const norm = (s: string) => s.replace(/\r\n/g, "\n").trim();
 const photoId = (p: PhotoEdit) => (p.url ? p.url : "key:" + p.key);
 // One string that stands for everything on the form, so "has anything changed since it was saved" is a comparison.
-const sigOf = (v: { title: string; description: string; price: string; qty: string; sku: string; vars: Record<string, VarEdit>; photos: PhotoEdit[]; specs: SpecEdit[] }) =>
-  JSON.stringify([v.title, norm(v.description), v.price, v.qty, v.sku, Object.keys(v.vars).sort().map((k) => [k, v.vars[k].price, v.vars[k].qty]), v.photos.map(photoId), specSig(v.specs)]);
+const compatSig = (rows: CompatRow[]) => JSON.stringify(rows.map((r) => [[...r.pairs].sort(), r.notes.trim()]).sort());
+const sigOf = (v: { title: string; description: string; price: string; qty: string; sku: string; vars: Record<string, VarEdit>; photos: PhotoEdit[]; specs: SpecEdit[]; compat: CompatRow[] }) =>
+  JSON.stringify([v.title, norm(v.description), v.price, v.qty, v.sku, Object.keys(v.vars).sort().map((k) => [k, v.vars[k].price, v.vars[k].qty]), v.photos.map(photoId), specSig(v.specs), compatSig(v.compat)]);
 
 // Read in an inert document, so nothing in the description can load or run while we compare.
 const inert = (h: string) => new DOMParser().parseFromString(h, "text/html").body.innerHTML.replace(/\s+/g, "");
@@ -103,6 +115,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
   const [vars, setVars] = useState<Record<string, VarEdit>>({});
   const [photos, setPhotos] = useState<PhotoEdit[]>([]);
   const [specs, setSpecs] = useState<SpecEdit[]>([]);
+  const [compat, setCompat] = useState<CompatRow[]>([]);
   const [showLib, setShowLib] = useState(false);
   const [libQ, setLibQ] = useState("");
   const [libResults, setLibResults] = useState<Found[] | null>(null);
@@ -132,6 +145,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
       ? d.photos.map((p, n) => (p.url ? { id: `e${n}`, thumb: p.url, url: p.url } : { id: "k:" + p.key, thumb: p.thumb ?? "", key: p.key }))
       : i.photos.map((p, n) => ({ id: `e${n}`, thumb: p.url, url: p.url }));
     const vSpecs: SpecEdit[] = (d?.item_specifics ?? i.item_specifics).map((x, n) => ({ id: `s${n}`, name: x.name, value: x.values.join("; ") }));
+    const vCompat: CompatRow[] = d?.compatibility ?? i.compatibility.list;
     shownId.current = i.item_id;
     setItem(i);
     setTitle(vTitle);
@@ -142,8 +156,9 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
     setVars(vVars);
     setPhotos(vPhotos);
     setSpecs(vSpecs);
+    setCompat(vCompat);
     setPhotoMsg("");
-    setBaseSig(sigOf({ title: vTitle, description: vDesc, price: vPrice, qty: vQty, sku: vSku, vars: vVars, photos: vPhotos, specs: vSpecs }));
+    setBaseSig(sigOf({ title: vTitle, description: vDesc, price: vPrice, qty: vQty, sku: vSku, vars: vVars, photos: vPhotos, specs: vSpecs, compat: vCompat }));
   }
 
   async function loadLog(s: string, id: string) {
@@ -196,6 +211,8 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
     item && item.specifics_editable && specsChanged
       ? { item_specifics: specs.filter((x) => x.name.trim() || x.value.trim()).map((x) => ({ name: x.name, values: splitValues(x.value) })) }
       : {};
+  const compatChanged = !!item && compatSig(compat) !== compatSig(item.compatibility.list);
+  const compatPart = () => (item && item.compatibility.editable && compatChanged ? { compatibility: compat } : {});
   const photosChanged = !!item && photos.map(photoId).join("|") !== item.photos.map((p) => p.url).join("|");
   const photoPart = () =>
     item && item.photos_editable && photosChanged ? { photos: photos.map((p) => (p.url ? { url: p.url } : { key: p.key })) } : {};
@@ -211,9 +228,10 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
           .filter((v, i) => v.price !== (item.variations[i].price ?? "")),
         ...photoPart(),
         ...specsPart(),
+        ...compatPart(),
       };
     }
-    return { title, description, price, ...photoPart(), ...specsPart() }; // quantity is never sent from here: the website owns stock
+    return { title, description, price, ...photoPart(), ...specsPart(), ...compatPart() }; // quantity is never sent from here: the website owns stock
   }
 
   const dirty =
@@ -221,6 +239,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
     (title !== item.title ||
       (item.photos_editable && photosChanged) ||
       (item.specifics_editable && specsChanged) ||
+      (item.compatibility.editable && compatChanged) ||
       norm(description) !== norm(item.description) ||
       (item.has_variations
         ? item.variations.some((v) => (vars[v.sku]?.price ?? "") !== (v.price ?? ""))
@@ -228,7 +247,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
 
   const touch = () => setDifferences([]);
 
-  const unsaved = !!item && baseSig !== sigOf({ title, description, price, qty, sku, vars, photos, specs });
+  const unsaved = !!item && baseSig !== sigOf({ title, description, price, qty, sku, vars, photos, specs, compat });
 
   // Everything on the form, for saving on the website (the whole state, so it comes back exactly as left).
   function draftChanges() {
@@ -240,6 +259,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
       Object.assign(d, { price });
     }
     if (item.photos_editable) d.photos = photos.map((p) => (p.url ? { url: p.url, thumb: p.thumb } : { key: p.key, thumb: p.thumb }));
+    if (item.compatibility.editable) d.compatibility = compat;
     if (item.specifics_editable) d.item_specifics = specs.filter((x) => x.name.trim() || x.value.trim()).map((x) => ({ name: x.name, values: splitValues(x.value) }));
     return d;
   }
@@ -249,7 +269,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
     const r = await api<{ draft: Item["draft"] }>("/ebay-edit/draft", { method: "PUT", body: { store, item_id: item.item_id, changes: draftChanges() } });
     const next = { ...item, draft: r.draft };
     setItem(next);
-    setBaseSig(sigOf({ title, description, price, qty, sku, vars, photos, specs }));
+    setBaseSig(sigOf({ title, description, price, qty, sku, vars, photos, specs, compat }));
     return next;
   }
 
@@ -699,7 +719,7 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
               </button>
             </div>
             <p className="text-xs text-gray-500">
-              The whole list is replaced when sent. Separate several values with a semicolon (for example: Cast; Single Ring). Condition and compatibility are below and cannot be changed here yet.
+              The whole list is replaced when sent. Separate several values with a semicolon (for example: Cast; Single Ring). Condition is below and cannot be changed here yet.
               {!item.specifics_editable && item.editable && " Item specifics on a listing with variations cannot be changed here yet."}
             </p>
             <div className="space-y-2">
@@ -747,46 +767,25 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
             </div>
           </div>
 
-          <details className="rounded border border-gray-200 bg-white p-4 text-sm">
+          <details className="rounded border border-gray-200 bg-white p-4 text-sm" open={compatChanged || item.compatibility.count === 0}>
             <summary className="cursor-pointer font-semibold">
-              Compatibility ({item.compatibility.count} vehicle{item.compatibility.count === 1 ? "" : "s"}, read only for now)
+              Compatible vehicles ({compat.length}
+              {compatChanged ? `, was ${item.compatibility.count} on eBay` : ""})
             </summary>
-            {item.compatibility.rows.length === 0 ? (
-              <p className="mt-2 text-xs text-gray-500">
-                {item.compatibility.count > 0 ? "eBay reports a compatibility list but did not return its rows." : "This listing has no compatibility list."}
-              </p>
-            ) : (
-              <div className="mt-2 overflow-x-auto">
-                {(() => {
-                  const cols: string[] = Array.from(new Set<string>(item.compatibility.rows.flatMap((r) => Object.keys(r)))).sort((x, y) =>
-                    x === "Notes" ? 1 : y === "Notes" ? -1 : 0,
-                  );
-                  return (
-                    <table className="w-full text-left text-xs">
-                      <thead className="uppercase text-gray-500">
-                        <tr>
-                          {cols.map((c) => (
-                            <th key={c} className="py-1 pr-3">{c}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100">
-                        {item.compatibility.rows.map((r, i) => (
-                          <tr key={i}>
-                            {cols.map((c) => (
-                              <td key={c} className="py-1 pr-3">{r[c] ?? ""}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  );
-                })()}
-                {item.compatibility.truncated && (
-                  <p className="mt-2 text-xs text-gray-500">Showing the first {item.compatibility.rows.length} of {item.compatibility.count}.</p>
-                )}
-              </div>
-            )}
+            <div className="mt-3">
+              <CompatEditor
+                categoryId={item.category_id ?? ""}
+                rows={compat}
+                baseline={item.compatibility.list}
+                disabled={busy !== ""}
+                lockedReason={item.compatibility.editable ? null : item.compatibility.reason || item.not_editable_reason}
+                onChange={(r) => {
+                  setCompat(r);
+                  touch();
+                }}
+              />
+              {item.compatibility.truncated && <p className="mt-2 text-xs text-gray-500">eBay returned {item.compatibility.list.length} rows.</p>}
+            </div>
           </details>
 
           {bar}

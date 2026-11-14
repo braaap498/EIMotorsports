@@ -51,6 +51,144 @@ router = APIRouter(prefix="/ebay-copy", tags=["admin-ebay-copy"], dependencies=[
 NO_TABLE = "Copies cannot be stored yet. Run sql/ebay_listing_copies.sql in Supabase, then try again."
 
 
+
+# --------------------------------------------------------------------------
+# shipping, handling and returns for sellers who use the older way (no business policies)
+# --------------------------------------------------------------------------
+def _tx(el, tag: str) -> str:
+    return (el.findtext(f"{NS}{tag}") or "").strip() if el is not None else ""
+
+
+def _terms_from_item(item) -> dict:
+    """The shipping services, return rules, payment methods and ship-to list of a live listing, read from GetItem.
+    Only fields that can be sent again are kept (no delivery estimates or display texts)."""
+    shipping: dict = {}
+    sd = item.find(f"{NS}ShippingDetails")
+    if sd is not None:
+        services = []
+        for o in sd.findall(f"{NS}ShippingServiceOptions"):
+            svc = _tx(o, "ShippingService")
+            if svc:
+                services.append({"priority": _tx(o, "ShippingServicePriority") or str(len(services) + 1), "service": svc,
+                                 "cost": _tx(o, "ShippingServiceCost"), "additional": _tx(o, "ShippingServiceAdditionalCost"),
+                                 "free": _tx(o, "FreeShipping").lower() == "true"})
+        intl = []
+        for o in sd.findall(f"{NS}InternationalShippingServiceOption"):
+            svc = _tx(o, "ShippingService")
+            if svc:
+                intl.append({"priority": _tx(o, "ShippingServicePriority") or str(len(intl) + 1), "service": svc,
+                             "cost": _tx(o, "ShippingServiceCost"), "additional": _tx(o, "ShippingServiceAdditionalCost"),
+                             "ship_to": [(x.text or "").strip() for x in o.findall(f"{NS}ShipToLocation") if (x.text or "").strip()]})
+        shipping = {"type": _tx(sd, "ShippingType"), "services": services, "international": intl,
+                    "excluded": [(x.text or "").strip() for x in sd.findall(f"{NS}ExcludeShipToLocation") if (x.text or "").strip()]}
+    returns: dict = {}
+    rp = item.find(f"{NS}ReturnPolicy")
+    if rp is not None:
+        for key, tag in (("accepted", "ReturnsAcceptedOption"), ("within", "ReturnsWithinOption"), ("paid_by", "ShippingCostPaidByOption"),
+                         ("refund", "RefundOption"), ("restocking", "RestockingFeeValueOption"), ("description", "Description")):
+            v = _tx(rp, tag)
+            if v:
+                returns[key] = v
+    return {
+        "shipping": shipping, "returns": returns,
+        "payment_methods": [(x.text or "").strip() for x in item.findall(f"{NS}PaymentMethods") if (x.text or "").strip()],
+        "ship_to": [(x.text or "").strip() for x in item.findall(f"{NS}ShipToLocations") if (x.text or "").strip()],
+    }
+
+
+def _terms_problem(d: dict) -> str:
+    """Why the shipping terms of this draft cannot be sent as they are, or ''."""
+    if str((d.get("shipping") or {}).get("type", "")).lower().startswith("calculated"):
+        return ("The model listing uses calculated shipping, which depends on this part's weight and size, and those are not copied. "
+                "Use a flat-rate listing as the model.")
+    return ""
+
+
+def _has_profiles(d: dict) -> bool:
+    return all(d.get(k) for k in ("ship_profile", "pay_profile", "return_profile"))
+
+
+def _has_terms(d: dict) -> bool:
+    sh, rt = d.get("shipping") or {}, d.get("returns") or {}
+    return bool(sh.get("services")) and bool(rt.get("accepted")) and not _terms_problem(d)
+
+
+def terms_summary(d: dict) -> list[str]:
+    """Plain-language lines about shipping, handling and returns, for the screen."""
+    out: list[str] = []
+    cur = d.get("currency") or "USD"
+    if _has_profiles(d):
+        return ["Shipping, payment and return rules come from the store's business policies (as on the model listing)."]
+    sh, rt = d.get("shipping") or {}, d.get("returns") or {}
+    for o in sh.get("services", []):
+        if o.get("free"):
+            out.append(f"Shipping {o['priority']}: {o['service']}, free")
+        else:
+            extra = f" (+{o['additional']} each extra)" if o.get("additional") not in (None, "", "0", "0.0", "0.00") else ""
+            out.append(f"Shipping {o['priority']}: {o['service']}, {o.get('cost') or '0.00'} {cur}{extra}")
+    for o in sh.get("international", []):
+        out.append(f"International: {o['service']}, {o.get('cost') or '0.00'} {cur}" + (f" to {', '.join(o['ship_to'])}" if o.get("ship_to") else ""))
+    if d.get("dispatch_days"):
+        out.append(f"Handling time: {d['dispatch_days']} business day{'s' if str(d['dispatch_days']) != '1' else ''}")
+    if rt.get("accepted"):
+        bits = [rt["accepted"]] + [rt[k] for k in ("within", "paid_by", "refund") if rt.get(k)]
+        out.append("Returns: " + ", ".join(bits))
+    if sh.get("excluded"):
+        out.append("Does not ship to: " + ", ".join(sh["excluded"]))
+    return out
+
+
+def _money_text(v: str, default: str = "0.00") -> str:
+    v = (v or "").strip()
+    if not v:
+        return default
+    try:
+        return str(_money(v))
+    except HTTPException:
+        return default
+
+
+def _legacy_xml(d: dict, cur: str) -> str:
+    """ShippingDetails, ReturnPolicy, PaymentMethods and ShipToLocations, as the older listings carry them."""
+    c = escape(cur)
+    sh, rt = d.get("shipping") or {}, d.get("returns") or {}
+    sd = ""
+    if sh.get("type"):
+        sd += f"<ShippingType>{escape(sh['type'])}</ShippingType>"
+    for o in sh.get("services", []):
+        cost = "0.00" if o.get("free") else _money_text(o.get("cost", ""))
+        x = f"<ShippingService>{escape(o['service'])}</ShippingService>"
+        if o.get("additional"):
+            x += f'<ShippingServiceAdditionalCost currencyID="{c}">{_money_text(o["additional"])}</ShippingServiceAdditionalCost>'
+        x += f'<ShippingServiceCost currencyID="{c}">{cost}</ShippingServiceCost>'
+        x += f"<ShippingServicePriority>{escape(str(o['priority']))}</ShippingServicePriority>"
+        if o.get("free"):
+            x += "<FreeShipping>true</FreeShipping>"
+        sd += f"<ShippingServiceOptions>{x}</ShippingServiceOptions>"
+    for o in sh.get("international", []):
+        x = f"<ShippingService>{escape(o['service'])}</ShippingService>"
+        if o.get("additional"):
+            x += f'<ShippingServiceAdditionalCost currencyID="{c}">{_money_text(o["additional"])}</ShippingServiceAdditionalCost>'
+        x += f'<ShippingServiceCost currencyID="{c}">{_money_text(o.get("cost", ""))}</ShippingServiceCost>'
+        x += f"<ShippingServicePriority>{escape(str(o['priority']))}</ShippingServicePriority>"
+        x += "".join(f"<ShipToLocation>{escape(z)}</ShipToLocation>" for z in o.get("ship_to", []))
+        sd += f"<InternationalShippingServiceOption>{x}</InternationalShippingServiceOption>"
+    sd += "".join(f"<ExcludeShipToLocation>{escape(z)}</ExcludeShipToLocation>" for z in sh.get("excluded", []))
+    out = f"<ShippingDetails>{sd}</ShippingDetails>" if sd else ""
+    if rt.get("accepted"):
+        r = f"<ReturnsAcceptedOption>{escape(rt['accepted'])}</ReturnsAcceptedOption>"
+        for tag, key in (("RefundOption", "refund"), ("ReturnsWithinOption", "within"), ("ShippingCostPaidByOption", "paid_by"),
+                         ("RestockingFeeValueOption", "restocking")):
+            if rt.get(key):
+                r += f"<{tag}>{escape(rt[key])}</{tag}>"
+        if rt.get("description"):
+            r += f"<Description>{escape(rt['description'])}</Description>"
+        out += f"<ReturnPolicy>{r}</ReturnPolicy>"
+    out += "".join(f"<PaymentMethods>{escape(m)}</PaymentMethods>" for m in d.get("payment_methods", []))
+    out += "".join(f"<ShipToLocations>{escape(z)}</ShipToLocations>" for z in d.get("ship_to", []))
+    return out
+
+
 # --------------------------------------------------------------------------
 # reading what a copy needs from the original
 # --------------------------------------------------------------------------
@@ -106,6 +244,7 @@ def _extras(db: Session, store: str, item_id: str) -> dict:
         "brand": t("ProductListingDetails/BrandMPN/Brand"),
         "mpn": t("ProductListingDetails/BrandMPN/MPN"),
         "compat": compat,
+        **_terms_from_item(item),
     }
 
 
@@ -119,6 +258,7 @@ class DraftIn(BaseModel):
     sku: Optional[str] = None
     photos: Optional[list[str]] = Field(default=None, max_length=24)  # the pictures to keep, in order (all must be the original's)
     item_specifics: Optional[list[dict]] = Field(default=None, max_length=100)  # [{name, values:[...]}]
+    compat: Optional[list[dict]] = Field(default=None, max_length=3000)  # the complete list: [{pairs:[[name, value], ...], notes}]
 
 
 def _row(db: Session, copy_id: int):
@@ -136,6 +276,30 @@ def _row(db: Session, copy_id: int):
     return r
 
 
+def _compat_clean(rows: list[dict]) -> list[dict]:
+    out, seen = [], set()
+    for row in rows:
+        pairs = []
+        for pr in row.get("pairs") or []:
+            if not isinstance(pr, (list, tuple)) or len(pr) != 2:
+                raise HTTPException(400, "A compatible vehicle row is not in the expected shape. Reload the page.")
+            n, v = " ".join(str(pr[0]).split()), " ".join(str(pr[1]).split())
+            if not n or not v:
+                raise HTTPException(400, "A compatible vehicle row has an empty name or value.")
+            if len(n) > 65 or len(v) > 65:
+                raise HTTPException(400, f"'{n}' has a name or value over 65 characters (eBay's limit).")
+            pairs.append([n, v])
+        if not pairs:
+            continue
+        notes = " ".join(str(row.get("notes") or "").split())[:500]
+        key = (tuple(sorted(map(tuple, pairs))), notes)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"pairs": pairs, "notes": notes})
+    return out
+
+
 def _shape(r) -> dict:
     d = dict(r.data or {})
     return {
@@ -150,6 +314,8 @@ def _shape(r) -> dict:
         # a draft started from a product (not copied from a live listing) has no store until one is chosen
         "category_id": d.get("category_id", ""), "compat_notes": d.get("compat_notes", []),
         "needs_store": not r.store, "model_item_id": d.get("model_item_id", ""),
+        "compat": d.get("compat", []), "compat_edited": bool(d.get("compat_edited")),
+        "terms": terms_summary(d), "terms_problem": _terms_problem(d),
     }
 
 
@@ -177,13 +343,15 @@ def create(body: CreateIn, db: Session = Depends(get_db), user: AuthUser = Depen
     if not pid:
         raise HTTPException(409, "This listing is not linked to a product on the website, so the copy would have nothing to link to. Link it first.")
     ex = _extras(db, row.store, item_id)
-    missing = [n for n, k in (("category", "category_id"), ("shipping policy", "ship_profile"),
-                              ("payment policy", "pay_profile"), ("return policy", "return_profile")) if not ex[k]]
-    if missing:
+    if not ex["category_id"]:
+        raise HTTPException(409, "eBay did not say which category this listing uses. Nothing was copied.")
+    if _terms_problem(ex):
+        raise HTTPException(409, _terms_problem(ex) + " Nothing was copied.")
+    if not _has_profiles(ex) and not _has_terms(ex):
         raise HTTPException(
             409,
-            "eBay did not say which " + ", ".join(missing) + " this listing uses (it may not use business policies). "
-            "Nothing was copied.",
+            "eBay gave neither business policies nor shipping services and return rules for this listing, so the new listing would have no "
+            "shipping or returns. Nothing was copied.",
         )
     photos = [p["url"] for p in src["photos"] if p.get("url")]
     if not photos:
@@ -291,6 +459,9 @@ def save_copy(copy_id: int, body: DraftIn, db: Session = Depends(get_db)):
         d["photos"] = body.photos
     if body.item_specifics is not None:
         d["item_specifics"] = _spec_clean(body.item_specifics)
+    if body.compat is not None:
+        d["compat"] = _compat_clean(body.compat)
+        d["compat_edited"] = True  # from now on choosing a store does not rebuild the list from our fitment
     db.execute(
         text("update ebay_listing_copies set data = cast(:d as jsonb), updated_at = now() where id = :i"),
         {"d": json.dumps(d), "i": copy_id},
@@ -333,10 +504,24 @@ def _ready(store: str, d: dict) -> None:
     """A draft started from a product cannot be checked or listed until a store has been chosen for it."""
     if not store:
         raise HTTPException(409, "Choose the store to list this in first. The category and shipping settings come from a listing there.")
-    missing = [n for n, k in (("category", "category_id"), ("shipping policy", "ship_profile"),
-                              ("payment policy", "pay_profile"), ("return policy", "return_profile")) if not d.get(k)]
-    if missing:
-        raise HTTPException(409, "The draft has no " + ", ".join(missing) + " yet. Choose the store again, or pick a different model listing.")
+    if not d.get("category_id"):
+        raise HTTPException(409, "The draft has no category yet. Choose the store again, or pick a different model listing.")
+    if _terms_problem(d):
+        raise HTTPException(409, _terms_problem(d))
+    if not _has_profiles(d) and not _has_terms(d):
+        raise HTTPException(409, "The draft has no shipping and return rules yet. Choose the store again, or pick a different model listing.")
+
+
+def _quantity_parts(db: Session, product_id: int) -> dict:
+    """Where the quantity comes from: our shelf (on hand minus set aside) plus the drop-ship warehouses, when the rule counts them."""
+    own = int(db.execute(text(f"select {available_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
+    total = int(db.execute(text(f"select {effective_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
+    try:
+        counted = (db.execute(text("select value from availability_settings where key = 'use_distributor_stock'")).scalar() or "off") == "on"
+    except Exception:
+        db.rollback()
+        counted = False
+    return {"quantity_own": own, "quantity_distributor": max(total - own, 0), "distributor_counted": counted}
 
 
 def _item_xml(d: dict, qty: int) -> str:
@@ -372,13 +557,16 @@ def _item_xml(d: dict, qty: int) -> str:
         parts.append(f"<PostalCode>{escape(d['postal_code'])}</PostalCode>")
     if d.get("dispatch_days"):
         parts.append(f"<DispatchTimeMax>{escape(d['dispatch_days'])}</DispatchTimeMax>")
-    parts.append(
-        "<SellerProfiles>"
-        f"<SellerShippingProfile><ShippingProfileID>{escape(d['ship_profile'])}</ShippingProfileID></SellerShippingProfile>"
-        f"<SellerPaymentProfile><PaymentProfileID>{escape(d['pay_profile'])}</PaymentProfileID></SellerPaymentProfile>"
-        f"<SellerReturnProfile><ReturnProfileID>{escape(d['return_profile'])}</ReturnProfileID></SellerReturnProfile>"
-        "</SellerProfiles>"
-    )
+    if _has_profiles(d):
+        parts.append(
+            "<SellerProfiles>"
+            f"<SellerShippingProfile><ShippingProfileID>{escape(d['ship_profile'])}</ShippingProfileID></SellerShippingProfile>"
+            f"<SellerPaymentProfile><PaymentProfileID>{escape(d['pay_profile'])}</PaymentProfileID></SellerPaymentProfile>"
+            f"<SellerReturnProfile><ReturnProfileID>{escape(d['return_profile'])}</ReturnProfileID></SellerReturnProfile>"
+            "</SellerProfiles>"
+        )
+    else:  # a store that has not opted into business policies: shipping and returns are written on the listing itself
+        parts.append(_legacy_xml(d, d.get("currency") or "USD"))
     if d.get("best_offer"):
         parts.append("<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>")
         ld = ""
@@ -420,8 +608,8 @@ def _item_xml(d: dict, qty: int) -> str:
         parts.append(
             "<ItemCompatibilityList>" + "".join(
                 "<Compatibility>"
-                + "".join(f"<NameValueList><Name>{escape(n)}</Name><Value>{escape(v)}</Value></NameValueList>" for n, v in c["pairs"])
                 + (f"<CompatibilityNotes>{escape(c['notes'])}</CompatibilityNotes>" if c.get("notes") else "")
+                + "".join(f"<NameValueList><Name>{escape(n)}</Name><Value>{escape(v)}</Value></NameValueList>" for n, v in c["pairs"])
                 + "</Compatibility>"
                 for c in comp
             ) + "</ItemCompatibilityList>"
@@ -476,6 +664,7 @@ def preview(copy_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
         "warnings": [e for e in errs if e["severity"] == "Warning"],
         "fees": fees,
         "quantity": qty,
+        **_quantity_parts(db, r.product_id),
         "duplicates": _duplicates(db, r.store, " ".join((d.get("title") or "").split()), ""),
         "fingerprint": _fingerprint(r.store, xml) if ok else None,
         "live_pushes_enabled": _live_on(db, r.store),

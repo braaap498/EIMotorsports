@@ -27,6 +27,7 @@ from app.ebay_oauth import router as ebay_oauth_router
 from app.ebay_copy import router as ebay_copy_router
 from app.ebay_newdraft import router as ebay_newdraft_router
 from app.ebay_edit import router as ebay_edit_router
+from app.ebay_vocab import router as ebay_vocab_router
 from app.ebay_edit import start_zero_keeper
 from app.ebay_sales import public_router as ebay_sales_public_router
 from app.ebay_sales import router as ebay_sales_router
@@ -111,6 +112,7 @@ admin_router.include_router(admin_ebay_new_router)
 admin_router.include_router(admin_ebay_listings_router)
 admin_router.include_router(ebay_oauth_router)
 admin_router.include_router(ebay_edit_router)
+admin_router.include_router(ebay_vocab_router)
 admin_router.include_router(ebay_copy_router)
 admin_router.include_router(ebay_newdraft_router)
 admin_router.include_router(ebay_sales_router)

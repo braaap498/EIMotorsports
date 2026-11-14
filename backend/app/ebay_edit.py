@@ -23,7 +23,8 @@ What can be changed: title, description (whole HTML replaced), price, available 
 on single listings; price and available quantity per variation on listings with variations.
 Photos (single listings): remove, reorder, make main, add from the website's photo storage or by upload.
 Item specifics (the whole list is replaced when sent) on single listings.
-Condition and the parts compatibility list are shown as read only for now.
+Condition is shown as read only for now. The parts compatibility list can be edited (the complete list is sent and
+replaces eBay's: ReplaceAll), when eBay returned the whole list.
 
 Safety rules built in:
   * the listing must belong to the connected account of the store (checked on every read)
@@ -205,14 +206,19 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
             specifics_list.append({"name": name, "values": vals})
 
     compat_rows: list[dict] = []
+    compat_full: list[dict] = []
     for c in item.findall(f"{NS}ItemCompatibilityList/{NS}Compatibility"):
         crow = {}
+        cpairs: list[list[str]] = []
         for n in c.findall(f"{NS}NameValueList"):
             nm = (n.findtext(f"{NS}Name") or "").strip()
             if nm:
                 crow[nm] = (n.findtext(f"{NS}Value") or "").strip()
+                cpairs.append([nm, crow[nm]])
         crow["Notes"] = (c.findtext(f"{NS}CompatibilityNotes") or "").strip()
         compat_rows.append(crow)
+        if cpairs:
+            compat_full.append({"pairs": cpairs, "notes": crow["Notes"]})
     try:
         compat_count = int(t("ItemCompatibilityCount") or len(compat_rows))
     except ValueError:
@@ -225,6 +231,10 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
         structural = "A variation on this listing has no SKU, so it cannot be addressed safely. Give each variation a SKU on eBay first."
     elif has_var and len({v["sku"] for v in variations}) != len(variations):
         structural = "Two variations on this listing share a SKU, so they cannot be told apart. Fix that on eBay first."
+    compat_reason = None
+    if compat_count > len(compat_rows):
+        compat_reason = (f"eBay returned {len(compat_rows)} of the {compat_count} compatible vehicles, so the list cannot be edited here "
+                         "without losing the rest.")
     ended = bool(status) and status != "Active"
     # an ended (Completed) fixed-price listing can be brought back with eBay's relist call; a scheduled one cannot
     relistable = ended and status in ("Completed", "Ended") and structural is None
@@ -259,7 +269,13 @@ def _read_item(db: Session, store: str, item_id: str) -> dict:
             "name": t("ConditionDisplayName"),
             "note": t("ConditionDescription"),
         },
-        "compatibility": {"count": compat_count, "rows": compat_rows[:300], "truncated": len(compat_rows) > 300},
+        "category_id": t("PrimaryCategory/CategoryID"),
+        "category_name": t("PrimaryCategory/CategoryName"),
+        "compatibility": {
+            "count": compat_count, "rows": compat_rows[:300], "truncated": len(compat_rows) > 300,
+            "list": compat_full,  # the complete list as [{pairs, notes}], for editing
+            "editable": reason is None and compat_reason is None, "reason": compat_reason,
+        },
         "photos": photos,
         "photos_editable": reason is None and not has_var,
         "editable": reason is None,
@@ -350,6 +366,11 @@ class SpecIn(BaseModel):
     values: list[str]
 
 
+class CompatRowIn(BaseModel):
+    pairs: list[list[str]] = Field(max_length=12)
+    notes: str = ""
+
+
 class Changes(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -359,6 +380,7 @@ class Changes(BaseModel):
     variations: Optional[list[VarChange]] = None
     photos: Optional[list[PhotoRef]] = Field(default=None, max_length=60)  # the complete list, main photo first
     item_specifics: Optional[list[SpecIn]] = Field(default=None, max_length=100)  # the complete list
+    compatibility: Optional[list[CompatRowIn]] = Field(default=None, max_length=3000)  # the complete compatible-vehicle list
 
 
 def _no_qty(ch: "Changes") -> "Changes":
@@ -498,6 +520,60 @@ def _specifics_part(current: dict, specs: list[SpecIn]) -> tuple[str, list[dict]
     return xml, diff
 
 
+def _clean_compat(rows) -> list[tuple]:
+    """[(pairs, notes)] with blanks dropped, spaces squeezed and exact repeats removed. Raises 400 on a malformed row."""
+    out, seen = [], set()
+    for r in rows:
+        pairs = []
+        for pr in r.pairs:
+            if len(pr) != 2:
+                raise HTTPException(400, "A compatible vehicle row is not in the expected shape. Reload the page.")
+            n, v = " ".join(pr[0].split()), " ".join(pr[1].split())
+            if not n or not v:
+                raise HTTPException(400, "A compatible vehicle row has an empty name or value.")
+            if len(n) > 65 or len(v) > 65:
+                raise HTTPException(400, f"'{n}' has a name or value over 65 characters (eBay's limit).")
+            pairs.append((n, v))
+        if not pairs:
+            continue
+        notes = " ".join((r.notes or "").split())[:500]
+        key = (tuple(sorted(pairs)), notes)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((pairs, notes))
+    return out
+
+
+def _compat_sig(rows: list[tuple]) -> set:
+    return {(tuple(sorted(p)), n) for p, n in rows}
+
+
+def _compat_part(current: dict, rows) -> tuple[str, Optional[dict]]:
+    """The ItemCompatibilityList to send, or ('', None) when it is the same as on eBay. The WHOLE list is sent with ReplaceAll,
+    so what is saved on eBay afterwards is exactly the list on the screen (rows removed on the screen are removed on eBay)."""
+    comp = current["compatibility"]
+    if not comp.get("editable"):
+        raise HTTPException(409, comp.get("reason") or "The compatible vehicles of this listing cannot be edited here.")
+    new = _clean_compat(rows)
+    old = _clean_compat([CompatRowIn(pairs=r["pairs"], notes=r.get("notes", "")) for r in comp["list"]])
+    new_sig, old_sig = _compat_sig(new), _compat_sig(old)
+    if new_sig == old_sig:
+        return "", None
+    xml = "<ItemCompatibilityList>"
+    for pairs, notes in new:
+        xml += "<Compatibility>"
+        if notes:
+            xml += f"<CompatibilityNotes>{escape(notes)}</CompatibilityNotes>"
+        xml += "".join(f"<NameValueList><Name>{escape(n)}</Name><Value>{escape(v)}</Value></NameValueList>" for n, v in pairs)
+        xml += "</Compatibility>"
+    xml += "<ReplaceAll>true</ReplaceAll></ItemCompatibilityList>"
+    return xml, {
+        "field": "Compatible vehicles", "before": f"{len(old_sig)} rows", "after": f"{len(new_sig)} rows",
+        "note": f"{len(new_sig - old_sig)} added, {len(old_sig - new_sig)} removed; the whole list is sent and replaces eBay's",
+    }
+
+
 def _build(current: dict, ch: Changes, allow_empty: bool = False, call: str = "ReviseFixedPriceItem") -> tuple[list[dict], list[dict]]:
     """The exact request(s), plus the before/after rows. Raises 400/409 with a readable reason."""
     if not current["editable"]:
@@ -542,6 +618,12 @@ def _build(current: dict, ch: Changes, allow_empty: bool = False, call: str = "R
         if sp_xml:
             parts.append(sp_xml)
             diff += sp_diff
+
+    if ch.compatibility is not None:
+        c_xml, c_diff = _compat_part(current, ch.compatibility)
+        if c_xml:
+            parts.append(c_xml)
+            diff.append(c_diff)
 
     if not has_var:
         if ch.price is not None and ch.price.strip():
@@ -663,6 +745,11 @@ def _differences(fresh: dict, ch: Changes) -> list[str]:
         for name in got:
             if name not in want:
                 out.append(f"Item specific '{name}' is still on the listing")
+    if ch.compatibility is not None and fresh["compatibility"].get("editable"):
+        want = _compat_sig(_clean_compat(ch.compatibility))
+        got = _compat_sig(_clean_compat([CompatRowIn(pairs=r["pairs"], notes=r.get("notes", "")) for r in fresh["compatibility"]["list"]]))
+        if want != got:
+            out.append(f"eBay now shows {len(got)} compatible vehicles; {len(want)} were sent ({len(want - got)} missing, {len(got - want)} extra)")
     if ch.photos is not None and not fresh["has_variations"]:
         now = [p["url"] for p in fresh["photos"]]
         if len(now) != len(ch.photos):

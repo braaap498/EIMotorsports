@@ -11,8 +11,9 @@ to the product) are the same for both.
   GET  /stores             the connected stores, to pick where to list
   POST /create             {product_id}  save a DRAFT on the website only. Refused when the product already has an eBay
                            listing: the answer lists them so the Sell similar route can be used.
-  POST /{id}/store         {store, model_item_id?}  choose the store. The category, shipping / payment / return policies,
-                           location, handling time and store categories are taken from ONE live listing in that store that
+  POST /{id}/store         {store, model_item_id?}  choose the store. The category, shipping and return rules (business policies
+                           when the store uses them, otherwise the shipping services and return terms written on the older
+                           listings), location, handling time and store categories are taken from ONE live listing in that store that
                            is as close as possible to this part: a listing of a product in the same website category,
                            then a neighbouring category, then the newest. "model_item_id" picks that listing by hand.
 
@@ -42,7 +43,7 @@ from app.admin_cleanup import _brand_names
 from app.admin_ebay_fitment import _LIST
 from app.auth import AuthUser, require_admin
 from app.database import get_db
-from app.ebay_copy import NO_TABLE, _extras, _row
+from app.ebay_copy import NO_TABLE, _extras, _has_profiles, _has_terms, _row, _terms_problem
 from app.ebay_edit import ITEM_RE, _money, _read_item
 from app.ebay_oauth import _store_row
 from app.images import full_url
@@ -467,7 +468,8 @@ def _model_candidates(db: Session, store: str, product_id: int, category_id) -> 
 
 
 _COPIED = ("category_id", "category_name", "country", "location", "postal_code", "dispatch_days",
-           "ship_profile", "pay_profile", "return_profile", "category2_id", "store_cat1", "store_cat2", "currency")
+           "ship_profile", "pay_profile", "return_profile", "category2_id", "store_cat1", "store_cat2", "currency",
+           "shipping", "returns", "payment_methods", "ship_to")
 
 
 @router.post("/{copy_id}/store")
@@ -501,9 +503,14 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
         except HTTPException as e:
             last = f"{item}: {e.detail}"
             continue
-        gaps = [n for n, k in (("category", "category_id"), ("shipping policy", "ship_profile"), ("payment policy", "pay_profile"), ("return policy", "return_profile")) if not ex[k]]
-        if gaps:
-            last = f"{item} has no {', '.join(gaps)}"
+        if not ex["category_id"]:
+            last = f"{item} has no category"
+            continue
+        if _terms_problem(ex):
+            last = f"{item}: calculated shipping"
+            continue
+        if not _has_profiles(ex) and not _has_terms(ex):
+            last = f"{item} has no shipping services and return rules (and no business policies)"
             continue
         chosen = (item, src, ex)
         break
@@ -511,14 +518,24 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
         raise HTTPException(409, f"None of the listings tried could be used as a model ({last}). Type an eBay item number from {row.store} to use instead.")
 
     item, src, ex = chosen
-    for k in _COPIED:
-        if ex.get(k):
-            d[k] = ex[k]
+    for k in _COPIED:  # a value the model does not have clears the old one, so profiles and older terms never mix
+        d[k] = ex.get(k) or ({} if k in ("shipping", "returns") else [] if k in ("payment_methods", "ship_to") else "")
     d["best_offer"] = bool(ex.get("best_offer"))
     d["best_offer_accept"] = d["best_offer_decline"] = ""  # prices differ per part; never copied
     if not d.get("condition_id") and ex.get("condition_id"):
         d["condition_id"] = ex["condition_id"]
     d["model_item_id"] = item
+
+    compat_note = ""
+    if not d.get("compat_edited") and d.get("category_id"):
+        try:
+            from app.ebay_vocab import convert_with_ebay
+            rows, notes = convert_with_ebay(db, r.product_id, d["category_id"])
+            d["compat"], d["compat_notes"] = rows, notes
+            compat_note = f"{len(rows)} compatible vehicle rows were made from our fitment using eBay's own list for this category."
+        except Exception as e:
+            db.rollback()
+            compat_note = f"eBay's vehicle list could not be read ({getattr(e, 'detail', None) or getattr(e, 'message', None) or e}); the table made from the saved eBay tables is kept."
 
     have = {s["name"].lower() for s in d.get("item_specifics", [])}
     hints = [{"name": s["name"], "value": "; ".join(s["values"])} for s in src["item_specifics"]
@@ -530,5 +547,5 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
     db.commit()
     return {
         "store": row.store, "model_item_id": item, "category_id": d.get("category_id", ""), "category_name": d.get("category_name", ""),
-        "hint_specifics": hints[:40], "tried": len(cands),
+        "hint_specifics": hints[:40], "tried": len(cands), "compat_note": compat_note,
     }

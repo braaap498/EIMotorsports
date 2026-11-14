@@ -6,6 +6,7 @@ import { Suspense, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 import DescriptionEditor from "../../../components/admin/DescriptionEditor";
+import CompatEditor, { type CompatRow } from "../../../components/admin/CompatEditor";
 
 type Spec = { name: string; values: string[] };
 type Copy = {
@@ -30,6 +31,10 @@ type Copy = {
   compat_notes: string[];
   needs_store: boolean;
   model_item_id: string;
+  compat: CompatRow[];
+  compat_edited: boolean;
+  terms: string[]; // plain-language shipping / handling / returns lines
+  terms_problem: string;
 };
 type StoreChoice = { store: string; seller: string | null; live: boolean };
 type Hint = { name: string; value: string };
@@ -39,6 +44,9 @@ type Preview = {
   warnings: { code: string; message: string }[];
   fees: { name: string; amount: string }[];
   quantity: number;
+  quantity_own?: number;
+  quantity_distributor?: number;
+  distributor_counted?: boolean;
   duplicates: string[];
   fingerprint: string | null;
   live_pushes_enabled: boolean;
@@ -54,6 +62,8 @@ function CopyEditor({ id }: { id: number }) {
   const [sku, setSku] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
   const [specs, setSpecs] = useState<{ name: string; value: string }[]>([]);
+  const [compat, setCompat] = useState<CompatRow[]>([]);
+  const [compatTouched, setCompatTouched] = useState(false); // only an edit made here is sent, so choosing a store can still rebuild the list
   const [dirty, setDirty] = useState(false);
   const [pv, setPv] = useState<Preview | null>(null);
   const [busy, setBusy] = useState("");
@@ -71,6 +81,8 @@ function CopyEditor({ id }: { id: number }) {
     setSku(c.sku);
     setPhotos(c.photos);
     setSpecs(c.item_specifics.map((s) => ({ name: s.name, value: s.values.join("; ") })));
+    setCompat(c.compat ?? []);
+    setCompatTouched(false);
     setDirty(false);
   }
 
@@ -107,13 +119,13 @@ function CopyEditor({ id }: { id: number }) {
     setMsg(null);
     setPv(null);
     try {
-      const r = await api<{ store: string; model_item_id: string; category_name: string; hint_specifics: Hint[] }>(`/ebay-draft/${id}/store`, {
+      const r = await api<{ store: string; model_item_id: string; category_name: string; hint_specifics: Hint[]; compat_note?: string }>(`/ebay-draft/${id}/store`, {
         method: "POST",
         body: { store: pickStore, ...(modelItem.trim() ? { model_item_id: modelItem.trim() } : {}) },
       });
       fill(await api<Copy>(`/ebay-copy/${id}`));
       setHints(r.hint_specifics);
-      setMsg({ kind: "success", text: `Set up for ${r.store}, using eBay item ${r.model_item_id} as the model${r.category_name ? ` (${r.category_name})` : ""}. Nothing has gone to eBay.` });
+      setMsg({ kind: "success", text: `Set up for ${r.store}, using eBay item ${r.model_item_id} as the model${r.category_name ? ` (${r.category_name})` : ""}. ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.` });
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -140,6 +152,7 @@ function CopyEditor({ id }: { id: number }) {
           item_specifics: specs
             .filter((s) => s.name.trim() || s.value.trim())
             .map((s) => ({ name: s.name, values: s.value.split(";").map((v) => v.trim()).filter(Boolean) })),
+          ...(compatTouched ? { compat } : {}),
         },
       });
       fill(c);
@@ -226,7 +239,7 @@ function CopyEditor({ id }: { id: number }) {
         <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
           <h2 className="font-semibold">Where to list it</h2>
           <p className="text-xs text-gray-500">
-            Choose the store. The category, shipping / payment / return policies, location and handling time are taken from a live listing in that
+            Choose the store. The category, shipping and return rules (business policies if the store uses them, otherwise the shipping services and return terms written on its older listings), location and handling time are taken from a live listing in that
             store that is as close to this part as possible (same website category first). To use a particular listing as the model, type its eBay item number.
           </p>
           <div className="flex flex-wrap items-end gap-3">
@@ -295,6 +308,37 @@ function CopyEditor({ id }: { id: number }) {
           Quantity is not set here: the new listing gets the product&rsquo;s available stock from the website. eBay may refuse a listing that
           is identical to a live one in the same store; change the title if it does.
         </p>
+      </div>
+
+      {(copy.terms ?? []).length > 0 || copy.terms_problem ? (
+        <div className="space-y-2 rounded border border-gray-200 bg-white p-4 text-sm">
+          <h2 className="font-semibold">Shipping, handling and returns</h2>
+          {copy.terms_problem && <Notice kind="error">{copy.terms_problem}</Notice>}
+          <ul className="list-disc space-y-0.5 pl-5 text-xs text-gray-700">
+            {(copy.terms ?? []).map((t, i) => <li key={i}>{t}</li>)}
+          </ul>
+          <p className="text-xs text-gray-500">Taken from the model listing, the way the older listings carry them. Change them on eBay or choose a different model listing.</p>
+        </div>
+      ) : null}
+
+      <div className="space-y-2 rounded border border-gray-200 bg-white p-4 text-sm">
+        <h2 className="font-semibold">Compatible vehicles ({compat.length})</h2>
+        <p className="text-xs text-gray-500">
+          {copy.compat_edited
+            ? "Edited by hand, so choosing a store again will not rebuild it."
+            : "Built from the fitment saved on the website, matched to eBay's own vehicle list. Add or remove vehicles freely."}
+        </p>
+        <CompatEditor
+          categoryId={copy.category_id}
+          rows={compat}
+          disabled={off}
+          lockedReason={fromProduct && !copy.category_id ? "Choose a store first so the eBay category is known." : null}
+          onChange={(r) => {
+            setCompat(r);
+            setCompatTouched(true);
+            touch();
+          }}
+        />
       </div>
 
       <div className="space-y-2 rounded border border-gray-200 bg-white p-4 text-sm">
@@ -385,7 +429,7 @@ function CopyEditor({ id }: { id: number }) {
           {pv.warnings.map((e, i) => <Notice key={i}>{e.message} (eBay {e.code})</Notice>)}
           {pv.ok && (
             <p>
-              eBay accepts this listing. Quantity {pv.quantity}.
+              eBay accepts this listing. Quantity {pv.quantity}{pv.quantity_own !== undefined ? ` (${pv.quantity_own} on our shelf${pv.distributor_counted ? ` + ${pv.quantity_distributor ?? 0} at the drop ship warehouses` : ", drop ship warehouses not counted"})` : ""}.
               {pv.fees.length > 0 ? ` Fees: ${pv.fees.map((f) => `${f.name} ${f.amount}`).join(", ")}.` : " No listing fee shown."}
             </p>
           )}
