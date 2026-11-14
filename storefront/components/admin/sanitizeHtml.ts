@@ -97,12 +97,45 @@ function fixLists(root: Element): void {
   });
 }
 
+const INVISIBLE = /[\u200b-\u200d\u2060\ufeff\s]+/g;
+const blankNode = (n: Node) =>
+  n.nodeType === Node.COMMENT_NODE || (n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").replace(INVISIBLE, "") === "");
+const isBlankBlock = (e: Element) => (e.tagName === "DIV" || e.tagName === "P") && textOf(e) === "" && !e.querySelector("hr,table");
+
+// eBay's editor often starts a list item with an empty line (a <br> or an empty div) and puts the real text on the next
+// line. The bullet then sits alone on the first line and cannot be selected or deleted. Such an item was never a real
+// list item, so it is taken out of the list and its content is shown as ordinary text (the list is split around it).
+function unwrapSpacerItems(root: Element): void {
+  root.querySelectorAll("li").forEach((li) => {
+    const list = li.parentElement;
+    if (!list || !/^(UL|OL)$/.test(list.tagName) || textOf(li) === "") return; // fully empty ones are removed later
+    const first = Array.from(li.childNodes).find((n) => !blankNode(n));
+    const spacer = !!first && first.nodeType === Node.ELEMENT_NODE && ((first as Element).tagName === "BR" || isBlankBlock(first as Element));
+    if (!spacer) return;
+    const after = document.createElement(list.tagName.toLowerCase());
+    while (li.nextSibling) after.appendChild(li.nextSibling);
+    list.after(after);
+    Array.from(li.childNodes).forEach((c) => after.before(c));
+    li.remove();
+  });
+}
+
 // Removes the empty wrappers, empty bullets and stray line breaks the eBay editor leaves behind.
 function tidy(root: Element): void {
+  unwrapSpacerItems(root);
   root.querySelectorAll("br").forEach((br) => {
-    // A <br> at the very end of a block is invisible; drop it unless it is the only content.
     const parent = br.parentElement;
-    if (parent && parent !== root && !br.nextSibling && br.previousSibling && parent.tagName !== "TD") br.remove();
+    if (!parent || parent.tagName === "TD" || parent.tagName === "TH") return;
+    // a <br> with nothing before it in its block only adds an empty first line
+    let leading = true;
+    for (let n = br.previousSibling; n; n = n.previousSibling) {
+      if (!blankNode(n) && !(n.nodeType === Node.ELEMENT_NODE && (n as Element).tagName === "BR")) leading = false;
+    }
+    // a <br> right before a block is an extra blank line; a <br> at the very end of a block is invisible
+    const next = br.nextSibling;
+    const beforeBlock = !!next && next.nodeType === Node.ELEMENT_NODE && /^(DIV|P|UL|OL|TABLE|H2|H3|H4|HR)$/.test((next as Element).tagName);
+    const atEnd = parent !== root && !next && !!br.previousSibling;
+    if ((leading && (br.nextSibling || parent !== root)) || beforeBlock || atEnd) br.remove();
   });
   fixLists(root);
   for (let pass = 0; pass < 12; pass++) {
