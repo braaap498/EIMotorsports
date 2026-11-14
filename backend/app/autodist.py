@@ -3715,9 +3715,51 @@ class WebsiteProductsIn(BaseModel):
     limit: int = Field(25, ge=1, le=100000)
 
 
-def _make_products_job(limit: int) -> None:
+def _insert_website_product(db: Session, r, cats: list, published: bool = True) -> Optional[int]:
+    """Make one published website product from a catalog row (the columns of _NEW_PRODUCT_CTE) and link it to the part.
+    Returns the new product id, or None when the part has nothing to build a title from. Commits nothing."""
     from app.admin_catalog import slugify  # late import: that module imports this one's helpers
 
+    title = _product_title(r.manufacturer, r.name, r.mfr_number)
+    if not title:
+        return None
+    base = slugify(title) or slugify(f"part {r.sku}")
+    slug, k = base, 1
+    while db.execute(text("select 1 from products where slug = :s"), {"s": slug}).first():
+        k += 1
+        slug = f"{base}-{k}"
+    ship_lb = r.ship_weight_lb if r.ship_weight_lb else r.weight_lb
+    with db.begin_nested():
+        pid = db.execute(
+            text(
+                "insert into products (title, slug, manufacturer_part_number, barcode, list_price, cost, quantity_on_hand, "
+                "weight_oz, length_in, width_in, height_in, condition, is_published, is_active, is_universal, show_part_number, category_id, description) "
+                "values (:title, :slug, :mpn, :bc, :price, :cost, 0, :wt, :l, :w, :h, 'New', :pub, true, false, false, :cat, :desc) returning id"
+            ),
+            {
+                "title": title, "slug": slug, "mpn": (r.mfr_number or "").strip() or None,
+                "bc": re.sub(r"\D", "", r.upc or "") or None, "price": r.price, "pub": published,
+                "cost": r.effective_cost, "wt": (float(ship_lb) * 16) if ship_lb else None,
+                "l": r.length_in, "w": r.width_in, "h": r.height_in,
+                "cat": _pick_category(cats, f"{r.name or ''} {title}"),
+                "desc": _starter_description(r.manufacturer, title, r.length_in, r.width_in, r.height_in, ship_lb),
+            },
+        ).scalar()
+        db.execute(
+            text("insert into supplier_product_links (supplier, supplier_sku, product_id) values (:s, :k, :p)"),
+            {"s": SUPPLIER, "k": r.sku, "p": pid},
+        )
+        for i, url in enumerate(r.images or []):
+            if not str(url or "").strip():
+                continue
+            db.execute(
+                text("insert into product_photos (product_id, source_url, is_primary, sort_order) values (:p, :u, :pr, :o)"),
+                {"p": pid, "u": str(url).strip(), "pr": i == 0, "o": i},
+            )
+    return pid
+
+
+def _make_products_job(limit: int) -> None:
     gen = get_db()
     db = next(gen)
     created = skipped = failed = 0
@@ -3738,43 +3780,9 @@ def _make_products_job(limit: int) -> None:
             cats = []
         for r in rows:
             try:
-                title = _product_title(r.manufacturer, r.name, r.mfr_number)
-                if not title:
+                if _insert_website_product(db, r, cats) is None:
                     skipped += 1
                     continue
-                base = slugify(title) or slugify(f"part {r.sku}")
-                slug, k = base, 1
-                while db.execute(text("select 1 from products where slug = :s"), {"s": slug}).first():
-                    k += 1
-                    slug = f"{base}-{k}"
-                ship_lb = r.ship_weight_lb if r.ship_weight_lb else r.weight_lb
-                with db.begin_nested():
-                    pid = db.execute(
-                        text(
-                            "insert into products (title, slug, manufacturer_part_number, barcode, list_price, cost, quantity_on_hand, "
-                            "weight_oz, length_in, width_in, height_in, condition, is_published, is_active, is_universal, show_part_number, category_id, description) "
-                            "values (:title, :slug, :mpn, :bc, :price, :cost, 0, :wt, :l, :w, :h, 'New', true, true, false, false, :cat, :desc) returning id"
-                        ),
-                        {
-                            "title": title, "slug": slug, "mpn": (r.mfr_number or "").strip() or None,
-                            "bc": re.sub(r"\D", "", r.upc or "") or None, "price": r.price,
-                            "cost": r.effective_cost, "wt": (float(ship_lb) * 16) if ship_lb else None,
-                            "l": r.length_in, "w": r.width_in, "h": r.height_in,
-                            "cat": _pick_category(cats, f"{r.name or ''} {title}"),
-                            "desc": _starter_description(r.manufacturer, title, r.length_in, r.width_in, r.height_in, ship_lb),
-                        },
-                    ).scalar()
-                    db.execute(
-                        text("insert into supplier_product_links (supplier, supplier_sku, product_id) values (:s, :k, :p)"),
-                        {"s": SUPPLIER, "k": r.sku, "p": pid},
-                    )
-                    for i, url in enumerate(r.images or []):
-                        if not str(url or "").strip():
-                            continue
-                        db.execute(
-                            text("insert into product_photos (product_id, source_url, is_primary, sort_order) values (:p, :u, :pr, :o)"),
-                            {"p": pid, "u": str(url).strip(), "pr": i == 0, "o": i},
-                        )
                 created += 1
             except Exception as e:  # one bad part must not stop the rest
                 failed += 1
@@ -3830,6 +3838,104 @@ def api_website_products_create(body: WebsiteProductsIn, user: AuthUser = Depend
         _prod_state.update(running=True, message="Starting…", done=0, total=0, created=0, skipped=0, failed=0, errors=[], finished_at=None)
     threading.Thread(target=_make_products_job, args=(body.limit,), daemon=True, name="autodist-make-products").start()
     return {"running": True}
+
+
+# One part at a time: type the Automatic Distributors SKU, see what the catalog has, make that one product.
+# Unlike the batch it does not need the part to be in stock (a special-order part can still be listed).
+_ANY_PART_CTE = _NEW_PRODUCT_CTE.replace(
+    "  where s.supplier = :s and s.active and (s.qty_indiana + s.qty_nevada) > 0\n", "  where s.supplier = :s\n"
+).replace("s.images,", "s.images, s.active, s.qty_indiana, s.qty_nevada,", 1)
+
+
+def _part_rows(db: Session, raw: str):
+    n = re.sub(r"[^A-Za-z0-9]", "", raw or "").upper()
+    if len(n) < 2:
+        raise HTTPException(400, "Enter the Automatic Distributors SKU.")
+    rows = db.execute(
+        text(
+            _ANY_PART_CTE
+            + " select * from cand where upper(regexp_replace(sku, '[^A-Za-z0-9]', '', 'g')) = :n or mfr_number_norm = :n "
+            "order by (upper(regexp_replace(sku, '[^A-Za-z0-9]', '', 'g')) = :n) desc, sku limit 10"
+        ),
+        {"s": SUPPLIER, "n": n},
+    ).all()
+    return rows
+
+
+@router.get("/api/website-products/lookup")
+def api_website_products_lookup(sku: str, db: Session = Depends(get_db)):
+    out = []
+    for r in _part_rows(db, sku):
+        prod = db.execute(
+            text("select p.id, p.title from supplier_product_links l join products p on p.id = l.product_id "
+                 "where l.supplier = :s and l.supplier_sku = :k limit 1"),
+            {"s": SUPPLIER, "k": r.sku},
+        ).first()
+        out.append({
+            "sku": r.sku, "manufacturer": r.manufacturer, "mfr_number": r.mfr_number, "name": r.name,
+            "title": _product_title(r.manufacturer, r.name, r.mfr_number),
+            "price": float(r.price) if r.price is not None else None,
+            "cost": float(r.effective_cost) if r.effective_cost is not None else None,
+            "qty": int((r.qty_indiana or 0) + (r.qty_nevada or 0)), "active": bool(r.active),
+            "photos": len([u for u in (r.images or []) if str(u or "").strip()]),
+            "product_id": prod.id if prod else None, "product_title": prod.title if prod else None,
+            "have_single": bool(r.have_single and not prod),
+        })
+    return {"items": out}
+
+
+class MakeOneIn(BaseModel):
+    sku: str
+    force: bool = False   # make it even though a single-item product with the same UPC / part number exists
+
+
+@router.post("/api/website-products/create-one")
+def api_website_products_create_one(body: MakeOneIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    rows = _part_rows(db, body.sku)
+    if not rows:
+        raise HTTPException(404, "That SKU is not in the Automatic Distributors catalog. Check the feed has been imported.")
+    want = re.sub(r"[^A-Za-z0-9]", "", body.sku).upper()
+    exact = [r for r in rows if re.sub(r"[^A-Za-z0-9]", "", r.sku).upper() == want]
+    if not exact:
+        raise HTTPException(409, "That matches a manufacturer number, not an Automatic Distributors SKU; pick the part from the list.")
+    r = exact[0]
+    prod = db.execute(
+        text("select p.id, p.title from supplier_product_links l join products p on p.id = l.product_id where l.supplier = :s and l.supplier_sku = :k limit 1"),
+        {"s": SUPPLIER, "k": r.sku},
+    ).first()
+    if prod:
+        raise HTTPException(409, f"{r.sku} already has a website product: #{prod.id} {prod.title}")
+    if r.have_single and not body.force:
+        raise HTTPException(409, "A single-item product with the same UPC or part number already exists. Make it anyway to create a second one.")
+    try:
+        try:
+            cats = _load_categories(db)
+        except Exception:
+            db.rollback()
+            cats = []
+        has_price = r.price is not None and r.price > 0
+        pid = _insert_website_product(db, r, cats, published=bool(has_price))
+        if pid is None:
+            raise HTTPException(400, "That part has no name or part number to build a title from.")
+        extra = {"parts_added": 0, "labels_set": 0}
+        try:
+            extra = _add_distributor_parts(db)
+        except HTTPException:
+            raise
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not make the product: {str(e)[:300]}")
+    photos = False
+    if _begin_photo_run():
+        threading.Thread(target=_store_product_photos, args=(500,), daemon=True, name="autodist-store-photos").start()
+        photos = True
+    title = db.execute(text("select title, custom_label_sku from products where id = :i"), {"i": pid}).first()
+    return {"product_id": pid, "title": title.title, "custom_label": title.custom_label_sku, "published": bool(has_price),
+            "photos_saving": photos, "parts_added": extra["parts_added"]}
 
 
 @router.get("/api/pos")

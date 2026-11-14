@@ -26,6 +26,12 @@ type Preview = {
   state: State;
   photos: PhotoState;
 };
+type OnePart = {
+  sku: string; manufacturer: string | null; mfr_number: string | null; name: string | null; title: string;
+  price: number | null; cost: number | null; qty: number; active: boolean; photos: number;
+  product_id: number | null; product_title: string | null; have_single: boolean;
+};
+const money = (x: number | null) => (x == null ? "no price" : `$${x.toFixed(2)}`);
 const n = (x: number | null | undefined) => (x ?? 0).toLocaleString("en-US");
 
 export default function AutodistProducts() {
@@ -36,6 +42,10 @@ export default function AutodistProducts() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [oneSku, setOneSku] = useState("");
+  const [oneParts, setOneParts] = useState<OnePart[] | null>(null);
+  const [oneMsg, setOneMsg] = useState<{ kind: "info" | "error"; text: string } | null>(null);
+  const [oneBusy, setOneBusy] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   async function loadPreview() {
@@ -75,6 +85,43 @@ export default function AutodistProducts() {
         /* keep watching */
       }
     }, 2000);
+  }
+
+  async function findOne() {
+    setOneBusy(true);
+    setOneMsg(null);
+    setOneParts(null);
+    try {
+      const r = await api<{ items: OnePart[] }>(`/autodist/api/website-products/lookup?sku=${encodeURIComponent(oneSku.trim())}`);
+      setOneParts(r.items);
+      if (!r.items.length) setOneMsg({ kind: "error", text: "That SKU is not in the Automatic Distributors catalog. Check the feed has been imported." });
+    } catch (e) {
+      setOneMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setOneBusy(false);
+    }
+  }
+
+  async function makeOne(part: OnePart, force: boolean) {
+    setOneBusy(true);
+    setOneMsg(null);
+    try {
+      const r = await api<{ product_id: number; title: string; custom_label: string | null; published: boolean; photos_saving: boolean }>(
+        "/autodist/api/website-products/create-one", { method: "POST", body: { sku: part.sku, force } });
+      setOneMsg({
+        kind: "info",
+        text: `Made product #${r.product_id}: ${r.title}${r.custom_label ? ` (custom label ${r.custom_label})` : ""}. ${
+          r.published ? "It is published." : "It has no price in the feed, so it is NOT published; set a price first."
+        }${r.photos_saving ? " Its photos are being saved to storage." : ""}`,
+      });
+      setOneParts(null);
+      setOneSku("");
+      void loadPreview();
+    } catch (e) {
+      setOneMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setOneBusy(false);
+    }
   }
 
   async function create() {
@@ -188,6 +235,41 @@ export default function AutodistProducts() {
         (distributor stock is never added to it). Each product gets the best-fitting category from your category tree (picked from the part name); each gets a short starting description (brand, condition, package size, weight) to build on; products have no vehicle fit yet.
       </Notice>
       {err && <Notice kind="error">{err}</Notice>}
+
+      <section className="max-w-3xl space-y-2 rounded border border-gray-200 p-3">
+        <h3 className="font-semibold">Make one product from an Automatic SKU</h3>
+        <p className="text-xs text-gray-500">
+          Works for any part in the catalog, in stock or not. It is made the same way as the batch below (title, category, photos, distributor part and custom label).
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <input className={inputCls + " w-64"} placeholder="Automatic SKU (e.g. 56-132)" value={oneSku}
+            onChange={(e) => setOneSku(e.target.value)} onKeyDown={(e) => e.key === "Enter" && oneSku.trim() && void findOne()} />
+          <button type="button" className={btnCls} disabled={oneBusy || !oneSku.trim()} onClick={() => void findOne()}>
+            {oneBusy ? "Working…" : "Find part"}
+          </button>
+        </div>
+        {oneMsg && <Notice kind={oneMsg.kind}>{oneMsg.text}</Notice>}
+        {oneParts?.map((p) => (
+          <div key={p.sku} className="space-y-1 rounded bg-gray-50 p-3">
+            <div className="font-medium">{p.title || p.name}</div>
+            <div className="text-xs text-gray-600">
+              SKU {p.sku}{p.mfr_number ? ` · Mfr # ${p.mfr_number}` : ""} · {money(p.price)} (cost {money(p.cost)}) · {n(p.qty)} in stock · {p.photos} photo link{p.photos === 1 ? "" : "s"}
+              {!p.active && " · not active in the feed"}
+            </div>
+            {p.product_id ? (
+              <div className="text-xs text-amber-700">Already a website product: #{p.product_id} {p.product_title}</div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                {p.have_single && <span className="text-xs text-amber-700">A single-item product with this UPC or part number already exists.</span>}
+                <button type="button" className={btnCls} disabled={oneBusy || running} onClick={() => void makeOne(p, p.have_single)}>
+                  {p.have_single ? "Make it anyway" : "Make website product"}
+                </button>
+                {p.price == null && <span className="text-xs text-gray-500">No price: it will be made unpublished.</span>}
+              </div>
+            )}
+          </div>
+        ))}
+      </section>
 
       {pv && (
         <div className="grid max-w-xl grid-cols-[1fr_auto] gap-x-6 gap-y-1 rounded border border-gray-200 bg-white p-4">
