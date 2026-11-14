@@ -3631,6 +3631,55 @@ def api_website_products_store_photos(body: StorePhotosIn, user: AuthUser = Depe
     return {"running": True}
 
 
+_NO_MFR_FROM = (
+    "from supplier_product_links l join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku "
+    "join products p on p.id = l.product_id "
+    "where l.supplier = :s and p.part_manufacturer_id is null and btrim(coalesce(s.manufacturer, '')) <> ''"
+)
+
+
+def _fill_manufacturers(db: Session) -> dict:
+    """Set the Manufacturer of every product made from the catalog that has none, from the catalog part's brand (made in the
+    manufacturer list when it is not there yet). Products that already have a Manufacturer are never changed. Commits nothing."""
+    from app.manufacturers import find_or_create, manufacturer_table
+
+    if not manufacturer_table(db):
+        raise HTTPException(409, "The manufacturer list could not be found in the database, so nothing was changed.")
+    rows = db.execute(text(f"select l.product_id, s.manufacturer {_NO_MFR_FROM}"), {"s": SUPPLIER}).all()
+    by_brand: dict[str, list[int]] = {}
+    for r in rows:
+        name = _nice_case(r.manufacturer)
+        if name:
+            by_brand.setdefault(name, []).append(r.product_id)
+    filled = 0
+    unresolved = 0
+    for name, ids in by_brand.items():
+        mid = find_or_create(db, name)
+        if mid is None:
+            unresolved += len(ids)
+            continue
+        filled += db.execute(
+            text("update products set part_manufacturer_id = :m where id = any(cast(:ids as bigint[])) and part_manufacturer_id is null"),
+            {"m": mid, "ids": ids},
+        ).rowcount
+    return {"checked": len(rows), "filled": filled, "brands": len(by_brand), "unresolved": unresolved}
+
+
+@router.post("/api/website-products/fill-manufacturers")
+def api_website_products_fill_manufacturers(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Give every product made from the catalog that has no Manufacturer the catalog part's brand. Safe to run again."""
+    try:
+        res = _fill_manufacturers(db)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not fill the manufacturers: {str(e)[:300]}")
+    return res
+
+
 @router.post("/api/website-products/add-parts")
 def api_website_products_add_parts(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     """Add the Distributor parts entry (and custom label) to every product made from the catalog that does not have one yet."""
@@ -3690,6 +3739,7 @@ def api_website_products_preview(db: Session = Depends(get_db)):
     return {
         **dict(r._mapping),
         "missing_parts": int(missing or 0),
+        "no_manufacturer": int(db.execute(text(f"select count(*) {_NO_MFR_FROM}"), {"s": SUPPLIER}).scalar() or 0),
         "no_category": int(no_cat or 0),
         "no_description": int(db.execute(text("select count(*) from supplier_product_links l join products p on p.id = l.product_id where l.supplier = :s and coalesce(btrim(p.description), '') = ''"), {"s": SUPPLIER}).scalar() or 0),
         "old_description_lines": int(

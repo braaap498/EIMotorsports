@@ -18,6 +18,7 @@ type Preview = {
   to_create: number;
   to_create_no_photo: number;
   missing_parts: number;
+  no_manufacturer: number;
   no_category: number;
   no_description: number;
   old_description_lines: number;
@@ -183,6 +184,23 @@ export default function AutodistProducts() {
     }
   }
 
+  async function fillManufacturers() {
+    setErr(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const r = await api<{ checked: number; filled: number; brands: number; unresolved: number }>("/autodist/api/website-products/fill-manufacturers", { method: "POST" });
+      setNote(
+        `Set the Manufacturer on ${n(r.filled)} product${r.filled === 1 ? "" : "s"} (${n(r.brands)} brand${r.brands === 1 ? "" : "s"}).` +
+          (r.unresolved ? ` ${n(r.unresolved)} could not be set because their brand could not be added to the manufacturer list.` : "")
+      );
+      await loadPreview();
+    } catch (e) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  }
+
   async function fixLabels() {
     setErr(null);
     setNote(null);
@@ -295,6 +313,16 @@ export default function AutodistProducts() {
           </span>
           <button type="button" className={btnCls} disabled={running || busy} onClick={() => void addParts()}>
             Add distributor parts
+          </button>
+        </div>
+      )}
+      {pv && pv.no_manufacturer > 0 && (
+        <div className="flex max-w-xl items-center justify-between gap-3 rounded border border-amber-300 bg-amber-50 p-3">
+          <span>
+            {n(pv.no_manufacturer)} product{pv.no_manufacturer === 1 ? "" : "s"} made here {pv.no_manufacturer === 1 ? "has" : "have"} no Manufacturer yet. It is filled from the catalog&rsquo;s brand and becomes the Brand on eBay listings.
+          </span>
+          <button type="button" className={btnCls} disabled={running || busy} onClick={() => void fillManufacturers()}>
+            Fill manufacturers
           </button>
         </div>
       )}
