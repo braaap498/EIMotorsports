@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
-import { Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
+import { Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
 import DescriptionEditor from "../../../components/admin/DescriptionEditor";
 import CompatEditor, { type CompatRow } from "../../../components/admin/CompatEditor";
 
@@ -485,7 +485,12 @@ function CopyEditor({ id }: { id: number }) {
           <button type="button" className={btnCls} disabled={off || !pv?.ok || !pv.fingerprint || !pv.live_pushes_enabled || dirty} onClick={() => void listIt()}>
             {busy === "list" ? "Listing…" : "List on eBay"}
           </button>
-          <button type="button" className="text-sm text-red-700 hover:underline" disabled={off} onClick={() => void discard()}>
+          <button
+            type="button"
+            className={`${dangerCls} ml-auto`}
+            disabled={off}
+            onClick={() => void discard()}
+          >
             Discard draft
           </button>
         </div>

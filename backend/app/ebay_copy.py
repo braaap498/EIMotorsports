@@ -222,6 +222,7 @@ def _extras(db: Session, store: str, item_id: str) -> dict:
     return {
         "category_id": t("PrimaryCategory/CategoryID"),
         "category_name": t("PrimaryCategory/CategoryName"),
+        "site": t("Site"),   # "US" or "eBayMotors": motorcycle / car parts categories only exist on eBayMotors
         "condition_id": t("ConditionID"),
         "condition_note": t("ConditionDescription"),
         "currency": (item.find(f"{NS}SellingStatus/{NS}CurrentPrice").get("currencyID") if item.find(f"{NS}SellingStatus/{NS}CurrentPrice") is not None else "USD"),
@@ -524,6 +525,19 @@ def _quantity_parts(db: Session, product_id: int) -> dict:
     return {"quantity_own": own, "quantity_distributor": max(total - own, 0), "distributor_counted": counted}
 
 
+SITE_IDS = {"US": "0", "eBayMotors": "100"}
+
+
+def _site_name(d: dict) -> str:
+    """The eBay site the listing is made on. Parts & Accessories categories (eBay Motors tree) are only valid on eBayMotors;
+    sending them to the US site gives eBay error 107 'The category is not valid'."""
+    return d.get("site") if d.get("site") in SITE_IDS else "US"
+
+
+def _site_id(d: dict) -> str:
+    return SITE_IDS[_site_name(d)]
+
+
 def _item_xml(d: dict, qty: int) -> str:
     price = _money(str(d.get("price") or ""))
     title = " ".join((d.get("title") or "").split())
@@ -541,7 +555,7 @@ def _item_xml(d: dict, qty: int) -> str:
         "<ListingDuration>GTC</ListingDuration>",
         "<ListingType>FixedPriceItem</ListingType>",
         f"<Currency>{cur}</Currency>",
-        "<Site>US</Site>",
+        f"<Site>{escape(_site_name(d))}</Site>",
     ]
     if d.get("sku"):
         parts.append(f"<SKU>{escape(d['sku'])}</SKU>")
@@ -646,7 +660,7 @@ def preview(copy_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
     d["sku"] = _product_label(db, r.product_id) or d.get("sku", "")
     qty = _quantity(db, r.store, r.product_id)
     xml = _item_xml(d, qty)
-    root = _trading(db, r.store, "VerifyAddFixedPriceItem", xml)
+    root = _trading(db, r.store, "VerifyAddFixedPriceItem", xml, _site_id(d))
     errs = _errors(root)
     ok = not _failed(root)
     fees = []
@@ -691,7 +705,7 @@ def list_it(copy_id: int, body: ListIn, db: Session = Depends(get_db), user: Aut
     if _fingerprint(r.store, xml) != body.fingerprint:
         raise HTTPException(409, "The listing is not the same as in the preview (or the stock changed). Nothing was sent. Preview again.")
 
-    root = _trading(db, r.store, "AddFixedPriceItem", xml)
+    root = _trading(db, r.store, "AddFixedPriceItem", xml, _site_id(d))
     errs = _errors(root)
     ok = not _failed(root)
     new_id = (root.findtext(f"{NS}ItemID") or "").strip()

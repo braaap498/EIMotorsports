@@ -76,7 +76,7 @@ BAD_TOKEN_CODES = {"931", "932", "16110"}  # eBay: the token was not accepted ->
 # --------------------------------------------------------------------------
 # talking to the Trading API
 # --------------------------------------------------------------------------
-def _trading(db: Session, store: str, call: str, inner: str) -> ET.Element:
+def _trading(db: Session, store: str, call: str, inner: str, site_id: str = "0") -> ET.Element:
     xml = f'<?xml version="1.0" encoding="utf-8"?><{call}Request xmlns="urn:ebay:apis:eBLBaseComponents">{inner}</{call}Request>'
     for attempt in (1, 2):
         token = get_user_token(db, store)
@@ -87,7 +87,7 @@ def _trading(db: Session, store: str, call: str, inner: str) -> ET.Element:
             headers={
                 "X-EBAY-API-IAF-TOKEN": token,
                 "X-EBAY-API-CALL-NAME": call,
-                "X-EBAY-API-SITEID": "0",
+                "X-EBAY-API-SITEID": site_id,
                 "X-EBAY-API-COMPATIBILITY-LEVEL": "1193",
                 "Content-Type": "text/xml",
             },

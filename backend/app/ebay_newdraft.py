@@ -549,10 +549,12 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
     if not d.get("condition_id") and ex.get("condition_id"):
         d["condition_id"] = ex["condition_id"]
     d["model_item_id"] = item
+    d["site"] = ex.get("site") or ""
     if cat_item and cat_store and cat_store.lower() != row.store.lower():
         d["category_id"] = cat_ex.get("category_id") or d.get("category_id", "")
         d["category_name"] = cat_ex.get("category_name") or ""
         d["category2_id"] = ""
+        d["site"] = cat_ex.get("site") or d.get("site", "")   # the site belongs to the category
         d["category_item_id"] = cat_item
 
     compat_note = ""
