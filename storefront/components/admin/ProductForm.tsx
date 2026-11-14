@@ -111,6 +111,7 @@ function buildPayload(vals: Record<string, string>, flags: Flags): { payload: Re
   }
   payload.description = (vals.description ?? "").trim() ? vals.description : null;
   payload.category_id = vals.category_id ? Number(vals.category_id) : null;
+  payload.part_manufacturer_id = vals.part_manufacturer_id ? Number(vals.part_manufacturer_id) : null;
   if ((vals.slug ?? "").trim()) payload.slug = vals.slug.trim();
   if (vals.sku !== undefined) payload.sku = vals.sku.trim().toUpperCase(); // edit screen only; blank is refused by the server
   Object.assign(payload, flags);
@@ -137,6 +138,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [vals, setVals] = useState<Record<string, string>>({});
   const [flags, setFlags] = useState<Flags>({ is_published: false, is_active: true, is_universal: false, universal_in_vehicle_search: true, fitment_exempt: false, show_part_number: false });
   const [cats, setCats] = useState<Cat[]>([]);
+  const [mfrs, setMfrs] = useState<{ id: number; name: string }[]>([]); // manufacturers (the brand of the part); also the eBay Brand
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [photosDirty, setPhotosDirty] = useState(false); // unsaved main-photo / order changes in the photos panel
   const [similar, setSimilar] = useState<SimilarMatch[]>([]);
@@ -151,7 +153,20 @@ export default function ProductForm({ productId }: { productId?: number }) {
 
   useEffect(() => {
     api<Cat[]>("/categories").then(setCats).catch(() => {});
+    api<{ items: { id: number; name: string }[] }>("/manufacturers").then((r) => setMfrs(r.items)).catch(() => {});
   }, []);
+
+  async function addManufacturer() {
+    const name = (window.prompt("Manufacturer name (the brand on the part, e.g. All Balls Racing):") ?? "").trim();
+    if (!name) return;
+    try {
+      const m = await api<{ id: number; name: string }>("/manufacturers", { method: "POST", body: { name } });
+      setMfrs((list) => (list.some((x) => x.id === m.id) ? list : [...list, m].sort((a, b) => a.name.localeCompare(b.name))));
+      set("part_manufacturer_id", String(m.id));
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    }
+  }
 
   // New products only: warn (never block) if a product like this already exists.
   useEffect(() => {
@@ -188,7 +203,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
     api<Record<string, unknown> & { photos: Photo[] }>(`/products/${productId}`)
       .then((p) => {
         const next: Record<string, string> = {};
-        [...ALL.map((f) => f.key), "description", "slug", "category_id", "sku"].forEach((k) => {
+        [...ALL.map((f) => f.key), "description", "slug", "category_id", "part_manufacturer_id", "sku"].forEach((k) => {
           const v = p[k];
           next[k] = v == null ? "" : String(v);
         });
@@ -434,6 +449,22 @@ export default function ProductForm({ productId }: { productId?: number }) {
                 placeholder="EI-0000123"
                 onChange={(e) => set("sku", e.target.value)}
               />
+            </Field>
+            <Field label="Manufacturer">
+              <select className={inputCls} disabled={!mayDetails} value={vals.part_manufacturer_id ?? ""} onChange={(e) => set("part_manufacturer_id", e.target.value)}>
+                <option value="">(none)</option>
+                {mfrs.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </select>
+              <span className="mt-1 block text-xs font-normal text-gray-500">
+                The brand on the part. It becomes the Brand on eBay listings.{" "}
+                {mayDetails && (
+                  <button type="button" className="underline" onClick={() => void addManufacturer()}>
+                    Add a manufacturer
+                  </button>
+                )}
+              </span>
             </Field>
             {renderFields(BASIC.filter((f) => f.key !== "title"))}
             <Field label="Category">

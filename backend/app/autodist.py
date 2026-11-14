@@ -3729,14 +3729,17 @@ def _insert_website_product(db: Session, r, cats: list, published: bool = True) 
         k += 1
         slug = f"{base}-{k}"
     ship_lb = r.ship_weight_lb if r.ship_weight_lb else r.weight_lb
+    from app.manufacturers import find_or_create  # late import, like slugify above
+    mfr_id = find_or_create(db, _nice_case(r.manufacturer))  # the catalog's brand becomes the product's Manufacturer (eBay Brand)
     with db.begin_nested():
         pid = db.execute(
             text(
-                "insert into products (title, slug, manufacturer_part_number, barcode, list_price, cost, quantity_on_hand, "
+                "insert into products (title, slug, manufacturer_part_number, part_manufacturer_id, barcode, list_price, cost, quantity_on_hand, "
                 "weight_oz, length_in, width_in, height_in, condition, is_published, is_active, is_universal, show_part_number, category_id, description) "
-                "values (:title, :slug, :mpn, :bc, :price, :cost, 0, :wt, :l, :w, :h, 'New', :pub, true, false, false, :cat, :desc) returning id"
+                "values (:title, :slug, :mpn, :mfr, :bc, :price, :cost, 0, :wt, :l, :w, :h, 'New', :pub, true, false, false, :cat, :desc) returning id"
             ),
             {
+                "mfr": mfr_id,
                 "title": title, "slug": slug, "mpn": (r.mfr_number or "").strip() or None,
                 "bc": re.sub(r"\D", "", r.upc or "") or None, "price": r.price, "pub": published,
                 "cost": r.effective_cost, "wt": (float(ship_lb) * 16) if ship_lb else None,

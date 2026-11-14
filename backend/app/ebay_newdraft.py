@@ -370,6 +370,23 @@ def _brand_for(db: Session, product_id: int) -> str:
     return brand
 
 
+def _remember_brand(db: Session, product_id: int, brand: str) -> None:
+    """A product with no Manufacturer gets the brand found from the catalog, so the product screen shows it from now on."""
+    if not brand:
+        return
+    try:
+        has = db.execute(text("select part_manufacturer_id from products where id = :p"), {"p": product_id}).scalar()
+        if has is not None:
+            return
+        from app.manufacturers import find_or_create
+        mid = find_or_create(db, brand)
+        if mid is not None:
+            db.execute(text("update products set part_manufacturer_id = :m where id = :p and part_manufacturer_id is null"), {"m": mid, "p": product_id})
+    except Exception:
+        db.rollback()
+        log.exception("could not save the brand on product %s", product_id)
+
+
 def _specifics_of(db: Session, product_id: int, brand: str, mpn: str) -> list[dict]:
     specs: list[dict] = []
     try:
@@ -417,6 +434,7 @@ def create(body: CreateIn, db: Session = Depends(get_db), user: AuthUser = Depen
         raise HTTPException(409, "The product has no photos yet. eBay needs at least one. Add one on the product first.")
 
     brand = _brand_for(db, body.product_id)
+    _remember_brand(db, body.product_id, brand)
     mpn = (j.get("manufacturer_part_number") or "").strip()
     description = (j.get("description") or "").strip() or f"<p>{title}</p>"
     price = ""
@@ -581,6 +599,7 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
     d["model_item_id"] = item
     if not d.get("brand"):   # drafts made before the brand fallback existed
         d["brand"] = _brand_for(db, r.product_id)
+        _remember_brand(db, r.product_id, d["brand"])
     specs_now = list(d.get("item_specifics") or [])
     if d.get("brand") and not any(str(x.get("name", "")).lower() == "brand" for x in specs_now) and len(d["brand"]) <= 65:
         specs_now.append({"name": "Brand", "values": [d["brand"]]})
