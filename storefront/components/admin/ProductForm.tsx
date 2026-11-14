@@ -457,14 +457,11 @@ export default function ProductForm({ productId }: { productId?: number }) {
                   <option key={m.id} value={m.id}>{m.name}</option>
                 ))}
               </select>
-              <span className="mt-1 block text-xs font-normal text-gray-500">
-                The brand on the part. It becomes the Brand on eBay listings.{" "}
-                {mayDetails && (
-                  <button type="button" className="underline" onClick={() => void addManufacturer()}>
-                    Add a manufacturer
-                  </button>
-                )}
-              </span>
+              {mayDetails && (
+                <button type="button" className="mt-1 block text-xs font-normal text-gray-500 underline" onClick={() => void addManufacturer()}>
+                  Add a manufacturer
+                </button>
+              )}
             </Field>
             {renderFields(BASIC.filter((f) => f.key !== "title"))}
             <Field label="Category">
