@@ -34,7 +34,7 @@ import logging
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -616,3 +616,78 @@ def rebuild_compat(copy_id: int, body: RebuildIn, db: Session = Depends(get_db),
                {"d": json.dumps(d), "i": copy_id})
     db.commit()
     return {"rows": len(merged), "added": added, "notes": notes}
+
+
+# --------------------------------------------------------------------------
+# picking the category by searching eBay's own category tree (no model item number needed)
+# --------------------------------------------------------------------------
+@router.get("/categories")
+def find_categories(q: str = Query(..., min_length=2, max_length=100)):
+    """eBay's suggested leaf categories for a few words ('fork seals'), eBay Motors first, then eBay US."""
+    from app import ebay_vocab as v
+    if not v.configured():
+        raise HTTPException(503, "EBAY_CLIENT_ID and EBAY_CLIENT_SECRET are not set on the API, so eBay's categories cannot be searched.")
+    out, seen, problems = [], set(), []
+    key = " ".join(q.lower().split())
+    for tree in v.TREES:
+        try:
+            res = v._cached(("catsug", tree, key), lambda t=tree: v._get(t, "get_category_suggestions", {"q": q.strip()}))
+        except v.VocabError as e:
+            problems.append(e.message)
+            continue
+        for sug in (res.get("categorySuggestions") or [])[:12]:
+            c = sug.get("category") or {}
+            cid = str(c.get("categoryId") or "")
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            anc = sorted(sug.get("categoryTreeNodeAncestors") or [], key=lambda a: a.get("categoryTreeNodeLevel") or 0)
+            path = [a.get("categoryName") for a in anc if a.get("categoryName")] + [c.get("categoryName") or cid]
+            out.append({"category_id": cid, "name": c.get("categoryName") or cid, "path": " > ".join(path),
+                        "tree": tree, "motors": tree == "100"})
+    if not out and problems:
+        raise HTTPException(502, f"eBay's category search said: {problems[0]}")
+    return {"categories": out}
+
+
+class CategoryIn(BaseModel):
+    category_id: str
+    category_name: str = ""
+    tree: str = "0"
+
+
+@router.post("/{copy_id}/category")
+def choose_category(copy_id: int, body: CategoryIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Use a category found by the search. Shipping and policies stay as the store's model listing gave them; the eBay site follows
+    the category's tree (eBay Motors categories are listed on the eBayMotors site), and the compatibility table is made again for it."""
+    from app import ebay_vocab as v
+    r = _row(db, copy_id)
+    if r.status != "draft":
+        raise HTTPException(409, "This draft is already listed.")
+    if r.source_item_id:
+        raise HTTPException(409, "This draft is a copy of a live listing, so its category is fixed.")
+    if not r.store:
+        raise HTTPException(409, "Choose the store first, then the category.")
+    cid = body.category_id.strip()
+    if not cid.isdigit() or body.tree not in v.TREES:
+        raise HTTPException(400, "That does not look like an eBay category.")
+    d = dict(r.data or {})
+    d["category_id"], d["category_name"] = cid, body.category_name.strip()
+    d["category2_id"] = ""
+    d["site"] = "eBayMotors" if body.tree == "100" else "US"
+    d.pop("category_item_id", None)
+    v._tree_of[cid] = body.tree
+    compat_note = ""
+    try:
+        rows, notes = v.convert_with_ebay(db, r.product_id, cid)
+        d["compat"], d["compat_notes"] = rows, notes
+        d.pop("compat_edited", None)
+        compat_note = f"{len(rows)} compatible vehicle rows were made again from our fitment for this category."
+    except Exception as e:
+        db.rollback()
+        d["compat"], d["compat_notes"] = [], []
+        compat_note = f"This category has no usable vehicle list ({getattr(e, 'detail', None) or getattr(e, 'message', None) or e}); the compatibility table was cleared."
+    db.execute(text("update ebay_listing_copies set data = cast(:d as jsonb), updated_at = now() where id = :i"),
+               {"d": json.dumps(d), "i": copy_id})
+    db.commit()
+    return {"category_id": cid, "category_name": d["category_name"], "site": d["site"], "compat_note": compat_note}

@@ -38,6 +38,7 @@ type Copy = {
 };
 type StoreChoice = { store: string; seller: string | null; live: boolean };
 type Hint = { name: string; value: string };
+type CatHit = { category_id: string; name: string; path: string; tree: string; motors: boolean };
 type Preview = {
   ok: boolean;
   errors: { code: string; message: string }[];
@@ -72,6 +73,8 @@ function CopyEditor({ id }: { id: number }) {
   const [pickStore, setPickStore] = useState("");
   const [modelItem, setModelItem] = useState("");
   const [hints, setHints] = useState<Hint[]>([]);
+  const [catQ, setCatQ] = useState("");
+  const [catHits, setCatHits] = useState<CatHit[] | null>(null);
 
   function fill(c: Copy) {
     setCopy(c);
@@ -131,6 +134,43 @@ function CopyEditor({ id }: { id: number }) {
           ? `Set up for ${r.store}: shipping and policies from eBay item ${r.model_item_id}, category${r.category_name ? ` ${r.category_name}` : ""} from item ${r.category_item_id} (${r.category_store}). ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.`
           : `Set up for ${r.store}, using eBay item ${r.model_item_id} as the model${r.category_name ? ` (${r.category_name})` : ""}. ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.`,
       });
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function searchCats() {
+    const q = catQ.trim();
+    if (q.length < 2) return;
+    setBusy("catsearch");
+    setMsg(null);
+    try {
+      const r = await api<{ categories: CatHit[] }>(`/ebay-draft/categories?q=${encodeURIComponent(q)}`);
+      setCatHits(r.categories);
+    } catch (e) {
+      setCatHits(null);
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function pickCat(h: CatHit) {
+    if (dirty && !(await save())) return;
+    setBusy("catpick");
+    setMsg(null);
+    setPv(null);
+    try {
+      const r = await api<{ compat_note?: string }>(`/ebay-draft/${id}/category`, {
+        method: "POST",
+        body: { category_id: h.category_id, category_name: h.name, tree: h.tree },
+      });
+      fill(await api<Copy>(`/ebay-copy/${id}`));
+      setCatHits(null);
+      setCatQ("");
+      setMsg({ kind: "success", text: `Category set to ${h.path} (${h.category_id}). ${r.compat_note ? r.compat_note + " " : ""}Nothing has gone to eBay.` });
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -289,6 +329,45 @@ function CopyEditor({ id }: { id: number }) {
             </p>
           ) : (
             <p className="text-xs text-amber-700">No store chosen yet, so this cannot be checked or listed.</p>
+          )}
+          {copy.store && (
+            <div className="space-y-2 border-t border-gray-100 pt-3">
+              <label className="block">
+                <span className="mb-1 block font-semibold">Or search eBay for the category</span>
+                <span className="flex flex-wrap items-center gap-2">
+                  <input
+                    className={`${inputCls} max-w-sm`}
+                    value={catQ}
+                    disabled={off}
+                    placeholder="e.g. fork seals"
+                    onChange={(e) => setCatQ(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void searchCats();
+                      }
+                    }}
+                  />
+                  <button type="button" className={btn2Cls} disabled={off || catQ.trim().length < 2} onClick={() => void searchCats()}>
+                    {busy === "catsearch" ? "Searching…" : "Search categories"}
+                  </button>
+                </span>
+              </label>
+              {catHits && catHits.length === 0 && <p className="text-xs text-gray-600">eBay suggested no categories for that. Try other words.</p>}
+              {catHits && catHits.length > 0 && (
+                <ul className="max-h-64 divide-y divide-gray-100 overflow-auto rounded border border-gray-200">
+                  {catHits.map((h) => (
+                    <li key={`${h.tree}-${h.category_id}`}>
+                      <button type="button" className="w-full px-3 py-2 text-left text-xs hover:bg-gray-50 disabled:opacity-50" disabled={off} onClick={() => void pickCat(h)}>
+                        <span className="font-medium">{h.path}</span>
+                        <span className="ml-2 text-gray-500">{h.category_id} · {h.motors ? "eBay Motors" : "eBay US"}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="text-xs text-gray-500">Picking one keeps the store&rsquo;s shipping and return settings, sets the right eBay site for the category, and makes the compatible-vehicles table again.</p>
+            </div>
           )}
         </div>
       )}
