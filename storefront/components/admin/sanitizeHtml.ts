@@ -59,48 +59,29 @@ function copyInto(source: Node, target: Node): void {
   });
 }
 
-const TIDY_EMPTY = new Set(["div", "p", "li", "ul", "ol", "b", "strong", "i", "em", "u", "sub", "sup", "a"]);
+const TIDY_EMPTY = new Set(["div", "p", "li", "ul", "ol", "b", "strong", "i", "em", "u", "sub", "sup", "a", "h2", "h3", "h4"]);
+const INLINE_WRAP = new Set(["b", "strong", "i", "em", "u", "sub", "sup", "a"]);
+const BLOCK = /^(DIV|P|H2|H3|H4|TABLE|HR)$/;
+const LIST = /^(UL|OL)$/;
 
 // Visible text, ignoring spaces and the invisible characters eBay's editor leaves in "empty" lines.
-const textOf = (el: Element) => (el.textContent ?? "").replace(/[\u200b-\u200d\u2060\ufeff\s]+/g, "");
+const INVISIBLE = /[\u200b-\u200d\u2060\ufeff\s]+/g;
+const textOf = (el: Element) => (el.textContent ?? "").replace(INVISIBLE, "");
+const hasObject = (el: Element) => !!el.querySelector("hr,table");
+const isEl = (n: Node | null | undefined, re?: RegExp): n is Element =>
+  !!n && n.nodeType === Node.ELEMENT_NODE && (!re || re.test((n as Element).tagName));
+const blankNode = (n: Node) =>
+  n.nodeType === Node.COMMENT_NODE || (n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").replace(INVISIBLE, "") === "");
+const isBlankBlock = (e: Element) => /^(DIV|P|H2|H3|H4)$/.test(e.tagName) && textOf(e) === "" && !hasObject(e);
 
-// A list item outside a list, or text / a nested list sitting directly inside <ul>, shows a bullet that the
-// editor cannot delete. Put every item inside a list and every list child inside an item.
-function fixLists(root: Element): void {
-  root.querySelectorAll("ul,ol").forEach((list) => {
-    Array.from(list.childNodes).forEach((n) => {
-      if (n.nodeType === Node.ELEMENT_NODE && (n as Element).tagName === "LI") return;
-      if (n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim() === "") {
-        n.parentNode?.removeChild(n);
-        return;
-      }
-      const prev = n.previousSibling;
-      const isList = n.nodeType === Node.ELEMENT_NODE && /^(UL|OL)$/.test((n as Element).tagName);
-      if (isList && prev && prev.nodeType === Node.ELEMENT_NODE && (prev as Element).tagName === "LI") {
-        prev.appendChild(n); // a sub-list belongs inside the item before it
-        return;
-      }
-      const li = document.createElement("li");
-      list.insertBefore(li, n);
-      li.appendChild(n);
-    });
-  });
-  root.querySelectorAll("li").forEach((li) => {
-    const parent = li.parentElement;
-    if (parent && (parent.tagName === "UL" || parent.tagName === "OL")) return;
-    const ul = document.createElement("ul");
-    li.before(ul);
-    ul.appendChild(li);
-    while (ul.nextSibling && ul.nextSibling.nodeType === Node.ELEMENT_NODE && (ul.nextSibling as Element).tagName === "LI") {
-      ul.appendChild(ul.nextSibling);
+// Bold / italic / link wrappers with no words in them only hide a <br> or nothing at all: keep what is inside.
+function unwrapEmptyInline(root: Element): void {
+  Array.from(root.querySelectorAll("*")).reverse().forEach((el) => {
+    if (INLINE_WRAP.has(el.tagName.toLowerCase()) && textOf(el) === "" && !hasObject(el)) {
+      el.replaceWith(...Array.from(el.childNodes));
     }
   });
 }
-
-const INVISIBLE = /[\u200b-\u200d\u2060\ufeff\s]+/g;
-const blankNode = (n: Node) =>
-  n.nodeType === Node.COMMENT_NODE || (n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").replace(INVISIBLE, "") === "");
-const isBlankBlock = (e: Element) => (e.tagName === "DIV" || e.tagName === "P") && textOf(e) === "" && !e.querySelector("hr,table");
 
 // eBay's editor often starts a list item with an empty line (a <br> or an empty div) and puts the real text on the next
 // line. The bullet then sits alone on the first line and cannot be selected or deleted. Such an item was never a real
@@ -108,43 +89,125 @@ const isBlankBlock = (e: Element) => (e.tagName === "DIV" || e.tagName === "P") 
 function unwrapSpacerItems(root: Element): void {
   root.querySelectorAll("li").forEach((li) => {
     const list = li.parentElement;
-    if (!list || !/^(UL|OL)$/.test(list.tagName) || textOf(li) === "") return; // fully empty ones are removed later
+    if (!list || !LIST.test(list.tagName) || textOf(li) === "") return; // fully empty ones are removed separately
     const first = Array.from(li.childNodes).find((n) => !blankNode(n));
-    const spacer = !!first && first.nodeType === Node.ELEMENT_NODE && ((first as Element).tagName === "BR" || isBlankBlock(first as Element));
-    if (!spacer) return;
+    if (!(isEl(first) && (first.tagName === "BR" || isBlankBlock(first)))) return;
+    first.remove(); // the empty first line itself
     const after = document.createElement(list.tagName.toLowerCase());
     while (li.nextSibling) after.appendChild(li.nextSibling);
     list.after(after);
-    Array.from(li.childNodes).forEach((c) => after.before(c));
+    const kids = Array.from(li.childNodes).filter((c) => !blankNode(c));
+    if (kids.every((c) => isEl(c, BLOCK) || isEl(c, LIST))) {
+      kids.forEach((c) => after.before(c));
+    } else {
+      // text and inline parts: keep them together as their own paragraph so they do not run into the next line
+      const div = document.createElement("div");
+      kids.forEach((c) => div.appendChild(c));
+      after.before(div);
+    }
     li.remove();
+  });
+}
+
+// A list may only hold list items. Anything else inside it (a heading or paragraph, loose text, a list that is not inside
+// an item) shows up with a bullet the editor cannot delete, or makes the bullet button act on the line above. Items that
+// hold nothing but a sub-list are replaced by that sub-list; a sub-list goes into the item before it; everything else is
+// taken out of the list, which is split around it.
+function normalizeList(list: Element): void {
+  let n: Node | null = list.firstChild;
+  while (n) {
+    const next: Node | null = n.nextSibling;
+    if (blankNode(n)) {
+      n.parentNode?.removeChild(n);
+      n = next;
+      continue;
+    }
+    if (isEl(n, /^LI$/)) {
+      const kids = Array.from(n.childNodes).filter((c) => !blankNode(c));
+      if (kids.length > 0 && kids.every((c) => isEl(c, LIST))) {
+        const first = kids[0];
+        Array.from(n.childNodes).forEach((c) => list.insertBefore(c, n));
+        n.remove();
+        n = first;
+        continue;
+      }
+      n = next;
+      continue;
+    }
+    if (isEl(n, LIST)) {
+      const prev = n.previousElementSibling;
+      if (prev && prev.tagName === "LI" && textOf(prev) !== "") {
+        prev.appendChild(n);
+        n = next;
+        continue;
+      }
+    }
+    // not a list item: take it out of the list (a run of loose text / inline parts becomes one paragraph)
+    let out = n as ChildNode;
+    if (!isEl(n, BLOCK) && !isEl(n, LIST)) {
+      const div = document.createElement("div");
+      list.insertBefore(div, n);
+      let m: Node | null = n;
+      while (m && !isEl(m, /^LI$/) && !isEl(m, BLOCK) && !isEl(m, LIST)) {
+        const nx: Node | null = m.nextSibling;
+        div.appendChild(m);
+        m = nx;
+      }
+      out = div;
+    }
+    const after = document.createElement(list.tagName.toLowerCase());
+    while (out.nextSibling) after.appendChild(out.nextSibling);
+    list.after(out);
+    out.after(after);
+    normalizeList(after);
+    return;
+  }
+}
+
+// A list item outside any list shows a bullet too; give such items a list.
+function wrapOrphanItems(root: Element): void {
+  root.querySelectorAll("li").forEach((li) => {
+    const parent = li.parentElement;
+    if (parent && LIST.test(parent.tagName)) return;
+    const ul = document.createElement("ul");
+    li.before(ul);
+    ul.appendChild(li);
+    while (isEl(ul.nextSibling, /^LI$/)) ul.appendChild(ul.nextSibling);
   });
 }
 
 // Removes the empty wrappers, empty bullets and stray line breaks the eBay editor leaves behind.
 function tidy(root: Element): void {
+  unwrapEmptyInline(root);
   unwrapSpacerItems(root);
+  // bullets with nothing in them
+  Array.from(root.querySelectorAll("li")).reverse().forEach((li) => {
+    if (textOf(li) === "" && !hasObject(li)) li.remove();
+  });
   root.querySelectorAll("br").forEach((br) => {
     const parent = br.parentElement;
     if (!parent || parent.tagName === "TD" || parent.tagName === "TH") return;
     // a <br> with nothing before it in its block only adds an empty first line
     let leading = true;
     for (let n = br.previousSibling; n; n = n.previousSibling) {
-      if (!blankNode(n) && !(n.nodeType === Node.ELEMENT_NODE && (n as Element).tagName === "BR")) leading = false;
+      if (!blankNode(n) && !isEl(n, /^BR$/)) leading = false;
     }
     // a <br> right before a block is an extra blank line; a <br> at the very end of a block is invisible
     const next = br.nextSibling;
-    const beforeBlock = !!next && next.nodeType === Node.ELEMENT_NODE && /^(DIV|P|UL|OL|TABLE|H2|H3|H4|HR)$/.test((next as Element).tagName);
+    const beforeBlock = isEl(next, /^(DIV|P|UL|OL|TABLE|H2|H3|H4|HR)$/);
     const atEnd = parent !== root && !next && !!br.previousSibling;
-    if ((leading && (br.nextSibling || parent !== root)) || beforeBlock || atEnd) br.remove();
+    if ((leading && (next || parent !== root)) || beforeBlock || atEnd) br.remove();
   });
-  fixLists(root);
+  Array.from(root.querySelectorAll("ul,ol")).reverse().forEach((list) => {
+    if (root.contains(list)) normalizeList(list);
+  });
+  wrapOrphanItems(root);
   for (let pass = 0; pass < 12; pass++) {
     let removed = false;
     // innermost first, so a list whose only item was empty goes too
     Array.from(root.querySelectorAll("*")).reverse().forEach((el) => {
-      const name = el.tagName.toLowerCase();
-      if (!TIDY_EMPTY.has(name) || !root.contains(el)) return;
-      if (textOf(el) === "" && !el.querySelector("hr,table")) {
+      if (!TIDY_EMPTY.has(el.tagName.toLowerCase()) || !root.contains(el)) return;
+      if (textOf(el) === "" && !hasObject(el)) {
         el.remove();
         removed = true;
       }
