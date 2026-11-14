@@ -525,7 +525,25 @@ def _quantity_parts(db: Session, product_id: int, dropship: bool = False) -> dic
     """Where the quantity comes from: our shelf (on hand minus set aside) plus the drop-ship warehouses, when they are counted."""
     own = int(db.execute(text(f"select {available_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
     total = int(db.execute(text(f"select {effective_sql('p', 'true' if dropship else 'false')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
-    return {"quantity_own": own, "quantity_distributor": max(total - own, 0), "distributor_counted": total > own or dropship}
+    note = ""
+    if not dropship:
+        note = "Drop ship is not ticked, so the distributor's warehouses are not counted."
+    elif total <= own:
+        try:
+            r = db.execute(
+                text("select count(*) as parts, count(si.id) filter (where si.active) as live from product_kit_parts k "
+                     "left join supplier_items si on si.id = k.supplier_item_id where k.product_id = :p"),
+                {"p": product_id},
+            ).first()
+            if not r or not r.parts:
+                note = "This product has no distributor part linked, so there is nothing to count. Use Add distributor parts on the Autodist page."
+            elif r.live < r.parts:
+                note = "A linked part is not an active item in the Autodist catalog, so it counts as 0."
+            else:
+                note = "The distributor's warehouses (Indiana + Nevada) show no stock for this part right now."
+        except Exception:
+            db.rollback()
+    return {"quantity_own": own, "quantity_distributor": max(total - own, 0), "distributor_counted": bool(dropship), "distributor_note": note}
 
 
 SITE_IDS = {"US": "0", "eBayMotors": "100"}

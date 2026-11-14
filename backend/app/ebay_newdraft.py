@@ -599,6 +599,8 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
     if not d.get("condition_id") and ex.get("condition_id"):
         d["condition_id"] = ex["condition_id"]
     d["model_item_id"] = item
+    if "dropship" not in d:   # drafts made before the Drop ship checkbox existed: on when the product has a distributor part
+        d["dropship"] = bool(db.execute(text("select exists (select 1 from product_kit_parts k where k.product_id = :p and k.supplier_item_id is not null)"), {"p": r.product_id}).scalar())
     if not d.get("brand"):   # drafts made before the brand fallback existed
         d["brand"] = _brand_for(db, r.product_id)
         _remember_brand(db, r.product_id, d["brand"])

@@ -49,6 +49,7 @@ type Preview = {
   quantity_own?: number;
   quantity_distributor?: number;
   distributor_counted?: boolean;
+  distributor_note?: string;
   duplicates: string[];
   fingerprint: string | null;
   live_pushes_enabled: boolean;
@@ -566,6 +567,7 @@ function CopyEditor({ id }: { id: number }) {
               {pv.fees.length > 0 ? ` Fees: ${pv.fees.map((f) => `${f.name} ${f.amount}`).join(", ")}.` : " No listing fee shown."}
             </p>
           )}
+          {pv.distributor_note && <Notice>{pv.distributor_note}</Notice>}
           {pv.duplicates.length > 0 && (
             <Notice kind="error">
               This store already has {pv.duplicates.length === 1 ? "a listing" : "listings"} with exactly this title ({pv.duplicates.join(", ")}). eBay may
