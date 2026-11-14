@@ -343,6 +343,18 @@ def get_item(store: str = Query(...), item_id: str = Query(...), db: Session = D
     _note_zero_state(db, item)
     item["draft"] = _read_draft(db, item["store"], item["item_id"])
     item["product_label"] = _product_label_for(db, item["store"], item["item_id"])
+    item["dropship"] = None  # {listing_id, on, product_on}: only for a listing linked to a product
+    try:
+        row = db.execute(
+            text("select cl.id, coalesce(cl.dropship_ok, false) as on_, coalesce(p.dropship_ok, false) as pon from channel_listings cl "
+                 "join products p on p.id = cl.product_id where lower(cl.store) = lower(:s) "
+                 "and regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i limit 1"),
+            {"s": item["store"], "i": item["item_id"]},
+        ).first()
+        if row:
+            item["dropship"] = {"listing_id": row.id, "on": bool(row.on_), "product_on": bool(row.pon)}
+    except Exception:
+        db.rollback()
     return item
 
 

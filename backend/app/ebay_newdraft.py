@@ -464,6 +464,8 @@ def create(body: CreateIn, db: Session = Depends(get_db), user: AuthUser = Depen
         "condition_id": condition_id(j.get("condition")), "condition_note": "",
         "compat": compat, "compat_notes": compat_notes,
         "brand": brand, "mpn": mpn,
+        # drop ship is on by default for a product that has a distributor part: the quantity then counts their warehouses
+        "dropship": bool(db.execute(text("select exists (select 1 from product_kit_parts k where k.product_id = :p and k.supplier_item_id is not null)"), {"p": body.product_id}).scalar()),
         "product_category_id": j.get("category_id"),
     }
     try:

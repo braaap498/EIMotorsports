@@ -21,6 +21,7 @@ type Item = {
   quantity_sold: number;
   sku: string;
   product_label?: string | null;
+  dropship?: { listing_id: number; on: boolean; product_on: boolean } | null;
   listing_type: string;
   status: string;
   url: string;
@@ -159,6 +160,21 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
     setCompat(vCompat);
     setPhotoMsg("");
     setBaseSig(sigOf({ title: vTitle, description: vDesc, price: vPrice, qty: vQty, sku: vSku, vars: vVars, photos: vPhotos, specs: vSpecs, compat: vCompat }));
+  }
+
+  async function toggleDropship(on: boolean) {
+    if (!item?.dropship) return;
+    setBusy("dropship");
+    setMsg(null);
+    try {
+      const r = await api<{ dropship_ok: boolean; queued: number }>(`/availability/listings/${item.dropship.listing_id}/dropship`, { method: "POST", body: { on } });
+      setItem({ ...item, dropship: { ...item.dropship, on: r.dropship_ok } });
+      setMsg({ kind: "success", text: `Drop ship is ${r.dropship_ok ? "on" : "off"} for this listing. ${r.queued ? "The new quantity is queued for eBay." : "No quantity change was needed."}` });
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
   }
 
   async function loadLog(s: string, id: string) {
@@ -572,6 +588,26 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
                   </span>
                 </label>
               </div>
+            )}
+
+            {!item.has_variations && item.dropship && (
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={item.dropship.on || item.dropship.product_on}
+                  disabled={busy !== "" || item.dropship.product_on}
+                  onChange={(e) => void toggleDropship(e.target.checked)}
+                />
+                <span>
+                  <span className="font-medium">Drop ship from the distributor</span>
+                  <span className="block text-xs text-gray-500">
+                    {item.dropship.product_on
+                      ? "On for every listing of this product (set on the Available page)."
+                      : "The quantity is the distributor's stock (Indiana + Nevada) plus our own shelf stock. Untick it and the quantity falls back to our own stock only, and eBay is updated."}
+                  </span>
+                </span>
+              </label>
             )}
 
             {item.has_variations && (

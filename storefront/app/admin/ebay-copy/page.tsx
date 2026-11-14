@@ -23,6 +23,7 @@ type Copy = {
   photos: string[];
   original_photos: string[];
   item_specifics: Spec[];
+  dropship?: boolean;
   currency: string;
   category_name: string;
   compat_count: number;
@@ -66,6 +67,7 @@ function CopyEditor({ id }: { id: number }) {
   const [compat, setCompat] = useState<CompatRow[]>([]);
   const [compatTouched, setCompatTouched] = useState(false); // only an edit made here is sent, so choosing a store can still rebuild the list
   const [dirty, setDirty] = useState(false);
+  const [dropship, setDropship] = useState(false);
   const [pv, setPv] = useState<Preview | null>(null);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -86,6 +88,7 @@ function CopyEditor({ id }: { id: number }) {
     setSpecs(c.item_specifics.map((s) => ({ name: s.name, value: s.values.join("; ") })));
     setCompat(c.compat ?? []);
     setCompatTouched(false);
+    setDropship(!!c.dropship);
     setDirty(false);
   }
 
@@ -214,6 +217,7 @@ function CopyEditor({ id }: { id: number }) {
           item_specifics: specs
             .filter((s) => s.name.trim() || s.value.trim())
             .map((s) => ({ name: s.name, values: s.value.split(";").map((v) => v.trim()).filter(Boolean) })),
+          dropship,
           ...(compatTouched ? { compat } : {}),
         },
       });
@@ -405,9 +409,29 @@ function CopyEditor({ id }: { id: number }) {
             <input className={`${inputCls} bg-gray-100 text-gray-600`} value={sku} readOnly tabIndex={-1} title="Read only. The custom label comes from the product." />
           </label>
         </div>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={dropship}
+            disabled={off}
+            onChange={(e) => {
+              setDropship(e.target.checked);
+              setDirty(true);
+              setPv(null);
+            }}
+          />
+          <span>
+            <span className="font-medium">Drop ship from the distributor</span>
+            <span className="block text-xs text-gray-500">
+              The quantity is the distributor&rsquo;s stock (Indiana + Nevada) plus whatever we have on our shelf, and stays that way after it is
+              listed. Untick it and the quantity is our own stock only.
+            </span>
+          </span>
+        </label>
         <p className="text-xs text-gray-500">
-          Quantity is not set here: the new listing gets the product&rsquo;s available stock from the website. eBay may refuse a listing that
-          is identical to a live one in the same store; change the title if it does.
+          Quantity is not typed here: it comes from stock. eBay may refuse a listing that is identical to a live one in the same store; change
+          the title if it does.
         </p>
       </div>
 
@@ -538,7 +562,7 @@ function CopyEditor({ id }: { id: number }) {
           {pv.warnings.map((e, i) => <Notice key={i}>{e.message} (eBay {e.code})</Notice>)}
           {pv.ok && (
             <p>
-              eBay accepts this listing. Quantity {pv.quantity}{pv.quantity_own !== undefined ? ` (${pv.quantity_own} on our shelf${pv.distributor_counted ? ` + ${pv.quantity_distributor ?? 0} at the drop ship warehouses` : ", drop ship warehouses not counted"})` : ""}.
+              eBay accepts this listing. Quantity {pv.quantity}{pv.quantity_own !== undefined ? ` (${pv.quantity_own} on our shelf${pv.distributor_counted ? ` + ${pv.quantity_distributor ?? 0} at the distributor` : ", distributor not counted"})` : ""}.
               {pv.fees.length > 0 ? ` Fees: ${pv.fees.map((f) => `${f.name} ${f.amount}`).join(", ")}.` : " No listing fee shown."}
             </p>
           )}

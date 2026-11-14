@@ -1,8 +1,8 @@
 """
 What is AVAILABLE to sell, counting the distributor's stock as well as our own shelf. Mounted at /admin/availability/* (admin only).
 
-THE RULE (only when the master switch "Count distributor stock" is ON; while it is OFF every number is the shelf count minus what
-is set aside, exactly as before)
+THE RULE (a product or listing marked DROP SHIP always counts the distributor's stock; everything else only while the master switch
+"Count distributor stock" is ON; with the switch OFF and nothing marked, every number is the shelf count minus what is set aside)
   own          quantity_on_hand minus parts set aside (app/stock.py), never below 0
   distributor  Automatic Distributors Indiana + Nevada stock for the product's parts (product_kit_parts). With several pieces
                the scarcest piece decides: min over the pieces of floor(stock / pieces needed per product)
@@ -120,12 +120,15 @@ def dist_sql(p: str = "p") -> str:
 
 
 def extra_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False) -> str:
-    """What the distributor adds on top of our own count for product `p` (0 when the switch is off or the rule says no).
-    `ovr` is an SQL boolean for a listing-level drop ship override, e.g. "coalesce(cl.dropship_ok, false)"."""
-    inner = f"(case when {parts_count_sql(p)} = 1 or {p}.dropship_ok or {ovr} then {dist_sql(p)} else 0 end)"
-    if ignore_switch:
-        return inner
-    return f"(case when {_setting_sql('use_distributor_stock', 'off')} = 'on' then {inner} else 0 end)"
+    """What the distributor adds on top of our own count for product `p`.
+    A product or listing that is marked DROP SHIP (`{p}.dropship_ok`, or `ovr`, an SQL boolean such as "coalesce(cl.dropship_ok, false)")
+    always counts the distributor's stock, whether it is a single part or a kit, and whatever the master switch says.
+    Anything not marked counts it only while the master switch is ON and the product is a single part."""
+    switch = "true" if ignore_switch else f"{_setting_sql('use_distributor_stock', 'off')} = 'on'"
+    return (
+        f"(case when {p}.dropship_ok or {ovr} then {dist_sql(p)} "
+        f"when {switch} and {parts_count_sql(p)} = 1 then {dist_sql(p)} else 0 end)"
+    )
 
 
 def effective_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False) -> str:
@@ -430,17 +433,19 @@ def reconcile(db: Session) -> dict:
     """Look at every product that has pieces and an active eBay listing. Record its number the first time (baseline, no push).
     When the number went DOWN since last time, queue its listings; when it went UP, only if "raise listings automatically" is ON."""
     out = {"checked": 0, "baseline": 0, "queued": 0}
-    if not switch_on(db):
-        return out
     from app.ebay_sales import enqueue_product
+
+    on = switch_on(db)
+    flagged = "exists (select 1 from channel_listings cl2 where cl2.product_id = p.id and cl2.dropship_ok)"
 
     raise_ok = get_setting(db, "auto_raise", "off") == "on"
     rows = db.execute(
         text(
-            f"select p.id, {effective_sql('p')} as eff, st.effective as prev from products p "
+            f"select p.id, {effective_sql('p', flagged)} as eff, st.effective as prev from products p "
             "left join availability_state st on st.product_id = p.id "
             "where exists (select 1 from product_kit_parts k where k.product_id = p.id) "
-            f"and exists (select 1 from channel_listings cl where cl.product_id = p.id and {_ACTIVE_LISTING})"
+            f"and exists (select 1 from channel_listings cl where cl.product_id = p.id and {_ACTIVE_LISTING}) "
+            + ("" if on else f"and (p.dropship_ok or {flagged})")
         )
     ).all()
     for n, r in enumerate(rows, 1):

@@ -260,6 +260,7 @@ class DraftIn(BaseModel):
     photos: Optional[list[str]] = Field(default=None, max_length=24)  # the pictures to keep, in order (all must be the original's)
     item_specifics: Optional[list[dict]] = Field(default=None, max_length=100)  # [{name, values:[...]}]
     compat: Optional[list[dict]] = Field(default=None, max_length=3000)  # the complete list: [{pairs:[[name, value], ...], notes}]
+    dropship: Optional[bool] = None  # count the distributor's warehouses in the quantity, and keep doing so after it is listed
 
 
 def _row(db: Session, copy_id: int):
@@ -317,6 +318,7 @@ def _shape(r) -> dict:
         "needs_store": not r.store, "model_item_id": d.get("model_item_id", ""),
         "compat": d.get("compat", []), "compat_edited": bool(d.get("compat_edited")),
         "terms": terms_summary(d), "terms_problem": _terms_problem(d),
+        "dropship": bool(d.get("dropship")),
     }
 
 
@@ -460,6 +462,8 @@ def save_copy(copy_id: int, body: DraftIn, db: Session = Depends(get_db)):
         d["photos"] = body.photos
     if body.item_specifics is not None:
         d["item_specifics"] = _spec_clean(body.item_specifics)
+    if body.dropship is not None:
+        d["dropship"] = bool(body.dropship)
     if body.compat is not None:
         d["compat"] = _compat_clean(body.compat)
         d["compat_edited"] = True  # from now on choosing a store does not rebuild the list from our fitment
@@ -489,14 +493,18 @@ def _product_label(db: Session, product_id: int) -> str:
     return (str(v).strip() if v is not None else "")
 
 
-def _quantity(db: Session, store: str, product_id: int) -> int:
-    avail = db.execute(text(f"select {effective_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar()
+def _quantity(db: Session, store: str, product_id: int, dropship: bool = False) -> int:
+    avail = db.execute(text(f"select {effective_sql('p', 'true' if dropship else 'false')} from products p where p.id = :p"), {"p": product_id}).scalar()
     avail = int(avail or 0)
     if avail < 1:
         raise HTTPException(
             409,
-            "The website shows nothing available to sell for this part (stock on hand minus parts set aside), and eBay "
-            "needs at least 1 to list. Receive stock first. Nothing was sent.",
+            "Nothing is available to sell for this part (our stock on hand minus parts set aside"
+            + (", plus the distributor's warehouses" if dropship else "") + "), and eBay "
+            "needs at least 1 to list. "
+            + ("Check that the product has its distributor part linked (Autodist page > Add distributor parts) and that the warehouses have stock. "
+               if dropship else "Tick Drop ship to count the distributor's warehouses, or receive stock first. ")
+            + "Nothing was sent.",
         )
     return min(avail, 9999)
 
@@ -513,16 +521,11 @@ def _ready(store: str, d: dict) -> None:
         raise HTTPException(409, "The draft has no shipping and return rules yet. Choose the store again, or pick a different model listing.")
 
 
-def _quantity_parts(db: Session, product_id: int) -> dict:
-    """Where the quantity comes from: our shelf (on hand minus set aside) plus the drop-ship warehouses, when the rule counts them."""
+def _quantity_parts(db: Session, product_id: int, dropship: bool = False) -> dict:
+    """Where the quantity comes from: our shelf (on hand minus set aside) plus the drop-ship warehouses, when they are counted."""
     own = int(db.execute(text(f"select {available_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
-    total = int(db.execute(text(f"select {effective_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
-    try:
-        counted = (db.execute(text("select value from availability_settings where key = 'use_distributor_stock'")).scalar() or "off") == "on"
-    except Exception:
-        db.rollback()
-        counted = False
-    return {"quantity_own": own, "quantity_distributor": max(total - own, 0), "distributor_counted": counted}
+    total = int(db.execute(text(f"select {effective_sql('p', 'true' if dropship else 'false')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
+    return {"quantity_own": own, "quantity_distributor": max(total - own, 0), "distributor_counted": total > own or dropship}
 
 
 SITE_IDS = {"US": "0", "eBayMotors": "100"}
@@ -658,7 +661,7 @@ def preview(copy_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
     d = dict(r.data or {})
     _ready(r.store, d)
     d["sku"] = _product_label(db, r.product_id) or d.get("sku", "")
-    qty = _quantity(db, r.store, r.product_id)
+    qty = _quantity(db, r.store, r.product_id, bool(d.get("dropship")))
     xml = _item_xml(d, qty)
     root = _trading(db, r.store, "VerifyAddFixedPriceItem", xml, _site_id(d))
     errs = _errors(root)
@@ -678,7 +681,7 @@ def preview(copy_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
         "warnings": [e for e in errs if e["severity"] == "Warning"],
         "fees": fees,
         "quantity": qty,
-        **_quantity_parts(db, r.product_id),
+        **_quantity_parts(db, r.product_id, bool(d.get("dropship"))),
         "duplicates": _duplicates(db, r.store, " ".join((d.get("title") or "").split()), ""),
         "fingerprint": _fingerprint(r.store, xml) if ok else None,
         "live_pushes_enabled": _live_on(db, r.store),
@@ -700,7 +703,7 @@ def list_it(copy_id: int, body: ListIn, db: Session = Depends(get_db), user: Aut
     if not _live_on(db, r.store):
         raise HTTPException(403, f"Live pushes are OFF for {r.store}. Turn them on in the Stores box first.")
     d["sku"] = _product_label(db, r.product_id) or d.get("sku", "")
-    qty = _quantity(db, r.store, r.product_id)
+    qty = _quantity(db, r.store, r.product_id, bool(d.get("dropship")))
     xml = _item_xml(d, qty)
     if _fingerprint(r.store, xml) != body.fingerprint:
         raise HTTPException(409, "The listing is not the same as in the preview (or the stock changed). Nothing was sent. Preview again.")
@@ -718,8 +721,14 @@ def list_it(copy_id: int, body: ListIn, db: Session = Depends(get_db), user: Aut
     notes: list[str] = []
     try:
         _insert_link(db, new_id, r.product_id, r.store)
+        if d.get("dropship"):
+            db.execute(
+                text("update channel_listings set dropship_ok = true where product_id = :p and lower(coalesce(store, '')) = lower(:s) "
+                     "and regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i"),
+                {"p": r.product_id, "s": r.store, "i": new_id},
+            )
         db.commit()
-        notes.append(f"Linked eBay item {new_id} to product {r.product_id}.")
+        notes.append(f"Linked eBay item {new_id} to product {r.product_id}." + (" Drop ship is on for it." if d.get("dropship") else ""))
     except Exception as e:
         db.rollback()
         log.exception("listed %s but could not link it to product %s", new_id, r.product_id)
