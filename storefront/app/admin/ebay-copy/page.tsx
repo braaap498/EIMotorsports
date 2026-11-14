@@ -138,6 +138,22 @@ function CopyEditor({ id }: { id: number }) {
     }
   }
 
+  async function rebuildCompat(mode: "add" | "replace") {
+    if (dirty && !(await save())) return;
+    if (mode === "replace" && !window.confirm("Replace the whole table with one made from the product's fitment? Rows you added by hand are lost.")) return;
+    setBusy("compat");
+    setMsg(null);
+    try {
+      const r = await api<{ rows: number; added: number; notes: string[] }>(`/ebay-draft/${id}/rebuild-compat`, { method: "POST", body: { mode } });
+      fill(await api<Copy>(`/ebay-copy/${id}`));
+      setMsg({ kind: "success", text: `${r.added} vehicle row${r.added === 1 ? "" : "s"} added from the product's fitment; the table now has ${r.rows}.${r.notes.length ? ` ${r.notes.length} note${r.notes.length === 1 ? "" : "s"} about what eBay does not list are below.` : ""}` });
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
   function touch() {
     setDirty(true);
     setPv(null); // an edit makes any preview out of date
@@ -333,6 +349,14 @@ function CopyEditor({ id }: { id: number }) {
             ? "Edited by hand, so choosing a store again will not rebuild it."
             : "Built from the fitment saved on the website, matched to eBay's own vehicle list. Add or remove vehicles freely."}
         </p>
+        {fromProduct && !!copy.category_id && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className={btnCls} disabled={off || busy !== ""} onClick={() => void rebuildCompat("add")}>
+              {busy === "compat" ? "Working…" : "Add all vehicles from the product's fitment"}
+            </button>
+            <button type="button" className={btn2Cls} disabled={off || busy !== ""} onClick={() => void rebuildCompat("replace")}>Replace table with fitment</button>
+          </div>
+        )}
         <CompatEditor
           categoryId={copy.category_id}
           rows={compat}

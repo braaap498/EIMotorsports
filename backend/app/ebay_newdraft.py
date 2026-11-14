@@ -580,3 +580,37 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
         "hint_specifics": hints[:40], "tried": len(cands), "compat_note": compat_note,
         "category_item_id": d.get("category_item_id", ""), "category_store": cat_store or row.store,
     }
+
+
+class RebuildIn(BaseModel):
+    mode: str = "add"   # "add": keep the rows already on the draft and add the missing ones; "replace": start over from our fitment
+
+
+@router.post("/{copy_id}/rebuild-compat")
+def rebuild_compat(copy_id: int, body: RebuildIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Make the compatible-vehicles table again from the product's fitment, using eBay's own list for the draft's category."""
+    r = _row(db, copy_id)
+    if r.status != "draft" or r.source_item_id or not r.product_id:
+        raise HTTPException(409, "Only a draft made from a product can be rebuilt from its fitment.")
+    d = dict(r.data or {})
+    if not d.get("category_id"):
+        raise HTTPException(409, "Choose the store first so the eBay category is known.")
+    from app.ebay_vocab import convert_with_ebay
+    try:
+        rows, notes = convert_with_ebay(db, r.product_id, d["category_id"])
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(502, f"eBay's vehicle list could not be read: {getattr(e, 'detail', None) or getattr(e, 'message', None) or e}")
+    have = list(d.get("compat") or [])
+    if body.mode == "replace":
+        merged, added = rows, len(rows)
+    else:
+        keys = {tuple(map(tuple, c.get("pairs") or [])) for c in have}
+        new = [c for c in rows if tuple(map(tuple, c["pairs"])) not in keys]
+        merged, added = (have + new)[:MAX_COMPAT_ROWS], len(new)
+    d["compat"], d["compat_notes"] = merged, notes
+    d.pop("compat_edited", None)
+    db.execute(text("update ebay_listing_copies set data = cast(:d as jsonb), updated_at = now() where id = :i"),
+               {"d": json.dumps(d), "i": copy_id})
+    db.commit()
+    return {"rows": len(merged), "added": added, "notes": notes}
