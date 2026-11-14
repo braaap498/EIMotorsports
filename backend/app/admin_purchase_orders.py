@@ -884,11 +884,13 @@ def po_from_ebay_order(body: EbayDropIn, db: Session = Depends(get_db), user: Au
     merged: dict[int, int] = {}
     for l in picked:
         merged[l.product_id] = merged.get(l.product_id, 0) + int(l.quantity or 1)
-    return create_po(
+    svc = (addr.get("service") or "").strip()
+    po = create_po(
         PoIn(
             distributor_id=dists[0].id,
             ship_to=_po_ship_to(addr),
-            note=f"Drop ship for eBay order {o.ebay_order_id}",
+            # the buyer's shipping choice rides on the PO so whoever (or whatever) places the order can match it
+            note=f"Drop ship for eBay order {o.ebay_order_id}" + (f". Buyer chose: {svc}" if svc else ""),
             po_type="drop_ship",
             source=src,
             lines=[PoLineIn(product_id=pid, quantity=q) for pid, q in merged.items()],
@@ -896,6 +898,9 @@ def po_from_ebay_order(body: EbayDropIn, db: Session = Depends(get_db), user: Au
         db=db,
         user=user,
     )
+    po["ship_service"] = svc or None
+    po["buyer_name"] = (addr.get("full_name") or "").strip() or None
+    return po
 
 
 @router.get("")

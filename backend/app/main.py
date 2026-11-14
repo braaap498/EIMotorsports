@@ -22,6 +22,7 @@ from app.admin_ebay_fitment import router as admin_ebay_fitment_router
 from app.admin_ebay_import import router as admin_ebay_import_router
 from app.admin_ebay_new import router as admin_ebay_new_router
 from app.manufacturers import router as manufacturers_router
+from app.dropship_auto import router as dropship_router
 from app.admin_ebay_listings import router as admin_ebay_listings_router
 from app.admin_ebay_listings import start_status_sync_daily
 from app.ebay_oauth import router as ebay_oauth_router
@@ -110,6 +111,7 @@ def ping_db(db: Session = Depends(get_db)):
 admin_router.include_router(admin_catalog_router)
 admin_router.include_router(admin_cleanup_router)
 admin_router.include_router(manufacturers_router)
+admin_router.include_router(dropship_router)
 admin_router.include_router(admin_ebay_new_router)
 admin_router.include_router(admin_ebay_listings_router)
 admin_router.include_router(ebay_oauth_router)

@@ -21,7 +21,7 @@ from reportlab.pdfgen import canvas
 
 # The business's own address, printed top left. The Ship To box defaults to the warehouse (it can be
 # changed on each purchase order when it is created).
-COMPANY_LINES = ["E & I Motorsports LLC", "7236 Valley Rd.", "Honor, MI 49640"]
+COMPANY_LINES: list[str] = []  # the address block at the top left was removed on purpose; add lines back here to print it again
 DEFAULT_SHIP_TO = "E & I Motorsports LLC\n5572 Betsie River Rd\nInterlochen, MI 49643"
 
 

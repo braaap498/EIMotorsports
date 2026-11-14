@@ -799,6 +799,12 @@ def run_due() -> int:
                 pass  # the reason is saved on the store (sales_last_error)
     finally:
         db.close()
+    try:
+        from app import dropship_auto  # new drop ship orders make their PO (only when its switch is on)
+
+        dropship_auto.scan_if_enabled()
+    except Exception:
+        log.exception("the drop ship check after the eBay order check failed")
     return n
 
 
