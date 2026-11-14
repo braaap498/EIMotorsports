@@ -198,7 +198,7 @@ export default function FitmentResearchPage() {
           <div className="space-y-2">
             {preview.warnings.length > 0 && <Notice kind="info">{preview.warnings.join(" ")}</Notice>}
             {preview.makes.map((mk) => (
-              <details key={mk.make} className="rounded border border-gray-200">
+              <details key={mk.make} open className="rounded border border-gray-200">
                 <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm">
                   <input type="checkbox" checked={!skipMakes[mk.make]} onClick={(e) => e.stopPropagation()}
                     onChange={(e) => setSkipMakes({ ...skipMakes, [mk.make]: !e.target.checked })} />
@@ -206,6 +206,8 @@ export default function FitmentResearchPage() {
                   <Badge tone={mk.make_exists ? "gray" : "green"}>{mk.make_exists ? "make exists" : "new make"}</Badge>
                   <Badge>{mk.models.length} models</Badge>
                   <Badge tone="amber">{mk.models.filter((m) => !m.model_exists).length} new</Badge>
+                  <Badge>{mk.models.reduce((a, m) => a + m.years.length, 0)} model-years to link</Badge>
+                  <Badge tone="green">{mk.models.reduce((a, m) => a + m.new_years, 0)} new years</Badge>
                 </summary>
                 <ul className="divide-y border-t text-sm">
                   {mk.models.map((m) => {
