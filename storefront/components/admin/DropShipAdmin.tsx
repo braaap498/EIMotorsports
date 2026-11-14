@@ -9,7 +9,12 @@ type Settings = { auto_po: boolean; last_scan_at: string | null; last_scan_note:
 
 const STAGE: Record<string, string> = {
   review_po: "Waiting for you to check the PO",
-  po_confirmed: "PO checked (the quote step is not switched on yet)",
+  po_confirmed: "PO checked; quote not fetched",
+  review_quote: "Waiting for you to check the quote",
+  placing: "Placing the order…",
+  placed: "Order placed; waiting for tracking",
+  review_tracking: "Waiting for you to check the tracking",
+  done: "Done: eBay told it shipped",
   held: "On hold",
   problem: "Needs attention",
 };
@@ -56,7 +61,7 @@ export default function DropShipAdmin() {
         <h1 className="text-lg font-semibold">Drop ship</h1>
         <p className="text-sm text-gray-600">
           An eBay order for a Drop ship product that is out of stock on our shelf makes its own purchase order to the distributor. For now
-          it stops there and asks you to check the PO.
+          you check the PO, then the quote (then the order is placed), then the tracking before eBay is told.
         </p>
       </div>
 
@@ -86,7 +91,7 @@ export default function DropShipAdmin() {
           </label>
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={() => void run("scan", () => api<{ note: string }>("/dropship/scan", { method: "POST" }), (r) => r.note)}>
-              {busy === "scan" ? "Checking…" : "Check for new orders now"}
+              {busy === "scan" ? "Checking…" : "Check for new orders and tracking now"}
             </button>
             {settings.last_scan_note && <span className="text-xs text-gray-500">Last check: {settings.last_scan_note}</span>}
           </div>
@@ -118,15 +123,15 @@ export default function DropShipAdmin() {
               {j.po_number != null && <span>PO {j.po_number}</span>}
               {j.buyer_name && <span>{j.buyer_name}</span>}
               {j.ship_service && <span className="text-gray-600">{j.ship_service}</span>}
-              <span className={`ml-auto rounded px-2 py-0.5 text-xs ${j.stage === "problem" ? "bg-red-50 text-red-700" : j.stage === "review_po" ? "bg-amber-50 text-amber-800" : "bg-gray-100 text-gray-700"}`}>
+              <span className={`ml-auto rounded px-2 py-0.5 text-xs ${j.stage === "problem" ? "bg-red-50 text-red-700" : ["review_po", "po_confirmed", "review_quote", "review_tracking"].includes(j.stage) ? "bg-amber-50 text-amber-800" : "bg-gray-100 text-gray-700"}`}>
                 {STAGE[j.stage] ?? j.stage}
               </span>
             </div>
             {j.problem && <p className="mt-1 text-xs text-red-700">{j.problem}</p>}
             <div className="mt-2 flex flex-wrap gap-2">
-              {j.stage === "review_po" && (
+              {["review_po", "po_confirmed", "review_quote", "review_tracking"].includes(j.stage) && (
                 <button type="button" className={btn2Cls} onClick={() => setOpen(open === j.id ? null : j.id)}>
-                  {open === j.id ? "Close" : "Review the PO"}
+                  {open === j.id ? "Close" : "Review"}
                 </button>
               )}
               {j.stage === "problem" && (
@@ -135,7 +140,7 @@ export default function DropShipAdmin() {
                 </button>
               )}
             </div>
-            {open === j.id && j.stage === "review_po" && (
+            {open === j.id && ["review_po", "po_confirmed", "review_quote", "review_tracking"].includes(j.stage) && (
               <div className="mt-3 border-t border-gray-100 pt-3">
                 <PoReview job={j} onDone={() => { setOpen(null); void load(); }} />
               </div>
