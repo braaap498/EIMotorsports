@@ -163,3 +163,85 @@ def extract_json(text: str):
                         break
         i = s.find("{", i + 1)
     return None
+
+
+# --------------------------------------------------------------------------
+# pasted catalog fitment (distributor "Fitment" tab, expanded and copied)
+# --------------------------------------------------------------------------
+# Makes the pasted lists are known to use; used besides the site's own makes to tell a make line from a model line.
+KNOWN_MAKES = [
+    "BMW", "Buell", "Ducati", "Harley Davidson", "Harley-Davidson", "Honda", "Kawasaki", "Suzuki", "Yamaha",
+    "Triumph", "KTM", "Aprilia", "Moto Guzzi", "Indian", "Victory", "Husqvarna", "MV Agusta", "Can-Am",
+    "Polaris", "Arctic Cat", "Ski-Doo", "Sea-Doo", "Royal Enfield", "Benelli", "Vespa", "Piaggio", "Beta", "Gas Gas",
+]
+
+
+def _is_year_line(s: str) -> Optional[int]:
+    s = s.strip()
+    if re.fullmatch(r"(19|20)\d{2}", s):
+        y = int(s)
+        return y if 1900 <= y <= 2035 else None
+    return None
+
+
+def parse_fitment_paste(text: str, extra_makes: Optional[list[str]] = None) -> dict:
+    """
+    Parse copied fitment text shaped like:   Make / year / model / model / year / model ... / Make / year ...
+    A line is a MAKE when the next line is a year and either its name is a known make, or it is the first line,
+    or the year jumps back up (years run newest to oldest inside a make, so the next make restarts higher).
+    Returns {"makes": [{"make", "models": [{"model", "years": [..]}]}], "warnings": [..]}.
+    """
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in (text or "").replace("\t", "\n").splitlines()]
+    lines = [ln for ln in lines if ln]
+    known = {_norm(m) for m in KNOWN_MAKES} | {_norm(m) for m in (extra_makes or [])}
+    known.discard("")
+    years_at = [_is_year_line(ln) for ln in lines]
+    # direction of the years inside a make: newest first (the usual) or oldest first
+    down = up = 0
+    for i in range(len(lines)):
+        if years_at[i] is None:
+            continue
+        j = next((k for k in range(i + 1, len(lines)) if years_at[k] is not None), None)
+        if j is None:
+            break
+        if years_at[j] < years_at[i]:
+            down += 1
+        elif years_at[j] > years_at[i]:
+            up += 1
+    newest_first = down >= up
+
+    makes: dict[str, dict] = {}
+    order: list[str] = []
+    warnings: list[str] = []
+    cur_make: Optional[str] = None
+    cur_year: Optional[int] = None
+    for i, ln in enumerate(lines):
+        y = years_at[i]
+        if y is not None:
+            cur_year = y
+            continue
+        nxt = years_at[i + 1] if i + 1 < len(lines) else None
+        is_make = False
+        if nxt is not None:
+            if _norm(ln) in known or cur_make is None or cur_year is None:
+                is_make = True
+            elif newest_first and nxt >= cur_year:
+                is_make = True
+            elif not newest_first and nxt <= cur_year:
+                is_make = True
+        if is_make:
+            cur_make, cur_year = ln, None
+            if cur_make not in makes:
+                makes[cur_make] = {"make": cur_make, "models": {}}
+                order.append(cur_make)
+            continue
+        if cur_make is None or cur_year is None:
+            warnings.append(f"Ignored \"{ln}\": no make and year above it.")
+            continue
+        makes[cur_make]["models"].setdefault(ln, set()).add(cur_year)
+    out = []
+    for mk in order:
+        models = [{"model": name, "years": sorted(ys)} for name, ys in makes[mk]["models"].items()]
+        models.sort(key=lambda m: m["model"].lower())
+        out.append({"make": mk, "models": models})
+    return {"makes": out, "warnings": warnings[:50]}

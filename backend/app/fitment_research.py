@@ -1,6 +1,9 @@
 """
 Fitment research for products that have no vehicle fitment (the distributor catalog carries none).
 
+A fourth way, "paste", skips the waiting list: copied catalog fitment text is previewed, then applied straight to one product
+(makes/models created when missing, years added, product_fitment rows made, which also feeds the eBay compatible vehicles).
+
 Three sources feed a WAITING LIST of suggestions; nothing touches product_fitment until a person approves it:
   1. names  - machines and years named in the product's own title (free, instant, runs on many products)
   2. ai     - Claude, with web search and any matching catalog PDF pages as evidence (one product at a time)
@@ -26,7 +29,7 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, current_user, needs, require_route_access
 from app.config import get_settings
 from app.database import _session_factory, get_db
-from app.fitment_match import OPEN_END, extract_json, find_machines, match_model
+from app.fitment_match import OPEN_END, _ALIASES, _norm, extract_json, find_machines, match_model, parse_fitment_paste
 
 log = logging.getLogger("fitment_research")
 router = APIRouter(prefix="/fitment-research", tags=["fitment-research"], dependencies=[Depends(require_route_access)])
@@ -347,3 +350,161 @@ def delete_pdf(pdf_id: int, db: Session = Depends(get_db)):
     db.execute(text("delete from fitment_pdfs where id = :i"), {"i": pdf_id})
     db.commit()
     return {"deleted": True}
+
+
+# --------------------------------------------------------------------------
+# 4. paste copied catalog fitment (Make / year / models ...) straight onto one product
+# --------------------------------------------------------------------------
+def _slugify(v: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (v or "").lower()).strip("-")
+
+
+def _make_key(name: str) -> str:
+    return _norm(_ALIASES.get((name or "").lower().strip(), name))
+
+
+@router.get("/paste/products")
+@needs("fitment.view")
+def paste_find_products(q: str = Query(..., min_length=1), db: Session = Depends(get_db)):
+    """Find the product a pasted list belongs to: by id, our SKU, manufacturer part number or the distributor's part number."""
+    raw = q.strip()
+    norm = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    if not norm:
+        return []
+    rows = db.execute(
+        text(
+            "select p.id, p.title, p.sku, " + _MPN + " as mpn, "
+            "(select count(distinct pf.vehicle_id) from product_fitment pf where pf.product_id = p.id) as fitment_rows "
+            "from products p where p.id = :id or p.sku ilike :like or regexp_replace(upper(coalesce(p.manufacturer_part_number, '')), '[^A-Z0-9]', '', 'g') = :n "
+            "or exists (select 1 from supplier_product_links l join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku "
+            "          where l.product_id = p.id and (regexp_replace(upper(coalesce(s.sku, '')), '[^A-Z0-9]', '', 'g') = :n "
+            "          or regexp_replace(upper(coalesce(s.mfr_number, '')), '[^A-Z0-9]', '', 'g') = :n)) "
+            "order by p.id limit 15"
+        ),
+        {"id": int(raw) if raw.isdigit() else -1, "like": raw, "n": norm},
+    ).all()
+    return [dict(r._mapping) for r in rows]
+
+
+class PasteIn(BaseModel):
+    text: str
+    vehicle_type_id: Optional[int] = None
+
+
+def _paste_plan(db: Session, text_in: str):
+    parsed = parse_fitment_paste(text_in, [m["name"] for m in db.execute(text("select name from vehicle_makes")).mappings()])
+    makes = [dict(r._mapping) for r in db.execute(text("select id, name from vehicle_makes"))]
+    models = [dict(r._mapping) for r in db.execute(text("select id, make_id, name, vehicle_type_id from vehicle_models"))]
+    plan = []
+    for pm in parsed["makes"]:
+        key = _make_key(pm["make"])
+        mk = next((m for m in makes if _norm(m["name"]) == key), None)
+        mine = [m for m in models if mk and m["make_id"] == mk["id"]]
+        pm_models = []
+        for mo in pm["models"]:
+            n = _norm(mo["model"])
+            ex = next((m for m in mine if _norm(m["name"]) == n), None)
+            similar = []
+            if not ex and len(n) >= 3:
+                similar = [m["name"] for m in mine if _norm(m["name"]) and (n.startswith(_norm(m["name"])) or _norm(m["name"]).startswith(n))][:3]
+            have = set()
+            if ex:
+                have = {r.year for r in db.execute(text("select year from vehicles where model_id = :m"), {"m": ex.get("id")})}
+            pm_models.append({
+                "model": mo["model"], "years": mo["years"], "model_id": ex["id"] if ex else None,
+                "model_exists": bool(ex), "type_id": ex["vehicle_type_id"] if ex else None,
+                "new_years": len([y for y in mo["years"] if y not in have]), "similar": similar,
+            })
+        plan.append({"make": pm["make"], "make_id": mk["id"] if mk else None, "make_exists": bool(mk), "models": pm_models})
+    return plan, parsed["warnings"]
+
+
+@router.post("/paste/preview")
+@needs("fitment.view")
+def paste_preview(body: PasteIn, db: Session = Depends(get_db)):
+    if len(body.text) > 400_000:
+        raise HTTPException(413, "That text is too long; paste one catalog part at a time.")
+    plan, warnings = _paste_plan(db, body.text)
+    if not plan:
+        raise HTTPException(400, "No makes, years and models were found in that text.")
+    return {
+        "makes": plan, "warnings": warnings,
+        "totals": {
+            "makes": len(plan), "new_makes": sum(1 for m in plan if not m["make_exists"]),
+            "models": sum(len(m["models"]) for m in plan), "new_models": sum(1 for m in plan for x in m["models"] if not x["model_exists"]),
+            "model_years": sum(len(x["years"]) for m in plan for x in m["models"]),
+        },
+    }
+
+
+class PasteApply(BaseModel):
+    text: str
+    vehicle_type_id: int
+    skip_makes: list[str] = []           # make names unchecked in the preview
+    skip_models: list[str] = []          # "make|model" pairs unchecked in the preview
+
+
+@router.post("/products/{product_id}/paste/apply")
+@needs("fitment.add")
+def paste_apply(product_id: int, body: PasteApply, db: Session = Depends(get_db)):
+    if not db.execute(text("select 1 from products where id = :i"), {"i": product_id}).first():
+        raise HTTPException(404, "Product not found")
+    if not db.execute(text("select 1 from vehicle_types where id = :i"), {"i": body.vehicle_type_id}).first():
+        raise HTTPException(400, "Choose the vehicle type for new models.")
+    plan, _ = _paste_plan(db, body.text)
+    skip_mk = {_norm(x) for x in body.skip_makes}
+    skip_mo = set(body.skip_models)
+    c = {"makes_created": 0, "models_created": 0, "types_filled": 0, "years_created": 0, "fitment_added": 0, "already_had": 0}
+    note = "catalog paste"
+    made: dict[tuple, int] = {}   # (make id, model key) created earlier in this paste, so two spellings never make two models
+    try:
+        for pm in plan:
+            if _norm(pm["make"]) in skip_mk:
+                continue
+            make_id = pm["make_id"]
+            if not make_id:
+                nm = pm["make"].strip()
+                slug, n = _slugify(nm) or "make", 1
+                while db.execute(text("select 1 from vehicle_makes where slug = :s"), {"s": slug}).first():
+                    n += 1
+                    slug = f"{_slugify(nm)}-{n}"
+                make_id = db.execute(text("insert into vehicle_makes (name, slug) values (:n, :s) returning id"), {"n": nm, "s": slug}).scalar()
+                c["makes_created"] += 1
+            for mo in pm["models"]:
+                if f"{pm['make']}|{mo['model']}" in skip_mo:
+                    continue
+                model_id = mo["model_id"] or made.get((make_id, _norm(mo["model"])))
+                if not model_id:
+                    base = _slugify(mo["model"]) or "model"
+                    slug, n = base, 1
+                    while db.execute(text("select 1 from vehicle_models where make_id = :m and slug = :s"), {"m": make_id, "s": slug}).first():
+                        n += 1
+                        slug = f"{base}-{n}"
+                    model_id = db.execute(
+                        text("insert into vehicle_models (make_id, vehicle_type_id, name, slug) values (:m, :t, :n, :s) returning id"),
+                        {"m": make_id, "t": body.vehicle_type_id, "n": mo["model"].strip(), "s": slug}).scalar()
+                    made[(make_id, _norm(mo["model"]))] = model_id
+                    c["models_created"] += 1
+                elif mo["model_id"] and mo["type_id"] is None:
+                    db.execute(text("update vehicle_models set vehicle_type_id = :t where id = :m and vehicle_type_id is null"),
+                               {"t": body.vehicle_type_id, "m": model_id})
+                    c["types_filled"] += 1
+                ys = ",".join(str(y) for y in mo["years"])
+                c["years_created"] += db.execute(
+                    text("insert into vehicles (model_id, year) select :m, y from unnest(cast(string_to_array(:ys, ',') as int[])) as y "
+                         "where not exists (select 1 from vehicles v where v.model_id = :m and v.year = y)"),
+                    {"m": model_id, "ys": ys}).rowcount
+                added = db.execute(
+                    text("insert into product_fitment (product_id, vehicle_id, notes, source) "
+                         "select :p, v.id, :n, 'research' from vehicles v where v.model_id = :m "
+                         "and v.year = any(cast(string_to_array(:ys, ',') as int[])) "
+                         "and not exists (select 1 from product_fitment pf where pf.product_id = :p and pf.vehicle_id = v.id)"),
+                    {"p": product_id, "m": model_id, "ys": ys, "n": note}).rowcount
+                c["fitment_added"] += added
+                c["already_had"] += len(mo["years"]) - added
+        _refresh(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return c
