@@ -22,6 +22,7 @@ type Item = {
   fitment_count: number;
   prior_merges: number | string;
   part_number: string | null;
+  shared_parts?: string[] | null; // set by "Find unmerged": label parts shared with another product
 };
 type SearchResp = { total: number; shown: number; items: Item[] };
 type ItemsResp = { items: Item[]; not_found: string[] };
@@ -604,7 +605,7 @@ export default function PartsCleanupPage() {
   const [searchedQ, setSearchedQ] = useState("");
   const [exactInput, setExactInput] = useState(false); // "Exact match" tick box next to the search
   const [searchedExact, setSearchedExact] = useState(false);
-  const [searchedUnmerged, setSearchedUnmerged] = useState(false);
+  const [unmergedMode, setUnmergedMode] = useState(false); // list came from the "Find unmerged" button
   const [items, setItems] = useState<Item[]>([]);
   const [total, setTotal] = useState(0);
   const [searching, setSearching] = useState(false);
@@ -643,16 +644,37 @@ export default function PartsCleanupPage() {
     return () => window.removeEventListener("beforeunload", h);
   }, [step]);
 
-  const runSearch = useCallback(async (q: string, exact: boolean = false, unmerged: boolean = false) => {
+  const runFindUnmerged = useCallback(async () => {
     setSearching(true);
     setSearchErr("");
     try {
-      const r = await api<SearchResp>(`/cleanup/search?q=${encodeURIComponent(q)}&limit=400${exact ? "&exact=true" : ""}${unmerged ? "&unmerged=true" : ""}`);
+      const r = await api<SearchResp>("/cleanup/unmerged-labels");
+      setItems(r.items);
+      setTotal(r.total);
+      setSearchedQ("all products with custom labels");
+      setSearchedExact(false);
+      setUnmergedMode(true);
+      setListMode("title");
+      setNotFound([]);
+      setSelected(new Set());
+      setKeeper(null);
+    } catch (e) {
+      setSearchErr(errMsg(e));
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  const runSearch = useCallback(async (q: string, exact: boolean = false) => {
+    setSearching(true);
+    setSearchErr("");
+    try {
+      const r = await api<SearchResp>(`/cleanup/search?q=${encodeURIComponent(q)}&limit=400${exact ? "&exact=true" : ""}`);
       setItems(r.items);
       setTotal(r.total);
       setSearchedQ(q);
       setSearchedExact(exact);
-      setSearchedUnmerged(unmerged);
+      setUnmergedMode(false);
       setListMode("title");
       setNotFound([]);
       setSelected(new Set());
@@ -706,7 +728,7 @@ export default function PartsCleanupPage() {
         setSearchErr(errMsg(e));
       }
     } else if (searchedQ) {
-      await runSearch(searchedQ, searchedExact, searchedUnmerged);
+      await (unmergedMode ? runFindUnmerged() : runSearch(searchedQ, searchedExact));
     }
   }
 
@@ -866,12 +888,12 @@ export default function PartsCleanupPage() {
               </button>
               <button
                 type="button"
-                className={btn2Cls}
-                disabled={searching || qInput.trim().length < 2}
-                title="Same search, but only products that have NOT been merged (no MASTER badge). The number or words can match the title, item number, SKU or anywhere inside a custom label."
-                onClick={() => runSearch(qInput.trim(), exactInput, true)}
+                className={btnCls}
+                disabled={searching}
+                title="Looks at every product with a custom label and lists the ones that were never merged but share a number with another product's label. No search words needed."
+                onClick={runFindUnmerged}
               >
-                Find unmerged
+                {searching ? "Searching…" : "Find unmerged"}
               </button>
             </form>
 
@@ -915,7 +937,9 @@ export default function PartsCleanupPage() {
                 <span className="text-gray-600">
                   {listMode === "items"
                     ? `${items.length} part${items.length === 1 ? "" : "s"} added by item number`
-                    : `${items.length} ${searchedUnmerged ? "unmerged " : ""}${searchedExact ? "exact " : ""}result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
+                    : unmergedMode
+                      ? `${items.length} product${items.length === 1 ? "" : "s"} not yet merged that share a custom label number with another product`
+                      : `${items.length} ${searchedExact ? "exact " : ""}result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
                 </span>
                 <button type="button" className={btn2Cls} onClick={() => applySelection(new Set(items.map((i) => i.id)))} disabled={items.length === 0}>
                   Tick all {items.length}
@@ -963,7 +987,12 @@ export default function PartsCleanupPage() {
                           />
                         </td>
                         <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.ebay_item_id ?? "—"}</td>
-                        <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.custom_label_sku ?? "—"}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-gray-600">
+                          {p.custom_label_sku ?? "—"}
+                          {unmergedMode && p.shared_parts && p.shared_parts.length > 0 && (
+                            <div className="text-xs text-blue-700">shares {p.shared_parts.join(", ")}</div>
+                          )}
+                        </td>
                         <td className="max-w-md px-3 py-2">
                           <div className="font-medium">{p.title}</div>
                         </td>

@@ -293,7 +293,6 @@ def search(
     q: str = Query(..., min_length=2),
     limit: int = Query(400, le=1500),
     exact: bool = Query(False, description="match the custom label SKU (or eBay item id / SKU) EXACTLY, not as part of a longer one"),
-    unmerged: bool = Query(False, description="only products that have never been the kept part of a merge (no MASTER badge)"),
     db: Session = Depends(get_db),
 ):
     if exact:
@@ -316,12 +315,6 @@ def search(
             f"(p.title ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) or p.custom_label_sku ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text))"
             for i in range(len(words))
         )
-    if unmerged:
-        # Same rule as the MASTER badge: a product is a master when part_merge_log shows merges into it.
-        where = (
-            f"({where}) and not exists (select 1 from part_merge_log ml "
-            "where ml.survivor_product_id = p.id and coalesce(ml.merged_count, 0) > 0)"
-        )
     total = db.execute(text(f"select count(*) from products p where {where}"), params).scalar()
     rows = db.execute(
         text(
@@ -341,6 +334,54 @@ def search(
         {**params, "limit": limit},
     ).all()
     return {"total": total, "shown": len(rows), "items": [dict(r._mapping) for r in rows]}
+
+
+@router.get("/unmerged-labels")
+def unmerged_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get_db)):
+    """No search term. Looks at EVERY product that has a custom label SKU and finds the ones that were never
+    merged (no MASTER badge) but share a number with another product's label. A label such as
+    CYL0041xx50000KS is split on "xx" into its parts (CYL0041, 50000KS), so a part number that sits inside a
+    longer label still counts. Shared parts shorter than 4 characters are ignored as noise. Products that
+    share a part are listed next to each other, and each row says which part it shares."""
+    rows = db.execute(
+        text(
+            f"""
+            with tok as (
+              select p.id as pid, btrim(t.part) as part
+              from products p
+              cross join lateral regexp_split_to_table(upper(btrim(p.custom_label_sku)), 'XX') as t(part)
+              where btrim(coalesce(p.custom_label_sku, '')) <> '' and length(btrim(t.part)) >= 4
+            ),
+            merged as (
+              select survivor_product_id as pid from part_merge_log
+              group by survivor_product_id having coalesce(sum(merged_count), 0) > 0
+            ),
+            shared as (
+              select part from tok group by part
+              having count(distinct pid) >= 2
+                 and count(distinct pid) filter (where pid not in (select pid from merged)) >= 1
+            ),
+            hits as (
+              select tok.pid, array_agg(distinct tok.part order by tok.part) as shared_parts
+              from tok join shared using (part)
+              group by tok.pid
+            )
+            select p.id, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+                   (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
+                   (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
+                   (select coalesce(sum(l.merged_count), 0) from part_merge_log l
+                     where l.survivor_product_id = p.id) as prior_merges,
+                   {_PN_SUBQUERY} as part_number,
+                   h.shared_parts
+            from hits h
+            join products p on p.id = h.pid
+            order by h.shared_parts[1], p.title, p.id
+            limit :limit
+            """
+        ),
+        {"limit": limit},
+    ).all()
+    return {"total": len(rows), "shown": len(rows), "items": [dict(r._mapping) for r in rows]}
 
 
 @router.get("/by-items")
