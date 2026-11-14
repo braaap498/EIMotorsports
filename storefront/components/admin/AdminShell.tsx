@@ -61,7 +61,6 @@ const EBAY_TABS: Tab[] = [
   { href: "/admin/ebay-listings", label: "Listings", match: ["/admin/ebay-listings", "/admin/ebay-edit"] },
   { href: "/admin/ebay-copy", label: "New listing" },
   { href: "/admin/ebay-sales", label: "Orders" },
-  { href: "/admin/availability", label: "Availability" },
   { href: "/admin/dropship", label: "Drop ship" },
   { href: "/admin/ebay-stores", label: "Store API", match: STORE_API_TABS.flatMap((t) => t.match ?? [t.href]) },
 ];

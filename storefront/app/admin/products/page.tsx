@@ -273,6 +273,9 @@ export default function ProductsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Products</h1>
+        <Link href="/admin/products/stock-display" className="ml-auto mr-3 text-sm underline">
+          Website stock display
+        </Link>
         {can("products.create") && (
           <Link href="/admin/products/new" className="rounded bg-black px-4 py-2 text-sm font-semibold text-white">
             Add product

@@ -63,6 +63,8 @@ def ensure_tables() -> None:
             "alter table products add column if not exists stock_display text",
             "alter table products add column if not exists dropship_ok boolean not null default false",
             "alter table channel_listings add column if not exists dropship_ok boolean not null default false",
+            # the listings' ticks as they were before the whole product was switched on (so it can be switched off and put back)
+            "alter table products add column if not exists dropship_prev text",
             "create table if not exists availability_settings (key text primary key, value text not null)",
             "create table if not exists availability_state ("
             "product_id bigint primary key, effective integer not null, updated_at timestamptz not null default now())",
@@ -333,14 +335,49 @@ def _queue_product(db: Session, product_id: int) -> int:
     return enqueue_product(db, product_id)
 
 
+class ProductDropIn(BaseModel):
+    on: bool
+    # when turning OFF: "restore" puts each listing back the way it was before the product was switched on; "reset" unticks them all
+    off_mode: Optional[str] = Field(None, pattern="^(restore|reset)$")
+
+
 @router.post("/products/{product_id}/dropship")
-def api_product_dropship(product_id: int, body: OnIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
-    n = db.execute(text("update products set dropship_ok = :v where id = :p"), {"v": body.on, "p": product_id}).rowcount
-    if not n:
+def api_product_dropship(product_id: int, body: ProductDropIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Switch a whole product on or off for drop shipping. ON ticks every listing of the product (overwriting what was set one by one;
+    the earlier ticks are remembered). OFF either restores the earlier ticks or unticks them all."""
+    import json
+
+    p = db.execute(text("select id, coalesce(dropship_ok, false) as on_, dropship_prev from products where id = :p for update"), {"p": product_id}).first()
+    if not p:
         raise HTTPException(404, "Product not found.")
+    ids = [r.id for r in db.execute(text("select id from channel_listings where product_id = :p"), {"p": product_id}).all()]
+    restored = 0
+    if body.on:
+        if not p.on_:
+            before = {
+                str(r.id): bool(r.dropship_ok)
+                for r in db.execute(text("select id, coalesce(dropship_ok, false) as dropship_ok from channel_listings where product_id = :p"), {"p": product_id}).all()
+            }
+            db.execute(text("update products set dropship_ok = true, dropship_prev = :v where id = :p"), {"v": json.dumps(before), "p": product_id})
+        db.execute(text("update channel_listings set dropship_ok = true where product_id = :p"), {"p": product_id})
+    else:
+        mode = body.off_mode or "reset"
+        prev: dict = {}
+        if mode == "restore" and p.dropship_prev:
+            try:
+                prev = json.loads(p.dropship_prev)
+            except ValueError:
+                prev = {}
+        for lid in ids:
+            db.execute(
+                text("update channel_listings set dropship_ok = :v where id = :l"),
+                {"v": bool(prev.get(str(lid))) if mode == "restore" else False, "l": lid},
+            )
+            restored += 1 if (mode == "restore" and prev.get(str(lid))) else 0
+        db.execute(text("update products set dropship_ok = false, dropship_prev = null where id = :p"), {"p": product_id})
     queued = _queue_product(db, product_id)
     db.commit()
-    return {"dropship_ok": body.on, "queued": queued}
+    return {"dropship_ok": body.on, "queued": queued, "restored": restored}
 
 
 @router.post("/listings/{listing_id}/dropship")
@@ -350,9 +387,74 @@ def api_listing_dropship(listing_id: int, body: OnIn, db: Session = Depends(get_
     ).first()
     if not row:
         raise HTTPException(404, "Listing not found.")
+    if row.product_id and not body.on:
+        # a listing was unticked, so the product is no longer "every listing": the others keep their ticks
+        db.execute(text("update products set dropship_ok = false, dropship_prev = null where id = :p and coalesce(dropship_ok, false)"), {"p": row.product_id})
     queued = _queue_product(db, row.product_id) if row.product_id else 0
     db.commit()
     return {"dropship_ok": body.on, "queued": queued}
+
+
+@router.get("/products")
+def api_products(
+    q: Optional[str] = Query(None, max_length=100),
+    show: str = Query("all", pattern="^(all|on|off|zero)$"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(40, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """Products that have an active eBay listing, with those listings underneath, for the Drop ship page.
+    show: all | on (some listing ticked) | off (none ticked) | zero (nothing can be sold now)."""
+    params: dict = {}
+    where = [f"exists (select 1 from channel_listings cl where cl.product_id = p.id and {_ACTIVE_LISTING})"]
+    ticked = f"(coalesce(p.dropship_ok, false) or exists (select 1 from channel_listings c2 where c2.product_id = p.id and c2.dropship_ok and {_ACTIVE_LISTING.replace('cl.', 'c2.')}))"
+    if show == "on":
+        where.append(ticked)
+    elif show == "off":
+        where.append(f"not {ticked}")
+    elif show == "zero":
+        where.append(f"{effective_sql('p', ignore_switch=True)} <= 0")
+    if q and q.strip():
+        for i, w in enumerate(q.split()[:5]):
+            where.append(f"(p.title ilike :w{i} or p.sku_display ilike :w{i} or p.custom_label_sku ilike :w{i} or p.manufacturer_part_number ilike :w{i})")
+            params[f"w{i}"] = f"%{w}%"
+    cond = " and ".join(where)
+    total = int(db.execute(text(f"select count(*) from products p where {cond}"), params).scalar() or 0)
+    rows = db.execute(
+        text(
+            f"select p.id, p.sku_display as sku, p.title, p.custom_label_sku, coalesce(p.quantity_on_hand, 0) as on_hand, "
+            f"{available_sql('p')} as own, {parts_count_sql('p')} as parts, {dist_sql('p')} as distributor, "
+            f"coalesce(p.dropship_ok, false) as dropship_ok, (p.dropship_prev is not null) as has_prev "
+            f"from products p where {cond} order by p.title, p.id limit :lim offset :off"
+        ),
+        {**params, "lim": per_page, "off": (page - 1) * per_page},
+    ).all()
+    ids = [r.id for r in rows]
+    listings: dict[int, list] = {}
+    if ids:
+        for l in db.execute(
+            text(
+                "select cl.id, cl.product_id, cl.store, regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item_id, "
+                f"coalesce(cl.dropship_ok, false) as dropship_ok from channel_listings cl where cl.product_id in :ids and {_ACTIVE_LISTING} "
+                "order by cl.store, cl.id"
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": ids},
+        ).all():
+            listings.setdefault(l.product_id, []).append(
+                {"listing_id": l.id, "store": l.store, "item_id": l.item_id, "dropship_ok": bool(l.dropship_ok)}
+            )
+    items = []
+    for r in rows:
+        ls = listings.get(r.id, [])
+        items.append(
+            {
+                "product_id": r.id, "sku": r.sku, "title": r.title, "custom_label": r.custom_label_sku,
+                "on_hand": int(r.on_hand), "own_available": int(r.own), "distributor": int(r.distributor),
+                "piece_count": int(r.parts), "dropship_ok": bool(r.dropship_ok), "has_prev": bool(r.has_prev),
+                "ticked": sum(1 for x in ls if x["dropship_ok"]), "listings": ls,
+            }
+        )
+    return {"total": total, "page": page, "per_page": per_page, "items": items, "settings": _settings(db)}
 
 
 @router.post("/apply-zeros")
