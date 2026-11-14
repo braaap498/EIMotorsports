@@ -293,6 +293,7 @@ def search(
     q: str = Query(..., min_length=2),
     limit: int = Query(400, le=1500),
     exact: bool = Query(False, description="match the custom label SKU (or eBay item id / SKU) EXACTLY, not as part of a longer one"),
+    unmerged: bool = Query(False, description="only products that have never been the kept part of a merge (no MASTER badge)"),
     db: Session = Depends(get_db),
 ):
     if exact:
@@ -314,6 +315,12 @@ def search(
         where = " and ".join(
             f"(p.title ilike cast(:w{i} as text) or p.ebay_item_id ilike cast(:w{i} as text) or p.custom_label_sku ilike cast(:w{i} as text) or p.sku ilike cast(:w{i} as text))"
             for i in range(len(words))
+        )
+    if unmerged:
+        # Same rule as the MASTER badge: a product is a master when part_merge_log shows merges into it.
+        where = (
+            f"({where}) and not exists (select 1 from part_merge_log ml "
+            "where ml.survivor_product_id = p.id and coalesce(ml.merged_count, 0) > 0)"
         )
     total = db.execute(text(f"select count(*) from products p where {where}"), params).scalar()
     rows = db.execute(

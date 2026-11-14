@@ -604,6 +604,7 @@ export default function PartsCleanupPage() {
   const [searchedQ, setSearchedQ] = useState("");
   const [exactInput, setExactInput] = useState(false); // "Exact match" tick box next to the search
   const [searchedExact, setSearchedExact] = useState(false);
+  const [searchedUnmerged, setSearchedUnmerged] = useState(false);
   const [items, setItems] = useState<Item[]>([]);
   const [total, setTotal] = useState(0);
   const [searching, setSearching] = useState(false);
@@ -642,15 +643,16 @@ export default function PartsCleanupPage() {
     return () => window.removeEventListener("beforeunload", h);
   }, [step]);
 
-  const runSearch = useCallback(async (q: string, exact: boolean = false) => {
+  const runSearch = useCallback(async (q: string, exact: boolean = false, unmerged: boolean = false) => {
     setSearching(true);
     setSearchErr("");
     try {
-      const r = await api<SearchResp>(`/cleanup/search?q=${encodeURIComponent(q)}&limit=400${exact ? "&exact=true" : ""}`);
+      const r = await api<SearchResp>(`/cleanup/search?q=${encodeURIComponent(q)}&limit=400${exact ? "&exact=true" : ""}${unmerged ? "&unmerged=true" : ""}`);
       setItems(r.items);
       setTotal(r.total);
       setSearchedQ(q);
       setSearchedExact(exact);
+      setSearchedUnmerged(unmerged);
       setListMode("title");
       setNotFound([]);
       setSelected(new Set());
@@ -704,7 +706,7 @@ export default function PartsCleanupPage() {
         setSearchErr(errMsg(e));
       }
     } else if (searchedQ) {
-      await runSearch(searchedQ, searchedExact);
+      await runSearch(searchedQ, searchedExact, searchedUnmerged);
     }
   }
 
@@ -862,6 +864,15 @@ export default function PartsCleanupPage() {
               <button className={btnCls} disabled={searching || qInput.trim().length < 2}>
                 {searching ? "Searching…" : "Search"}
               </button>
+              <button
+                type="button"
+                className={btn2Cls}
+                disabled={searching || qInput.trim().length < 2}
+                title="Same search, but only products that have NOT been merged (no MASTER badge). The number or words can match the title, item number, SKU or anywhere inside a custom label."
+                onClick={() => runSearch(qInput.trim(), exactInput, true)}
+              >
+                Find unmerged
+              </button>
             </form>
 
             <form
@@ -904,7 +915,7 @@ export default function PartsCleanupPage() {
                 <span className="text-gray-600">
                   {listMode === "items"
                     ? `${items.length} part${items.length === 1 ? "" : "s"} added by item number`
-                    : `${items.length} ${searchedExact ? "exact " : ""}result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
+                    : `${items.length} ${searchedUnmerged ? "unmerged " : ""}${searchedExact ? "exact " : ""}result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
                 </span>
                 <button type="button" className={btn2Cls} onClick={() => applySelection(new Set(items.map((i) => i.id)))} disabled={items.length === 0}>
                   Tick all {items.length}
