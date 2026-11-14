@@ -170,6 +170,7 @@ export default function DescriptionEditor({
   function emit() {
     const el = ref.current;
     if (!el) return;
+    el.querySelectorAll("[style]").forEach((x) => x.removeAttribute("style")); // the browser may add inline fonts; they are not kept when saved
     const empty = (el.textContent ?? "").trim() === "" && !el.querySelector("li,hr,table");
     const html = empty ? "" : el.innerHTML;
     lastEmitted.current = html;
@@ -189,6 +190,7 @@ export default function DescriptionEditor({
   function run(command: string, arg?: string) {
     if (disabled) return;
     restoreSelection();
+    document.execCommand("styleWithCSS", false, "false"); // use <b>/<i> tags, not inline styles that change the font
     document.execCommand(command, false, arg);
     emit();
     refreshActive();

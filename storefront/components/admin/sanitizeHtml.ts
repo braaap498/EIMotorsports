@@ -74,6 +74,43 @@ const blankNode = (n: Node) =>
   n.nodeType === Node.COMMENT_NODE || (n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").replace(INVISIBLE, "") === "");
 const isBlankBlock = (e: Element) => /^(DIV|P|H2|H3|H4)$/.test(e.tagName) && textOf(e) === "" && !hasObject(e);
 
+// Bold, italic and underline sometimes wrap whole blocks (a bold <b> around a list, say). Then a line that is moved or given
+// a bullet in the editor leaves the <b> behind and changes font. Put the formatting inside each block instead, so it
+// travels with the text.
+const FORMAT_WRAP = /^(B|STRONG|I|EM|U|SUB|SUP)$/;
+const BLOCKISH = /^(DIV|P|H2|H3|H4|UL|OL|LI)$/;
+function pushFormattingDown(root: Element): void {
+  for (let pass = 0; pass < 40; pass++) {
+    const w = Array.from(root.querySelectorAll("*")).find(
+      (e) => FORMAT_WRAP.test(e.tagName) && Array.from(e.children).some((c) => BLOCKISH.test(c.tagName)),
+    );
+    if (!w) return;
+    const wrapAround = (nodes: Node[]) => {
+      const c = w.cloneNode(false);
+      nodes.forEach((x) => c.appendChild(x));
+      return c;
+    };
+    let run: Node[] = [];
+    const flush = () => {
+      if (run.length && run.some((x) => !blankNode(x))) w.before(wrapAround(run));
+      else run.forEach((x) => w.before(x));
+      run = [];
+    };
+    Array.from(w.childNodes).forEach((k) => {
+      if (isEl(k, BLOCKISH)) {
+        flush();
+        const inner = Array.from(k.childNodes);
+        if (inner.some((x) => !blankNode(x))) k.appendChild(wrapAround(inner));
+        w.before(k);
+      } else {
+        run.push(k);
+      }
+    });
+    flush();
+    w.remove();
+  }
+}
+
 // Bold / italic / link wrappers with no words in them only hide a <br> or nothing at all: keep what is inside.
 function unwrapEmptyInline(root: Element): void {
   Array.from(root.querySelectorAll("*")).reverse().forEach((el) => {
@@ -111,8 +148,8 @@ function unwrapSpacerItems(root: Element): void {
 
 // A list may only hold list items. Anything else inside it (a heading or paragraph, loose text, a list that is not inside
 // an item) shows up with a bullet the editor cannot delete, or makes the bullet button act on the line above. Items that
-// hold nothing but a sub-list are replaced by that sub-list; a sub-list goes into the item before it; everything else is
-// taken out of the list, which is split around it.
+// hold nothing but a sub-list are replaced by that sub-list; a list placed directly in a list is merged into it;
+// everything else is taken out of the list, which is split around it.
 function normalizeList(list: Element): void {
   let n: Node | null = list.firstChild;
   while (n) {
@@ -135,12 +172,13 @@ function normalizeList(list: Element): void {
       continue;
     }
     if (isEl(n, LIST)) {
-      const prev = n.previousElementSibling;
-      if (prev && prev.tagName === "LI" && textOf(prev) !== "") {
-        prev.appendChild(n);
-        n = next;
-        continue;
-      }
+      // a list placed directly inside a list is eBay's way of indenting; its bullets join the outer list so every
+      // bullet behaves the same (a real sub-list inside an item is left alone)
+      const kids = Array.from(n.childNodes);
+      kids.forEach((c) => list.insertBefore(c, n));
+      n.remove();
+      n = kids[0] ?? next;
+      continue;
     }
     // not a list item: take it out of the list (a run of loose text / inline parts becomes one paragraph)
     let out = n as ChildNode;
@@ -178,6 +216,7 @@ function wrapOrphanItems(root: Element): void {
 
 // Removes the empty wrappers, empty bullets and stray line breaks the eBay editor leaves behind.
 function tidy(root: Element): void {
+  pushFormattingDown(root);
   unwrapEmptyInline(root);
   unwrapSpacerItems(root);
   // bullets with nothing in them
