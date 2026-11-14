@@ -337,6 +337,35 @@ def _photos_of(db: Session, product_id: int) -> list[str]:
     return urls[:MAX_PHOTOS]
 
 
+def _brand_for(db: Session, product_id: int) -> str:
+    """The product's brand: its saved brand, else the manufacturer of the distributor catalog part it was made from
+    (products made from the Autodist catalog have no saved brand, and eBay refuses a listing without the Brand specific)."""
+    brand = ""
+    try:
+        pmid = db.execute(text("select part_manufacturer_id from products where id = :p"), {"p": product_id}).scalar()
+    except Exception:
+        db.rollback()
+        pmid = None
+    if pmid is not None:
+        brand = (_brand_names(db, [pmid]).get(pmid) or "").strip()
+    if not brand:
+        try:
+            raw = db.execute(
+                text("select s.manufacturer from supplier_product_links l join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku "
+                     "where l.product_id = :p and coalesce(btrim(s.manufacturer), '') <> '' order by l.supplier_sku limit 1"),
+                {"p": product_id},
+            ).scalar()
+            if raw:
+                try:
+                    from app.autodist import _nice_case
+                    brand = _nice_case(raw).strip()
+                except Exception:
+                    brand = str(raw).strip()
+        except Exception:
+            db.rollback()
+    return brand
+
+
 def _specifics_of(db: Session, product_id: int, brand: str, mpn: str) -> list[dict]:
     specs: list[dict] = []
     try:
@@ -383,10 +412,7 @@ def create(body: CreateIn, db: Session = Depends(get_db), user: AuthUser = Depen
     if not photos:
         raise HTTPException(409, "The product has no photos yet. eBay needs at least one. Add one on the product first.")
 
-    brand = ""
-    pmid = j.get("part_manufacturer_id")
-    if pmid is not None:
-        brand = (_brand_names(db, [pmid]).get(pmid) or "").strip()
+    brand = _brand_for(db, body.product_id)
     mpn = (j.get("manufacturer_part_number") or "").strip()
     description = (j.get("description") or "").strip() or f"<p>{title}</p>"
     price = ""
@@ -549,6 +575,12 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
     if not d.get("condition_id") and ex.get("condition_id"):
         d["condition_id"] = ex["condition_id"]
     d["model_item_id"] = item
+    if not d.get("brand"):   # drafts made before the brand fallback existed
+        d["brand"] = _brand_for(db, r.product_id)
+    specs_now = list(d.get("item_specifics") or [])
+    if d.get("brand") and not any(str(x.get("name", "")).lower() == "brand" for x in specs_now) and len(d["brand"]) <= 65:
+        specs_now.append({"name": "Brand", "values": [d["brand"]]})
+        d["item_specifics"] = specs_now
     d["site"] = ex.get("site") or ""
     if cat_item and cat_store and cat_store.lower() != row.store.lower():
         d["category_id"] = cat_ex.get("category_id") or d.get("category_id", "")
