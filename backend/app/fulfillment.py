@@ -151,6 +151,33 @@ def shortages(db: Session) -> list:
     ).all()
 
 
+def ebay_line_dropship_flags(db: Session, order_ids) -> dict[tuple[str, int], bool]:
+    """{(eBay order id, product id): True when the listing the buyer BOUGHT FROM is set to Drop ship}. The listing's own
+    checkbox counts, and so does a Drop ship tick on the product itself (which means every listing). A flag on some OTHER
+    listing of the same product does not count. A line whose listing cannot be found falls back to the product's own flag."""
+    ids = sorted({str(o) for o in order_ids if o})
+    if not ids:
+        return {}
+    rows = db.execute(
+        text(
+            """
+            select l.ebay_order_id, l.product_id,
+                   bool_or(coalesce(p.dropship_ok, false) or coalesce(cl.dropship_ok, false)) as flagged
+            from ebay_order_lines l
+            join products p on p.id = l.product_id
+            left join channel_listings cl on cl.product_id = l.product_id
+                 and lower(coalesce(cl.store, '')) = lower(coalesce(l.store, ''))
+                 and regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g')
+                   = regexp_replace(cast(l.ebay_item_id as text), '[^0-9]', '', 'g')
+            where l.ebay_order_id = any(cast(:o as text[])) and l.product_id is not null
+            group by l.ebay_order_id, l.product_id
+            """
+        ),
+        {"o": ids},
+    ).all()
+    return {(r.ebay_order_id, int(r.product_id)): bool(r.flagged) for r in rows}
+
+
 def urgent_orders(db: Session) -> dict[str, list[str]]:
     """{ 'Channel|order ref': [reason, ...] } for every open order that needs a human decision and has not had one."""
     ensure_table(db)
@@ -161,11 +188,21 @@ def urgent_orders(db: Session) -> dict[str, list[str]]:
     pct = _env_num("FULFILL_URGENT_PCT", 50)
     min_units = _env_num("FULFILL_URGENT_MIN_UNITS", 5)
     found: dict[str, list[str]] = {}
+    try:
+        flags = ebay_line_dropship_flags(db, [r.order_ref for r in short if r.channel == "eBay"])
+    except Exception:
+        db.rollback()
+        flags = {}
     for r in short:
         d = avail.get(r.product_id)
         have = d["available"] if d else 0
         detail = d["detail"] if d else "no distributor is linked to this product"
         covered = r.ordered - r.short
+        unflagged = r.channel == "eBay" and flags.get((r.order_ref, int(r.product_id))) is False
+        note = (
+            f"{r.sku}: short on our shelf (by {r.short}), and the listing it was bought from is not set to Drop ship, so no "
+            f"drop ship order is made by itself; {detail}. Decide whether to drop ship it or ship it from our own stock."
+        )
         if have < r.short:
             reason = (
                 f"{r.sku}: {r.ordered} ordered, our shelf covers {covered}, {detail}. "
@@ -176,8 +213,12 @@ def urgent_orders(db: Session) -> dict[str, list[str]]:
                 f"{r.sku}: {r.ordered} ordered, our shelf covers {covered}; the other {r.short} would come from the "
                 f"distributor, and {detail} (that is {round(r.short * 100.0 / have)}% of it)."
             )
+        elif unflagged:
+            reason = note
         else:
             continue
+        if unflagged and reason is not note:
+            found.setdefault(key_of(r.channel, r.order_ref), []).append(note)
         found.setdefault(key_of(r.channel, r.order_ref), []).append(reason)
     if not found:
         return {}

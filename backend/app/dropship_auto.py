@@ -83,25 +83,29 @@ def _settings(db: Session) -> dict:
     return {"auto_po": bool(r.auto_po), "last_scan_at": r.last_scan_at, "last_scan_note": r.last_scan_note}
 
 
-def _flagged_short_lines(db: Session, order_id: str) -> list[int]:
-    """Products on this eBay order that are marked Drop ship and not fully in stock on our shelf."""
+def _flagged_short_lines(db: Session, order_id: str, honor_decision: bool = False) -> list[int]:
+    """Products on this eBay order that are short on our shelf AND whose listing (the one the buyer bought from) is set to
+    Drop ship. A flag on another listing of the same product does not count: those orders go to the Pick & ship decision
+    instead. With honor_decision (the manual button only), an order a person approved as 'drop ship' there counts too."""
+    from app import fulfillment
     from app.admin_purchase_orders import _ebay_order_and_lines
 
     _o, lines = _ebay_order_and_lines(db, order_id)
-    ids = [l.product_id for l in lines if l.product_id is not None]
-    if not ids:
+    if not any(l.product_id is not None for l in lines):
         return []
-    flagged = {
-        r.id
-        for r in db.execute(
-            text(
-                "select p.id from products p where p.id = any(cast(:ids as bigint[])) and (coalesce(p.dropship_ok, false) or exists "
-                "(select 1 from channel_listings cl where cl.product_id = p.id and coalesce(cl.dropship_ok, false)))"
-            ),
-            {"ids": ids},
-        ).all()
-    }
-    return sorted({l.product_id for l in lines if l.product_id in flagged and int(l.on_hand or 0) < int(l.quantity or 1)})
+    flags = fulfillment.ebay_line_dropship_flags(db, [_o.ebay_order_id])
+    approved = False
+    if honor_decision:
+        approved = (fulfillment.decisions_for(db, [fulfillment.key_of("eBay", _o.ebay_order_id)]).get(fulfillment.key_of("eBay", _o.ebay_order_id)) or {}).get("decision") == "dropship"
+    return sorted(
+        {
+            l.product_id
+            for l in lines
+            if l.product_id is not None
+            and (flags.get((_o.ebay_order_id, int(l.product_id))) or approved)
+            and int(l.on_hand or 0) < int(l.quantity or 1)
+        }
+    )
 
 
 def _make_job(db: Session, order_id: str, store: Optional[str], product_ids: list[int], user: AuthUser) -> dict:
@@ -251,11 +255,12 @@ def job_from_order(body: FromOrderIn, db: Session = Depends(get_db), user: AuthU
         raise HTTPException(409, f"eBay order {o.ebay_order_id} is already in the list.")
     db.execute(text("delete from dropship_jobs where ebay_order_id = :o"), {"o": o.ebay_order_id})
     db.commit()
-    picks = _flagged_short_lines(db, o.ebay_order_id)
+    picks = _flagged_short_lines(db, o.ebay_order_id, honor_decision=True)
     if not picks:
         raise HTTPException(
             409,
-            "Nothing on that order needs drop shipping: no line is a product marked Drop ship that is out of stock on our shelf.",
+            "Nothing on that order can be drop shipped: no line is short on our shelf with its listing set to Drop ship, "
+            "and nobody approved a drop ship for it on Pick & ship.",
         )
     res = _make_job(db, o.ebay_order_id, o.store, picks, user)
     if res.get("problem"):
