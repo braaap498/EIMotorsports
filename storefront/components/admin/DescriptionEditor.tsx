@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { isSafeLink, sanitizeHtml } from "./sanitizeHtml";
+import { isSafeLink, normalizeBlocks, sanitizeHtml } from "./sanitizeHtml";
 
 // A visual editor for product descriptions: staff see the text as it will look
 // on the store and use a Word-style toolbar instead of typing HTML. The same
@@ -221,7 +221,30 @@ export default function DescriptionEditor({
     const clean = html ? sanitizeHtml(html) : "";
     if (clean) document.execCommand("insertHTML", false, clean);
     else document.execCommand("insertText", false, text);
+    tidyKeepingCaret(); // the browser may nest the pasted blocks inside the block the cursor was in
     emit();
+  }
+
+  // Gives the text the same one-level shape as a loaded description, and keeps the cursor where it was.
+  function tidyKeepingCaret() {
+    const el = ref.current;
+    if (!el) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !el.contains(sel.anchorNode)) {
+      normalizeBlocks(el);
+      return;
+    }
+    const r = sel.getRangeAt(0).cloneRange();
+    r.collapse(false);
+    const mark = document.createElement("span");
+    r.insertNode(mark);
+    normalizeBlocks(el);
+    const back = document.createRange();
+    back.setStartAfter(mark);
+    back.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(back);
+    mark.remove();
   }
 
   return (
