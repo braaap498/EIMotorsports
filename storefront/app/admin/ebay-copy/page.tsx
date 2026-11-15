@@ -320,7 +320,8 @@ function CopyEditor({ id }: { id: number }) {
               </select>
             </label>
             <label className="block">
-              <span className="mb-1 block font-semibold">Take category from item # (any store, optional)</span>
+              <span className="mb-1 block font-semibold">Model listing item # (optional)</span>
+              <span className="mb-1 block text-xs font-normal text-gray-500">A similar live listing. From the store chosen here it supplies the category, shipping, returns and handling time. From another store it supplies the category only.</span>
               <input className={inputCls} value={modelItem} disabled={off} placeholder="e.g. 177464505625" onChange={(e) => setModelItem(e.target.value)} />
             </label>
             <button type="button" className={btnCls} disabled={off || !pickStore} onClick={() => void chooseStore()}>
