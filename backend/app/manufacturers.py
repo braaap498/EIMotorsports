@@ -48,24 +48,76 @@ def manufacturer_table(db: Session) -> Optional[str]:
     return ref
 
 
+LAST_ERROR: dict = {"msg": ""}  # why the last find_or_create gave None, so callers can show it instead of a bare "could not"
+
+
+def _insert_manufacturer(db: Session, ref: str, n: str) -> int:
+    """Insert `n`. A table with more required columns than `name` (no default, NOT NULL) gets them filled when we can guess
+    them: slug-like columns get a slug of the name, id gets the next number when it has no default."""
+    try:
+        with db.begin_nested():
+            return int(db.execute(text(f"insert into {ref} (name) values (:n) returning id"), {"n": n}).scalar())
+    except Exception as first:
+        LAST_ERROR["msg"] = str(first.orig if hasattr(first, "orig") else first)[:300]
+        cols = db.execute(
+            text(
+                "select column_name, data_type, column_default from information_schema.columns "
+                "where table_schema || '.' || table_name = replace(:r, '\"', '') and is_nullable = 'NO' and column_name <> 'name'"
+            ),
+            {"r": ref if "." in ref else f"public.{ref}"},
+        ).all()
+        slug = re.sub(r"[^a-z0-9]+", "-", n.lower()).strip("-") or "brand"
+        vals: dict = {"name": n}
+        exprs = {"name": ":name"}
+        for c in cols:
+            if c.column_name == "id" and c.column_default is None:
+                exprs["id"] = f"(select coalesce(max(id), 0) + 1 from {ref})"
+            elif c.column_default is not None:
+                continue
+            elif c.column_name in ("slug", "handle", "code", "key"):
+                vals[c.column_name] = slug
+                exprs[c.column_name] = f":{c.column_name}"
+            elif c.data_type in ("boolean",):
+                exprs[c.column_name] = "false"
+            elif c.data_type in ("integer", "bigint", "smallint", "numeric"):
+                exprs[c.column_name] = "0"
+            elif c.data_type in ("timestamp with time zone", "timestamp without time zone"):
+                exprs[c.column_name] = "now()"
+            else:
+                vals[c.column_name] = n
+                exprs[c.column_name] = f":{c.column_name}"
+        if len(exprs) == 1:
+            raise
+        with db.begin_nested():
+            return int(
+                db.execute(
+                    text(f"insert into {ref} ({', '.join(exprs)}) values ({', '.join(exprs.values())}) returning id"), vals
+                ).scalar()
+            )
+
+
 def find_or_create(db: Session, name: Optional[str], create: bool = True) -> Optional[int]:
     """The id of the manufacturer called `name` (capitals ignored). Makes it when `create` and it is missing. Commits nothing.
-    Any problem (no table, the table needs other columns) just gives None, so callers carry on without a manufacturer."""
+    Any problem (no table, the table needs other columns) just gives None, so callers carry on without a manufacturer;
+    the reason is left in LAST_ERROR["msg"]."""
+    LAST_ERROR["msg"] = ""
     n = " ".join((name or "").split())
     if not n or len(n) > 120:
         return None
     ref = manufacturer_table(db)
     if not ref:
+        LAST_ERROR["msg"] = "the manufacturer table could not be found"
         return None
     try:
         with db.begin_nested():
             found = db.execute(text(f"select id from {ref} where lower(btrim(name)) = lower(:n) order by id limit 1"), {"n": n}).scalar()
-            if found is not None:
-                return int(found)
-            if not create:
-                return None
-            return int(db.execute(text(f"insert into {ref} (name) values (:n) returning id"), {"n": n}).scalar())
-    except Exception:
+        if found is not None:
+            return int(found)
+        if not create:
+            return None
+        return _insert_manufacturer(db, ref, n)
+    except Exception as e:
+        LAST_ERROR["msg"] = LAST_ERROR["msg"] or str(getattr(e, "orig", e))[:300]
         log.exception("could not find or make the manufacturer %r", n)
         return None
 

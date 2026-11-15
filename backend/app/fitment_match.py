@@ -193,6 +193,8 @@ def parse_fitment_paste(text: str, extra_makes: Optional[list[str]] = None) -> d
     """
     lines = [re.sub(r"\s+", " ", ln).strip() for ln in (text or "").replace("\t", "\n").splitlines()]
     lines = [ln for ln in lines if ln]
+    # "Note: Built After & Before 9/16" style lines are annotations on the model above, never models or makes.
+    lines = [ln for ln in lines if not re.match(r"(?i)^notes?\s*[:\-]", ln)]
     known = {_norm(m) for m in KNOWN_MAKES} | {_norm(m) for m in (extra_makes or [])}
     known.discard("")
     years_at = [_is_year_line(ln) for ln in lines]

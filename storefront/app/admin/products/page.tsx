@@ -123,6 +123,7 @@ export default function ProductsPage() {
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [bulkMode, setBulkMode] = useState<FitmentMode>("not_vehicle");
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkMsg, setBulkMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   const mayChangeFitment = can("fitment.add");
@@ -244,7 +245,10 @@ export default function ProductsPage() {
     const count = scope === "selected" ? sel.size : data.total;
     if (count === 0) return;
     const what = scope === "selected" ? `the ${count} selected product${count === 1 ? "" : "s"}` : `all ${count} products in this list`;
-    if (!window.confirm(`Set ${what} to "${modeLabel}"?\n\nThis changes how they match vehicle searches. You can change them back the same way.`)) return;
+    if (scope === "list") {
+      const typed = window.prompt(`This will change ${count.toLocaleString()} products to "${modeLabel}".\n\nType ${count} to confirm.`);
+      if (typed === null || typed.trim() !== String(count)) return;
+    } else if (!window.confirm(`Set ${what} to "${modeLabel}"?\n\nThis changes how they match vehicle searches. You can change them back the same way.`)) return;
     setBulkBusy(true);
     setBulkMsg(null);
     try {
@@ -337,8 +341,18 @@ export default function ProductsPage() {
         ))}
       </div>
 
-      {mayChangeFitment && data.total > 0 && (
+      {mayChangeFitment && data.total > 0 && !bulkOpen && (
+        <div>
+          <button type="button" className="text-sm text-blue-700 underline" onClick={() => setBulkOpen(true)}>
+            Bulk change how products match vehicles&hellip;
+          </button>
+        </div>
+      )}
+      {mayChangeFitment && data.total > 0 && bulkOpen && (
         <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50 p-3">
+          <div className="flex justify-end">
+            <button type="button" className="text-xs text-gray-600 underline" onClick={() => setBulkOpen(false)}>Hide</button>
+          </div>
           <div className="flex flex-wrap items-end gap-3">
             <Field label="Set how these products match vehicles">
               <select className={`${inputCls} min-w-[18rem]`} value={bulkMode} onChange={(e) => setBulkMode(e.target.value as FitmentMode)} disabled={bulkBusy}>
@@ -350,7 +364,7 @@ export default function ProductsPage() {
             <button type="button" className={btnCls} disabled={bulkBusy || sel.size === 0} onClick={() => void applyBulk("selected")}>
               Apply to {sel.size} selected
             </button>
-            <button type="button" className={btnCls} disabled={bulkBusy || !anyFilter} onClick={() => void applyBulk("list")} title={anyFilter ? "" : "Pick a category, search or status first"}>
+            <button type="button" className="rounded border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50" disabled={bulkBusy || !anyFilter} onClick={() => void applyBulk("list")} title={anyFilter ? "" : "Pick a category, search or status first"}>
               Apply to all {data.total.toLocaleString()} in this list
             </button>
             {sel.size > 0 && (

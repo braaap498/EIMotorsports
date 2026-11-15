@@ -3641,7 +3641,7 @@ _NO_MFR_FROM = (
 def _fill_manufacturers(db: Session) -> dict:
     """Set the Manufacturer of every product made from the catalog that has none, from the catalog part's brand (made in the
     manufacturer list when it is not there yet). Products that already have a Manufacturer are never changed. Commits nothing."""
-    from app.manufacturers import find_or_create, manufacturer_table
+    from app.manufacturers import LAST_ERROR, find_or_create, manufacturer_table
 
     if not manufacturer_table(db):
         raise HTTPException(409, "The manufacturer list could not be found in the database, so nothing was changed.")
@@ -3653,16 +3653,18 @@ def _fill_manufacturers(db: Session) -> dict:
             by_brand.setdefault(name, []).append(r.product_id)
     filled = 0
     unresolved = 0
+    reason = ""
     for name, ids in by_brand.items():
         mid = find_or_create(db, name)
         if mid is None:
             unresolved += len(ids)
+            reason = reason or LAST_ERROR["msg"]
             continue
         filled += db.execute(
             text("update products set part_manufacturer_id = :m where id = any(cast(:ids as bigint[])) and part_manufacturer_id is null"),
             {"m": mid, "ids": ids},
         ).rowcount
-    return {"checked": len(rows), "filled": filled, "brands": len(by_brand), "unresolved": unresolved}
+    return {"checked": len(rows), "filled": filled, "brands": len(by_brand), "unresolved": unresolved, "reason": reason}
 
 
 @router.post("/api/website-products/fill-manufacturers")

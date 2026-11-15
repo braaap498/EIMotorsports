@@ -189,10 +189,10 @@ export default function AutodistProducts() {
     setNote(null);
     setBusy(true);
     try {
-      const r = await api<{ checked: number; filled: number; brands: number; unresolved: number }>("/autodist/api/website-products/fill-manufacturers", { method: "POST" });
+      const r = await api<{ checked: number; filled: number; brands: number; unresolved: number; reason?: string }>("/autodist/api/website-products/fill-manufacturers", { method: "POST" });
       setNote(
         `Set the Manufacturer on ${n(r.filled)} product${r.filled === 1 ? "" : "s"} (${n(r.brands)} brand${r.brands === 1 ? "" : "s"}).` +
-          (r.unresolved ? ` ${n(r.unresolved)} could not be set because their brand could not be added to the manufacturer list.` : "")
+          (r.unresolved ? ` ${n(r.unresolved)} could not be set because their brand could not be added to the manufacturer list.${r.reason ? ` Database said: ${r.reason}` : ""}` : "")
       );
       await loadPreview();
     } catch (e) {
