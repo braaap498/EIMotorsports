@@ -117,7 +117,7 @@ def terms_summary(d: dict) -> list[str]:
     """Plain-language lines about shipping, handling and returns, for the screen."""
     out: list[str] = []
     cur = d.get("currency") or "USD"
-    if _has_profiles(d):
+    if _has_profiles(d) and not d.get("inline_terms"):
         return ["Shipping, payment and return rules come from the store's business policies (as on the model listing)."]
     sh, rt = d.get("shipping") or {}, d.get("returns") or {}
     for o in sh.get("services", []):
@@ -148,10 +148,25 @@ def _money_text(v: str, default: str = "0.00") -> str:
         return default
 
 
+def _pa_returns(d: dict, rt: dict) -> dict:
+    """eBay Motors Parts & Accessories listings must offer domestic returns for at least 30 days with the seller paying
+    return shipping (eBay's P&A return rule, enforced on API calls). Older listings carry shorter or buyer-paid terms, so a
+    draft for the eBay Motors site is sent with compliant returns; a 60-day window is kept as it is."""
+    if _site_name(d) != "eBayMotors":
+        return rt
+    out = dict(rt)
+    out["accepted"] = "ReturnsAccepted"
+    if out.get("within") != "Days_60":
+        out["within"] = "Days_30"
+    out["paid_by"] = "Seller"
+    out.pop("restocking", None)
+    return out
+
+
 def _legacy_xml(d: dict, cur: str) -> str:
     """ShippingDetails, ReturnPolicy, PaymentMethods and ShipToLocations, as the older listings carry them."""
     c = escape(cur)
-    sh, rt = d.get("shipping") or {}, d.get("returns") or {}
+    sh, rt = d.get("shipping") or {}, _pa_returns(d, d.get("returns") or {})
     sd = ""
     if sh.get("type"):
         sd += f"<ShippingType>{escape(sh['type'])}</ShippingType>"
@@ -260,6 +275,7 @@ class DraftIn(BaseModel):
     photos: Optional[list[str]] = Field(default=None, max_length=24)  # the pictures to keep, in order (all must be the original's)
     item_specifics: Optional[list[dict]] = Field(default=None, max_length=100)  # [{name, values:[...]}]
     compat: Optional[list[dict]] = Field(default=None, max_length=3000)  # the complete list: [{pairs:[[name, value], ...], notes}]
+    dispatch_days: Optional[str] = None  # handling time in business days: 0 (same day), 1-5, 10, 15, 20 or 30
     dropship: Optional[bool] = None  # count the distributor's warehouses in the quantity, and keep doing so after it is listed
 
 
@@ -319,6 +335,7 @@ def _shape(r) -> dict:
         "compat": d.get("compat", []), "compat_edited": bool(d.get("compat_edited")),
         "terms": terms_summary(d), "terms_problem": _terms_problem(d),
         "dropship": bool(d.get("dropship")),
+        "dispatch_days": str(d.get("dispatch_days") or ""),
     }
 
 
@@ -464,6 +481,11 @@ def save_copy(copy_id: int, body: DraftIn, db: Session = Depends(get_db)):
         d["item_specifics"] = _spec_clean(body.item_specifics)
     if body.dropship is not None:
         d["dropship"] = bool(body.dropship)
+    if body.dispatch_days is not None:
+        dd = body.dispatch_days.strip()
+        if dd not in ("0", "1", "2", "3", "4", "5", "10", "15", "20", "30"):
+            raise HTTPException(400, "Handling time must be 0 (same day), 1, 2, 3, 4, 5, 10, 15, 20 or 30 business days.")
+        d["dispatch_days"] = dd
     if body.compat is not None:
         d["compat"] = _compat_clean(body.compat)
         d["compat_edited"] = True  # from now on choosing a store does not rebuild the list from our fitment
@@ -592,7 +614,7 @@ def _item_xml(d: dict, qty: int) -> str:
         parts.append(f"<PostalCode>{escape(d['postal_code'])}</PostalCode>")
     if d.get("dispatch_days"):
         parts.append(f"<DispatchTimeMax>{escape(d['dispatch_days'])}</DispatchTimeMax>")
-    if _has_profiles(d):
+    if _has_profiles(d) and not d.get("inline_terms"):
         parts.append(
             "<SellerProfiles>"
             f"<SellerShippingProfile><ShippingProfileID>{escape(d['ship_profile'])}</ShippingProfileID></SellerShippingProfile>"
@@ -683,6 +705,22 @@ def preview(copy_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
     xml = _item_xml(d, qty)
     root = _trading(db, r.store, "VerifyAddFixedPriceItem", xml, _site_id(d))
     errs = _errors(root)
+    # eBay 21919446: the store is not opted into Business Policies, so the policy ids on the draft mean nothing to it (and it
+    # then also reports no shipping service and a bad return policy). Send the model listing's own shipping and return
+    # terms instead, as the older listings carry them, and check again. Nothing is listed by this.
+    if (_has_profiles(d) and not d.get("inline_terms") and _has_terms(d)
+            and any(e["code"] == "21919446" for e in errs)):
+        d["inline_terms"] = True
+        xml = _item_xml(d, qty)
+        root = _trading(db, r.store, "VerifyAddFixedPriceItem", xml, _site_id(d))
+        errs = _errors(root)
+        try:
+            db.execute(text("update ebay_listing_copies set data = cast(:d as jsonb), updated_at = now() where id = :i"),
+                       {"d": json.dumps(d), "i": copy_id})
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.exception("could not save the inline-terms switch on draft %s", copy_id)
     ok = not _failed(root)
     fees = []
     for f in root.findall(f"{NS}Fees/{NS}Fee"):

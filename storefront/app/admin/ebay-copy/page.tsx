@@ -24,6 +24,7 @@ type Copy = {
   original_photos: string[];
   item_specifics: Spec[];
   dropship?: boolean;
+  dispatch_days?: string;
   currency: string;
   category_name: string;
   compat_count: number;
@@ -69,6 +70,7 @@ function CopyEditor({ id }: { id: number }) {
   const [compatTouched, setCompatTouched] = useState(false); // only an edit made here is sent, so choosing a store can still rebuild the list
   const [dirty, setDirty] = useState(false);
   const [dropship, setDropship] = useState(false);
+  const [handling, setHandling] = useState("");
   const [pv, setPv] = useState<Preview | null>(null);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -90,6 +92,7 @@ function CopyEditor({ id }: { id: number }) {
     setCompat(c.compat ?? []);
     setCompatTouched(false);
     setDropship(!!c.dropship);
+    setHandling(c.dispatch_days ?? "");
     setDirty(false);
   }
 
@@ -219,6 +222,7 @@ function CopyEditor({ id }: { id: number }) {
             .filter((s) => s.name.trim() || s.value.trim())
             .map((s) => ({ name: s.name, values: s.value.split(";").map((v) => v.trim()).filter(Boolean) })),
           dropship,
+          ...(handling !== "" ? { dispatch_days: handling } : {}),
           ...(compatTouched ? { compat } : {}),
         },
       });
@@ -444,7 +448,19 @@ function CopyEditor({ id }: { id: number }) {
           <ul className="list-disc space-y-0.5 pl-5 text-xs text-gray-700">
             {(copy.terms ?? []).map((t, i) => <li key={i}>{t}</li>)}
           </ul>
-          <p className="text-xs text-gray-500">Taken from the model listing, the way the older listings carry them. Change them on eBay or choose a different model listing.</p>
+          <label className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="font-semibold">Handling time</span>
+            <select className={inputCls + " w-44"} value={handling} disabled={off}
+              onChange={(e) => { setHandling(e.target.value); setDirty(true); }}>
+              <option value="">From the model listing</option>
+              <option value="0">Same day</option>
+              {["1", "2", "3", "4", "5", "10", "15", "20", "30"].map((n) => (
+                <option key={n} value={n}>{n} business day{n === "1" ? "" : "s"}</option>
+              ))}
+            </select>
+            <span className="text-xs text-gray-500">Save, then check again to send it.</span>
+          </label>
+          <p className="text-xs text-gray-500">Shipping and returns are taken from the model listing. Handling time can be changed here. For the rest, choose a different model listing.</p>
         </div>
       ) : null}
 
