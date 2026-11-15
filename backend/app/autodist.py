@@ -2427,7 +2427,10 @@ def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict
     # everything back, even if a tracking number is already showing.
     partial = _has_unshipped_lines(data)
     judged = "partial" if partial else status
-    done = bool(items) and not partial and not _not_shipped_yet(status)
+    # Evidence the parts really went out: a parcel tracking number, or a shipped status code. A freight PRO number alone is not
+    # evidence: a brand-new order can carry a placeholder PRO (our PO number plus a suffix) before anything has shipped.
+    shipped_evidence = any(i.get("kind") == "tracking" for i in items) or str(status or "").strip().upper() in SHIPPED_CODES
+    done = bool(items) and shipped_evidence and not partial and not _not_shipped_yet(status)
     try:
         db.execute(
             text(
@@ -2442,7 +2445,7 @@ def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict
         db.rollback()
         raise HTTPException(503, "The tracking columns are missing. Run sql/autodist_tracking.sql in Supabase, then try again.")
     po_no = db.execute(text("select po_number from supplier_orders where id = :i"), {"i": row_id}).scalar()
-    closed = _close_drop_ship_po(db, po_no, order_number, judged, items)
+    closed = _close_drop_ship_po(db, po_no, order_number, judged, items if shipped_evidence else [])
     ebay_filled = _hand_off_to_ebay(db, po_no, judged, items)
     return {"order_number": order_number, "status": status, "tracking": items, "po_closed": closed, "ebay_filled": ebay_filled}
 
