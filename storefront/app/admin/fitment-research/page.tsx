@@ -184,7 +184,7 @@ export default function FitmentResearchPage() {
             <Badge tone={target.fitment_rows ? "amber" : "gray"}>{target.fitment_rows} vehicles already</Badge>
           </div>
         )}
-        <textarea className={inputCls + " h-40 w-full font-mono text-xs"} placeholder={"BMW\n2019\nF750GS\n2009\nG650GS\n…\nBuell\n2003\nXB9R Firebolt"}
+        <textarea className={inputCls + " h-96 w-full font-mono text-xs"} placeholder={"BMW\n2019\nF750GS\n2009\nG650GS\n…\nBuell\n2003\nXB9R Firebolt"}
           value={pasted} onChange={(e) => { setPasted(e.target.value); setPreview(null); }} />
         <div className="flex flex-wrap items-center gap-2">
           <label className="text-sm text-gray-600">New models go under type</label>
