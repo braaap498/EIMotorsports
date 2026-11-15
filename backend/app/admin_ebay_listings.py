@@ -39,6 +39,8 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.availability import dropship_qty_sql as _dropship_qty_sql
+
 from app.auth import require_admin
 from app.database import get_db, get_engine
 from app.images import thumb_url
@@ -301,6 +303,8 @@ _L_PRICE = "coalesce(p.list_price, lr.price, la.price)"
 # (report, then eBay lookup) and is above 0, that is shown instead and marked as coming from eBay. Stock is never changed.
 _L_EBAY_QTY = "cast(coalesce(lr.quantity, la.quantity) as integer)"
 _L_QTY_FROM_EBAY = f"(coalesce(p.quantity_on_hand, 0) = 0 and coalesce({_L_EBAY_QTY}, 0) > 0)"
+# A listing ticked Drop ship shows what is sent to eBay for it: the lowest non-empty of our shelf, Indiana and Nevada.
+_L_IS_DROPSHIP = "(coalesce(cl.dropship_ok, false) or coalesce(p.dropship_ok, false))"
 # Photo order for a row: the listing's own saved set (ebay_listings.photos, filled by the photo import's "listing
 # originals" run and by merges), then photos saved under its own item number, then the product's main photo.
 _REPO_SORTS = {
@@ -382,8 +386,9 @@ def repo_listings(
             select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
                    p.id as product_id, p.sku_display as sku, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
                    {_L_PRICE} as list_price, p.quantity_on_hand,
-                   case when {_L_QTY_FROM_EBAY} then {_L_EBAY_QTY} else p.quantity_on_hand end as quantity_shown,
-                   {_L_QTY_FROM_EBAY} as qty_from_ebay,
+                   case when {_L_IS_DROPSHIP} then {_dropship_qty_sql('p')}
+                        when {_L_QTY_FROM_EBAY} then {_L_EBAY_QTY} else p.quantity_on_hand end as quantity_shown,
+                   ({_L_QTY_FROM_EBAY} and not {_L_IS_DROPSHIP}) as qty_from_ebay,
                    {edits_sql} as unsent_edits,
                    (select count(*) from channel_listings x where x.product_id = p.id) as product_listings,
                    case
