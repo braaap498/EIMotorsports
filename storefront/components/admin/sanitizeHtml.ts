@@ -214,6 +214,94 @@ function wrapOrphanItems(root: Element): void {
   });
 }
 
+// Pasted text often arrives as wrappers inside wrappers, loose text and <br> lines mixed with blocks. The page puts space
+// between top-level blocks only, so the gaps came out uneven and could not be changed. This gives every description one
+// shape: a wrapper that holds blocks is dissolved, and every top-level run of loose text becomes a paragraph (a single line
+// break stays a line break inside it; two or more start a new paragraph).
+const TOP_BLOCK = /^(DIV|P|H2|H3|H4|UL|OL|TABLE|HR)$/;
+const isBr = (n: Node | undefined) => isEl(n, /^BR$/);
+
+function flushRun(root: Element, run: Node[], ref: Node | null): void {
+  const groups: Node[][] = [[]];
+  let i = 0;
+  while (i < run.length) {
+    if (isBr(run[i])) {
+      let j = i;
+      let count = 0;
+      while (j < run.length && (isBr(run[j]) || blankNode(run[j]))) {
+        if (isBr(run[j])) count++;
+        j++;
+      }
+      if (count >= 2) groups.push([]);
+      else groups[groups.length - 1].push(...run.slice(i, j));
+      i = j;
+      continue;
+    }
+    groups[groups.length - 1].push(run[i]);
+    i++;
+  }
+  run.forEach((n) => n.parentNode?.removeChild(n));
+  for (const g of groups) {
+    while (g.length && (isBr(g[0]) || blankNode(g[0]))) g.shift();
+    while (g.length && (isBr(g[g.length - 1]) || blankNode(g[g.length - 1]))) g.pop();
+    if (!g.length) continue;
+    const d = document.createElement("div");
+    g.forEach((n) => d.appendChild(n));
+    root.insertBefore(d, ref);
+  }
+}
+
+export function normalizeBlocks(root: Element): void {
+  const inCell = (e: Element) => {
+    const c = e.closest("li,td,th");
+    return !!c && root.contains(c);
+  };
+  for (let pass = 0; pass < 60; pass++) {
+    const w = Array.from(root.querySelectorAll("div,p")).find((e) => Array.from(e.children).some((c) => TOP_BLOCK.test(c.tagName)) && !inCell(e));
+    if (!w) break;
+    w.replaceWith(...Array.from(w.childNodes));
+  }
+  let run: Node[] = [];
+  Array.from(root.childNodes).forEach((k) => {
+    if (isEl(k, TOP_BLOCK)) {
+      if (run.length) flushRun(root, run, k);
+      run = [];
+    } else {
+      run.push(k);
+    }
+  });
+  if (run.length) flushRun(root, run, null);
+}
+
+// Spaces at the start or end of a line show up in the editor as a ragged left edge (a line that looks indented). Trim them.
+const LINE_BLOCK = /^(DIV|P|LI|H2|H3|H4|TD|TH)$/;
+function trimLineEdges(root: Element): void {
+  const edge = (t: Node, dir: "previousSibling" | "nextSibling"): boolean => {
+    let node: Node | null = t;
+    while (node && node !== root) {
+      const sib: Node | null = node[dir];
+      if (sib && !blankNode(sib)) return isBr(sib);
+      if (sib) {
+        node = sib; // a blank node between: look past it
+        continue;
+      }
+      const up: Node | null = node.parentNode;
+      if (!up || up === root || isEl(up, LINE_BLOCK)) return true;
+      node = up;
+    }
+    return true;
+  };
+  const texts: Text[] = [];
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let n = w.nextNode(); n; n = w.nextNode()) texts.push(n as Text);
+  texts.forEach((t) => {
+    let v = t.data;
+    if (edge(t, "previousSibling")) v = v.replace(/^[\s\u00a0]+/, "");
+    if (edge(t, "nextSibling")) v = v.replace(/[\s\u00a0]+$/, "");
+    if (v !== t.data) t.data = v;
+  });
+}
+
 // Removes the empty wrappers, empty bullets and stray line breaks the eBay editor leaves behind.
 function tidy(root: Element): void {
   pushFormattingDown(root);
@@ -241,6 +329,8 @@ function tidy(root: Element): void {
     if (root.contains(list)) normalizeList(list);
   });
   wrapOrphanItems(root);
+  normalizeBlocks(root);
+  trimLineEdges(root);
   for (let pass = 0; pass < 12; pass++) {
     let removed = false;
     // innermost first, so a list whose only item was empty goes too
