@@ -41,6 +41,7 @@ The PO's "Item" column is the product's manufacturer part number (the field on t
 "Manufacturer Part Number" item specific when that field is empty), copied onto the PO when it is made.
 """
 import logging
+import os
 import re
 import time
 from datetime import date
@@ -124,11 +125,22 @@ def _who(email: Optional[str]) -> Optional[str]:
 OPEN_LINE = "l.received_at is null and exists (select 1 from po_headers hh where hh.id = l.po_id and hh.status <> 'cancelled')"
 
 
+# New PO numbers never start below this. Automatic Distributors refuses a PO number your account already used ("PO number exists
+# already"), and our numbers began at 1, so low numbers can collide with old orders. Change it with PO_NUMBER_START in Render.
+PO_NUMBER_FLOOR = int(os.environ.get("PO_NUMBER_START", "700001") or 700001)
+
+
+def _next_number(db: Session) -> int:
+    """One more than the highest used, but never below PO_NUMBER_FLOOR."""
+    top = int(db.execute(text("select coalesce(max(po_number), 0) from po_headers")).scalar() or 0)
+    return max(top + 1, PO_NUMBER_FLOOR)
+
+
 def _free_number(db: Session) -> int:
-    """The next PO number: one more than the highest used (1 when there are none). POs are never deleted,
-    so a number is never reused or skipped. The lock keeps two people creating a PO at once from getting the same number."""
+    """The next PO number: one more than the highest used, and never below PO_NUMBER_FLOOR. POs are never deleted,
+    so a number is never reused. The lock keeps two people creating a PO at once from getting the same number."""
     db.execute(text("select pg_advisory_xact_lock(7001)"))
-    return int(db.execute(text("select coalesce(max(po_number), 0) + 1 from po_headers")).scalar())
+    return _next_number(db)
 
 
 def ensure_po_types() -> None:
@@ -954,8 +966,7 @@ def list_pos(
 @needs("inventory.purchase")
 def defaults(db: Session = Depends(get_db)):
     """What the Create / Edit screens fill in: the usual Ship To address, and a PO number nobody uses yet."""
-    nxt = db.execute(text("select coalesce(max(po_number), 0) + 1 from po_headers")).scalar()
-    return {"ship_to": DEFAULT_SHIP_TO, "next_po_number": int(nxt)}
+    return {"ship_to": DEFAULT_SHIP_TO, "next_po_number": _next_number(db)}
 
 
 @router.get("/issues")

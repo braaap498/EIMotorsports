@@ -207,12 +207,13 @@ def list_jobs(stage: Optional[str] = Query(None, max_length=20), db: Session = D
     _ensure(db)
     rows = db.execute(
         text(
-            "select id, ebay_order_id, store, po_id, po_number, stage, ship_service, buyer_name, problem, created_at, confirmed_by, confirmed_at, "
-            "quote, ship_method, supplier_order, supplier_mode, tracking_number, tracking_carrier "
-            "from dropship_jobs "
-            + ("where stage in ('review_po', 'po_confirmed', 'review_quote', 'review_tracking') " if stage == "review"
-               else "where stage = :s " if stage else "where stage <> 'dismissed' ")
-            + "order by id desc limit 100"
+            "select j.id, j.ebay_order_id, j.store, j.po_id, coalesce(h.po_number, j.po_number) as po_number, j.stage, j.ship_service, "
+            "j.buyer_name, j.problem, j.created_at, j.confirmed_by, j.confirmed_at, "
+            "j.quote, j.ship_method, j.supplier_order, j.supplier_mode, j.tracking_number, j.tracking_carrier "
+            "from dropship_jobs j left join po_headers h on h.id = j.po_id "
+            + ("where j.stage in ('review_po', 'po_confirmed', 'review_quote', 'review_tracking') " if stage == "review"
+               else "where j.stage = :s " if stage else "where j.stage <> 'dismissed' ")
+            + "order by j.id desc limit 100"
         ),
         {"s": stage} if stage and stage != "review" else {},
     ).all()
@@ -315,11 +316,22 @@ def _service_words(name: str) -> tuple[Optional[str], Optional[str]]:
     return carrier, speed
 
 
+# eBay shipping services that always go out on one specific distributor option (compared with letters and digits only).
+# USPSParcel is the free shipping service on the listings: it is shipped as USPS Ground Advantage.
+FIXED_OPTIONS = {"uspsparcel": "uspsgroundadvantage"}
+
+
 def pick_shipping_option(buyer_service: Optional[str], options: list[dict]) -> Optional[str]:
     """The distributor's shipping option closest to the buyer's eBay choice, or None when there is no safe match
-    (a person then picks it at the quote check). A match needs the same speed; the same carrier is preferred."""
+    (a person then picks it at the quote check). A match needs the same speed; the same carrier is preferred.
+    A service in FIXED_OPTIONS uses its own option when the distributor offers it."""
     if not buyer_service or not options:
         return None
+    fixed = FIXED_OPTIONS.get(_norm(buyer_service))
+    if fixed:
+        hits = [str(o.get("name") or "") for o in options if _norm(str(o.get("name") or "")) == fixed]
+        if hits:
+            return hits[0]
     bc, bs = _service_words(buyer_service)
     if not bs:
         return None
@@ -422,7 +434,13 @@ def place_job(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depen
     j = _job(db, job_id)
     if j.stage != "review_quote":
         raise HTTPException(409, "That order is not waiting for the quote check.")
-    full = db.execute(text("select id, po_id, ebay_order_id, ship_method from dropship_jobs where id = :i"), {"i": job_id}).first()
+    full = db.execute(
+        text(
+            "select j.id, j.po_id, j.ebay_order_id, j.ship_method, coalesce(cast(h.po_number as text), cast(j.po_number as text)) as po_number_text "
+            "from dropship_jobs j left join po_headers h on h.id = j.po_id where j.id = :i"
+        ),
+        {"i": job_id},
+    ).first()
     if not full.ship_method:
         raise HTTPException(409, "Pick a shipping option first.")
     body = _order_in(db, full, full.ship_method, True)
@@ -440,9 +458,18 @@ def place_job(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depen
         db.rollback()
         # A 504 means the order MAY have been placed: keep it out of the normal flow until a person has checked.
         new_stage = "problem" if e.status_code == 504 else "review_quote"
+        detail = str(e.detail)
+        low = detail.lower()
+        if new_stage == "review_quote" and "po number" in low and ("exist" in low or "duplicate" in low):
+            msg = (
+                f"Not placed: the distributor already has an order with PO number {full.po_number_text}. Nothing was ordered. "
+                "Give this PO a new, unused number in the purchase order editor, then place it again."
+            )
+        else:
+            msg = ("Not placed: " if new_stage == "review_quote" else "CHECK WITH THE DISTRIBUTOR BEFORE TRYING AGAIN: ") + detail[:350]
         db.execute(
             text("update dropship_jobs set stage = :s, problem = :m, updated_at = now() where id = :i"),
-            {"s": new_stage, "m": ("Not placed: " if new_stage == "review_quote" else "CHECK WITH THE DISTRIBUTOR BEFORE TRYING AGAIN: ") + str(e.detail)[:350], "i": job_id},
+            {"s": new_stage, "m": msg[:400], "i": job_id},
         )
         db.commit()
         raise
