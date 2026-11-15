@@ -352,6 +352,21 @@ def pick_shipping_option(buyer_service: Optional[str], options: list[dict]) -> O
     return best[0] if best else None
 
 
+def method_code(method: Optional[str], options: list) -> str:
+    """What the order API wants as the shipping method: the option's carrier CODE (the same value the Orders screen sends), not its
+    display name. `method` may be a name (what the page shows and saves) or already a code; anything unknown is passed through."""
+    m = (method or "").strip()
+    if not m:
+        return ""
+    for o in options or []:
+        if not isinstance(o, dict):
+            continue
+        name, code = str(o.get("name") or "").strip(), str(o.get("carrier_code") or "").strip()
+        if m == name or m == code:
+            return code or name
+    return m
+
+
 def _order_in(db: Session, job, method: Optional[str], confirm: bool):
     from app.autodist import OrderAddress, OrderIn, OrderLine, api_po
 
@@ -387,8 +402,9 @@ def _run_quote(db: Session, job_id: int, method: Optional[str]) -> dict:
         options = (first.get("totals") or {}).get("shipping_options") or []
         chosen = method or pick_shipping_option(j.ship_service, options)
         quote = first
-        if chosen and chosen != (body.shipping_method or ""):
-            body.shipping_method = chosen
+        code = method_code(chosen, options)  # the order API takes the option's code, not its display name
+        if code and code != (body.shipping_method or ""):
+            body.shipping_method = code
             quote = api_order_quote(body)
         quote["options"] = options
         quote["method"] = chosen
@@ -436,14 +452,18 @@ def place_job(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depen
         raise HTTPException(409, "That order is not waiting for the quote check.")
     full = db.execute(
         text(
-            "select j.id, j.po_id, j.ebay_order_id, j.ship_method, coalesce(cast(h.po_number as text), cast(j.po_number as text)) as po_number_text "
+            "select j.id, j.po_id, j.ebay_order_id, j.ship_method, j.quote, coalesce(cast(h.po_number as text), cast(j.po_number as text)) as po_number_text "
             "from dropship_jobs j left join po_headers h on h.id = j.po_id where j.id = :i"
         ),
         {"i": job_id},
     ).first()
     if not full.ship_method:
         raise HTTPException(409, "Pick a shipping option first.")
-    body = _order_in(db, full, full.ship_method, True)
+    try:
+        saved_options = (json.loads(full.quote) if full.quote else {}).get("options") or []
+    except ValueError:
+        saved_options = []
+    body = _order_in(db, full, method_code(full.ship_method, saved_options), True)
     # claim the job first so a double click cannot place it twice
     claimed = db.execute(
         text("update dropship_jobs set stage = 'placing', updated_at = now() where id = :i and stage = 'review_quote' returning id"),
