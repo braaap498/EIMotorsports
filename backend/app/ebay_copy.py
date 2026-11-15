@@ -119,7 +119,7 @@ def terms_summary(d: dict) -> list[str]:
     cur = d.get("currency") or "USD"
     if _has_profiles(d) and not d.get("inline_terms"):
         return ["Shipping, payment and return rules come from the store's business policies (as on the model listing)."]
-    sh, rt = d.get("shipping") or {}, d.get("returns") or {}
+    sh, rt = d.get("shipping") or {}, _pa_returns(d, d.get("returns") or {})
     for o in sh.get("services", []):
         if o.get("free"):
             out.append(f"Shipping {o['priority']}: {o['service']}, free")
@@ -275,6 +275,7 @@ class DraftIn(BaseModel):
     photos: Optional[list[str]] = Field(default=None, max_length=24)  # the pictures to keep, in order (all must be the original's)
     item_specifics: Optional[list[dict]] = Field(default=None, max_length=100)  # [{name, values:[...]}]
     compat: Optional[list[dict]] = Field(default=None, max_length=3000)  # the complete list: [{pairs:[[name, value], ...], notes}]
+    shipping_options: Optional[list[dict]] = Field(default=None, max_length=30)  # [{kind: domestic|international, priority, cost, additional, free}]
     dispatch_days: Optional[str] = None  # handling time in business days: 0 (same day), 1-5, 10, 15, 20 or 30
     dropship: Optional[bool] = None  # count the distributor's warehouses in the quantity, and keep doing so after it is listed
 
@@ -336,6 +337,13 @@ def _shape(r) -> dict:
         "terms": terms_summary(d), "terms_problem": _terms_problem(d),
         "dropship": bool(d.get("dropship")),
         "dispatch_days": str(d.get("dispatch_days") or ""),
+        "shipping_options": (
+            [{"kind": "domestic", "priority": str(o.get("priority")), "service": o.get("service", ""), "cost": o.get("cost") or "",
+              "additional": o.get("additional") or "", "free": bool(o.get("free"))} for o in (d.get("shipping") or {}).get("services", [])]
+            + [{"kind": "international", "priority": str(o.get("priority")), "service": o.get("service", ""), "cost": o.get("cost") or "",
+                "additional": "", "free": False} for o in (d.get("shipping") or {}).get("international", [])]
+        ),
+        "terms_from_policies": bool(_has_profiles(d) and not d.get("inline_terms")),
     }
 
 
@@ -481,6 +489,36 @@ def save_copy(copy_id: int, body: DraftIn, db: Session = Depends(get_db)):
         d["item_specifics"] = _spec_clean(body.item_specifics)
     if body.dropship is not None:
         d["dropship"] = bool(body.dropship)
+    if body.shipping_options is not None:
+        sh = dict(d.get("shipping") or {})
+        dom = [dict(o) for o in sh.get("services", [])]
+        intl = [dict(o) for o in sh.get("international", [])]
+        if not dom and not intl:
+            raise HTTPException(409, "This draft has no shipping services to change. Choose the store (and a model listing) first.")
+        for req in body.shipping_options:
+            kind, pr = str(req.get("kind") or ""), str(req.get("priority") or "")
+            pool = dom if kind == "domestic" else intl if kind == "international" else None
+            tgt = next((o for o in (pool or []) if str(o.get("priority")) == pr), None)
+            if tgt is None:
+                raise HTTPException(400, "A shipping option in the request is not on the draft. Reload the page.")
+            name = tgt.get("service") or "shipping option"
+            if kind == "domestic" and req.get("free"):
+                tgt["free"], tgt["cost"], tgt["additional"] = True, "0.00", ""
+                continue
+            tgt["free"] = False
+            try:
+                tgt["cost"] = str(_money(str(req.get("cost") or "")))
+            except HTTPException:
+                raise HTTPException(400, f"{name}: the shipping price must be above 0, or tick Free.")
+            add = str(req.get("additional") or "").strip()
+            if kind == "domestic":
+                try:
+                    tgt["additional"] = str(_money(add)) if add and Decimal(add.replace(",", "").lstrip("$") or "0") != 0 else ""
+                except Exception:
+                    raise HTTPException(400, f"{name}: the price for each extra item is not a number.")
+        sh["services"], sh["international"] = dom, intl
+        d["shipping"] = sh
+        d["inline_terms"] = True  # changed prices go on the listing itself; a business policy's own prices cannot be changed from here
     if body.dispatch_days is not None:
         dd = body.dispatch_days.strip()
         if dd not in ("0", "1", "2", "3", "4", "5", "10", "15", "20", "30"):
@@ -522,7 +560,7 @@ def _quantity(db: Session, store: str, product_id: int, dropship: bool = False) 
         raise HTTPException(
             409,
             "Nothing is available to sell for this part (our stock on hand minus parts set aside"
-            + (", plus the distributor's warehouses" if dropship else "") + "), and eBay "
+            + (", Indiana and Nevada are all at 0" if dropship else "") + "), and eBay "
             "needs at least 1 to list. "
             + ("Check that the product has its distributor part linked (Autodist page > Add distributor parts) and that the warehouses have stock. "
                if dropship else "Tick Drop ship to count the distributor's warehouses, or receive stock first. ")
@@ -544,13 +582,18 @@ def _ready(store: str, d: dict) -> None:
 
 
 def _quantity_parts(db: Session, product_id: int, dropship: bool = False) -> dict:
-    """Where the quantity comes from: our shelf (on hand minus set aside) plus the drop-ship warehouses, when they are counted."""
+    """Where the quantity comes from. A drop ship listing shows the lowest of our shelf (on hand minus set aside), Indiana and Nevada,
+    not counting any that is at 0; otherwise it is our shelf only."""
+    from app.availability import wh_sql
+
     own = int(db.execute(text(f"select {available_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
     total = int(db.execute(text(f"select {effective_sql('p', 'true' if dropship else 'false')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
+    ind = int(db.execute(text(f"select {wh_sql('p', 'qty_indiana')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
+    nev = int(db.execute(text(f"select {wh_sql('p', 'qty_nevada')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
     note = ""
     if not dropship:
         note = "Drop ship is not ticked, so the distributor's warehouses are not counted."
-    elif total <= own:
+    elif total <= 0:
         try:
             r = db.execute(
                 text("select count(*) as parts, count(si.id) filter (where si.active) as live from product_kit_parts k "
@@ -565,7 +608,8 @@ def _quantity_parts(db: Session, product_id: int, dropship: bool = False) -> dic
                 note = "The distributor's warehouses (Indiana + Nevada) show no stock for this part right now."
         except Exception:
             db.rollback()
-    return {"quantity_own": own, "quantity_distributor": max(total - own, 0), "distributor_counted": bool(dropship), "distributor_note": note}
+    return {"quantity_own": own, "quantity_indiana": ind, "quantity_nevada": nev, "quantity_distributor": ind + nev,
+            "distributor_counted": bool(dropship), "distributor_note": note}
 
 
 SITE_IDS = {"US": "0", "eBayMotors": "100"}

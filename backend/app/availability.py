@@ -1,6 +1,10 @@
 """
 What is AVAILABLE to sell, counting the distributor's stock as well as our own shelf. Mounted at /admin/availability/* (admin only).
 
+DROP SHIP NUMBER: a product or listing marked DROP SHIP shows the LOWEST of our shelf, the Indiana warehouse and the Nevada warehouse,
+ignoring any that is at 0 (so it moves to the next one when one runs out), and 0 only when all three are at 0 (dropship_qty_sql).
+Everything below describes the number for products that are NOT marked drop ship.
+
 THE RULE (a product or listing marked DROP SHIP always counts the distributor's stock; everything else only while the master switch
 "Count distributor stock" is ON; with the switch OFF and nothing marked, every number is the shelf count minus what is set aside)
   own          quantity_on_hand minus parts set aside (app/stock.py), never below 0
@@ -121,6 +125,28 @@ def dist_sql(p: str = "p") -> str:
     )
 
 
+def wh_sql(p: str, col: str) -> str:
+    """Stock of ONE distributor warehouse (`qty_indiana` or `qty_nevada`) for product `p`: the scarcest piece decides, 0 when there
+    are no pieces or a piece has no live catalog item."""
+    return (
+        "(select case when count(*) = 0 or bool_or(si.id is null) then 0 else "
+        f"coalesce(min(cast(floor(cast(coalesce(si.{col}, 0) as numeric) "
+        "/ greatest(coalesce(k.quantity, 1), 1)) as integer)), 0) end "
+        "from product_kit_parts k "
+        f"left join supplier_items si on si.id = k.supplier_item_id and si.supplier = '{SUPPLIER}' and si.active "
+        f"where k.product_id = {p}.id)"
+    )
+
+
+def dropship_qty_sql(p: str = "p") -> str:
+    """The number a DROP SHIP listing shows: the LOWEST of our own shelf, the Indiana warehouse and the Nevada warehouse, not
+    counting any that is at 0. When one runs out the number moves up to the next lowest; it is 0 only when all three are at 0."""
+    return (
+        f"coalesce(least(nullif({available_sql(p)}, 0), nullif({wh_sql(p, 'qty_indiana')}, 0), "
+        f"nullif({wh_sql(p, 'qty_nevada')}, 0)), 0)"
+    )
+
+
 def extra_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False) -> str:
     """What the distributor adds on top of our own count for product `p`.
     A product or listing that is marked DROP SHIP (`{p}.dropship_ok`, or `ovr`, an SQL boolean such as "coalesce(cl.dropship_ok, false)")
@@ -134,8 +160,12 @@ def extra_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False) -> 
 
 
 def effective_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False) -> str:
-    """SQL: what can be sold from product `p` now (own count, plus the distributor's where the rule allows)."""
-    return f"({available_sql(p)} + {extra_sql(p, ovr, ignore_switch)})"
+    """SQL: what can be sold from product `p` now. A product or listing marked DROP SHIP shows the lowest non-empty of our shelf,
+    Indiana and Nevada (dropship_qty_sql); anything else is our own count plus the distributor's where the rule allows."""
+    return (
+        f"(case when {p}.dropship_ok or {ovr} then {dropship_qty_sql(p)} "
+        f"else {available_sql(p)} + {extra_sql(p, ovr, ignore_switch)} end)"
+    )
 
 
 def stock_mode_sql(p: str = "p") -> str:
@@ -543,7 +573,7 @@ def reconcile(db: Session) -> dict:
     raise_ok = get_setting(db, "auto_raise", "off") == "on"
     rows = db.execute(
         text(
-            f"select p.id, {effective_sql('p', flagged)} as eff, st.effective as prev from products p "
+            f"select p.id, {effective_sql('p', flagged)} as eff, st.effective as prev, (p.dropship_ok or {flagged}) as ds from products p "
             "left join availability_state st on st.product_id = p.id "
             "where exists (select 1 from product_kit_parts k where k.product_id = p.id) "
             f"and exists (select 1 from channel_listings cl where cl.product_id = p.id and {_ACTIVE_LISTING}) "
@@ -557,7 +587,7 @@ def reconcile(db: Session) -> dict:
             out["baseline"] += 1
         elif eff == r.prev:
             continue
-        elif eff < r.prev or raise_ok:
+        elif eff < r.prev or raise_ok or r.ds:   # drop ship numbers move up when one source runs out, so they are always sent
             try:
                 with db.begin_nested():
                     out["queued"] += enqueue_product(db, r.id)

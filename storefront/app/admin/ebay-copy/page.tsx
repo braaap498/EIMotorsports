@@ -25,6 +25,8 @@ type Copy = {
   item_specifics: Spec[];
   dropship?: boolean;
   dispatch_days?: string;
+  shipping_options?: ShipOpt[];
+  terms_from_policies?: boolean;
   currency: string;
   category_name: string;
   compat_count: number;
@@ -38,6 +40,7 @@ type Copy = {
   terms: string[]; // plain-language shipping / handling / returns lines
   terms_problem: string;
 };
+type ShipOpt = { kind: "domestic" | "international"; priority: string; service: string; cost: string; additional: string; free: boolean };
 type StoreChoice = { store: string; seller: string | null; live: boolean };
 type Hint = { name: string; value: string };
 type CatHit = { category_id: string; name: string; path: string; tree: string; motors: boolean };
@@ -49,6 +52,8 @@ type Preview = {
   quantity: number;
   quantity_own?: number;
   quantity_distributor?: number;
+  quantity_indiana?: number;
+  quantity_nevada?: number;
   distributor_counted?: boolean;
   distributor_note?: string;
   duplicates: string[];
@@ -71,6 +76,8 @@ function CopyEditor({ id }: { id: number }) {
   const [dirty, setDirty] = useState(false);
   const [dropship, setDropship] = useState(false);
   const [handling, setHandling] = useState("");
+  const [shipOpts, setShipOpts] = useState<ShipOpt[]>([]);
+  const [shipTouched, setShipTouched] = useState(false);
   const [pv, setPv] = useState<Preview | null>(null);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -93,6 +100,8 @@ function CopyEditor({ id }: { id: number }) {
     setCompatTouched(false);
     setDropship(!!c.dropship);
     setHandling(c.dispatch_days ?? "");
+    setShipOpts(c.shipping_options ?? []);
+    setShipTouched(false);
     setDirty(false);
   }
 
@@ -223,6 +232,7 @@ function CopyEditor({ id }: { id: number }) {
             .map((s) => ({ name: s.name, values: s.value.split(";").map((v) => v.trim()).filter(Boolean) })),
           dropship,
           ...(handling !== "" ? { dispatch_days: handling } : {}),
+          ...(shipTouched ? { shipping_options: shipOpts } : {}),
           ...(compatTouched ? { compat } : {}),
         },
       });
@@ -448,6 +458,50 @@ function CopyEditor({ id }: { id: number }) {
           <ul className="list-disc space-y-0.5 pl-5 text-xs text-gray-700">
             {(copy.terms ?? []).map((t, i) => <li key={i}>{t}</li>)}
           </ul>
+          {shipOpts.length > 0 && (
+            <div className="space-y-1">
+              <div className="font-semibold">Shipping prices</div>
+              <table className="text-xs">
+                <thead>
+                  <tr className="text-left text-gray-500">
+                    <th className="pr-3 font-normal">Service</th><th className="pr-3 font-normal">Free</th>
+                    <th className="pr-3 font-normal">Price</th><th className="font-normal">Each extra item</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shipOpts.map((o, i) => {
+                    const set = (patch: Partial<ShipOpt>) => {
+                      setShipOpts(shipOpts.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+                      setShipTouched(true);
+                      setDirty(true);
+                    };
+                    return (
+                      <tr key={`${o.kind}-${o.priority}`}>
+                        <td className="pr-3">{o.kind === "international" ? "International: " : ""}{o.service}</td>
+                        <td className="pr-3">
+                          {o.kind === "domestic" ? <input type="checkbox" checked={o.free} disabled={off} onChange={(e) => set({ free: e.target.checked })} /> : null}
+                        </td>
+                        <td className="pr-3">
+                          <input className={inputCls + " w-24"} value={o.free ? "0.00" : o.cost} disabled={off || o.free} inputMode="decimal"
+                            onChange={(e) => set({ cost: e.target.value })} />
+                        </td>
+                        <td>
+                          {o.kind === "domestic" ? (
+                            <input className={inputCls + " w-24"} value={o.free ? "" : o.additional} disabled={off || o.free} inputMode="decimal"
+                              placeholder="none" onChange={(e) => set({ additional: e.target.value })} />
+                          ) : null}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-500">
+                Save, then check again to send them. Changing a price puts the shipping on this listing itself
+                {copy.terms_from_policies ? " instead of the store's business policy" : ""}.
+              </p>
+            </div>
+          )}
           <label className="flex flex-wrap items-center gap-2 text-sm">
             <span className="font-semibold">Handling time</span>
             <select className={inputCls + " w-44"} value={handling} disabled={off}
@@ -580,7 +634,7 @@ function CopyEditor({ id }: { id: number }) {
           {pv.warnings.map((e, i) => <Notice key={i}>{e.message} (eBay {e.code})</Notice>)}
           {pv.ok && (
             <p>
-              eBay accepts this listing. Quantity {pv.quantity}{pv.quantity_own !== undefined ? ` (${pv.quantity_own} on our shelf${pv.distributor_counted ? ` + ${pv.quantity_distributor ?? 0} at the distributor` : ", distributor not counted"})` : ""}.
+              eBay accepts this listing. Quantity {pv.quantity}{pv.quantity_own !== undefined ? (pv.distributor_counted ? ` (lowest of the sources that have stock: our shelf ${pv.quantity_own}, Indiana ${pv.quantity_indiana ?? 0}, Nevada ${pv.quantity_nevada ?? 0})` : ` (${pv.quantity_own} on our shelf, distributor not counted)`) : ""}.
               {pv.fees.length > 0 ? ` Fees: ${pv.fees.map((f) => `${f.name} ${f.amount}`).join(", ")}.` : " No listing fee shown."}
             </p>
           )}
