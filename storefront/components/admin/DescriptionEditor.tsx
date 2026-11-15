@@ -86,6 +86,16 @@ const icons = {
       <path d="M15 14l5 5M20 14l-5 5" />
     </Icon>
   ),
+  single: (
+    <Icon>
+      <path d="M4 5h16M4 9h16M4 13h16M4 17h16" />
+    </Icon>
+  ),
+  paragraphs: (
+    <Icon>
+      <path d="M4 4h16M4 8h16M4 16h16M4 20h16" />
+    </Icon>
+  ),
   undo: (
     <Icon>
       <path d="M3 7v6h6" />
@@ -196,6 +206,65 @@ export default function DescriptionEditor({
     refreshActive();
   }
 
+  // Line spacing. "Single" puts the chosen lines into one block with plain line breaks between them (no gap); "Paragraphs"
+  // makes every line its own paragraph (the standard gap). It applies to the selected lines, or to the whole description when
+  // nothing is selected. Text, bold and links are kept.
+  function setSpacing(mode: "single" | "paragraphs") {
+    const el = ref.current;
+    if (!el || disabled) return;
+    restoreSelection();
+    const sel = window.getSelection();
+    const range = sel && sel.rangeCount && el.contains(sel.anchorNode) && !sel.getRangeAt(0).collapsed ? sel.getRangeAt(0) : null;
+    const isLine = (n: Element) => /^(DIV|P)$/.test(n.tagName) && !n.querySelector("div,p,ul,ol,li,table,h2,h3,h4");
+    const kids = Array.from(el.children);
+    const chosen = new Set(kids.filter((k) => isLine(k) && (!range || range.intersectsNode(k))));
+    if (chosen.size === 0) return;
+    let last: Element | null = null;
+    if (mode === "single") {
+      let i = 0;
+      while (i < kids.length) {
+        if (!chosen.has(kids[i])) {
+          i++;
+          continue;
+        }
+        const group: Element[] = [];
+        while (i < kids.length && chosen.has(kids[i])) group.push(kids[i++]);
+        const one = document.createElement("div");
+        group.forEach((blk, n) => {
+          if (n > 0) one.appendChild(document.createElement("br"));
+          Array.from(blk.childNodes).forEach((c) => {
+            if (!(c instanceof HTMLBRElement && !c.nextSibling)) one.appendChild(c); // a trailing break would add an empty line
+          });
+        });
+        group[0].before(one);
+        group.forEach((blk) => blk.remove());
+        last = one;
+      }
+    } else {
+      chosen.forEach((blk) => {
+        const lines: Node[][] = [[]];
+        Array.from(blk.childNodes).forEach((c) => (c instanceof HTMLBRElement ? lines.push([]) : lines[lines.length - 1].push(c)));
+        lines.forEach((ln) => {
+          if (ln.every((n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim() === "")) return;
+          const piece = blk.cloneNode(false);
+          ln.forEach((n) => piece.appendChild(n));
+          blk.before(piece);
+          last = piece as Element;
+        });
+        blk.remove();
+      });
+    }
+    if (last && sel) {
+      const r = document.createRange();
+      r.selectNodeContents(last);
+      r.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+    emit();
+    refreshActive();
+  }
+
   function makeLink() {
     if (disabled) return;
     const sel = window.getSelection();
@@ -273,6 +342,8 @@ export default function DescriptionEditor({
         <Divider />
         <Tool disabled={disabled} title="Bulleted list" on={active.ul} onClick={() => run("insertUnorderedList")}>{icons.bullets}</Tool>
         <Tool disabled={disabled} title="Numbered list" on={active.ol} onClick={() => run("insertOrderedList")}>{icons.numbers}</Tool>
+        <Tool disabled={disabled} title="Single line spacing (selected lines, or all lines if nothing is selected)" onClick={() => setSpacing("single")}>{icons.single}</Tool>
+        <Tool disabled={disabled} title="Paragraph spacing: a gap between lines (selected lines, or all lines if nothing is selected)" onClick={() => setSpacing("paragraphs")}>{icons.paragraphs}</Tool>
         <Divider />
         <Tool disabled={disabled} title="Add link to selected text" onClick={makeLink}>{icons.link}</Tool>
         <Tool disabled={disabled} title="Remove link" onClick={() => run("unlink")}>{icons.unlink}</Tool>

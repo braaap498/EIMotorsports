@@ -216,7 +216,7 @@ function wrapOrphanItems(root: Element): void {
 
 // Pasted text often arrives as wrappers inside wrappers, loose text and <br> lines mixed with blocks. The page puts space
 // between top-level blocks only, so the gaps came out uneven and could not be changed. This gives every description one
-// shape: a wrapper that holds blocks is dissolved, and every top-level run of loose text becomes a paragraph (every line break starts a new paragraph).
+// shape: a wrapper that holds blocks is dissolved, and every top-level run of loose text becomes a paragraph (a single line break stays a tight line break inside it; a blank line starts a new paragraph).
 const TOP_BLOCK = /^(DIV|P|H2|H3|H4|UL|OL|TABLE|HR)$/;
 const isBr = (n: Node | undefined) => isEl(n, /^BR$/);
 
@@ -231,7 +231,8 @@ function flushRun(root: Element, run: Node[], ref: Node | null): void {
         if (isBr(run[j])) count++;
         j++;
       }
-      if (count >= 1) groups.push([]); // every line break starts a new paragraph, so every gap is the same
+      if (count >= 2) groups.push([]); // a blank line starts a new paragraph; a single line break stays tight
+      else groups[groups.length - 1].push(...run.slice(i, j));
       i = j;
       continue;
     }
@@ -259,18 +260,6 @@ export function normalizeBlocks(root: Element): void {
     if (!w) break;
     w.replaceWith(...Array.from(w.childNodes));
   }
-  Array.from(root.children).forEach((blk) => {
-    if (!/^(DIV|P)$/.test(blk.tagName) || !Array.from(blk.childNodes).some((c) => isBr(c))) return;
-    const lines: Node[][] = [[]];
-    Array.from(blk.childNodes).forEach((c) => (isBr(c) ? lines.push([]) : lines[lines.length - 1].push(c)));
-    lines.forEach((ln) => {
-      if (ln.every((n) => blankNode(n))) return;
-      const piece = blk.cloneNode(false);
-      ln.forEach((n) => piece.appendChild(n));
-      blk.before(piece);
-    });
-    blk.remove();
-  });
   let run: Node[] = [];
   Array.from(root.childNodes).forEach((k) => {
     if (isEl(k, TOP_BLOCK)) {
