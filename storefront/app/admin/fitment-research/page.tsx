@@ -63,11 +63,7 @@ export default function FitmentResearchPage() {
   }, []);
   useEffect(load, [load]);
   useEffect(() => {
-    api<VType[]>("/vehicle-types").then((t) => {
-      setVtypes(t);
-      const m = t.find((x) => x.slug === "motorcycle");
-      if (m) setVtype(String(m.id));
-    }).catch(() => {});
+    api<VType[]>("/vehicle-types").then(setVtypes).catch(() => {});
   }, []);
   // keep PDF progress fresh while one is being read
   useEffect(() => {
