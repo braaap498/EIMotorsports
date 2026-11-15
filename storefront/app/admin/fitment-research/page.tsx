@@ -110,7 +110,11 @@ export default function FitmentResearchPage() {
     return `Read ${t.makes} makes, ${t.models} models, ${t.model_years} model-years. ${t.new_makes} new makes and ${t.new_models} new models would be created. Nothing is saved yet.`;
   });
 
-  const applyPaste = () => target && run(async () => {
+  const applyPaste = () => {
+    if (!vtype) { setMsg({ kind: "error", text: "Choose the type for new models first. Nothing was added." }); return; }
+    return applyPasteNow();
+  };
+  const applyPasteNow = () => target && run(async () => {
     const r = await api<Record<string, number>>(`/fitment-research/products/${target.id}/paste/apply`, {
       method: "POST",
       body: {
@@ -184,7 +188,7 @@ export default function FitmentResearchPage() {
           value={pasted} onChange={(e) => { setPasted(e.target.value); setPreview(null); }} />
         <div className="flex flex-wrap items-center gap-2">
           <label className="text-sm text-gray-600">New models go under type</label>
-          <select className={inputCls + " w-44"} value={vtype} onChange={(e) => setVtype(e.target.value)}>
+          <select className={inputCls + " w-44" + (vtype ? "" : " border-amber-500")} value={vtype} onChange={(e) => setVtype(e.target.value)}>
             <option value="">Choose…</option>
             {vtypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
           </select>
@@ -227,6 +231,7 @@ export default function FitmentResearchPage() {
             <button className={btnCls} disabled={busy || !target || !vtype} onClick={applyPaste}>
               {target ? `Add this fitment to ${target.sku || target.title}` : "Find the product first"}
             </button>
+            {!vtype && <span className="text-sm text-amber-700">Choose a type above to enable this.</span>}
           </div>
         )}
       </section>
