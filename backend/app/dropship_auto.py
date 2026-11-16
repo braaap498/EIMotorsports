@@ -71,6 +71,7 @@ def _ensure(db: Session) -> None:
         "alter table dropship_jobs add column if not exists supplier_mode text",
         "alter table dropship_jobs add column if not exists tracking_number text",
         "alter table dropship_jobs add column if not exists tracking_carrier text",
+        "alter table dropship_settings add column if not exists auto_ship boolean not null default false",
         "alter table dropship_jobs add column if not exists placed_at timestamptz",
         "alter table dropship_jobs add column if not exists shipped_at timestamptz",
         "create index if not exists dropship_jobs_created_idx on dropship_jobs (created_at)",
@@ -107,8 +108,8 @@ def _backfill_line_states(db: Session) -> None:
 
 def _settings(db: Session) -> dict:
     _ensure(db)
-    r = db.execute(text("select auto_po, last_scan_at, last_scan_note from dropship_settings where id = 1")).first()
-    return {"auto_po": bool(r.auto_po), "last_scan_at": r.last_scan_at, "last_scan_note": r.last_scan_note}
+    r = db.execute(text("select auto_po, auto_ship, last_scan_at, last_scan_note from dropship_settings where id = 1")).first()
+    return {"auto_po": bool(r.auto_po), "auto_ship": bool(r.auto_ship), "last_scan_at": r.last_scan_at, "last_scan_note": r.last_scan_note}
 
 
 def _flagged_short_lines(db: Session, order_id: str, honor_decision: bool = False) -> list[int]:
@@ -209,7 +210,8 @@ def scan_if_enabled() -> None:
 
 
 class SettingsIn(BaseModel):
-    auto_po: bool
+    auto_po: Optional[bool] = None
+    auto_ship: Optional[bool] = None  # tell eBay the order shipped as soon as the tracking arrives (no check by a person)
 
 
 @router.get("/settings")
@@ -222,7 +224,10 @@ def get_settings(db: Session = Depends(get_db)):
 @needs(*PERMS)
 def put_settings(body: SettingsIn, db: Session = Depends(get_db)):
     _ensure(db)
-    db.execute(text("update dropship_settings set auto_po = :a where id = 1"), {"a": body.auto_po})
+    if body.auto_po is not None:
+        db.execute(text("update dropship_settings set auto_po = :a where id = 1"), {"a": body.auto_po})
+    if body.auto_ship is not None:
+        db.execute(text("update dropship_settings set auto_ship = :a where id = 1"), {"a": body.auto_ship})
     db.commit()
     return _settings(db)
 
@@ -543,7 +548,8 @@ def place_job(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depen
 # --------------------------------------------------------------------------
 def advance_tracking(db: Session) -> int:
     """A placed order whose tracking has reached its eBay order (the Automatic Distributors tracking check does that) moves to
-    'review_tracking'. Nothing is sent to eBay here."""
+    'review_tracking'. With the "Tell eBay it shipped automatically" switch ON it is then sent to eBay straight away; otherwise
+    nothing is sent here and a person checks it first."""
     _ensure(db)
     rows = db.execute(
         text(
@@ -554,18 +560,26 @@ def advance_tracking(db: Session) -> int:
         )
     ).all()
     db.commit()
+    if rows and _settings(db)["auto_ship"]:
+        for r in rows:
+            try:
+                _send_tracking_now(db, r.id, SYSTEM_USER)
+            except Exception as e:
+                db.rollback()
+                msg = str(getattr(e, "detail", e))[:300]
+                log.warning("automatic send of tracking to eBay failed for job %s: %s", r.id, msg)
+                db.execute(
+                    text("update dropship_jobs set problem = :m, updated_at = now() where id = :i"),
+                    {"m": "Tracking was NOT sent to eBay automatically: " + msg + " Check it here and send it yourself.", "i": r.id},
+                )
+                db.commit()
     return len(rows)
 
 
-@router.post("/jobs/{job_id}/send-tracking")
-@needs(*PERMS)
-def send_tracking(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(require_route_access)):
-    """The tracking is correct: tell eBay the order shipped, with the tracking number. eBay then notifies the buyer."""
+def _send_tracking_now(db: Session, job_id: int, user: AuthUser) -> None:
+    """Tell eBay the order shipped with this job's tracking number (eBay then notifies the buyer), and mark the job done."""
     from app.ebay_sales import ShipIn, mark_shipped
 
-    j = _job(db, job_id)
-    if j.stage != "review_tracking":
-        raise HTTPException(409, "That order is not waiting for the tracking check.")
     r = db.execute(
         text("select j.tracking_number, j.tracking_carrier, o.id as order_pk from dropship_jobs j join ebay_orders o on o.ebay_order_id = j.ebay_order_id where j.id = :i"),
         {"i": job_id},
@@ -573,8 +587,18 @@ def send_tracking(job_id: int, db: Session = Depends(get_db), user: AuthUser = D
     if not r or not r.tracking_number:
         raise HTTPException(409, "No tracking number is on that order yet.")
     mark_shipped(r.order_pk, ShipIn(carrier=r.tracking_carrier or "Other", tracking_number=r.tracking_number), db=db, user=user)
-    db.execute(text("update dropship_jobs set stage = 'done', shipped_at = now(), updated_at = now() where id = :i"), {"i": job_id})
+    db.execute(text("update dropship_jobs set stage = 'done', problem = null, shipped_at = now(), updated_at = now() where id = :i"), {"i": job_id})
     db.commit()
+
+
+@router.post("/jobs/{job_id}/send-tracking")
+@needs(*PERMS)
+def send_tracking(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(require_route_access)):
+    """The tracking is correct: tell eBay the order shipped, with the tracking number. eBay then notifies the buyer."""
+    j = _job(db, job_id)
+    if j.stage != "review_tracking":
+        raise HTTPException(409, "That order is not waiting for the tracking check.")
+    _send_tracking_now(db, job_id, user)
     return {"ok": True, "stage": "done"}
 
 

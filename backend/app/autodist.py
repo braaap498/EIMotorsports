@@ -2447,6 +2447,14 @@ def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict
     po_no = db.execute(text("select po_number from supplier_orders where id = :i"), {"i": row_id}).scalar()
     closed = _close_drop_ship_po(db, po_no, order_number, judged, items if shipped_evidence else [])
     ebay_filled = _hand_off_to_ebay(db, po_no, judged, items)
+    if ebay_filled:
+        try:  # the drop ship order moves on now, not at the next eBay order check
+            from app import dropship_auto
+
+            dropship_auto.advance_tracking(db)
+        except Exception:
+            db.rollback()
+            log.exception("tracking reached eBay order %s but its drop ship job could not be advanced", ebay_filled)
     return {"order_number": order_number, "status": status, "tracking": items, "po_closed": closed, "ebay_filled": ebay_filled}
 
 

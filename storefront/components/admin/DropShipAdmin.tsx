@@ -13,7 +13,7 @@ import DropShipActivity from "./DropShipActivity";
      OFF either puts the listings back as they were or unticks them all.
    - Orders: the drop ship orders in progress, with the temporary check popups. */
 
-type Settings = { auto_po: boolean; last_scan_at: string | null; last_scan_note: string | null };
+type Settings = { auto_po: boolean; auto_ship: boolean; last_scan_at: string | null; last_scan_note: string | null };
 type Avail = { use_distributor_stock: boolean; auto_raise: boolean; display_default: string };
 type Listing = { listing_id: number; store: string; item_id: string; dropship_ok: boolean };
 type Item = {
@@ -148,6 +148,26 @@ export default function DropShipAdmin() {
                 <span className="block text-xs text-gray-500">
                   Each time the eBay orders are checked, a paid order from the last 10 days gets its PO when its listing is ticked and our shelf is short.
                   Global Shipping Program orders and incomplete addresses are never made; they show under Orders as needing attention.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={settings.auto_ship}
+                disabled={busy !== ""}
+                onChange={(e) =>
+                  void run("autoship", () => api<Settings>("/dropship/settings", { method: "PUT", body: { auto_ship: e.target.checked } }), (r) =>
+                    r.auto_ship ? "When tracking arrives, eBay will be told the order shipped and the buyer notified, with no check from you." : "Tracking will wait for your check before eBay is told."
+                  )
+                }
+              />
+              <span>
+                <span className="font-medium">Tell eBay it shipped automatically</span>
+                <span className="block text-xs text-gray-500">
+                  When the distributor's tracking arrives for a placed order, eBay is told it shipped with that tracking number and the buyer is notified, with no
+                  check from you. When OFF, the order waits for your check on the tracking.
                 </span>
               </span>
             </label>
