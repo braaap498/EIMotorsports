@@ -51,13 +51,18 @@ type RepoResp = {
   seller: string;
   known_store: boolean;
   status: string;
-  total: number;
-  counts: { all: number; active: number; inactive: number };
-  statuses: { status: string; count: number }[];
+  total: number; // exact once the counts have arrived (totalExact), until then an estimate that is only used to enable Next
+  counts?: { all: number; active: number; inactive: number }; // arrive just after the rows
+  statuses?: { status: string; count: number }[];
   offset: number;
   limit: number;
+  has_more?: boolean;
   items: RepoItem[];
+  scope?: string; // set here: which store / status / search this page belongs to
+  storeKey?: string;
+  totalExact?: boolean;
 };
+type RepoMeta = { scope: string; storeKey: string; total: number; counts: NonNullable<RepoResp["counts"]>; statuses: NonNullable<RepoResp["statuses"]> };
 
 type SyncRow = {
   store: string;
@@ -120,6 +125,8 @@ export default function EbayLiveListingsPage() {
   const [statusF, setStatusF] = useState<string>("all");
   const [repo, setRepo] = useState<RepoResp | null>(null);
   const reqSeq = useRef(0); // only the newest list request may update the screen (typing fast sends several)
+  const pageCache = useRef(new Map<string, { t: number; r: RepoResp }>()); // pages already read (the one shown and its neighbours), good for a minute
+  const metaRef = useRef<RepoMeta | null>(null); // the last counts read; they arrive after the rows
   const lastQ = useRef(""); // the search text the list on screen was read with
   const [busy, setBusy] = useState("");
   const [priceOpen, setPriceOpen] = useState(false); // the "Change price" box under the selection bar
@@ -255,6 +262,7 @@ export default function EbayLiveListingsPage() {
     try {
       const rows: RepoItem[] = [];
       let offset = 0;
+      let grand = 0;
       for (;;) {
         const params = new URLSearchParams({ q: lastQ.current, sort, status: repo.status || "all", offset: String(offset), limit: "200" });
         if (repo.store === "") params.set("all_stores", "1");
@@ -262,12 +270,13 @@ export default function EbayLiveListingsPage() {
         const r = await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`);
         rows.push(...r.items);
         offset += r.items.length;
+        grand = r.total;
         if (r.items.length === 0 || offset >= r.total || rows.length >= SELECT_ALL_MAX) break;
       }
       const capped = rows.slice(0, SELECT_ALL_MAX);
       setAllMatch(capped);
       setPicked(new Set(capped.map((x) => x.listing_id)));
-      if (repo.total > capped.length) setActMsg({ kind: "error", text: `Only the first ${capped.length} of ${repo.total} matching listings were selected (the limit). Narrow the search to get the rest.` });
+      if (grand > capped.length) setActMsg({ kind: "error", text: `Only the first ${capped.length} of ${grand} matching listings were selected (the limit). Narrow the search to get the rest.` });
     } catch (e) {
       setActMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -742,7 +751,70 @@ export default function EbayLiveListingsPage() {
     void loadRepo(0, { store, q, sort: next, statusF });
   };
 
-  async function loadRepo(offset: number, from?: { store: string; q: string; sort: string; statusF: string }) {
+  // ---- reading the list: rows first, counts after, neighbouring pages ahead of time
+  function scopeOf(st: string, qq: string, stat: string) {
+    const storeKey = st === ALL ? "*all*" : st.trim().toLowerCase();
+    return { storeKey, scope: `${storeKey}|${stat}|${qq.trim().toLowerCase()}` };
+  }
+  function scopeParams(st: string, qq: string, stat: string) {
+    const params = new URLSearchParams({ q: qq.trim(), status: stat });
+    if (st === ALL) params.set("all_stores", "1");
+    else if (st.trim()) params.set("store", st.trim());
+    return params;
+  }
+  // The rows of one page, nothing else (the server skips the whole-store counts for these).
+  async function fetchPage(st: string, qq: string, so: string, stat: string, offset: number): Promise<RepoResp> {
+    const params = scopeParams(st, qq, stat);
+    params.set("sort", so);
+    params.set("offset", String(offset));
+    params.set("limit", String(PAGE_SIZE));
+    params.set("fast", "1");
+    const r = await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`);
+    const { scope, storeKey } = scopeOf(st, qq, stat);
+    return { ...r, scope, storeKey };
+  }
+  const pageKey = (st: string, qq: string, so: string, stat: string, offset: number) => `${scopeOf(st, qq, stat).scope}|${so}|${offset}`;
+  // Put the last known counts on a page of rows: exact when they were read for this same search, otherwise an estimate.
+  function withMeta(r: RepoResp): RepoResp {
+    const m = metaRef.current;
+    const exact = !!m && m.scope === r.scope;
+    const sameStore = !!m && m.storeKey === r.storeKey;
+    return {
+      ...r,
+      total: exact ? m!.total : r.offset + r.items.length + (r.has_more ? 1 : 0),
+      totalExact: exact,
+      counts: sameStore ? m!.counts : undefined,
+      statuses: sameStore ? m!.statuses : undefined,
+    };
+  }
+  async function loadCounts(st: string, qq: string, stat: string) {
+    const { scope, storeKey } = scopeOf(st, qq, stat);
+    try {
+      const c = await api<{ total: number; counts: RepoMeta["counts"]; statuses: RepoMeta["statuses"] }>(`/ebay-listings/repo/counts?${scopeParams(st, qq, stat).toString()}`);
+      metaRef.current = { scope, storeKey, total: c.total, counts: c.counts, statuses: c.statuses };
+      setRepo((prev) => (prev && prev.scope === scope ? withMeta(prev) : prev)); // only if that search is still the one on screen
+    } catch {
+      /* the rows are already showing; the numbers just stay as they were */
+    }
+  }
+  // Quietly read the page after this one and the page before it, so Next / Previous are instant.
+  async function prefetchNeighbours(r: RepoResp, st: string, qq: string, so: string, stat: string, myReq: number) {
+    const wanted = [r.has_more ? r.offset + PAGE_SIZE : -1, r.offset > 0 ? Math.max(0, r.offset - PAGE_SIZE) : -1].filter((o) => o >= 0);
+    for (const o of wanted) {
+      if (myReq !== reqSeq.current) return; // something newer was asked for: stop
+      const key = pageKey(st, qq, so, stat, o);
+      if (pageCache.current.has(key)) continue;
+      try {
+        const pr = await fetchPage(st, qq, so, stat, o);
+        pageCache.current.set(key, { t: Date.now(), r: pr });
+      } catch {
+        return;
+      }
+    }
+  }
+
+  // `cached: true` (used by Previous / Next / page box) may show a page read ahead of time; every other call reads fresh.
+  async function loadRepo(offset: number, from?: { store: string; q: string; sort: string; statusF: string }, opts?: { cached?: boolean }) {
     const useStore = from ? from.store : store;
     const useQ = from ? from.q : q;
     const useSort = from ? from.sort : sort;
@@ -756,15 +828,23 @@ export default function EbayLiveListingsPage() {
     setAllMatch(null);
     setGroupDone("");
     try {
-      // the database list sorts by title / price / newest; eBay's own "newest" and price orders map onto these
-      const params = new URLSearchParams({ q: useQ.trim(), sort: useSort, status: useStatus, offset: String(offset), limit: String(PAGE_SIZE) });
-      if (useStore === ALL) params.set("all_stores", "1");
-      else if (useStore.trim()) params.set("store", useStore.trim());
       saveSaved("ebay-listings", { store: useStore, q: useQ, sort: useSort, offset, statusF: useStatus });
-      const r = await api<RepoResp>(`/ebay-listings/repo?${params.toString()}`);
+      const key = pageKey(useStore, useQ, useSort, useStatus, offset);
+      const hit = opts?.cached ? pageCache.current.get(key) : undefined;
+      let r: RepoResp;
+      if (hit && Date.now() - hit.t < 60_000) {
+        r = hit.r;
+      } else {
+        if (!opts?.cached) pageCache.current.clear(); // a fresh read means things may have changed: forget the old pages
+        r = await fetchPage(useStore, useQ, useSort, useStatus, offset);
+        pageCache.current.set(key, { t: Date.now(), r });
+      }
       if (myReq === reqSeq.current) {
-        setRepo(r);
+        setRepo(withMeta(r));
         void loadZero();
+        // counts: skip when paging inside a search whose numbers are already known; otherwise read them now (rows are already showing)
+        if (!opts?.cached || !metaRef.current || metaRef.current.scope !== r.scope) void loadCounts(useStore, useQ, useStatus);
+        void prefetchNeighbours(r, useStore, useQ, useSort, useStatus, myReq);
       }
     } catch (e) {
       if (myReq === reqSeq.current) {
@@ -864,7 +944,7 @@ export default function EbayLiveListingsPage() {
               void loadRepo(0, { store, q, sort, statusF: v });
             }}
           >
-            <option value="all">All{repo ? ` (${repo.counts.all})` : ""}</option>
+            <option value="all">All{repo?.counts ? ` (${repo.counts.all})` : ""}</option>
             {(() => {
               // The usual eBay statuses are always offered (with 0 when none are on file), followed by any other
               // status found on the store's listings.
@@ -916,10 +996,10 @@ export default function EbayLiveListingsPage() {
       {/* ---- listings from our database */}
       {repo && (
         <div className="space-y-3">
-          <Pager total={repo.total} limit={repo.limit} offset={repo.offset} onChange={(o) => void loadRepo(o)} />
+          <Pager total={repo.total} limit={repo.limit} offset={repo.offset} onChange={(o) => void loadRepo(o, undefined, { cached: true })} />
           <p className="text-sm text-gray-700">
-            <span className="font-medium">{allMode ? "All stores" : repo.store}</span> in our database: {repo.counts.all} listing{repo.counts.all === 1 ? "" : "s"}, {repo.counts.active} active, {repo.counts.inactive} inactive.
-            {repo.statuses.length > 0 && (
+            <span className="font-medium">{allMode ? "All stores" : repo.store}</span> in our database: {repo.counts ? <>{repo.counts.all} listing{repo.counts.all === 1 ? "" : "s"}, {repo.counts.active} active, {repo.counts.inactive} inactive.</> : "counting…"}
+            {repo.statuses && repo.statuses.length > 0 && (
               <span className="ml-1 text-xs text-gray-500">
                 Statuses on file: {repo.statuses.map((x) => `${x.status} (${x.count})`).join(", ")}.
               </span>
@@ -962,7 +1042,7 @@ export default function EbayLiveListingsPage() {
             </p>
           )}
           {actMsg && <Notice kind={actMsg.kind}>{actMsg.text}</Notice>}
-          {!allMatch && repo.total > repo.items.length && repo.items.length > 0 && repo.items.every((x) => picked.has(x.listing_id)) && (
+          {!allMatch && repo.totalExact && repo.total > repo.items.length && repo.items.length > 0 && repo.items.every((x) => picked.has(x.listing_id)) && (
             <div className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
               All {repo.items.length} listings on this page are selected.{" "}
               <button type="button" className="font-medium text-blue-800 underline" disabled={loadingAll} onClick={() => void selectAllMatching()}>
@@ -1179,7 +1259,7 @@ export default function EbayLiveListingsPage() {
               </table>
             </div>
           )}
-          <Pager total={repo.total} limit={repo.limit} offset={repo.offset} onChange={(o) => void loadRepo(o)} />
+          <Pager total={repo.total} limit={repo.limit} offset={repo.offset} onChange={(o) => void loadRepo(o, undefined, { cached: true })} />
         </div>
       )}
 

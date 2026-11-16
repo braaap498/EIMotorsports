@@ -360,29 +360,22 @@ def _repo_order(sort: str) -> str:
     return f"{expr} {direction} nulls last, cl.id"
 
 
-@router.get("/repo")
-def repo_listings(
-    store: Optional[str] = Query(None, description="eBay store; empty means the main store"),
-    all_stores: bool = Query(False, description="true = every store at once; the store parameter is then ignored"),
-    status: str = Query("all", max_length=40, description="all, or one status exactly as on file (active, ended, draft, ...); 'inactive' = anything not active"),
-    q: str = Query("", max_length=100),
-    sort: str = Query("newest", pattern="^(newest|title|price_low|price_high|(title|store|label|price|qty|status)(:(asc|desc))?)$"),
-    offset: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
-    db: Session = Depends(get_db),
-):
+_SORT_NEEDS_JOINS = {"title", "price", "label", "qty", "price_low", "price_high"}
+
+
+def _repo_scope(db: Session, store, all_stores: bool, status: str, q: str, params_extra: Optional[dict] = None):
+    """Shared by the list and its counts: which listings are meant. Returns (who, base, params, draft_sql, edits_sql, where, words)."""
     if all_stores:
         who = {"store": "", "seller": "", "known": True}
         base = [f"{_DIGITS} <> ''"]
-        params: dict = {"n": limit, "o": offset}
+        params: dict = {}
     else:
         who = _resolve(db, store)
         base = ["lower(cl.store) = lower(:store)", f"{_DIGITS} <> ''"]
-        params = {"store": who["store"], "n": limit, "o": offset}
+        params = {"store": who["store"]}
     _ensure_speed_indexes(db)
     # "Draft" = a listing whose stored status is draft (report import), OR a live listing with edits saved on the
     # website that have not been pushed to eBay yet (ebay_listing_drafts). The table may not exist yet: then none.
-    # The saved-edits test is ONE list read once (not a lookup per listing), which is what keeps this fast.
     has_edits_table = bool(db.execute(text("select to_regclass('public.ebay_listing_drafts') is not null")).scalar())
     edits_sql = (
         f"((lower(cl.store), {_DIGITS}) in (select lower(d.store), d.item_id from ebay_listing_drafts d))"
@@ -390,19 +383,6 @@ def repo_listings(
         else "false"
     )
     draft_sql = f"(lower(coalesce(cl.status, '')) = 'draft' or {edits_sql})"
-    # counts for the whole store (the search box does not change them): all three numbers come from ONE pass over the store
-    agg = db.execute(
-        text(
-            f"select lower(coalesce(nullif(btrim(cl.status), ''), '(none)')) as status, count(*) as n, "
-            f"count(*) filter (where {_ACTIVE}) as active, count(*) filter (where {draft_sql}) as drafts "
-            f"from channel_listings cl where {' and '.join(base)} group by 1 order by n desc"
-        ),
-        params,
-    ).all()
-    raw = agg
-    counts = SimpleNamespace(total=sum(int(r.n) for r in agg), active=sum(int(r.active) for r in agg))
-    draft_n = sum(int(r.drafts) for r in agg)
-
     where = list(base)
     if status == "active":
         where.append(_ACTIVE)
@@ -413,56 +393,162 @@ def repo_listings(
     elif status != "all":
         where.append("lower(coalesce(nullif(btrim(cl.status), ''), '(none)')) = :stv")
         params["stv"] = status.strip().lower()
-    for i, w in enumerate([w for w in re.split(r"\s+", q.strip()) if w][:6]):
+    words = [w for w in re.split(r"\s+", q.strip()) if w][:6]
+    for i, w in enumerate(words):
         params[f"w{i}"] = f"%{w}%"
         where.append(f"(p.title ilike :w{i} or {_L_TITLE} ilike :w{i} or {_DIGITS} ilike :w{i} or p.custom_label_sku ilike :w{i} or {_L_LABEL} ilike :w{i} or p.sku_display ilike :w{i})")
-    clause = " and ".join(where)
-    total = db.execute(
-        text(f"select count(*) from channel_listings cl {_LISTING_JOINS} where {clause}"), params
-    ).scalar()
-    rows = db.execute(
+    return who, base, params, draft_sql, edits_sql, where, words
+
+
+# Whole-store numbers (how many listings, how many per status, how many drafts) change slowly and cost a full pass over the
+# store, so they are kept for a minute and thrown away whenever a status is changed here.
+_COUNTS_TTL = 60.0
+_counts_cache: dict = {}
+
+
+def _store_numbers(db: Session, key: str, base: list, params: dict, draft_sql: str):
+    hit = _counts_cache.get(key)
+    if hit and time.time() - hit[0] < _COUNTS_TTL:
+        return hit[1]
+    p = {k: v for k, v in params.items() if k == "store"}
+    agg = db.execute(
         text(
-            f"""
-            select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
-                   p.id as product_id, p.sku_display as sku, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
-                   {_L_PRICE} as list_price, p.quantity_on_hand,
-                   case when {_L_IS_DROPSHIP} then {_dropship_qty_sql('p')}
-                        when {_L_QTY_FROM_EBAY} then {_L_EBAY_QTY} else p.quantity_on_hand end as quantity_shown,
-                   ({_L_QTY_FROM_EBAY} and not {_L_IS_DROPSHIP}) as qty_from_ebay,
-                   {edits_sql} as unsent_edits,
-                   (select count(*) from channel_listings x where x.product_id = p.id) as product_listings,
-                   case
-                     when exists (select 1 from channel_listings x where x.product_id = p.id
-                                    and regexp_replace(cast(x.external_id as text), '[^0-9]', '', 'g')
-                                      = nullif(regexp_replace(coalesce(cast(p.ebay_item_id as text), ''), '[^0-9]', '', 'g'), ''))
-                       then {_DIGITS} = nullif(regexp_replace(coalesce(cast(p.ebay_item_id as text), ''), '[^0-9]', '', 'g'), '')
-                     else cl.id = (select min(x.id) from channel_listings x where x.product_id = p.id)
-                   end as is_product_source,
-                   coalesce(
-                     (select e->>'image_key'
-                        from ebay_listings el,
-                             jsonb_array_elements(case when jsonb_typeof(el.photos) = 'array' then el.photos else '[]'::jsonb end)
-                               with ordinality as t(e, n)
-                       where el.ebay_item_id = {_DIGITS} and coalesce(e->>'image_key', '') <> ''
-                       order by (coalesce(e->>'is_primary', '') = 'true') desc,
-                                case when (e->>'sort_order') ~ '^[0-9]+$' then (e->>'sort_order')::int else 0 end, n
-                       limit 1),
-                     (select ph.image_key from product_photos ph
-                       where split_part(ph.storage_path, '/', 1) = 'EBAY-' || {_DIGITS}
-                       order by ph.is_primary desc, ph.sort_order, ph.id limit 1),
-                     (select ph.image_key from product_photos ph where ph.product_id = p.id and not ph.hidden
-                       order by ph.is_primary desc, ph.sort_order, ph.id limit 1)
-                   ) as image_key
-            from channel_listings cl {_LISTING_JOINS}
-            where {clause} order by {_repo_order(sort)} limit :n offset :o
-            """
+            f"select lower(coalesce(nullif(btrim(cl.status), ''), '(none)')) as status, count(*) as n, "
+            f"count(*) filter (where {_ACTIVE}) as active, count(*) filter (where {draft_sql}) as drafts "
+            f"from channel_listings cl where {' and '.join(base)} group by 1 order by n desc"
         ),
-        params,
+        p,
     ).all()
+    val = [(r.status, int(r.n), int(r.active), int(r.drafts)) for r in agg]
+    _counts_cache[key] = (time.time(), val)
+    return val
+
+
+def _counts_payload(agg: list) -> dict:
+    total = sum(n for _, n, _, _ in agg)
+    active = sum(a for _, _, a, _ in agg)
+    draft_n = sum(d for _, _, _, d in agg)
+    return {
+        "counts": {"all": total, "active": active, "inactive": total - active},
+        # Draft is counted as described above (stored draft status plus listings with unsent edits), not by raw status
+        "statuses": [{"status": s, "count": n} for s, n, _, _ in agg if s != "draft"] + ([{"status": "draft", "count": draft_n}] if draft_n else []),
+    }
+
+
+_REPO_ARGS = dict(
+    store=Query(None, description="eBay store; empty means the main store"),
+    all_stores=Query(False, description="true = every store at once; the store parameter is then ignored"),
+    status=Query("all", max_length=40, description="all, or one status exactly as on file (active, ended, draft, ...); 'inactive' = anything not active"),
+    q=Query("", max_length=100),
+)
+_SORT_PATTERN = "^(newest|title|price_low|price_high|(title|store|label|price|qty|status)(:(asc|desc))?)$"
+
+
+@router.get("/repo/counts")
+def repo_counts(
+    store: Optional[str] = _REPO_ARGS["store"],
+    all_stores: bool = _REPO_ARGS["all_stores"],
+    status: str = _REPO_ARGS["status"],
+    q: str = _REPO_ARGS["q"],
+    db: Session = Depends(get_db),
+):
+    """The numbers around the list (whole-store counts, per-status counts, and how many listings match the current
+    status + search). Split from /repo so the rows can show first and these arrive after."""
+    who, base, params, draft_sql, _edits, where, words = _repo_scope(db, store, all_stores, status, q)
+    agg = _store_numbers(db, "*all*" if all_stores else who["store"].lower(), base, params, draft_sql)
+    out = _counts_payload(agg)
+    c = out["counts"]
+    if not words:  # no search words: the matching total is already known from the store-wide numbers
+        if status == "all":
+            total = c["all"]
+        elif status == "active":
+            total = c["active"]
+        elif status == "inactive":
+            total = c["inactive"]
+        elif status == "draft":
+            total = sum(d for _, _, _, d in agg)
+        else:
+            total = next((n for s, n, _, _ in agg if s == status.strip().lower()), 0)
+    else:
+        total = db.execute(text(f"select count(*) from channel_listings cl {_LISTING_JOINS} where {' and '.join(where)}"), params).scalar()
+    return {"store": who["store"], "total": int(total or 0), **out}
+
+
+@router.get("/repo")
+def repo_listings(
+    store: Optional[str] = _REPO_ARGS["store"],
+    all_stores: bool = _REPO_ARGS["all_stores"],
+    status: str = _REPO_ARGS["status"],
+    q: str = _REPO_ARGS["q"],
+    sort: str = Query("newest", pattern=_SORT_PATTERN),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    fast: bool = Query(False, description="true = rows only (plus has_more); the counts come from /repo/counts"),
+    db: Session = Depends(get_db),
+):
+    who, base, params, draft_sql, edits_sql, where, words = _repo_scope(db, store, all_stores, status, q)
+    clause = " and ".join(where)
+
+    # Step 1: find WHICH listings are on this page. The joins to the title/label/price tables are only added when the
+    # search or the sort needs them; the plain "newest" view reads one table. One extra row tells us whether a next page exists.
+    key = sort.partition(":")[0]
+    joins = _LISTING_JOINS if (words or key in _SORT_NEEDS_JOINS) else ""
+    id_rows = db.execute(
+        text(f"select cl.id from channel_listings cl {joins} where {clause} order by {_repo_order(sort)} limit :n offset :o"),
+        {**params, "n": limit + 1, "o": offset},
+    ).all()
+    ids = [r[0] for r in id_rows]
+    has_more = len(ids) > limit
+    ids = list(dict.fromkeys(ids[:limit]))  # a title table with two rows for one item must not repeat a listing
+
+    # Step 2: the expensive per-row columns (photo lookup, product listing counts, ...) for just these rows.
+    rows = []
+    if ids:
+        rows = db.execute(
+            text(
+                f"""
+                select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
+                       p.id as product_id, p.sku_display as sku, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
+                       {_L_PRICE} as list_price, p.quantity_on_hand,
+                       case when {_L_IS_DROPSHIP} then {_dropship_qty_sql('p')}
+                            when {_L_QTY_FROM_EBAY} then {_L_EBAY_QTY} else p.quantity_on_hand end as quantity_shown,
+                       ({_L_QTY_FROM_EBAY} and not {_L_IS_DROPSHIP}) as qty_from_ebay,
+                       {edits_sql} as unsent_edits,
+                       (select count(*) from channel_listings x where x.product_id = p.id) as product_listings,
+                       case
+                         when exists (select 1 from channel_listings x where x.product_id = p.id
+                                        and regexp_replace(cast(x.external_id as text), '[^0-9]', '', 'g')
+                                          = nullif(regexp_replace(coalesce(cast(p.ebay_item_id as text), ''), '[^0-9]', '', 'g'), ''))
+                           then {_DIGITS} = nullif(regexp_replace(coalesce(cast(p.ebay_item_id as text), ''), '[^0-9]', '', 'g'), '')
+                         else cl.id = (select min(x.id) from channel_listings x where x.product_id = p.id)
+                       end as is_product_source,
+                       coalesce(
+                         (select e->>'image_key'
+                            from ebay_listings el,
+                                 jsonb_array_elements(case when jsonb_typeof(el.photos) = 'array' then el.photos else '[]'::jsonb end)
+                                   with ordinality as t(e, n)
+                           where el.ebay_item_id = {_DIGITS} and coalesce(e->>'image_key', '') <> ''
+                           order by (coalesce(e->>'is_primary', '') = 'true') desc,
+                                    case when (e->>'sort_order') ~ '^[0-9]+$' then (e->>'sort_order')::int else 0 end, n
+                           limit 1),
+                         (select ph.image_key from product_photos ph
+                           where split_part(ph.storage_path, '/', 1) = 'EBAY-' || {_DIGITS}
+                           order by ph.is_primary desc, ph.sort_order, ph.id limit 1),
+                         (select ph.image_key from product_photos ph where ph.product_id = p.id and not ph.hidden
+                           order by ph.is_primary desc, ph.sort_order, ph.id limit 1)
+                       ) as image_key
+                from channel_listings cl {_LISTING_JOINS}
+                where cl.id = any(cast(:ids as bigint[]))
+                """
+            ),
+            {"ids": ids},
+        ).all()
+        pos = {i: n for n, i in enumerate(ids)}
+        rows = sorted(rows, key=lambda r: pos.get(r.listing_id, 0))
     items = []
     for r in rows:
         d = dict(r._mapping)
-        key = d.pop("image_key", None)
+        k = d.pop("image_key", None)
         items.append(
             {
                 "store": d["store"],
@@ -480,26 +566,27 @@ def repo_listings(
                 "unsent_edits": bool(d["unsent_edits"]),
                 "api_type": d["api_type"],
                 "product_id": d["product_id"],
-                "image_url": thumb_url(key) if key else None,
+                "image_url": thumb_url(k) if k else None,
                 # for a merged product (more than one listing), the one listing its gallery is taken from
                 "is_product_source": bool(d["is_product_source"]) and (d["product_listings"] or 0) > 1,
                 "url": f"https://www.ebay.com/itm/{d['item_id']}",
             }
         )
-    return {
+    out = {
         "store": who["store"],
         "seller": who["seller"],
         "known_store": who["known"],
         "status": status,
-        "total": total,
-        "counts": {"all": counts.total, "active": counts.active, "inactive": counts.total - counts.active},
-        # Draft is counted as described above (stored draft status plus listings with unsent edits), not by raw status
-        "statuses": [{"status": r.status, "count": r.n} for r in raw if r.status != "draft"]
-        + ([{"status": "draft", "count": draft_n}] if draft_n else []),
         "offset": offset,
         "limit": limit,
+        "has_more": has_more,
         "items": items,
     }
+    if fast:
+        return out  # no total / counts / statuses: the screen asks /repo/counts for those
+    c = repo_counts(store=store, all_stores=all_stores, status=status, q=q, db=db)
+    out.update(total=c["total"], counts=c["counts"], statuses=c["statuses"])
+    return out
 
 
 class RepoStatusIn(BaseModel):
@@ -532,6 +619,7 @@ def repo_set_status(body: RepoStatusIn, db: Session = Depends(get_db)):
         params,
     )
     db.commit()
+    _counts_cache.clear()
     return {"store": who["store"], "status": body.status, "changed": res.rowcount, "asked": len(ids)}
 
 
@@ -631,6 +719,7 @@ def _item_status(db: Session, store: str, item: str) -> Optional[str]:
 
 
 def _set_status(store: str, items: list, status: str) -> int:
+    _counts_cache.clear()
     n = 0
     with get_engine().begin() as c:
         for i in range(0, len(items), 1000):
