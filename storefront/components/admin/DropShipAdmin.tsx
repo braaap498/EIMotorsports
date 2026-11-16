@@ -46,6 +46,7 @@ const STAGE: Record<string, string> = {
   review_tracking: "Waiting for you to check the tracking",
   done: "Done: eBay told it shipped",
   held: "On hold",
+  return_needed: "eBay order cancelled: needs you",
   problem: "Needs attention",
 };
 
@@ -453,7 +454,7 @@ function OrdersTab({
             {j.po_number != null && <span>PO {j.po_number}</span>}
             {j.buyer_name && <span>{j.buyer_name}</span>}
             {j.ship_service && <span className="text-gray-600">{j.ship_service}</span>}
-            <span className={`ml-auto rounded px-2 py-0.5 text-xs ${j.stage === "problem" ? "bg-red-50 text-red-700" : REVIEW.includes(j.stage) ? "bg-amber-50 text-amber-800" : "bg-gray-100 text-gray-700"}`}>
+            <span className={`ml-auto rounded px-2 py-0.5 text-xs ${j.stage === "problem" || j.stage === "return_needed" ? "bg-red-50 text-red-700" : REVIEW.includes(j.stage) ? "bg-amber-50 text-amber-800" : "bg-gray-100 text-gray-700"}`}>
               {STAGE[j.stage] ?? j.stage}
             </span>
           </div>
@@ -463,6 +464,20 @@ function OrdersTab({
             {REVIEW.includes(j.stage) && (
               <button type="button" className={btn2Cls} onClick={() => setOpen(open === j.id ? null : j.id)}>
                 {open === j.id ? "Close" : "Review"}
+              </button>
+            )}
+            {j.stage === "return_needed" && (
+              <button
+                type="button"
+                className={btn2Cls}
+                disabled={busy !== ""}
+                title="Use this once the return, or the cancel at the distributor, has been taken care of"
+                onClick={() => {
+                  if (!window.confirm("Clear this order? Only do this after the return (or the cancel at the distributor) has been taken care of.")) return;
+                  void run("dismiss", () => api(`/dropship/jobs/${j.id}/dismiss`, { method: "POST" }), () => "Cleared.", load);
+                }}
+              >
+                Return / cancel handled: clear
               </button>
             )}
             {j.stage === "problem" && (

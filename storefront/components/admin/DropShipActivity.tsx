@@ -55,9 +55,10 @@ const STAGE: Record<string, string> = {
   review_tracking: "Tracking to check",
   done: "Shipped",
   held: "On hold",
+  return_needed: "eBay order cancelled: needs you",
   problem: "Needs attention",
 };
-const WAITING_ORDER = ["problem", "review_po", "po_confirmed", "review_quote", "placing", "placed", "review_tracking", "held"];
+const WAITING_ORDER = ["return_needed", "problem", "review_po", "po_confirmed", "review_quote", "placing", "placed", "review_tracking", "held"];
 const BASIS_LABEL: Record<Basis, string> = { received: "Received", placed: "Ordered from distributor", shipped: "Shipped to buyer" };
 
 function frameOf(range: Range, from: string, to: string): { since: Date; until: Date } | null {
@@ -203,7 +204,7 @@ export default function DropShipActivity() {
         <div className="flex flex-wrap items-center gap-2 rounded border border-gray-200 bg-white p-3 text-sm">
           <span className="font-medium">Waiting right now:</span>
           {WAITING_ORDER.filter((k) => (s.waiting[k] ?? 0) > 0).map((k) => (
-            <button key={k} type="button" onClick={() => { setStage(stage === k ? "" : k); reset(); }} className={`rounded px-2 py-0.5 text-xs ${k === "problem" ? "bg-red-50 text-red-700" : "bg-gray-100 text-gray-700"} ${stage === k ? "ring-1 ring-black" : ""}`}>
+            <button key={k} type="button" onClick={() => { setStage(stage === k ? "" : k); reset(); }} className={`rounded px-2 py-0.5 text-xs ${k === "problem" || k === "return_needed" ? "bg-red-50 text-red-700" : "bg-gray-100 text-gray-700"} ${stage === k ? "ring-1 ring-black" : ""}`}>
               {STAGE[k]} · {s.waiting[k]}
             </button>
           ))}
@@ -257,7 +258,7 @@ export default function DropShipActivity() {
             {(data?.rows ?? []).map((r) => {
               const at = basis === "received" ? r.created_at : basis === "placed" ? r.placed_at : r.shipped_at;
               return (
-                <tr key={r.id} className={r.stage === "problem" ? "bg-red-50" : ""}>
+                <tr key={r.id} className={r.stage === "problem" || r.stage === "return_needed" ? "bg-red-50" : ""}>
                   <td className="whitespace-nowrap px-3 py-2 text-gray-600">{when(at)}</td>
                   <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">
                     {r.ebay_order_id}
@@ -273,7 +274,7 @@ export default function DropShipActivity() {
                     {r.ship_service && <div className="text-xs text-gray-500">{r.ship_service}</div>}
                   </td>
                   <td className="px-3 py-2">
-                    <Badge tone={r.stage === "done" ? "green" : r.stage === "problem" ? "amber" : "blue"}>{STAGE[r.stage] ?? r.stage}</Badge>
+                    <Badge tone={r.stage === "done" ? "green" : r.stage === "problem" || r.stage === "return_needed" ? "amber" : "blue"}>{STAGE[r.stage] ?? r.stage}</Badge>
                     {r.problem && <div className="max-w-xs text-xs text-red-700">{r.problem}</div>}
                   </td>
                   <td className="px-3 py-2 text-xs">
