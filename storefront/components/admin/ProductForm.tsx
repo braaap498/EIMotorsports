@@ -126,6 +126,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const mayPrice = can("products.edit_price");
   const mayStock = can("inventory.adjust");
   const mayPublish = can("products.publish");
+  const [dropship, setDropship] = useState(false); // sold from the distributor's stock: website orders (and eBay orders) are ordered from them automatically
+  const [dropshipOrig, setDropshipOrig] = useState(false);
   const maySave = productId
     ? can("products.edit_details", "products.edit_price", "inventory.adjust", "products.publish", "fitment.add")
     : can("products.create");
@@ -216,6 +218,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
           show_part_number: !!p.show_part_number,
         };
         setVals(next);
+        setDropship(!!p.dropship_ok);
+        setDropshipOrig(!!p.dropship_ok);
         setFlags(loadedFlags);
         setOriginal({ vals: next, flags: loadedFlags });
         const base = buildPayload(next, loadedFlags);
@@ -243,13 +247,15 @@ export default function ProductForm({ productId }: { productId?: number }) {
       payload = Object.fromEntries(
         Object.entries(payload).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(baseline[k]))
       );
-      if (Object.keys(payload).length === 0) return setMsg({ kind: "success", text: "Nothing has changed." });
+      if (Object.keys(payload).length === 0 && dropship === dropshipOrig) return setMsg({ kind: "success", text: "Nothing has changed." });
     }
 
     setBusy(true);
     try {
       if (productId) {
-        const r = await api<{ cls_changed?: boolean; sku?: string; shelf_code?: string; barcode_changed?: boolean }>(`/products/${productId}`, { method: "PATCH", body: payload });
+        const r = Object.keys(payload).length
+          ? await api<{ cls_changed?: boolean; sku?: string; shelf_code?: string; barcode_changed?: boolean }>(`/products/${productId}`, { method: "PATCH", body: payload })
+          : ({} as { cls_changed?: boolean; sku?: string; shelf_code?: string; barcode_changed?: boolean });
         if (baseline) setBaseline({ ...baseline, ...payload, ...(r.sku ? { sku: r.sku } : {}) });
         setOriginal({ vals: r.sku ? { ...vals, sku: r.sku } : vals, flags });
         let text = "Saved";
@@ -268,7 +274,19 @@ export default function ProductForm({ productId }: { productId?: number }) {
             text += `. The label is saved here but was not sent to eBay: ${errMsg(err)}`;
           }
         }
-        setMsg({ kind: "success", text });
+        let failed = false;
+        if (dropship !== dropshipOrig) {
+          try {
+            await api(`/availability/products/${productId}/dropship`, { method: "POST", body: { on: dropship, off_mode: "restore" } });
+            setDropshipOrig(dropship);
+            text += dropship ? ". Drop ship is ON" : ". Drop ship is OFF";
+          } catch (err) {
+            setDropship(dropshipOrig);
+            failed = true;
+            text += `. Drop ship was NOT changed: ${errMsg(err)}`;
+          }
+        }
+        setMsg({ kind: failed ? "error" : "success", text });
       } else {
         const body = kitParts.length
           ? {
@@ -536,6 +554,12 @@ export default function ProductForm({ productId }: { productId?: number }) {
               <input type="checkbox" disabled={!mayPublish} checked={flags.is_active} onChange={(e) => setFlags((f) => ({ ...f, is_active: e.target.checked }))} />
               Active
             </label>
+            {productId ? (
+              <label className="flex items-center gap-2" title="Needs the part matched to the Automatic Distributors catalog. Turning it on also ticks Drop ship on every eBay listing of this product.">
+                <input type="checkbox" disabled={!mayPublish} checked={dropship} onChange={(e) => setDropship(e.target.checked)} />
+                Drop ship (website and eBay orders are ordered from the distributor automatically)
+              </label>
+            ) : null}
           </div>
         </section>
 

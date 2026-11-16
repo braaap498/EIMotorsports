@@ -1021,6 +1021,11 @@ def get_product(product_id: int, db: Session = Depends(get_db), user: AuthUser =
         d["thumb"] = thumb_url(d["image_key"]) or d["source_url"]
         out.append(d)
     data = {**dict(row._mapping), "photos": out}
+    try:  # the Drop ship tick lives on the product (set through /availability/products/{id}/dropship)
+        data["dropship_ok"] = bool(db.execute(text("select coalesce(dropship_ok, false) from products where id = :i"), {"i": product_id}).scalar())
+    except Exception:
+        db.rollback()
+        data["dropship_ok"] = False
     if not has_perm(user, "products.edit_price"):
         data.pop("cost", None)  # what the shop paid is only shown to people who can change prices
     return data

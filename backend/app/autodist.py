@@ -2455,6 +2455,13 @@ def _refresh_order_tracking(db: Session, row_id: int, order_number: str) -> dict
         except Exception:
             db.rollback()
             log.exception("tracking reached eBay order %s but its drop ship job could not be advanced", ebay_filled)
+    try:  # a website drop ship order reads its tracking from this same order, so it moves on now too
+        from app import dropship_auto
+
+        dropship_auto.advance_tracking(db)
+    except Exception:
+        db.rollback()
+        log.exception("tracking arrived for PO %s but website drop ship jobs could not be advanced", po_no)
     return {"order_number": order_number, "status": status, "tracking": items, "po_closed": closed, "ebay_filled": ebay_filled}
 
 
