@@ -12,7 +12,8 @@ Chain. The switch "Manual checks" (Drop ship page, default OFF) decides whether 
   6. review_tracking tracking comes back (existing automatic check); a person checks it, then eBay is told it shipped, with the
                   tracking number, and eBay notifies the buyer
 
-Nothing runs by itself until "Make POs automatically" is switched on (default OFF).
+A listing ticked Drop ship is drop shipped automatically, whatever our shelf holds (and only a product whose parts are all matched to
+the distributor catalog can be ticked). An unticked listing that is short on our shelf asks a person on Pick & ship instead.
 """
 import json
 import logging
@@ -74,6 +75,8 @@ def _ensure(db: Session) -> None:
         "alter table dropship_jobs add column if not exists tracking_carrier text",
         "alter table dropship_settings add column if not exists auto_ship boolean not null default false",
         "alter table dropship_settings add column if not exists manual_checks boolean not null default false",
+        "alter table dropship_jobs add column if not exists tries integer not null default 0",
+        "alter table dropship_jobs add column if not exists note text",
         "alter table dropship_jobs add column if not exists placed_at timestamptz",
         "alter table dropship_jobs add column if not exists shipped_at timestamptz",
         "create index if not exists dropship_jobs_created_idx on dropship_jobs (created_at)",
@@ -110,16 +113,18 @@ def _backfill_line_states(db: Session) -> None:
 
 def _settings(db: Session) -> dict:
     _ensure(db)
-    r = db.execute(text("select auto_po, manual_checks, last_scan_at, last_scan_note from dropship_settings where id = 1")).first()
-    return {"auto_po": bool(r.auto_po), "manual_checks": bool(r.manual_checks), "last_scan_at": r.last_scan_at, "last_scan_note": r.last_scan_note}
+    r = db.execute(text("select manual_checks, last_scan_at, last_scan_note from dropship_settings where id = 1")).first()
+    return {"manual_checks": bool(r.manual_checks), "last_scan_at": r.last_scan_at, "last_scan_note": r.last_scan_note}
 
 
 def _flagged_short_lines(db: Session, order_id: str, honor_decision: bool = False) -> list[int]:
-    """Products on this eBay order that are short on our shelf AND whose listing (the one the buyer bought from) is set to
-    Drop ship. A flag on another listing of the same product does not count: those orders go to the Pick & ship decision
-    instead. With honor_decision (the manual button only), an order a person approved as 'drop ship' there counts too."""
+    """Products on this eBay order that are to be drop shipped: the listing the buyer bought from is ticked Drop ship (our shelf does
+    not matter), and the product is matched to the distributor's catalog. A flag on another listing of the same product does not
+    count. An UNticked listing is never made automatically: when it is short on our shelf Pick & ship asks a person. With
+    honor_decision (the manual button only), an order a person approved as 'drop ship' there counts too, if it is short on our shelf."""
     from app import fulfillment
     from app.admin_purchase_orders import _ebay_order_and_lines
+    from app.availability import has_distributor
 
     _o, lines = _ebay_order_and_lines(db, order_id)
     if not any(l.product_id is not None for l in lines):
@@ -128,15 +133,14 @@ def _flagged_short_lines(db: Session, order_id: str, honor_decision: bool = Fals
     approved = False
     if honor_decision:
         approved = (fulfillment.decisions_for(db, [fulfillment.key_of("eBay", _o.ebay_order_id)]).get(fulfillment.key_of("eBay", _o.ebay_order_id)) or {}).get("decision") == "dropship"
-    return sorted(
-        {
-            l.product_id
-            for l in lines
-            if l.product_id is not None
-            and (flags.get((_o.ebay_order_id, int(l.product_id))) or approved)
-            and int(l.on_hand or 0) < int(l.quantity or 1)
-        }
-    )
+    picks = {
+        int(l.product_id)
+        for l in lines
+        if l.product_id is not None
+        and (flags.get((_o.ebay_order_id, int(l.product_id))) or (approved and int(l.on_hand or 0) < int(l.quantity or 1)))
+    }
+    # a product without a matched distributor part cannot be drop shipped: it stays with Pick & ship
+    return sorted(pid for pid in picks if has_distributor(db, pid))
 
 
 def _make_job(db: Session, order_id: str, store: Optional[str], product_ids: list[int], user: AuthUser) -> dict:
@@ -198,11 +202,11 @@ def scan_new_orders(db: Session, user: AuthUser = SYSTEM_USER) -> dict:
 
 
 def scan_if_enabled() -> None:
-    """Called by the eBay sales timer after it has fetched orders. Does nothing unless the switch is on."""
+    """Called by the eBay sales timer after it has fetched orders: new orders for ticked listings make their PO, and every waiting
+    drop ship order moves on."""
     db = _session_factory()()
     try:
-        if _settings(db)["auto_po"]:
-            scan_new_orders(db)
+        scan_new_orders(db)
         run_automatic(db)
     except Exception:
         db.rollback()
@@ -212,7 +216,6 @@ def scan_if_enabled() -> None:
 
 
 class SettingsIn(BaseModel):
-    auto_po: Optional[bool] = None
     manual_checks: Optional[bool] = None  # ON = stop for a person at the PO, quote and tracking steps; OFF (default) = all automatic
 
 
@@ -226,8 +229,6 @@ def get_settings(db: Session = Depends(get_db)):
 @needs(*PERMS)
 def put_settings(body: SettingsIn, db: Session = Depends(get_db)):
     _ensure(db)
-    if body.auto_po is not None:
-        db.execute(text("update dropship_settings set auto_po = :a where id = 1"), {"a": body.auto_po})
     if body.manual_checks is not None:
         db.execute(text("update dropship_settings set manual_checks = :a where id = 1"), {"a": body.manual_checks})
     db.commit()
@@ -244,7 +245,7 @@ def list_jobs(stage: Optional[str] = Query(None, max_length=20), db: Session = D
         text(
             "select j.id, j.ebay_order_id, j.store, j.po_id, coalesce(h.po_number, j.po_number) as po_number, j.stage, j.ship_service, "
             "j.buyer_name, j.problem, j.created_at, j.confirmed_by, j.confirmed_at, "
-            "j.quote, j.ship_method, j.supplier_order, j.supplier_mode, j.tracking_number, j.tracking_carrier "
+            "j.quote, j.ship_method, j.supplier_order, j.supplier_mode, j.tracking_number, j.tracking_carrier, j.note, j.tries "
             "from dropship_jobs j left join po_headers h on h.id = j.po_id "
             + ("where j.stage in ('review_po', 'po_confirmed', 'review_quote', 'review_tracking') " if stage == "review"
                else "where j.stage = :s " if stage else "where j.stage <> 'dismissed' ")
@@ -438,6 +439,19 @@ def _run_quote(db: Session, job_id: int, method: Optional[str]) -> dict:
         first = api_order_quote(body)
         options = (first.get("totals") or {}).get("shipping_options") or []
         chosen = method or pick_shipping_option(j.ship_service, options)
+        fallback = False
+        if not chosen and options and not _settings(db)["manual_checks"]:
+            # no option matches what the buyer picked: with Manual checks OFF use the cheapest the distributor offers
+            def _cost(o):
+                try:
+                    return float(o.get("cost"))
+                except (TypeError, ValueError):
+                    return 1e9
+
+            named = [o for o in options if isinstance(o, dict) and o.get("name")]
+            if named:
+                chosen = str(min(named, key=_cost)["name"])
+                fallback = True
         quote = first
         code = method_code(chosen, options)  # the order API takes the option's code, not its display name
         if code and code != (body.shipping_method or ""):
@@ -445,6 +459,7 @@ def _run_quote(db: Session, job_id: int, method: Optional[str]) -> dict:
             quote = api_order_quote(body)
         quote["options"] = options
         quote["method"] = chosen
+        quote["fallback"] = fallback
         quote["server_mode"] = first.get("mode")
     except HTTPException as e:
         db.rollback()
@@ -454,9 +469,12 @@ def _run_quote(db: Session, job_id: int, method: Optional[str]) -> dict:
         return {"ok": False, "stage": j.stage, "problem": msg}
     db.execute(
         text(
-            "update dropship_jobs set stage = 'review_quote', quote = :q, ship_method = :m, problem = null, updated_at = now() where id = :i"
+            "update dropship_jobs set stage = 'review_quote', quote = :q, ship_method = :m, problem = null, note = :n, updated_at = now() where id = :i"
         ),
-        {"q": json.dumps(quote, default=str), "m": quote["method"], "i": job_id},
+        {
+            "q": json.dumps(quote, default=str), "m": quote["method"], "i": job_id,
+            "n": (f"No option matched the buyer's choice ({j.ship_service or 'none given'}); the cheapest, {quote['method']}, was used." if quote.get("fallback") else None),
+        },
     )
     db.commit()
     return {"ok": True, "stage": "review_quote", "method": quote["method"]}
@@ -557,7 +575,7 @@ def advance_tracking(db: Session) -> int:
     _ensure(db)
     rows = db.execute(
         text(
-            "update dropship_jobs j set stage = 'review_tracking', tracking_number = o.tracking_number, "
+            "update dropship_jobs j set stage = 'review_tracking', problem = null, tracking_number = o.tracking_number, "
             "tracking_carrier = o.tracking_carrier, updated_at = now() "
             "from ebay_orders o where j.stage = 'placed' and o.ebay_order_id = j.ebay_order_id "
             "and coalesce(o.tracking_number, '') <> '' returning j.id"
@@ -630,8 +648,74 @@ def run_automatic(db: Session) -> dict:
                     {"i": r.id},
                 )
                 db.commit()
+    done["retried"] = _retry_failures(db)
     done["tracking_sent"] = advance_tracking(db)
+    _flag_freight(db)
     return done
+
+
+MAX_TRIES = 3
+
+
+def _retry_failures(db: Session) -> int:
+    """With Manual checks OFF, a quote that failed or a tracking number eBay refused is tried again on the next checks, up to
+    MAX_TRIES times in all (they are often a passing glitch). The order itself is never re-sent to the distributor here."""
+    n = 0
+    for r in db.execute(
+        text(
+            "select id, stage, problem from dropship_jobs where tries < :m and problem is not null and "
+            "((stage in ('review_po', 'po_confirmed') and problem like 'Quote failed%') or "
+            " (stage = 'review_tracking' and problem like 'Tracking was NOT sent%')) order by id limit 20"
+        ),
+        {"m": MAX_TRIES},
+    ).all():
+        db.execute(text("update dropship_jobs set tries = tries + 1, updated_at = now() where id = :i"), {"i": r.id})
+        db.commit()
+        n += 1
+        try:
+            if r.stage == "review_tracking":
+                _send_tracking_now(db, r.id, SYSTEM_USER)
+            else:
+                _run_quote(db, r.id, None)
+        except Exception as e:
+            db.rollback()
+            msg = str(getattr(e, "detail", e))[:300]
+            if r.stage == "review_tracking":
+                db.execute(
+                    text("update dropship_jobs set problem = :m where id = :i"),
+                    {"m": f"Tracking was NOT sent to eBay automatically: {msg} Check it and send it yourself.", "i": r.id},
+                )
+                db.commit()
+    return n
+
+
+def _flag_freight(db: Session) -> None:
+    """A placed order whose only tracking is a freight PRO number (never a parcel number eBay accepts) would wait forever.
+    Say so on the order, so a person can enter the carrier and tracking number by hand."""
+    try:
+        rows = db.execute(
+            text(
+                "select j.id, so.tracking from dropship_jobs j join supplier_orders so on so.order_number = j.supplier_order and so.supplier = 'autodist' "
+                "where j.stage = 'placed' and j.problem is null and so.tracking is not null"
+            )
+        ).all()
+    except Exception:
+        db.rollback()
+        return
+    for r in rows:
+        try:
+            items = r.tracking if isinstance(r.tracking, list) else json.loads(r.tracking or "[]")
+        except ValueError:
+            continue
+        if not isinstance(items, list):
+            continue
+        pro = next((i for i in items if isinstance(i, dict) and i.get("kind") == "pro" and i.get("number")), None)
+        if pro and not any(isinstance(i, dict) and i.get("kind") == "tracking" and i.get("number") for i in items):
+            db.execute(
+                text("update dropship_jobs set problem = :m, updated_at = now() where id = :i and stage = 'placed' and problem is null"),
+                {"m": f"Shipping by freight (PRO number {str(pro['number'])[:30]}): there is no parcel tracking number eBay accepts. Enter the carrier and tracking number yourself.", "i": r.id},
+            )
+    db.commit()
 
 
 def _send_tracking_now(db: Session, job_id: int, user: AuthUser) -> None:
@@ -658,6 +742,135 @@ def send_tracking(job_id: int, db: Session = Depends(get_db), user: AuthUser = D
         raise HTTPException(409, "That order is not waiting for the tracking check.")
     _send_tracking_now(db, job_id, user)
     return {"ok": True, "stage": "done"}
+
+
+@router.get("/health")
+@needs(*PERMS)
+def health(db: Session = Depends(get_db)):
+    """Warnings for the top of the Drop ship page: things that stop a ticked listing from running by itself."""
+    import os
+
+    from app import autodist
+
+    _ensure(db)
+    warnings: list[str] = []
+    try:
+        ticked = db.execute(
+            text(
+                "select cl.store, count(*) as n from channel_listings cl join products p on p.id = cl.product_id "
+                "where (coalesce(cl.dropship_ok, false) or coalesce(p.dropship_ok, false)) group by cl.store"
+            )
+        ).all()
+    except Exception:
+        db.rollback()
+        ticked = []
+    total = sum(int(r.n) for r in ticked)
+    if total:
+        # 1. the automatic tracking check
+        try:
+            autodist._ensure_tracking_settings(db)
+            cfg = db.execute(
+                text("select tracking_enabled, tracking_interval_minutes from supplier_sync_settings where supplier = :s"), {"s": autodist.SUPPLIER}
+            ).first()
+            if cfg is None or not cfg.tracking_enabled:
+                warnings.append(
+                    "The automatic tracking check is OFF (Distributor data feed tab). Tracking will not come back by itself, so eBay will not be told the orders shipped."
+                )
+        except Exception:
+            db.rollback()
+        # 2. the eBay order check, store by store
+        try:
+            accts = {
+                (r.store or "").lower(): r
+                for r in db.execute(text("select store, sales_polling_enabled, refresh_token_enc is not null as connected from ebay_accounts")).all()
+            }
+            for r in ticked:
+                a = accts.get((r.store or "").lower())
+                if a is None or not a.connected:
+                    warnings.append(f"{r.store}: the store is not connected to eBay, so its orders are never checked.")
+                elif not a.sales_polling_enabled:
+                    warnings.append(f"{r.store}: the eBay order check is OFF. New orders will not be seen, so nothing there will drop ship by itself.")
+        except Exception:
+            db.rollback()
+        # 3. ticked but no distributor part
+        try:
+            from app.availability import linked_sql
+
+            bad = db.execute(
+                text(f"select count(*) from products p where (coalesce(p.dropship_ok, false) or exists (select 1 from channel_listings c where c.product_id = p.id and c.dropship_ok)) and not coalesce({linked_sql('p')}, false)")
+            ).scalar()
+            if bad:
+                warnings.append(f"{int(bad)} product(s) are ticked Drop ship but have no distributor part linked. Their orders cannot drop ship; they go to Pick & ship.")
+        except Exception:
+            db.rollback()
+        # 4. real orders switched off
+        try:
+            url, _key = autodist._api_settings()
+            if autodist._api_mode(url) == "live" and os.environ.get("AUTOMATIC_DIST_ALLOW_LIVE_ORDERS", "").strip().lower() not in ("1", "true", "yes"):
+                warnings.append("This is the live server and real orders are switched off. Drop ship orders will stop at the order step until AUTOMATIC_DIST_ALLOW_LIVE_ORDERS=1 is set on Render.")
+        except Exception:
+            db.rollback()
+    return {"ticked": total, "warnings": warnings}
+
+
+class CarrierTrackingIn(BaseModel):
+    carrier: str = Field(..., min_length=2, max_length=20)
+    tracking_number: str = Field(..., min_length=6, max_length=80)
+
+
+@router.post("/jobs/{job_id}/tracking")
+@needs(*PERMS)
+def enter_tracking(job_id: int, body: CarrierTrackingIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_route_access)):
+    """For an order the distributor shipped by freight (or whose tracking never came back): a person types the carrier and tracking
+    number, and eBay is told it shipped with them."""
+    import re
+
+    j = _job(db, job_id)
+    if j.stage not in ("placed", "review_tracking"):
+        raise HTTPException(409, "That order has not been placed with the distributor, or is already finished.")
+    num = re.sub(r"\s+", "", body.tracking_number)
+    db.execute(
+        text("update dropship_jobs set tracking_number = :t, tracking_carrier = :c, stage = 'review_tracking', problem = null, updated_at = now() where id = :i"),
+        {"t": num, "c": body.carrier.strip(), "i": job_id},
+    )
+    db.commit()
+    try:
+        _send_tracking_now(db, job_id, user)
+    except HTTPException as e:
+        db.rollback()
+        db.execute(text("update dropship_jobs set problem = :m where id = :i"), {"m": f"eBay did not accept that tracking: {str(e.detail)[:300]}", "i": job_id})
+        db.commit()
+        raise
+    return {"ok": True, "stage": "done"}
+
+
+@router.post("/jobs/{job_id}/ship-from-stock")
+@needs(*PERMS)
+def ship_from_stock(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(require_route_access)):
+    """The way out for an order that cannot be drop shipped (Global Shipping Program, incomplete address, no matching shipping option,
+    a refused order): cancel its PO if it has one, put its lines back on our shelf, and hand the order to Pick & ship as 'ship from
+    our own stock'. Not possible once the distributor has the order."""
+    from app import fulfillment
+    from app.admin_purchase_orders import CancelIn, cancel_po
+    from app.ebay_sales import undo_lines_dropship
+
+    j = db.execute(text("select id, stage, po_id, ebay_order_id from dropship_jobs where id = :i"), {"i": job_id}).first()
+    if not j:
+        raise HTTPException(404, "That drop ship order is not in the list.")
+    if j.stage in ("placing", "placed", "review_tracking", "done", "dismissed"):
+        raise HTTPException(409, "The distributor already has this order, so it cannot be moved to our own stock from here.")
+    pids: list[int] = []
+    if j.po_id:
+        pids = [int(r.product_id) for r in db.execute(text("select product_id from po_lines where po_id = :p and product_id is not null"), {"p": j.po_id}).all()]
+        st = db.execute(text("select status from po_headers where id = :p"), {"p": j.po_id}).scalar()
+        if st and st != "cancelled":
+            cancel_po(j.po_id, CancelIn(reason=f"Shipping eBay order {j.ebay_order_id} from our own stock instead"), db=db, user=user)
+    if pids:
+        undo_lines_dropship(db, j.ebay_order_id, pids)
+    fulfillment.record_decision(db, "eBay", j.ebay_order_id, "stock", user.email, ["Could not be drop shipped; shipping from our own stock"])
+    db.execute(text("update dropship_jobs set stage = 'dismissed', updated_at = now() where id = :i"), {"i": job_id})
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/jobs/{job_id}/hold")

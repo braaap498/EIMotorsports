@@ -323,7 +323,7 @@ export default function AutodistOrders({ status, openPo }: { status: Status | nu
         )}
       </div>
       {status?.mode === "live" && (
-        <Notice kind="info">This is the live server. Placing a real order is switched off unless AUTOMATIC_DIST_ALLOW_LIVE_ORDERS=yes is set in Render. Practice on the test server first.</Notice>
+        <Notice kind="info">This is the live server. To place a real order, switch AUTOMATIC_DIST_ALLOW_LIVE_ORDERS=1 on Render.</Notice>
       )}
 
       <div className="space-y-2 rounded border border-gray-200 bg-white p-4">

@@ -35,6 +35,13 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.admin_ebay_new import _insert_link
+
+
+def _linked_for_dropship(db, product_id) -> bool:
+    """Drop ship can only be ticked for a product whose pieces are all matched to the Automatic Distributors catalog."""
+    from app.availability import has_distributor
+
+    return bool(product_id) and has_distributor(db, int(product_id))
 from app.auth import AuthUser, require_admin
 from app.database import get_db
 from app.ebay_edit import (
@@ -821,6 +828,9 @@ def list_it(copy_id: int, body: ListIn, db: Session = Depends(get_db), user: Aut
     notes: list[str] = []
     try:
         _insert_link(db, new_id, r.product_id, r.store)
+        if d.get("dropship") and not _linked_for_dropship(db, r.product_id):
+            notes.append("Drop ship was NOT turned on: that product has no Automatic Distributors part linked.")
+            d = {**d, "dropship": False}
         if d.get("dropship"):
             db.execute(
                 text("update channel_listings set dropship_ok = true where product_id = :p and lower(coalesce(store, '')) = lower(:s) "

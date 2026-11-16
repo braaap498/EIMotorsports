@@ -38,6 +38,7 @@ export type DsJob = {
   supplier_mode?: string | null;
   tracking_number?: string | null;
   tracking_carrier?: string | null;
+  note?: string | null;
   po?: DsPo | null;
 };
 

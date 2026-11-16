@@ -125,6 +125,31 @@ def dist_sql(p: str = "p") -> str:
     )
 
 
+def linked_sql(p: str = "p") -> str:
+    """SQL boolean: product `p` has at least one piece and EVERY piece is matched to a live Automatic Distributors catalog item.
+    Only such a product can be drop shipped."""
+    return (
+        "(select count(*) > 0 and not bool_or(si.id is null) "
+        "from product_kit_parts k "
+        f"left join supplier_items si on si.id = k.supplier_item_id and si.supplier = '{SUPPLIER}' and si.active "
+        f"where k.product_id = {p}.id)"
+    )
+
+
+def has_distributor(db: Session, product_id: int) -> bool:
+    try:
+        return bool(db.execute(text(f"select coalesce({linked_sql('p')}, false) from products p where p.id = :i"), {"i": product_id}).scalar())
+    except Exception:
+        db.rollback()
+        return False
+
+
+NO_DISTRIBUTOR_MSG = (
+    "That product has no Automatic Distributors part linked (or one of its pieces is not matched to the distributor's catalog), "
+    "so it cannot be drop shipped. Link its parts to the distributor catalog first."
+)
+
+
 def wh_sql(p: str, col: str) -> str:
     """Stock of ONE distributor warehouse (`qty_indiana` or `qty_nevada`) for product `p`: the scarcest piece decides, 0 when there
     are no pieces or a piece has no live catalog item."""
@@ -380,6 +405,9 @@ def api_product_dropship(product_id: int, body: ProductDropIn, db: Session = Dep
     p = db.execute(text("select id, coalesce(dropship_ok, false) as on_, dropship_prev from products where id = :p for update"), {"p": product_id}).first()
     if not p:
         raise HTTPException(404, "Product not found.")
+    if body.on and not has_distributor(db, product_id):
+        db.rollback()
+        raise HTTPException(409, NO_DISTRIBUTOR_MSG)
     ids = [r.id for r in db.execute(text("select id from channel_listings where product_id = :p"), {"p": product_id}).all()]
     restored = 0
     if body.on:
@@ -412,6 +440,10 @@ def api_product_dropship(product_id: int, body: ProductDropIn, db: Session = Dep
 
 @router.post("/listings/{listing_id}/dropship")
 def api_listing_dropship(listing_id: int, body: OnIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    if body.on:
+        pid = db.execute(text("select product_id from channel_listings where id = :l"), {"l": listing_id}).scalar()
+        if pid is None or not has_distributor(db, int(pid)):
+            raise HTTPException(409, NO_DISTRIBUTOR_MSG)
     row = db.execute(
         text("update channel_listings set dropship_ok = :v where id = :l returning product_id"), {"v": body.on, "l": listing_id}
     ).first()
@@ -454,7 +486,7 @@ def api_products(
         text(
             f"select p.id, p.sku_display as sku, p.title, p.custom_label_sku, coalesce(p.quantity_on_hand, 0) as on_hand, "
             f"{available_sql('p')} as own, {parts_count_sql('p')} as parts, {dist_sql('p')} as distributor, "
-            f"coalesce(p.dropship_ok, false) as dropship_ok, (p.dropship_prev is not null) as has_prev "
+            f"coalesce(p.dropship_ok, false) as dropship_ok, (p.dropship_prev is not null) as has_prev, coalesce({linked_sql('p')}, false) as linked "
             f"from products p where {cond} order by p.title, p.id limit :lim offset :off"
         ),
         {**params, "lim": per_page, "off": (page - 1) * per_page},
@@ -480,7 +512,7 @@ def api_products(
             {
                 "product_id": r.id, "sku": r.sku, "title": r.title, "custom_label": r.custom_label_sku,
                 "on_hand": int(r.on_hand), "own_available": int(r.own), "distributor": int(r.distributor),
-                "piece_count": int(r.parts), "dropship_ok": bool(r.dropship_ok), "has_prev": bool(r.has_prev),
+                "piece_count": int(r.parts), "dropship_ok": bool(r.dropship_ok), "has_prev": bool(r.has_prev), "has_distributor": bool(r.linked),
                 "ticked": sum(1 for x in ls if x["dropship_ok"]), "listings": ls,
             }
         )

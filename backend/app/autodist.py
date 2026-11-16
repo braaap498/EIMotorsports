@@ -2098,7 +2098,7 @@ def api_order_place(body: OrderIn, db: Session = Depends(get_db), user: AuthUser
         raise HTTPException(
             403,
             "Real orders are switched off. Point AUTOMATIC_DIST_API_URL at the test server to practice, or set "
-            "AUTOMATIC_DIST_ALLOW_LIVE_ORDERS=yes in Render when you are ready for real ones.",
+            "AUTOMATIC_DIST_ALLOW_LIVE_ORDERS=1 on Render when you are ready for real ones.",
         )
     payload = _order_payload(body)
     if mode == "test":
