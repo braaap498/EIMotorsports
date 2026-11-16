@@ -315,13 +315,34 @@ _REPO_SORTS = {
 }
 
 
+def _repo_order(sort: str) -> str:
+    """ORDER BY for the listings table. A column sort is "key" or "key:asc" / "key:desc" (keys: title, store, label, price, qty, status);
+    blanks always come last. The older fixed choices (newest, title, price_low, price_high) still work."""
+    if sort in _REPO_SORTS:
+        return _REPO_SORTS[sort]
+    key, _, d = sort.partition(":")
+    direction = "desc" if d == "desc" else "asc"
+    qty = f"(case when {_L_IS_DROPSHIP} then {_dropship_qty_sql('p')} when {_L_QTY_FROM_EBAY} then {_L_EBAY_QTY} else p.quantity_on_hand end)"
+    expr = {
+        "title": f"lower({_L_TITLE})",
+        "store": "lower(cl.store)",
+        "label": f"lower({_L_LABEL})",
+        "price": _L_PRICE,
+        "qty": qty,
+        "status": "lower(nullif(btrim(cl.status), ''))",
+    }.get(key)
+    if not expr:
+        return _REPO_SORTS["newest"]
+    return f"{expr} {direction} nulls last, cl.id"
+
+
 @router.get("/repo")
 def repo_listings(
     store: Optional[str] = Query(None, description="eBay store; empty means the main store"),
     all_stores: bool = Query(False, description="true = every store at once; the store parameter is then ignored"),
     status: str = Query("all", max_length=40, description="all, or one status exactly as on file (active, ended, draft, ...); 'inactive' = anything not active"),
     q: str = Query("", max_length=100),
-    sort: str = Query("newest", pattern="^(newest|title|price_low|price_high)$"),
+    sort: str = Query("newest", pattern="^(newest|title|price_low|price_high|(title|store|label|price|qty|status)(:(asc|desc))?)$"),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -414,7 +435,7 @@ def repo_listings(
                        order by ph.is_primary desc, ph.sort_order, ph.id limit 1)
                    ) as image_key
             from channel_listings cl {_LISTING_JOINS}
-            where {clause} order by {_REPO_SORTS[sort]} limit :n offset :o
+            where {clause} order by {_repo_order(sort)} limit :n offset :o
             """
         ),
         params,

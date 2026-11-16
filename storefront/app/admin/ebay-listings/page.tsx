@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
+import { SortTh, type SortState } from "../../../components/admin/SortHeader";
 import ClearableInput from "../../../components/admin/ClearableInput";
 
 /* ------------------------------------------------------------------ types */
@@ -80,6 +81,17 @@ function ago(iso: string | null): string {
 }
 
 const PAGE_SIZE = 50;
+// Column sorting, like the Orders list. The order is kept as the text the server takes: "newest" (nothing chosen) or "key:asc" / "key:desc".
+type ListSortKey = "title" | "store" | "label" | "price" | "qty" | "status";
+function parseSort(v: string): SortState<ListSortKey> {
+  if (v === "title") return { key: "title", dir: "asc" };
+  if (v === "price_low") return { key: "price", dir: "asc" };
+  if (v === "price_high") return { key: "price", dir: "desc" };
+  const [k, d] = v.split(":");
+  if (["title", "store", "label", "price", "qty", "status"].includes(k)) return { key: k as ListSortKey, dir: d === "desc" ? "desc" : "asc" };
+  return { key: null, dir: "asc" };
+}
+
 const ALL = "__all__"; // the "All stores" choice in the store drop-down
 
 function money(v: string | number | null | undefined, cur?: string | null) {
@@ -532,8 +544,9 @@ export default function EbayLiveListingsPage() {
       return;
     }
     const one = n === 1;
+    const others = selectedItems().length - n;
     const what = keepAlive ? "quantity 1" : "the available stock shown on the website";
-    if (!window.confirm(`This will put ${one ? "this listing" : `these ${n} listings`} back on sale on eBay at ${what}.${keepAlive ? "\n\nBuyers can buy the part while it is at 1, so only do this for a part you could ship." : "\n\nA part with nothing available is left at 0."}\n\nContinue?`)) return;
+    if (!window.confirm(`This will put ${one ? "this listing" : `these ${n} listings`} back on sale on eBay at ${what}.${others > 0 ? `\n\nOnly the ${n} selected listing${one ? "" : "s"} at 0 ${one ? "is" : "are"} changed; the other ${others} ${others === 1 ? "is" : "are"} left alone.` : ""}${keepAlive ? "\n\nBuyers can buy the part while it is at 1, so only do this for a part you could ship." : "\n\nA part with nothing available is left at 0."}\n\nContinue?`)) return;
     setBusy("status");
     setActMsg(null);
     let done = 0;
@@ -720,6 +733,13 @@ export default function EbayLiveListingsPage() {
   }
   const isZero = (x: { store: string; item_id: string }) => `${x.store.toLowerCase()}|${x.item_id}` in zeroMap;
 
+  const sortState = parseSort(sort);
+  const onSort = (k: ListSortKey) => {
+    const next = sortState.key === k ? `${k}:${sortState.dir === "asc" ? "desc" : "asc"}` : `${k}:asc`;
+    setSort(next);
+    void loadRepo(0, { store, q, sort: next, statusF });
+  };
+
   async function loadRepo(offset: number, from?: { store: string; q: string; sort: string; statusF: string }) {
     const useStore = from ? from.store : store;
     const useQ = from ? from.q : q;
@@ -871,22 +891,24 @@ export default function EbayLiveListingsPage() {
             placeholder="e.g. Tusk 1.8 bar"
           />
         </label>
-        <label className="block text-sm font-medium text-gray-700">
+        <div className="block text-sm font-medium text-gray-700">
           <span className="mb-1 block">Order</span>
-          <select
-            className={inputCls}
-            value={sort}
-            onChange={(e) => {
-              setSort(e.target.value);
-              void loadRepo(0, { store, q, sort: e.target.value, statusF });
-            }}
-          >
-            <option value="newest">Newest first</option>
-            <option value="title">Title, A to Z</option>
-            <option value="price_low">Price, low to high</option>
-            <option value="price_high">Price, high to low</option>
-          </select>
-        </label>
+          <div className="flex items-center gap-2 py-2 text-sm font-normal text-gray-600">
+            <span>{sortState.key ? `By ${{ title: "listing", store: "store", label: "custom label", price: "price", qty: "quantity", status: "status" }[sortState.key]}, ${sortState.dir === "asc" ? "low to high" : "high to low"}` : "Newest first"}</span>
+            {sortState.key && (
+              <button
+                type="button"
+                className="text-xs underline"
+                onClick={() => {
+                  setSort("newest");
+                  void loadRepo(0, { store, q, sort: "newest", statusF });
+                }}
+              >
+                Newest first
+              </button>
+            )}
+          </div>
+        </div>
       </form>
 
       {/* ---- listings from our database */}
@@ -987,11 +1009,11 @@ export default function EbayLiveListingsPage() {
               )}
               {nZeroPicked > 0 && (
                 <>
-                  <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkRestore(false)} title="Puts the listing back on sale at the available stock shown on the website">
+                  <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkRestore(false)} title="Puts the listing back on sale at the available stock shown on the website. Only the selected listings that are at 0 are changed.">
                     Restore stock on eBay ({nZeroPicked})
                   </button>
-                  <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkRestore(true)} title="Sets quantity 1 on eBay, which restarts the zero-days count">
-                    Set to 1 ({nZeroPicked})
+                  <button type="button" className={btn2Cls} disabled={busy === "status"} onClick={() => void bulkRestore(true)} title="Sets quantity 1 on eBay, which restarts the zero-days count. Only the selected listings that are at 0 are changed.">
+                    Restart Zero-Days ({nZeroPicked})
                   </button>
                 </>
               )}
@@ -1072,12 +1094,12 @@ export default function EbayLiveListingsPage() {
                       />
                     </th>
                     <th className="px-2 py-2"></th>
-                    <th className="whitespace-nowrap px-2 py-2">Listing</th>
-                    <th className="whitespace-nowrap px-2 py-2">Store</th>
-                    <th className="whitespace-nowrap px-2 py-2">Custom label</th>
-                    <th className="whitespace-nowrap px-2 py-2">Price</th>
-                    <th className="whitespace-nowrap px-2 py-2">Quantity</th>
-                    <th className="whitespace-nowrap px-2 py-2">Status</th>
+                    <SortTh label="Listing" k="title" sort={sortState} onSort={onSort} className="px-2 py-2" />
+                    <SortTh label="Store" k="store" sort={sortState} onSort={onSort} className="px-2 py-2" />
+                    <SortTh label="Custom label" k="label" sort={sortState} onSort={onSort} className="px-2 py-2" />
+                    <SortTh label="Price" k="price" sort={sortState} onSort={onSort} className="px-2 py-2" />
+                    <SortTh label="Quantity" k="qty" sort={sortState} onSort={onSort} className="px-2 py-2" />
+                    <SortTh label="Status" k="status" sort={sortState} onSort={onSort} className="px-2 py-2" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
