@@ -13,7 +13,7 @@ import DropShipActivity from "./DropShipActivity";
      OFF either puts the listings back as they were or unticks them all.
    - Orders: the drop ship orders in progress, with the temporary check popups. */
 
-type Settings = { auto_po: boolean; auto_ship: boolean; last_scan_at: string | null; last_scan_note: string | null };
+type Settings = { auto_po: boolean; manual_checks: boolean; last_scan_at: string | null; last_scan_note: string | null };
 type Avail = { use_distributor_stock: boolean; auto_raise: boolean; display_default: string };
 type Listing = { listing_id: number; store: string; item_id: string; dropship_ok: boolean };
 type Item = {
@@ -151,26 +151,50 @@ export default function DropShipAdmin() {
                 </span>
               </span>
             </label>
-            <label className="flex items-start gap-2">
-              <input
-                type="checkbox"
-                className="mt-1"
-                checked={settings.auto_ship}
-                disabled={busy !== ""}
-                onChange={(e) =>
-                  void run("autoship", () => api<Settings>("/dropship/settings", { method: "PUT", body: { auto_ship: e.target.checked } }), (r) =>
-                    r.auto_ship ? "When tracking arrives, eBay will be told the order shipped and the buyer notified, with no check from you." : "Tracking will wait for your check before eBay is told."
-                  )
-                }
-              />
-              <span>
-                <span className="font-medium">Tell eBay it shipped automatically</span>
-                <span className="block text-xs text-gray-500">
-                  When the distributor's tracking arrives for a placed order, eBay is told it shipped with that tracking number and the buyer is notified, with no
-                  check from you. When OFF, the order waits for your check on the tracking.
+            <div className="rounded border border-amber-200 bg-amber-50 p-3">
+              <label className="flex items-start gap-2">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={settings.manual_checks}
+                  disabled={busy !== ""}
+                  onChange={(e) =>
+                    void run("manual", () => api<Settings>("/dropship/settings", { method: "PUT", body: { manual_checks: e.target.checked } }), (r) =>
+                      r.manual_checks
+                        ? "Manual checks are ON: drop ship orders stop at the PO, quote and tracking steps for you."
+                        : "Manual checks are OFF: drop ship orders now run all the way by themselves."
+                    )
+                  }
+                />
+                <span>
+                  <span className="font-medium">Manual checks (for testing)</span>
+                  <span className="block text-xs text-gray-600">
+                    OFF (normal): every drop ship order runs by itself, start to finish. ON: it stops at the three checks below and waits for you.
+                  </span>
                 </span>
-              </span>
-            </label>
+              </label>
+              <ol className="mt-2 list-decimal space-y-1 pl-9 text-xs text-gray-700">
+                <li>
+                  <span className="font-medium">PO check.</span> The PO is made from the eBay order and waits for you to look at it. Your OK gets the quote from
+                  Automatic Distributors. OFF: the PO is accepted and the quote is fetched at once.
+                </li>
+                <li>
+                  <span className="font-medium">Quote check and place the order.</span> The quote waits for you to look at the price and the shipping option (you can
+                  change it), then the button places the real order (owner or admin only). OFF: the shipping option closest to what the buyer picked on eBay is used
+                  and the order is placed at once, still under the test/live server and live switch safeguards.
+                </li>
+                <li>
+                  <span className="font-medium">Tracking check.</span> When the distributor's tracking arrives it waits for you to check it, then the button tells
+                  eBay the order shipped (eBay notifies the buyer). OFF: eBay is told the moment the tracking arrives, and the order is marked shipped and leaves Pick
+                  &amp; ship.
+                </li>
+              </ol>
+              <p className="mt-2 text-xs text-gray-600">
+                Either way an order stops for a person if something goes wrong (no matching shipping option, a refused quote or order, eBay refusing the tracking) and
+                shows the reason under Orders. It is never retried by itself. "Make POs automatically" above still decides whether new eBay orders start this at all,
+                and the automatic tracking check on the Distributor data feed tab still has to be on.
+              </p>
+            </div>
             <div className="flex flex-wrap items-center gap-2">
               <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={() => void run("scan", () => api<{ note: string }>("/dropship/scan", { method: "POST" }), (r) => r.note)}>
                 {busy === "scan" ? "Checking…" : "Check for new orders and tracking now"}

@@ -2,7 +2,8 @@
 Automatic drop shipping, step 1: an eBay order that has to be drop shipped makes its purchase order by itself,
 then WAITS for a person to look at the PO and confirm it before anything goes further.
 
-Chain (a temporary review stop at every step while it is being proved out):
+Chain. The switch "Manual checks" (Drop ship page, default OFF) decides whether each step has a temporary review stop:
+  OFF = everything below runs by itself, one step after another. ON = it stops at the three review steps (2, 4, 6) for a person.
   1. eBay order paid        -> drop ship PO made (buyer name, address, and the shipping service the buyer picked)
   2. review_po   a person checks the PO              <- BUILT (this file)
   3. quote       confirming the PO gets a quote from Automatic Distributors; the shipping option closest to the buyer's choice is picked
@@ -72,6 +73,7 @@ def _ensure(db: Session) -> None:
         "alter table dropship_jobs add column if not exists tracking_number text",
         "alter table dropship_jobs add column if not exists tracking_carrier text",
         "alter table dropship_settings add column if not exists auto_ship boolean not null default false",
+        "alter table dropship_settings add column if not exists manual_checks boolean not null default false",
         "alter table dropship_jobs add column if not exists placed_at timestamptz",
         "alter table dropship_jobs add column if not exists shipped_at timestamptz",
         "create index if not exists dropship_jobs_created_idx on dropship_jobs (created_at)",
@@ -108,8 +110,8 @@ def _backfill_line_states(db: Session) -> None:
 
 def _settings(db: Session) -> dict:
     _ensure(db)
-    r = db.execute(text("select auto_po, auto_ship, last_scan_at, last_scan_note from dropship_settings where id = 1")).first()
-    return {"auto_po": bool(r.auto_po), "auto_ship": bool(r.auto_ship), "last_scan_at": r.last_scan_at, "last_scan_note": r.last_scan_note}
+    r = db.execute(text("select auto_po, manual_checks, last_scan_at, last_scan_note from dropship_settings where id = 1")).first()
+    return {"auto_po": bool(r.auto_po), "manual_checks": bool(r.manual_checks), "last_scan_at": r.last_scan_at, "last_scan_note": r.last_scan_note}
 
 
 def _flagged_short_lines(db: Session, order_id: str, honor_decision: bool = False) -> list[int]:
@@ -201,7 +203,7 @@ def scan_if_enabled() -> None:
     try:
         if _settings(db)["auto_po"]:
             scan_new_orders(db)
-        advance_tracking(db)
+        run_automatic(db)
     except Exception:
         db.rollback()
         log.exception("automatic drop ship check failed")
@@ -211,7 +213,7 @@ def scan_if_enabled() -> None:
 
 class SettingsIn(BaseModel):
     auto_po: Optional[bool] = None
-    auto_ship: Optional[bool] = None  # tell eBay the order shipped as soon as the tracking arrives (no check by a person)
+    manual_checks: Optional[bool] = None  # ON = stop for a person at the PO, quote and tracking steps; OFF (default) = all automatic
 
 
 @router.get("/settings")
@@ -226,8 +228,8 @@ def put_settings(body: SettingsIn, db: Session = Depends(get_db)):
     _ensure(db)
     if body.auto_po is not None:
         db.execute(text("update dropship_settings set auto_po = :a where id = 1"), {"a": body.auto_po})
-    if body.auto_ship is not None:
-        db.execute(text("update dropship_settings set auto_ship = :a where id = 1"), {"a": body.auto_ship})
+    if body.manual_checks is not None:
+        db.execute(text("update dropship_settings set manual_checks = :a where id = 1"), {"a": body.manual_checks})
     db.commit()
     return _settings(db)
 
@@ -271,6 +273,7 @@ def list_jobs(stage: Optional[str] = Query(None, max_length=20), db: Session = D
 def scan_now(db: Session = Depends(get_db), user: AuthUser = Depends(require_route_access)):
     out = scan_new_orders(db, user)
     out["tracking_ready"] = advance_tracking(db)
+    out["automatic"] = run_automatic(db)
     return out
 
 
@@ -299,6 +302,7 @@ def job_from_order(body: FromOrderIn, db: Session = Depends(get_db), user: AuthU
     res = _make_job(db, o.ebay_order_id, o.store, picks, user)
     if res.get("problem"):
         raise HTTPException(409, res["problem"])
+    run_automatic(db)
     return res
 
 
@@ -548,7 +552,7 @@ def place_job(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depen
 # --------------------------------------------------------------------------
 def advance_tracking(db: Session) -> int:
     """A placed order whose tracking has reached its eBay order (the Automatic Distributors tracking check does that) moves to
-    'review_tracking'. With the "Tell eBay it shipped automatically" switch ON it is then sent to eBay straight away; otherwise
+    'review_tracking'. With "Manual checks" OFF it is then sent to eBay straight away; with it ON
     nothing is sent here and a person checks it first."""
     _ensure(db)
     rows = db.execute(
@@ -560,7 +564,7 @@ def advance_tracking(db: Session) -> int:
         )
     ).all()
     db.commit()
-    if rows and _settings(db)["auto_ship"]:
+    if rows and not _settings(db)["manual_checks"]:
         for r in rows:
             try:
                 _send_tracking_now(db, r.id, SYSTEM_USER)
@@ -574,6 +578,60 @@ def advance_tracking(db: Session) -> int:
                 )
                 db.commit()
     return len(rows)
+
+
+def run_automatic(db: Session) -> dict:
+    """With "Manual checks" OFF, carry every waiting drop ship order through the review steps by itself:
+    PO check -> quote -> place the order -> (tracking, handled by advance_tracking) -> tell eBay.
+    An order that has a problem noted (a failed quote, a refused order, eBay refusing the tracking) is NOT retried here; it waits for a
+    person, so nothing is hammered or ordered twice. Order placing keeps every existing safeguard (test/live server, live switch,
+    duplicate PO number)."""
+    _ensure(db)
+    if _settings(db)["manual_checks"]:
+        return {"manual": True}
+    done = {"confirmed": 0, "placed": 0, "stopped": 0}
+    for _ in range(2):  # a second pass lets an order that was just confirmed continue to the quote and the order in the same run
+        ids = db.execute(
+            text("select id, stage, ship_method from dropship_jobs where stage in ('review_po', 'review_quote') and problem is null order by id limit 25")
+        ).all()
+        if not ids:
+            break
+        for r in ids:
+            try:
+                if r.stage == "review_po":
+                    confirm_po(r.id, db=db, user=SYSTEM_USER)  # confirms, then gets the quote
+                    done["confirmed"] += 1
+                elif r.stage == "review_quote":
+                    if not r.ship_method:
+                        db.execute(
+                            text("update dropship_jobs set problem = 'No shipping option matched the buyer''s choice. Pick one and place the order yourself.', updated_at = now() where id = :i"),
+                            {"i": r.id},
+                        )
+                        db.commit()
+                        done["stopped"] += 1
+                        continue
+                    place_job(r.id, db=db, user=SYSTEM_USER)
+                    done["placed"] += 1
+            except HTTPException as e:
+                db.rollback()
+                done["stopped"] += 1
+                log.warning("automatic drop ship step failed for job %s: %s", r.id, e.detail)
+                # place_job and the quote already record their own reason; make sure there is one so the loop does not retry it
+                db.execute(
+                    text("update dropship_jobs set problem = coalesce(problem, :m), updated_at = now() where id = :i and stage in ('review_po', 'review_quote')"),
+                    {"m": ("Automatic step stopped: " + str(e.detail))[:400], "i": r.id},
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                log.exception("automatic drop ship step crashed for job %s", r.id)
+                db.execute(
+                    text("update dropship_jobs set problem = coalesce(problem, 'Automatic step crashed; check the log and do it yourself.'), updated_at = now() where id = :i and stage in ('review_po', 'review_quote')"),
+                    {"i": r.id},
+                )
+                db.commit()
+    done["tracking_sent"] = advance_tracking(db)
+    return done
 
 
 def _send_tracking_now(db: Session, job_id: int, user: AuthUser) -> None:
