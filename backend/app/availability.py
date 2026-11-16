@@ -66,6 +66,8 @@ def ensure_tables() -> None:
         for stmt in (
             "alter table products add column if not exists stock_display text",
             "alter table products add column if not exists dropship_ok boolean not null default false",
+            # the WEBSITE's own Drop ship tick on the product. It has nothing to do with eBay: eBay is set per listing (dropship_ok above).
+            "alter table products add column if not exists web_dropship_ok boolean not null default false",
             "alter table channel_listings add column if not exists dropship_ok boolean not null default false",
             # the listings' ticks as they were before the whole product was switched on (so it can be switched off and put back)
             "alter table products add column if not exists dropship_prev text",
@@ -172,25 +174,34 @@ def dropship_qty_sql(p: str = "p") -> str:
     )
 
 
-def extra_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False) -> str:
+def extra_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False, flag: str = "dropship_ok") -> str:
     """What the distributor adds on top of our own count for product `p`.
     A product or listing that is marked DROP SHIP (`{p}.dropship_ok`, or `ovr`, an SQL boolean such as "coalesce(cl.dropship_ok, false)")
     always counts the distributor's stock, whether it is a single part or a kit, and whatever the master switch says.
     Anything not marked counts it only while the master switch is ON and the product is a single part."""
     switch = "true" if ignore_switch else f"{_setting_sql('use_distributor_stock', 'off')} = 'on'"
     return (
-        f"(case when {p}.dropship_ok or {ovr} then {dist_sql(p)} "
+        f"(case when {p}.{flag} or {ovr} then {dist_sql(p)} "
         f"when {switch} and {parts_count_sql(p)} = 1 then {dist_sql(p)} else 0 end)"
     )
 
 
-def effective_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False) -> str:
+def effective_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False, flag: str = "dropship_ok") -> str:
     """SQL: what can be sold from product `p` now. A product or listing marked DROP SHIP shows the lowest non-empty of our shelf,
     Indiana and Nevada (dropship_qty_sql); anything else is our own count plus the distributor's where the rule allows."""
     return (
-        f"(case when {p}.dropship_ok or {ovr} then {dropship_qty_sql(p)} "
-        f"else {available_sql(p)} + {extra_sql(p, ovr, ignore_switch)} end)"
+        f"(case when {p}.{flag} or {ovr} then {dropship_qty_sql(p)} "
+        f"else {available_sql(p)} + {extra_sql(p, ovr, ignore_switch, flag)} end)"
     )
+
+
+def web_effective_sql(p: str = "p") -> str:
+    """What the WEBSITE can sell of product `p`. Only the product's own website Drop ship tick (products.web_dropship_ok) counts here;
+    the eBay drop ship ticks (per listing, in Sales channels) never change what the website shows, and neither does the
+    'Count distributor stock' switch.
+      ticked   -> the lowest non-empty of our shelf, Indiana and Nevada; 0 (out of stock, cannot be ordered) when all three are empty
+      unticked -> our own shelf only (what is not set aside for other orders)"""
+    return f"(case when coalesce({p}.web_dropship_ok, false) then {dropship_qty_sql(p)} else {available_sql(p)} end)"
 
 
 def stock_mode_sql(p: str = "p") -> str:
@@ -202,13 +213,14 @@ def stock_mode_sql(p: str = "p") -> str:
 # helpers for the other modules
 # --------------------------------------------------------------------------
 def extra_stock(db: Session, ids) -> dict[int, int]:
-    """{product id: units the distributor adds} for the checkout (0 everywhere while the switch is off)."""
+    """{product id: units the distributor adds} for the website checkout: the distributor's stock for a product ticked Drop ship on the
+    website, 0 for everything else. Uses the website's own tick, not the eBay ones, and ignores the 'Count distributor stock' switch."""
     ids = sorted({int(i) for i in ids})
     if not ids:
         return {}
     try:
         rows = db.execute(
-            text(f"select p.id, {extra_sql('p')} as e from products p where p.id in :ids").bindparams(bindparam("ids", expanding=True)),
+            text(f"select p.id, (case when coalesce(p.web_dropship_ok, false) then {dist_sql('p')} else 0 end) as e from products p where p.id in :ids").bindparams(bindparam("ids", expanding=True)),
             {"ids": ids},
         ).all()
         return {r.id: max(0, int(r.e or 0)) for r in rows}

@@ -12,6 +12,11 @@ Chain. The switch "Manual checks" (Drop ship page, default OFF) decides whether 
   6. review_tracking tracking comes back (existing automatic check); a person checks it, then eBay is told it shipped, with the
                   tracking number, and eBay notifies the buyer
 
+WEBSITE ORDERS use the same chain. A paid website order (Stripe) whose products are ALL ticked Drop ship ON THE WEBSITE (products.web_dropship_ok; eBay ticks are separate) makes its PO by itself;
+the job is kept under the key "web:<order number>" (dropship_jobs.channel = 'web'). When the distributor's tracking comes back the
+website order is marked shipped with it (the customer sees it on Track order). An order that mixes drop ship products with shelf
+products is NOT automated: it is flagged "MIXED ORDER" and waits for a person.
+
 A listing ticked Drop ship is drop shipped automatically, whatever our shelf holds (and only a product whose parts are all matched to
 the distributor catalog can be ticked). An unticked listing that is short on our shelf asks a person on Pick & ship instead.
 """
@@ -79,6 +84,9 @@ def _ensure(db: Session) -> None:
         "alter table dropship_jobs add column if not exists note text",
         "alter table dropship_jobs add column if not exists placed_at timestamptz",
         "alter table dropship_jobs add column if not exists shipped_at timestamptz",
+        "alter table dropship_jobs add column if not exists channel text not null default 'ebay'",
+        "alter table dropship_jobs add column if not exists web_order_id bigint",
+        "create index if not exists dropship_jobs_channel_idx on dropship_jobs (channel, stage)",
         "create index if not exists dropship_jobs_created_idx on dropship_jobs (created_at)",
         "create index if not exists dropship_jobs_placed_idx on dropship_jobs (placed_at)",
         "create index if not exists dropship_jobs_shipped_idx on dropship_jobs (shipped_at)",
@@ -172,6 +180,147 @@ def _make_job(db: Session, order_id: str, store: Optional[str], product_ids: lis
     return {"order": order_id, "po_number": po["po_number"]}
 
 
+# --------------------------------------------------------------------------
+# WEBSITE ORDERS. A paid website order whose products are all ticked Drop ship is ordered from the distributor by the same
+# chain as an eBay order. Its job is keyed "web:<order number>" so it can never collide with an eBay order id.
+# --------------------------------------------------------------------------
+WEB_PREFIX = "web:"
+WEB_CANCEL_PREFIX = "Website order cancelled"
+_TRACK_OK = re.compile(r"^[A-Za-z0-9\-]{6,60}$")
+
+
+def _is_web(key) -> bool:
+    return str(key or "").startswith(WEB_PREFIX)
+
+
+def _web_ship_label(notes) -> Optional[str]:
+    """The shipping choice the customer paid for (checkout writes it as 'Shipping: <label>' in the order notes)."""
+    m = re.search(r"Shipping:\s*([^|]+)", str(notes or ""))
+    return m.group(1).strip()[:80] if m else None
+
+
+def _web_lines(db: Session, order_id: int) -> tuple[list[int], list[str]]:
+    """(product ids to drop ship, names of the lines that are NOT drop ship) for a website order. A line is drop ship when its product
+    has the website Drop ship tick (products.web_dropship_ok, separate from the eBay listing ticks) and is matched to the distributor's catalog; anything else (not ticked, unmatched, no product) stays on our shelf."""
+    from app.availability import has_distributor
+
+    rows = db.execute(
+        text(
+            "select oi.product_id, coalesce(p.sku_display, oi.part_number, oi.title, 'a part') as label, coalesce(p.web_dropship_ok, false) as ds "
+            "from order_items oi left join products p on p.id = oi.product_id where oi.order_id = :o order by oi.id"
+        ),
+        {"o": order_id},
+    ).all()
+    drop: list[int] = []
+    other: list[str] = []
+    for r in rows:
+        if r.product_id is not None and r.ds and has_distributor(db, int(r.product_id)):
+            if int(r.product_id) not in drop:
+                drop.append(int(r.product_id))
+        else:
+            other.append(str(r.label))
+    return drop, other
+
+
+def _web_problem(db: Session, number: str, order_id: int, msg: str, user: AuthUser) -> None:
+    db.execute(
+        text(
+            "insert into dropship_jobs (ebay_order_id, store, stage, problem, created_by, channel, web_order_id) "
+            "values (:k, 'Website', 'problem', :m, :u, 'web', :w) on conflict (ebay_order_id) do nothing"
+        ),
+        {"k": WEB_PREFIX + number, "m": msg[:400], "u": user.email, "w": order_id},
+    )
+    db.commit()
+
+
+def _release_web_holds(db: Session, order_id: int, pids: list[int]) -> None:
+    """The distributor fills these lines, not our shelf: drop the shelf hold (the shelf count itself is NOT changed)."""
+    db.execute(
+        text("delete from stock_reservations where order_id = :o and product_id = any(cast(:p as bigint[]))"),
+        {"o": order_id, "p": list(pids)},
+    )
+    try:
+        from app.ebay_sales import queue_stock_push
+
+        queue_stock_push(db, list(pids))
+    except Exception:
+        log.exception("could not queue quantity updates after drop shipping website order lines")
+    db.commit()
+
+
+def _make_web_job(db: Session, o, pids: list[int], user: AuthUser) -> dict:
+    """Make the PO for a website order and record the job. A refusal (incomplete address, no distributor...) is recorded as 'problem'."""
+    from app.admin_purchase_orders import FromWebOrderIn, po_from_web_order
+
+    key = WEB_PREFIX + o.order_number
+    try:
+        po = po_from_web_order(FromWebOrderIn(order_number=o.order_number, product_ids=pids), db=db, user=user)
+    except HTTPException as e:
+        db.rollback()
+        msg = str(e.detail)[:400]
+        _web_problem(db, o.order_number, o.id, msg, user)
+        return {"order": key, "problem": msg}
+    db.execute(
+        text(
+            "insert into dropship_jobs (ebay_order_id, store, po_id, po_number, stage, ship_service, buyer_name, created_by, channel, web_order_id) "
+            "values (:k, 'Website', :pid, :pn, 'review_po', :svc, :bn, :u, 'web', :w) on conflict (ebay_order_id) do nothing"
+        ),
+        {"k": key, "pid": po["id"], "pn": po["po_number"], "svc": _web_ship_label(o.notes), "bn": o.customer_name, "u": user.email, "w": o.id},
+    )
+    db.commit()
+    try:
+        _release_web_holds(db, o.id, pids)
+    except Exception:
+        db.rollback()
+        log.exception("drop ship PO made for website order %s, but its shelf holds could not be released", o.order_number)
+    return {"order": key, "po_number": po["po_number"]}
+
+
+def scan_web_orders(db: Session, user: AuthUser = SYSTEM_USER) -> dict:
+    """Paid website orders that contain a product ticked Drop ship and have no job yet. All lines drop ship -> PO and job. A mix of
+    drop ship and shelf lines -> a 'problem' job saying so (nothing is ordered). Skipped: an order a person already decided to ship from
+    our own stock, one that already has a live drop ship PO (made by hand), and one staff already started picking."""
+    from app import fulfillment
+
+    _ensure(db)
+    rows = db.execute(
+        text(
+            "select o.id, o.order_number, o.customer_name, o.notes from orders o "
+            "where o.status = 'paid' and o.shipped_at is null and o.picked_at is null and o.paid_at > now() - make_interval(days => :d) "
+            "and not exists (select 1 from dropship_jobs j where j.ebay_order_id = 'web:' || o.order_number) "
+            "and not exists (select 1 from po_headers h where h.source = 'web:' || o.order_number and h.status <> 'cancelled') "
+            "and not exists (select 1 from inventory_batches b where b.order_id = o.id and b.kind = 'ship') "
+            "and exists (select 1 from order_items oi join products p on p.id = oi.product_id "
+            "            where oi.order_id = o.id and coalesce(p.web_dropship_ok, false)) "
+            "order by o.id limit 50"
+        ),
+        {"d": RECENT_DAYS},
+    ).all()
+    made, problems = [], []
+    for o in rows:
+        try:
+            k = fulfillment.key_of("Website", o.order_number)
+            if (fulfillment.decisions_for(db, [k]).get(k) or {}).get("decision") == "stock":
+                continue  # a person chose to ship this one from our own shelf
+            drop, other = _web_lines(db, o.id)
+            if not drop:
+                continue
+            if other:
+                msg = (
+                    f"MIXED ORDER: {len(drop)} part(s) are set to drop ship but {len(other)} are not ({', '.join(other)[:150]}). "
+                    "Nothing was ordered. Use 'Ship from our stock' to pick the whole order here, or make the drop ship PO yourself."
+                )
+                _web_problem(db, o.order_number, o.id, msg, user)
+                problems.append({"order": WEB_PREFIX + o.order_number, "problem": msg})
+                continue
+            res = _make_web_job(db, o, drop, user)
+            (problems if res.get("problem") else made).append(res)
+        except Exception:
+            db.rollback()
+            log.exception("drop ship check failed for website order %s", o.order_number)
+    return {"checked": len(rows), "made": made, "problems": problems}
+
+
 def scan_new_orders(db: Session, user: AuthUser = SYSTEM_USER) -> dict:
     _ensure(db)
     rows = db.execute(
@@ -207,7 +356,14 @@ def scan_if_enabled() -> None:
     db = _session_factory()()
     try:
         scan_new_orders(db)
+        try:
+            scan_web_orders(db)  # paid website orders for products ticked Drop ship
+        except Exception:
+            db.rollback()
+            log.exception("automatic drop ship check of website orders failed")
+        handle_cancelled_orders(db)  # an eBay order the buyer cancelled stops here, before anything else moves
         run_automatic(db)
+        _flag_cancel_window(db)
     except Exception:
         db.rollback()
         log.exception("automatic drop ship check failed")
@@ -245,7 +401,8 @@ def list_jobs(stage: Optional[str] = Query(None, max_length=20), db: Session = D
         text(
             "select j.id, j.ebay_order_id, j.store, j.po_id, coalesce(h.po_number, j.po_number) as po_number, j.stage, j.ship_service, "
             "j.buyer_name, j.problem, j.created_at, j.confirmed_by, j.confirmed_at, "
-            "j.quote, j.ship_method, j.supplier_order, j.supplier_mode, j.tracking_number, j.tracking_carrier, j.note, j.tries "
+            "j.quote, j.ship_method, j.supplier_order, j.supplier_mode, j.tracking_number, j.tracking_carrier, j.note, j.tries, "
+            "j.channel, j.web_order_id "
             "from dropship_jobs j left join po_headers h on h.id = j.po_id "
             + ("where j.stage in ('review_po', 'po_confirmed', 'review_quote', 'review_tracking') " if stage == "review"
                else "where j.stage = :s " if stage else "where j.stage <> 'dismissed' ")
@@ -273,6 +430,12 @@ def list_jobs(stage: Optional[str] = Query(None, max_length=20), db: Session = D
 @needs(*PERMS)
 def scan_now(db: Session = Depends(get_db), user: AuthUser = Depends(require_route_access)):
     out = scan_new_orders(db, user)
+    try:
+        out["web"] = scan_web_orders(db, user)
+    except Exception:
+        db.rollback()
+        log.exception("check of website orders failed")
+        out["web"] = {"error": True}
     out["tracking_ready"] = advance_tracking(db)
     out["automatic"] = run_automatic(db)
     return out
@@ -417,7 +580,7 @@ def _order_in(db: Session, job, method: Optional[str], confirm: bool):
     addr = {k: v for k, v in (po["ship_to"] or {}).items() if k in OrderAddress.model_fields}
     return OrderIn(
         po_number=str(po["po_number"]),
-        comment=f"Drop ship for eBay order {job.ebay_order_id}"[:200],
+        comment=(f"Drop ship for website order {str(job.ebay_order_id)[len(WEB_PREFIX):]}" if _is_web(job.ebay_order_id) else f"Drop ship for eBay order {job.ebay_order_id}")[:200],
         shipping_method=method or "",
         ship_to=OrderAddress(**addr),
         items=[OrderLine(number=l["number"], quantity=int(l["quantity"])) for l in po["lines"]],
@@ -512,6 +675,16 @@ def place_job(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depen
         ),
         {"i": job_id},
     ).first()
+    if db.execute(
+        text(
+            "select 1 where exists (select 1 from ebay_orders where ebay_order_id = :o and cancelled) "
+            "or exists (select 1 from orders where 'web:' || order_number = :o and status = 'cancelled')"
+        ),
+        {"o": full.ebay_order_id},
+    ).first():
+        # the buyer's cancellation already reached us: nothing is sent to the distributor
+        handle_cancelled_orders(db, only_job=job_id)
+        raise HTTPException(409, "This order was cancelled, so it was not placed with the distributor.")
     if not full.ship_method:
         raise HTTPException(409, "Pick a shipping option first.")
     try:
@@ -566,36 +739,241 @@ def place_job(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depen
 
 
 # --------------------------------------------------------------------------
+# the buyer cancelled the eBay order: stop the PO, or cancel the distributor's order, or say a return is needed
+# --------------------------------------------------------------------------
+CANCEL_PREFIX = "eBay order cancelled"
+
+
+def _set_cancel_state(db: Session, job_id: int, problem: str, stage: Optional[str] = None) -> None:
+    """Writes the message only when it changed, so a job that is retried every few minutes does not keep touching itself."""
+    db.execute(
+        text(
+            "update dropship_jobs set problem = cast(:m as text), stage = coalesce(cast(:s as text), stage), updated_at = now() "
+            "where id = :i and (problem is distinct from cast(:m as text) or (cast(:s as text) is not null and stage <> cast(:s as text)))"
+        ),
+        {"m": problem[:500], "s": stage, "i": job_id},
+    )
+    db.commit()
+
+
+def _cancel_open_po(db: Session, po_id, reason: str) -> None:
+    from app.admin_purchase_orders import CancelIn, cancel_po
+
+    if not po_id:
+        return
+    st = db.execute(text("select status from po_headers where id = :p"), {"p": po_id}).scalar()
+    if st and st not in ("cancelled", "received"):
+        try:
+            cancel_po(po_id, CancelIn(reason=reason), db=db, user=SYSTEM_USER)
+        except HTTPException:
+            db.rollback()  # already cancelled or received in the meantime: nothing more to do
+
+
+def handle_cancelled_orders(db: Session, only_job: Optional[int] = None) -> dict:
+    """Every drop ship job whose eBay order the buyer cancelled:
+      * the distributor has no order yet (waiting at the PO / quote / hold steps): its PO is cancelled and the job closed;
+      * the distributor has the order and has NOT invoiced it: the order is cancelled with them, then the PO, then the job closed;
+      * the distributor already invoiced it (it has shipped): the job moves to 'return_needed' with the order number, because
+        only a return can be arranged from there;
+      * the distributor could not be reached: the job is left as it is with a note, and tried again after 15 minutes.
+    A job being placed right now is skipped and picked up on the next pass."""
+    from app.autodist import CancelOrderIn, api_order_cancel
+
+    _ensure(db)
+    out = {"stopped": 0, "distributor_cancelled": 0, "return_needed": 0, "retry_later": 0}
+    rows = db.execute(
+        text(
+            "select j.id, j.stage, j.po_id, j.po_number, j.supplier_order, j.problem, j.ebay_order_id, j.channel "
+            "from dropship_jobs j "
+            "left join ebay_orders o on j.channel = 'ebay' and o.ebay_order_id = j.ebay_order_id "
+            "left join orders w on j.channel = 'web' and 'web:' || w.order_number = j.ebay_order_id "
+            "where (coalesce(o.cancelled, false) or w.status = 'cancelled') and j.stage not in ('done', 'dismissed', 'return_needed', 'placing') "
+            "and (j.problem is null or (j.problem not like cast(:pfx as text) and j.problem not like cast(:wpfx as text)) "
+            "     or j.updated_at < now() - interval '15 minutes') "
+            + ("and j.id = :jid " if only_job else "")
+            + "order by j.id limit 50"
+        ),
+        {"pfx": CANCEL_PREFIX + "%", "wpfx": WEB_CANCEL_PREFIX + "%", **({"jid": only_job} if only_job else {})},
+    ).all()
+    for r in rows:
+        web = r.channel == "web"
+        pfx = WEB_CANCEL_PREFIX if web else CANCEL_PREFIX
+        why = f"Website order {str(r.ebay_order_id)[len(WEB_PREFIX):]} was cancelled" if web else f"The buyer cancelled eBay order {r.ebay_order_id}"
+        try:
+            so = None
+            pn = str(r.po_number or "").strip()
+            if r.supplier_order or pn:
+                so = db.execute(
+                    text(
+                        "select id, order_number, status from supplier_orders where supplier = 'autodist' and order_number <> '' "
+                        "and ((cast(:on as text) <> '' and order_number = cast(:on as text)) or (cast(:on as text) = '' and cast(:pn as text) <> '' and cast(po_number as text) = cast(:pn as text))) "
+                        "order by id desc limit 1"
+                    ),
+                    {"on": r.supplier_order or "", "pn": pn},
+                ).first()
+            if so is None and r.stage == "problem" and (r.problem or "").startswith("CHECK WITH THE DISTRIBUTOR"):
+                # placing the order got no answer: the distributor may have it and we cannot tell from here
+                _set_cancel_state(db, r.id, f"{pfx}, and the order may already be with the distributor. Check Automatic Distributors for the order from PO {pn} and cancel it there if it exists.", "return_needed")
+                out["return_needed"] += 1
+                continue
+            done_with = "no order had been placed with the distributor"
+            if so is not None:
+                if str(so.status or "").strip().lower() == "cancelled":
+                    done_with = f"distributor order {so.order_number} was already cancelled"
+                else:
+                    try:
+                        api_order_cancel(so.id, CancelOrderIn(confirm=True), db=db, user=SYSTEM_USER)
+                    except HTTPException as e:
+                        db.rollback()
+                        detail = str(e.detail)
+                        if e.status_code in (404, 409):
+                            # invoiced / shipped, or on the other server: a person has to take it from here
+                            ret = "invoiced" in detail.lower() or "shipped" in detail.lower()
+                            head = "RETURN NEEDED: " if ret else "NEEDS YOU: "
+                            _set_cancel_state(db, r.id, f"{pfx}. {head}{detail} Distributor order {so.order_number}, PO {pn}.", "return_needed")
+                            out["return_needed"] += 1
+                            continue
+                        _set_cancel_state(db, r.id, f"{pfx}, but the distributor order {so.order_number} is NOT cancelled yet: {detail[:300]} It will be tried again.")
+                        out["retry_later"] += 1
+                        if e.status_code == 429:
+                            break
+                        continue
+                    done_with = f"distributor order {so.order_number} cancelled"
+                    out["distributor_cancelled"] += 1
+            _cancel_open_po(db, r.po_id, f"{why}; {done_with}")
+            db.execute(
+                text("update dropship_jobs set stage = 'dismissed', problem = null, note = :n, updated_at = now() where id = :i"),
+                {"n": f"{why}: {done_with}.", "i": r.id},
+            )
+            db.commit()
+            out["stopped"] += 1
+        except Exception:
+            db.rollback()
+            log.exception("could not handle the cancelled eBay order %s", r.ebay_order_id)
+    return out
+
+
+def _flag_cancel_window(db: Session) -> None:
+    """The distributor has invoiced (shipped) an order but eBay has no tracking yet: the buyer can still ask to cancel on
+    eBay, and nothing can stop this shipment any more. Say so on the job so that request gets declined, not accepted."""
+    try:
+        db.execute(
+            text(
+                "update dropship_jobs j set note = :m || case when coalesce(j.note, '') = '' then '' else ' | ' || j.note end, updated_at = now() "
+                "from supplier_orders so, ebay_orders o "
+                "where j.stage = 'placed' and so.supplier = 'autodist' and so.order_number = j.supplier_order "
+                "and upper(coalesce(so.status, '')) in ('4', '4S', 'H') "
+                "and o.ebay_order_id = j.ebay_order_id and not o.cancelled and o.shipped_at_ebay is null "
+                "and coalesce(j.note, '') not like 'Heads-up:%'"
+            ),
+            {"m": "Heads-up: the distributor has already invoiced and shipped this order, but eBay has no tracking yet. If the buyer asks to cancel on eBay, DECLINE it (a cancel cannot stop this shipment); a return is the only way back."},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("could not flag the cancel window")
+
+
+@router.post("/jobs/{job_id}/dismiss")
+@needs(*PERMS)
+def dismiss_job(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(require_route_access)):
+    """Clears an order that was cancelled on eBay after the distributor had shipped it, once the return (or the cancel at
+    the distributor) has been taken care of by hand."""
+    j = _job(db, job_id)
+    if j.stage != "return_needed":
+        raise HTTPException(409, "Only a cancelled order that is waiting for you can be cleared here.")
+    db.execute(
+        text("update dropship_jobs set stage = 'dismissed', note = :n, updated_at = now() where id = :i"),
+        {"n": f"Cancelled on eBay; handled by {user.email}.", "i": job_id},
+    )
+    db.commit()
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
 # step 6: tracking back, then eBay
 # --------------------------------------------------------------------------
+def _destination(db: Session, job_id: int) -> str:
+    """Where a job's tracking goes, for messages."""
+    ch = db.execute(text("select channel from dropship_jobs where id = :i"), {"i": job_id}).scalar()
+    return "the website order" if ch == "web" else "eBay"
+
+
+def _web_tracking(db: Session) -> list[int]:
+    """A placed WEBSITE order whose distributor order is fully shipped and has a parcel tracking number moves to 'review_tracking'
+    (the tracking is read straight from the distributor order the tracking check keeps up to date). Returns the job ids."""
+    from app import autodist
+
+    try:
+        rows = db.execute(
+            text(
+                "select j.id, so.tracking, so.status from dropship_jobs j "
+                "join supplier_orders so on so.supplier = 'autodist' and so.order_number = j.supplier_order "
+                "where j.channel = 'web' and j.stage = 'placed' and so.tracking is not null"
+            )
+        ).all()
+    except Exception:
+        db.rollback()
+        log.exception("could not look for tracking on website drop ship orders")
+        return []
+    out: list[int] = []
+    for r in rows:
+        try:
+            items = r.tracking if isinstance(r.tracking, list) else json.loads(r.tracking or "[]")
+        except ValueError:
+            continue
+        if not isinstance(items, list) or autodist._not_shipped_yet(r.status):
+            continue  # not everything has gone out yet: wait for the rest
+        parcel = next((i for i in items if isinstance(i, dict) and i.get("kind") == "tracking" and i.get("number")), None)
+        if not parcel:
+            continue
+        num = re.sub(r"\s+", "", str(parcel["number"]))
+        if not _TRACK_OK.match(num):
+            continue
+        got = db.execute(
+            text(
+                "update dropship_jobs set stage = 'review_tracking', problem = null, tracking_number = :t, tracking_carrier = :c, updated_at = now() "
+                "where id = :i and stage = 'placed' returning id"
+            ),
+            {"t": num, "c": autodist._guess_carrier(num, parcel.get("carrier")), "i": r.id},
+        ).first()
+        if got:
+            out.append(int(got.id))
+    db.commit()
+    return out
+
+
 def advance_tracking(db: Session) -> int:
     """A placed order whose tracking has reached its eBay order (the Automatic Distributors tracking check does that) moves to
     'review_tracking'. With "Manual checks" OFF it is then sent to eBay straight away; with it ON
     nothing is sent here and a person checks it first."""
     _ensure(db)
+    web_ids = _web_tracking(db)
     rows = db.execute(
         text(
             "update dropship_jobs j set stage = 'review_tracking', problem = null, tracking_number = o.tracking_number, "
-            "tracking_carrier = o.tracking_carrier, updated_at = now() "
-            "from ebay_orders o where j.stage = 'placed' and o.ebay_order_id = j.ebay_order_id "
+            "tracking_carrier = o.tracking_carrier, updated_at = now(), "
+            "note = case when j.note like 'Heads-up:%' then null else j.note end "
+            "from ebay_orders o where j.stage = 'placed' and o.ebay_order_id = j.ebay_order_id and not o.cancelled "
             "and coalesce(o.tracking_number, '') <> '' returning j.id"
         )
     ).all()
     db.commit()
-    if rows and not _settings(db)["manual_checks"]:
-        for r in rows:
+    ids = [r.id for r in rows] + web_ids
+    if ids and not _settings(db)["manual_checks"]:
+        for jid in ids:
             try:
-                _send_tracking_now(db, r.id, SYSTEM_USER)
+                _send_tracking_now(db, jid, SYSTEM_USER)
             except Exception as e:
                 db.rollback()
                 msg = str(getattr(e, "detail", e))[:300]
-                log.warning("automatic send of tracking to eBay failed for job %s: %s", r.id, msg)
+                log.warning("automatic send of tracking failed for job %s: %s", jid, msg)
                 db.execute(
                     text("update dropship_jobs set problem = :m, updated_at = now() where id = :i"),
-                    {"m": "Tracking was NOT sent to eBay automatically: " + msg + " Check it here and send it yourself.", "i": r.id},
+                    {"m": f"Tracking was NOT sent to {_destination(db, jid)} automatically: " + msg + " Check it here and send it yourself.", "i": jid},
                 )
                 db.commit()
-    return len(rows)
+    return len(ids)
 
 
 def run_automatic(db: Session) -> dict:
@@ -683,7 +1061,7 @@ def _retry_failures(db: Session) -> int:
             if r.stage == "review_tracking":
                 db.execute(
                     text("update dropship_jobs set problem = :m where id = :i"),
-                    {"m": f"Tracking was NOT sent to eBay automatically: {msg} Check it and send it yourself.", "i": r.id},
+                    {"m": f"Tracking was NOT sent to {_destination(db, r.id)} automatically: {msg} Check it and send it yourself.", "i": r.id},
                 )
                 db.commit()
     return n
@@ -718,10 +1096,40 @@ def _flag_freight(db: Session) -> None:
     db.commit()
 
 
+def _ship_web_order(db: Session, job_id: int, j, user: AuthUser) -> None:
+    """The distributor shipped a website order: mark it shipped with the tracking number (the customer sees it on Track order and in
+    their order), and finish the job. Parts never touched our shelf, so no stock changes here."""
+    num = (j.tracking_number or "").strip()
+    if not num:
+        raise HTTPException(409, "No tracking number is on that order yet.")
+    carrier = (j.tracking_carrier or "").strip() or None
+    number = str(j.ebay_order_id)[len(WEB_PREFIX):]
+    row = db.execute(
+        text(
+            "update orders set status = 'shipped', shipped_at = now(), shipped_by = :by, tracking_number = :t, carrier = :c "
+            "where lower(order_number) = lower(:n) and status = 'paid' and shipped_at is null returning id, order_number"
+        ),
+        {"by": user.email, "t": num, "c": carrier, "n": number},
+    ).first()
+    if not row:
+        db.rollback()
+        raise HTTPException(409, f"Website order {number} is not waiting to ship (it was cancelled or is already shipped).")
+    from app import order_activity
+
+    order_activity.log_action(db, user, "tracking_shipped", "Website", row.order_number, f"{carrier + ' ' if carrier else ''}{num}")
+    db.execute(text("update dropship_jobs set stage = 'done', problem = null, shipped_at = now(), updated_at = now() where id = :i"), {"i": job_id})
+    db.commit()
+
+
 def _send_tracking_now(db: Session, job_id: int, user: AuthUser) -> None:
     """Tell eBay the order shipped with this job's tracking number (eBay then notifies the buyer), and mark the job done."""
     from app.ebay_sales import ShipIn, mark_shipped
 
+    w = db.execute(
+        text("select j.channel, j.ebay_order_id, j.tracking_number, j.tracking_carrier from dropship_jobs j where j.id = :i"), {"i": job_id}
+    ).first()
+    if w is not None and w.channel == "web":
+        return _ship_web_order(db, job_id, w, user)
     r = db.execute(
         text("select j.tracking_number, j.tracking_carrier, o.id as order_pk from dropship_jobs j join ebay_orders o on o.ebay_order_id = j.ebay_order_id where j.id = :i"),
         {"i": job_id},
@@ -838,10 +1246,51 @@ def enter_tracking(job_id: int, body: CarrierTrackingIn, db: Session = Depends(g
         _send_tracking_now(db, job_id, user)
     except HTTPException as e:
         db.rollback()
-        db.execute(text("update dropship_jobs set problem = :m where id = :i"), {"m": f"eBay did not accept that tracking: {str(e.detail)[:300]}", "i": job_id})
+        db.execute(text("update dropship_jobs set problem = :m where id = :i"), {"m": f"The order did not accept that tracking: {str(e.detail)[:300]}", "i": job_id})
         db.commit()
         raise
     return {"ok": True, "stage": "done"}
+
+
+def _web_ship_from_stock(db: Session, j, user: AuthUser) -> dict:
+    """Website version of the way out: cancel the PO if there is one, set the parts aside on our shelf again, and leave the order to be
+    picked normally."""
+    from app import fulfillment
+    from app.admin_purchase_orders import CancelIn, cancel_po
+    from app.stock import lock_products
+
+    number = str(j.ebay_order_id)[len(WEB_PREFIX):]
+    if j.po_id:
+        st = db.execute(text("select status from po_headers where id = :p"), {"p": j.po_id}).scalar()
+        if st and st != "cancelled":
+            cancel_po(j.po_id, CancelIn(reason=f"Shipping website order {number} from our own stock instead"), db=db, user=user)
+    lines = db.execute(
+        text(
+            "select oi.product_id, sum(oi.quantity) as q from order_items oi join orders o on o.id = oi.order_id "
+            "where lower(o.order_number) = lower(:n) and o.status = 'paid' and oi.product_id is not null "
+            "and not exists (select 1 from stock_reservations r where r.order_id = oi.order_id and r.product_id = oi.product_id) "
+            "group by oi.product_id"
+        ),
+        {"n": number},
+    ).all()
+    if lines:
+        oid = db.execute(text("select id from orders where lower(order_number) = lower(:n)"), {"n": number}).scalar()
+        lock_products(db, [int(l.product_id) for l in lines])
+        for l in lines:
+            db.execute(
+                text("insert into stock_reservations (order_id, product_id, quantity, status, expires_at) values (:o, :p, :q, 'reserved', null)"),
+                {"o": oid, "p": int(l.product_id), "q": int(l.q)},
+            )
+        try:
+            from app.ebay_sales import queue_stock_push
+
+            queue_stock_push(db, [int(l.product_id) for l in lines])
+        except Exception:
+            log.exception("could not queue quantity updates after moving website order %s to our own stock", number)
+    fulfillment.record_decision(db, "Website", number, "stock", user.email, ["Could not be drop shipped; shipping from our own stock"])
+    db.execute(text("update dropship_jobs set stage = 'dismissed', updated_at = now() where id = :i"), {"i": j.id})
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/jobs/{job_id}/ship-from-stock")
@@ -854,11 +1303,13 @@ def ship_from_stock(job_id: int, db: Session = Depends(get_db), user: AuthUser =
     from app.admin_purchase_orders import CancelIn, cancel_po
     from app.ebay_sales import undo_lines_dropship
 
-    j = db.execute(text("select id, stage, po_id, ebay_order_id from dropship_jobs where id = :i"), {"i": job_id}).first()
+    j = db.execute(text("select id, stage, po_id, ebay_order_id, channel from dropship_jobs where id = :i"), {"i": job_id}).first()
     if not j:
         raise HTTPException(404, "That drop ship order is not in the list.")
     if j.stage in ("placing", "placed", "review_tracking", "done", "dismissed"):
         raise HTTPException(409, "The distributor already has this order, so it cannot be moved to our own stock from here.")
+    if j.channel == "web":
+        return _web_ship_from_stock(db, j, user)
     pids: list[int] = []
     if j.po_id:
         pids = [int(r.product_id) for r in db.execute(text("select product_id from po_lines where po_id = :p and product_id is not null"), {"p": j.po_id}).all()]
@@ -902,7 +1353,7 @@ def retry_job(job_id: int, db: Session = Depends(get_db)):
 _PLACED = "coalesce(j.placed_at, case when j.stage in ('placed', 'review_tracking', 'done') then j.updated_at end)"
 _SHIPPED = "coalesce(j.shipped_at, case when j.stage = 'done' then j.updated_at end)"
 _BASIS = {"received": "j.created_at", "placed": _PLACED, "shipped": _SHIPPED}
-_WAITING_STAGES = ("review_po", "po_confirmed", "review_quote", "placing", "placed", "review_tracking", "held", "problem")
+_WAITING_STAGES = ("review_po", "po_confirmed", "review_quote", "placing", "placed", "review_tracking", "held", "return_needed", "problem")
 
 
 def _when(raw: str, default):
@@ -982,8 +1433,11 @@ def activity(
             select j.id, j.ebay_order_id, j.store, coalesce(h.po_number, j.po_number) as po_number, j.stage, j.buyer_name, j.ship_service,
                    j.supplier_order, j.supplier_mode, j.tracking_number, j.tracking_carrier, j.problem, j.created_at,
                    {_PLACED} as placed_at, {_SHIPPED} as shipped_at,
-                   (select coalesce(sum(l.quantity), 0) from ebay_order_lines l where l.ebay_order_id = j.ebay_order_id) as units,
-                   (select min(coalesce(l.title, '')) from ebay_order_lines l where l.ebay_order_id = j.ebay_order_id) as title
+                   case when j.channel = 'web' then (select coalesce(sum(oi.quantity), 0) from order_items oi where oi.order_id = j.web_order_id)
+                        else (select coalesce(sum(l.quantity), 0) from ebay_order_lines l where l.ebay_order_id = j.ebay_order_id) end as units,
+                   case when j.channel = 'web' then (select min(coalesce(oi.title, '')) from order_items oi where oi.order_id = j.web_order_id)
+                        else (select min(coalesce(l.title, '')) from ebay_order_lines l where l.ebay_order_id = j.ebay_order_id) end as title,
+                   j.channel
             {frm} where {w} order by {col} desc nulls last, j.id desc limit :lim offset :off
             """
         ),

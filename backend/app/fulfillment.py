@@ -193,14 +193,39 @@ def urgent_orders(db: Session) -> dict[str, list[str]]:
     except Exception:
         db.rollback()
         flags = {}
+    # A website order is "unflagged" when its product is not ticked Drop ship on the website: nothing is ordered by itself, so a person is asked.
+    web_flags: dict[int, bool] = {}
+    web_ids = sorted({int(r.product_id) for r in short if r.channel == "Website" and r.product_id is not None})
+    if web_ids:
+        try:
+            web_flags = {
+                int(x.id): bool(x.f)
+                for x in db.execute(
+                    text("select id, coalesce(web_dropship_ok, false) as f from products where id = any(cast(:i as bigint[]))"), {"i": web_ids}
+                ).all()
+            }
+        except Exception:
+            db.rollback()
     for r in short:
         d = avail.get(r.product_id)
         have = d["available"] if d else 0
         detail = d["detail"] if d else "no distributor is linked to this product"
         covered = r.ordered - r.short
-        unflagged = r.channel == "eBay" and flags.get((r.order_ref, int(r.product_id))) is False
+        if (
+            r.channel == "Website"
+            and web_flags.get(int(r.product_id)) is False
+            and have <= 0
+            and not (d and d["unknown"])
+        ):
+            # Not ticked Drop ship, our shelf is short, and the distributor's warehouses (Indiana, Nevada) have none either, or no
+            # distributor is linked: there is nothing to ask. The part is simply out of stock, so it is not urgent.
+            continue
+        unflagged = (r.channel == "eBay" and flags.get((r.order_ref, int(r.product_id))) is False) or (
+            r.channel == "Website" and web_flags.get(int(r.product_id)) is False
+        )
+        where = "the listing it was bought from" if r.channel == "eBay" else "the product"
         note = (
-            f"{r.sku}: short on our shelf (by {r.short}), and the listing it was bought from is not set to Drop ship, so no "
+            f"{r.sku}: short on our shelf (by {r.short}), and {where} is not set to Drop ship, so no "
             f"drop ship order is made by itself; {detail}. Decide whether to drop ship it or ship it from our own stock."
         )
         if have < r.short:

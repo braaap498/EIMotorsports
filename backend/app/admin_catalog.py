@@ -1021,14 +1021,36 @@ def get_product(product_id: int, db: Session = Depends(get_db), user: AuthUser =
         d["thumb"] = thumb_url(d["image_key"]) or d["source_url"]
         out.append(d)
     data = {**dict(row._mapping), "photos": out}
-    try:  # the Drop ship tick lives on the product (set through /availability/products/{id}/dropship)
-        data["dropship_ok"] = bool(db.execute(text("select coalesce(dropship_ok, false) from products where id = :i"), {"i": product_id}).scalar())
+    try:  # the website's own Drop ship tick (set through /products/{id}/web-dropship); eBay drop shipping is set per listing
+        data["web_dropship_ok"] = bool(db.execute(text("select coalesce(web_dropship_ok, false) from products where id = :i"), {"i": product_id}).scalar())
     except Exception:
         db.rollback()
-        data["dropship_ok"] = False
+        data["web_dropship_ok"] = False
     if not has_perm(user, "products.edit_price"):
         data.pop("cost", None)  # what the shop paid is only shown to people who can change prices
     return data
+
+
+class WebDropshipIn(BaseModel):
+    on: bool
+
+
+@router.post("/products/{product_id}/web-dropship")
+@needs("products.publish")
+def set_web_dropship(product_id: int, body: WebDropshipIn, db: Session = Depends(get_db)):
+    """Tick or untick Drop ship for WEBSITE orders of this product. It does not touch eBay (those ticks are per listing in Sales
+    channels). Ticked: the website shows the distributor's stock and a paid order is ordered from the distributor automatically.
+    Needs every part of the product matched to the distributor's catalog."""
+    from app.availability import NO_DISTRIBUTOR_MSG, has_distributor
+
+    _product_or_404(db, product_id)
+    if body.on and not has_distributor(db, product_id):
+        raise HTTPException(409, NO_DISTRIBUTOR_MSG)
+    db.execute(
+        text("update products set web_dropship_ok = :v, updated_at = now() where id = :i"), {"v": body.on, "i": product_id}
+    )
+    db.commit()
+    return {"web_dropship_ok": body.on}
 
 
 @router.post("/products", status_code=201)

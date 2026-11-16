@@ -126,7 +126,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const mayPrice = can("products.edit_price");
   const mayStock = can("inventory.adjust");
   const mayPublish = can("products.publish");
-  const [dropship, setDropship] = useState(false); // sold from the distributor's stock: website orders (and eBay orders) are ordered from them automatically
+  const [dropship, setDropship] = useState(false); // website only: sold from the distributor's stock, paid website orders are ordered from them automatically
   const [dropshipOrig, setDropshipOrig] = useState(false);
   const maySave = productId
     ? can("products.edit_details", "products.edit_price", "inventory.adjust", "products.publish", "fitment.add")
@@ -218,8 +218,8 @@ export default function ProductForm({ productId }: { productId?: number }) {
           show_part_number: !!p.show_part_number,
         };
         setVals(next);
-        setDropship(!!p.dropship_ok);
-        setDropshipOrig(!!p.dropship_ok);
+        setDropship(!!p.web_dropship_ok);
+        setDropshipOrig(!!p.web_dropship_ok);
         setFlags(loadedFlags);
         setOriginal({ vals: next, flags: loadedFlags });
         const base = buildPayload(next, loadedFlags);
@@ -277,13 +277,13 @@ export default function ProductForm({ productId }: { productId?: number }) {
         let failed = false;
         if (dropship !== dropshipOrig) {
           try {
-            await api(`/availability/products/${productId}/dropship`, { method: "POST", body: { on: dropship, off_mode: "restore" } });
+            await api(`/products/${productId}/web-dropship`, { method: "POST", body: { on: dropship } });
             setDropshipOrig(dropship);
-            text += dropship ? ". Drop ship is ON" : ". Drop ship is OFF";
+            text += dropship ? ". Website drop ship is ON" : ". Website drop ship is OFF";
           } catch (err) {
             setDropship(dropshipOrig);
             failed = true;
-            text += `. Drop ship was NOT changed: ${errMsg(err)}`;
+            text += `. Website drop ship was NOT changed: ${errMsg(err)}`;
           }
         }
         setMsg({ kind: failed ? "error" : "success", text });
@@ -555,9 +555,9 @@ export default function ProductForm({ productId }: { productId?: number }) {
               Active
             </label>
             {productId ? (
-              <label className="flex items-center gap-2" title="Needs the part matched to the Automatic Distributors catalog. Turning it on also ticks Drop ship on every eBay listing of this product.">
+              <label className="flex items-center gap-2" title="Website only. Needs the part matched to the Automatic Distributors catalog. eBay drop shipping is not affected: it is set per listing in Sales channels.">
                 <input type="checkbox" disabled={!mayPublish} checked={dropship} onChange={(e) => setDropship(e.target.checked)} />
-                Drop ship (website and eBay orders are ordered from the distributor automatically)
+                Drop ship on the website (paid website orders are ordered from the distributor automatically)
               </label>
             ) : null}
           </div>
