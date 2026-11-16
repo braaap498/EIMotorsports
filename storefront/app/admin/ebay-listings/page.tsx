@@ -232,7 +232,9 @@ export default function EbayLiveListingsPage() {
   // The store, Show and Order boxes read it as soon as they change. Nothing happens until the first read is done.
   useEffect(() => {
     if (!restored.current || q.trim() === lastQ.current) return;
-    const t = setTimeout(() => void loadRepo(0, { store, q, sort, statusF }), 350);
+    const t = setTimeout(() => {
+      if (q.trim() !== lastQ.current) void loadRepo(0, { store, q, sort, statusF }); // Enter may already have loaded it
+    }, 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q]);

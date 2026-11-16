@@ -27,6 +27,7 @@ its own eBay user name; if it does not, the store name itself is used as the use
 import logging
 import os
 import re
+from types import SimpleNamespace
 import threading
 import time
 import urllib.parse
@@ -315,6 +316,29 @@ _REPO_SORTS = {
 }
 
 
+_speed_ready = False
+
+
+def _ensure_speed_indexes(db: Session) -> None:
+    """Once per server start: indexes for the lookups the listings table does (best effort; each is skipped if it cannot be made)."""
+    global _speed_ready
+    if _speed_ready:
+        return
+    _speed_ready = True
+    for ddl in (
+        "create index if not exists ix_ebay_report_rows_item on ebay_report_rows (item_id)",
+        "create index if not exists ix_ebay_api_details_item on ebay_api_details (item_id)",
+        "create index if not exists ix_ebay_compat_items_item on ebay_compat_items (item_id)",
+        f"create index if not exists ix_channel_listings_digits on channel_listings (({_DIGITS.replace('cl.', '')}))",
+        "create index if not exists ix_channel_listings_store_lower on channel_listings ((lower(store)))",
+    ):
+        try:
+            db.execute(text(ddl))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+
 def _repo_order(sort: str) -> str:
     """ORDER BY for the listings table. A column sort is "key" or "key:asc" / "key:desc" (keys: title, store, label, price, qty, status);
     blanks always come last. The older fixed choices (newest, title, price_low, price_high) still work."""
@@ -355,34 +379,29 @@ def repo_listings(
         who = _resolve(db, store)
         base = ["lower(cl.store) = lower(:store)", f"{_DIGITS} <> ''"]
         params = {"store": who["store"], "n": limit, "o": offset}
-    # counts and raw statuses for the whole store (the search box does not change them)
-    counts = db.execute(
-        text(
-            f"select count(*) as total, count(*) filter (where {_ACTIVE}) as active "
-            f"from channel_listings cl where {' and '.join(base)}"
-        ),
-        params,
-    ).first()
-    raw = db.execute(
-        text(
-            f"select lower(coalesce(nullif(btrim(cl.status), ''), '(none)')) as status, count(*) as n from channel_listings cl "
-            f"where {' and '.join(base)} group by 1 order by n desc"
-        ),
-        params,
-    ).all()
-
+    _ensure_speed_indexes(db)
     # "Draft" = a listing whose stored status is draft (report import), OR a live listing with edits saved on the
     # website that have not been pushed to eBay yet (ebay_listing_drafts). The table may not exist yet: then none.
+    # The saved-edits test is ONE list read once (not a lookup per listing), which is what keeps this fast.
     has_edits_table = bool(db.execute(text("select to_regclass('public.ebay_listing_drafts') is not null")).scalar())
     edits_sql = (
-        f"exists (select 1 from ebay_listing_drafts d where lower(d.store) = lower(cl.store) and d.item_id = {_DIGITS})"
+        f"((lower(cl.store), {_DIGITS}) in (select lower(d.store), d.item_id from ebay_listing_drafts d))"
         if has_edits_table
         else "false"
     )
     draft_sql = f"(lower(coalesce(cl.status, '')) = 'draft' or {edits_sql})"
-    draft_n = db.execute(
-        text(f"select count(*) from channel_listings cl where {' and '.join(base)} and {draft_sql}"), params
-    ).scalar() or 0
+    # counts for the whole store (the search box does not change them): all three numbers come from ONE pass over the store
+    agg = db.execute(
+        text(
+            f"select lower(coalesce(nullif(btrim(cl.status), ''), '(none)')) as status, count(*) as n, "
+            f"count(*) filter (where {_ACTIVE}) as active, count(*) filter (where {draft_sql}) as drafts "
+            f"from channel_listings cl where {' and '.join(base)} group by 1 order by n desc"
+        ),
+        params,
+    ).all()
+    raw = agg
+    counts = SimpleNamespace(total=sum(int(r.n) for r in agg), active=sum(int(r.active) for r in agg))
+    draft_n = sum(int(r.drafts) for r in agg)
 
     where = list(base)
     if status == "active":
