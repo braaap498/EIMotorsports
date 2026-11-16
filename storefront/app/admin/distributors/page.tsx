@@ -1,14 +1,13 @@
 "use client";
 
-import { useAccess } from "../../../components/admin/AdminAccess";
-import { Notice } from "../../../components/admin/ui";
-import DistributorList from "../../../components/admin/Distributors";
+import { useRouter } from "next/navigation";
+import { useEffect } from "react";
 
-// Every distributor you order from. Opens to each distributor's own page.
-export default function DistributorsPage() {
-  const { can } = useAccess();
-  if (!can("inventory.purchase")) {
-    return <Notice kind="error">Your account doesn’t have access to distributors.</Notice>;
-  }
-  return <DistributorList />;
+// The distributor list moved into the main Automatic Distributors page: pick a distributor in the drop down at the top.
+export default function DistributorsRedirect() {
+  const router = useRouter();
+  useEffect(() => {
+    router.replace("/admin/distributors/autodist");
+  }, [router]);
+  return <p className="text-sm text-gray-500">Loading…</p>;
 }

@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../../lib/adminApi";
-import { Badge, Notice, btnCls, btn2Cls, inputCls } from "../../../../components/admin/ui";
+import { Badge, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../../components/admin/ui";
+import { DistributorForm, deleteDistributor, isAutodist, useDistributors, type Dist } from "../../../../components/admin/Distributors";
 import { useAccess } from "../../../../components/admin/AdminAccess";
 import AutodistCatalog from "../../../../components/admin/AutodistCatalog";
 import AutodistOpportunities from "../../../../components/admin/AutodistOpportunities";
@@ -365,15 +365,9 @@ function AutodistInner() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <Link href="/admin/distributors" className="text-sm text-gray-600 underline">
-          ← All distributors
-        </Link>
-        <h1 className="mt-1 text-2xl font-semibold">Automatic Distributors</h1>
-        <p className="mt-1 text-sm text-gray-600">
-          Supplier parts, cost and warehouse stock. This is licensed data: it stays on this screen and is never shown on the public store.
-        </p>
-      </div>
+      <p className="text-sm text-gray-600">
+        Supplier parts, cost and warehouse stock. This is licensed data: it stays on this screen and is never shown on the public store.
+      </p>
 
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
       {!pending && ftpReview && (
@@ -843,9 +837,145 @@ function AutodistInner() {
   );
 }
 
-// Dealer cost and stock are licensed data: owners and admins only.
-export default function AutodistPage() {
+const AUTODIST = "autodist"; // the Automatic Distributors choice before it has been added to the PO list
+
+/** The distributor picker at the top: Automatic Distributors is the default choice. Its address, Edit and Add sit next to it. */
+function DistributorHub() {
   const { isAdmin } = useAccess();
-  if (!isAdmin) return <Notice kind="error">Your account doesn’t have access to this page.</Notice>;
-  return <AutodistInner />;
+  const { dists, loaded, flash, setFlash, reload } = useDistributors();
+  const [sel, setSel] = useState("");
+  const [editing, setEditing] = useState<Dist | "new" | null>(null);
+  const [preset, setPreset] = useState("");
+
+  const autodistRow = dists.find((d) => isAutodist(d.name));
+  const autodistValue = autodistRow ? String(autodistRow.id) : AUTODIST;
+  // once Automatic Distributors has been added to the PO list, its virtual choice becomes that row
+  const cur = sel === AUTODIST && autodistRow ? String(autodistRow.id) : sel;
+
+  useEffect(() => {
+    if (!loaded || sel) return;
+    const want = new URLSearchParams(window.location.search).get("d");
+    if (want && dists.some((d) => String(d.id) === want)) {
+      setSel(want);
+      return;
+    }
+    // Automatic Distributors is the default for owners and admins; anyone else starts on the first distributor
+    setSel(isAdmin ? autodistValue : dists[0] ? String(dists[0].id) : "");
+  }, [loaded, sel, dists, isAdmin, autodistValue]);
+
+  const row = dists.find((d) => String(d.id) === cur) ?? null;
+  const notListed = cur === AUTODIST;
+  const showCatalog = isAdmin && (notListed || (row !== null && isAutodist(row.name)));
+  const ordered = [...dists].sort((a, b) => Number(isAutodist(b.name)) - Number(isAutodist(a.name)) || a.name.localeCompare(b.name));
+
+  function start(target: Dist | "new", name = "") {
+    setPreset(name);
+    setEditing(target);
+    setFlash(null);
+  }
+
+  async function remove(d: Dist) {
+    try {
+      if (await deleteDistributor(d)) {
+        setSel("");
+        setEditing(null);
+        reload();
+        setFlash({ kind: "success", text: `${d.name} deleted.` });
+      }
+    } catch (e) {
+      setFlash({ kind: "error", text: errMsg(e) });
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
+
+      <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
+        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+          <label className="block text-sm font-medium text-gray-700">
+            <span className="mb-1 block">Distributor</span>
+            <select
+              className={`${inputCls} !w-72 text-base`}
+              value={cur}
+              disabled={!loaded}
+              onChange={(e) => {
+                setSel(e.target.value);
+                setEditing(null);
+                setFlash(null);
+              }}
+            >
+              {isAdmin && !autodistRow && <option value={AUTODIST}>Automatic Distributors</option>}
+              {ordered.map((d) => (
+                <option key={d.id} value={String(d.id)}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="min-w-[14rem] flex-1 text-sm text-gray-700">
+            {row ? (
+              <>
+                <div className="whitespace-pre-line">{row.address || "No address yet."}</div>
+                <div className="text-gray-500">{[row.email, row.phone].filter(Boolean).join(" · ")}</div>
+                {row.notes && <div className="text-gray-500">{row.notes}</div>}
+              </>
+            ) : notListed ? (
+              <div className="text-gray-500">Not on your purchase-order list yet. Add it to give it an address for purchase orders.</div>
+            ) : null}
+          </div>
+
+          <div className="flex flex-wrap gap-2 pt-6">
+            {row && (
+              <button type="button" className={btn2Cls} onClick={() => start(row)}>
+                Edit
+              </button>
+            )}
+            {notListed && (
+              <button type="button" className={btn2Cls} onClick={() => start("new", "Automatic Distributors")}>
+                Add to PO list
+              </button>
+            )}
+            <button type="button" className={btnCls} onClick={() => start("new")}>
+              Add a distributor
+            </button>
+            {row && (
+              <button type="button" className={dangerCls} onClick={() => void remove(row)}>
+                Delete
+              </button>
+            )}
+          </div>
+        </div>
+        <p className="text-xs text-gray-500">The address prints in the Vendor box on the purchase order, one line per line you type.</p>
+
+        {editing !== null && (
+          <DistributorForm
+            key={editing === "new" ? `new-${preset}` : editing.id}
+            dist={editing === "new" ? null : editing}
+            presetName={preset}
+            onCancel={() => setEditing(null)}
+            onSaved={() => {
+              setEditing(null);
+              reload();
+              setFlash({ kind: "success", text: "Distributor saved." });
+            }}
+          />
+        )}
+      </div>
+
+      {showCatalog ? (
+        <AutodistInner />
+      ) : row ? (
+        <p className="text-sm text-gray-500">{row.name} has no catalog or feed here. Its details above print on its purchase orders.</p>
+      ) : null}
+    </div>
+  );
+}
+
+// Everyone who can make purchase orders gets the picker. The catalog below it (dealer cost and stock, licensed data) is owners and admins only.
+export default function AutodistPage() {
+  const { can } = useAccess();
+  if (!can("inventory.purchase")) return <Notice kind="error">Your account doesn’t have access to distributors.</Notice>;
+  return <DistributorHub />;
 }
