@@ -912,6 +912,14 @@ def po_from_ebay_order(body: EbayDropIn, db: Session = Depends(get_db), user: Au
     )
     po["ship_service"] = svc or None
     po["buyer_name"] = (addr.get("full_name") or "").strip() or None
+    try:
+        from app import ebay_sales
+
+        # the distributor fills these lines, so they stop being "Set aside" on our shelf
+        ebay_sales.mark_lines_dropship(db, o.ebay_order_id, list(merged))
+    except Exception:
+        db.rollback()
+        log.exception("drop ship PO made for eBay order %s, but its lines could not be moved to Drop ship", o.ebay_order_id)
     return po
 
 
@@ -1262,6 +1270,15 @@ def cancel_po(po_id: int, body: CancelIn, db: Session = Depends(get_db), user: A
         db.rollback()
         log.exception("Cancelling a purchase order failed")
         raise HTTPException(500, f"The purchase order was not cancelled. ({type(exc).__name__})")
+    try:  # a cancelled drop ship PO: its eBay order lines go back to Set aside so the order is picked normally
+        src = db.execute(text("select source, po_type from po_headers where id = :i"), {"i": po_id}).first()
+        if src and str(src.source or "").startswith("ebay:") and src.po_type == "drop_ship":
+            from app import ebay_sales
+
+            ebay_sales.undo_lines_dropship(db, str(src.source)[5:], open_products)
+    except Exception:
+        db.rollback()
+        log.exception("PO %s was cancelled, but its eBay order lines could not be put back to Set aside", po_id)
     return {"ok": True, "po_number": h.po_number, "received_lines": sum(1 for l in lines if l.received_at is not None)}
 
 

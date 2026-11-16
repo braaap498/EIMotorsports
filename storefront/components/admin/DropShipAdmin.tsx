@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "./ui";
 import { PoReview, type DsJob } from "./DropShipReview";
+import DropShipActivity from "./DropShipActivity";
 
 /* Drop ship: every drop ship setting in one place.
    - the switches (count the distributor's stock, raise listings, make POs automatically)
@@ -46,7 +47,7 @@ const STAGE: Record<string, string> = {
 };
 
 export default function DropShipAdmin() {
-  const [tab, setTab] = useState<"products" | "orders">("products");
+  const [tab, setTab] = useState<"products" | "orders" | "activity">("products");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [avail, setAvail] = useState<Avail | null>(null);
   const [busy, setBusy] = useState("");
@@ -83,7 +84,7 @@ export default function DropShipAdmin() {
   const saveAvail = (patch: Partial<Avail>) =>
     run("avail", () => api<Avail>("/availability/settings", { method: "PUT", body: patch }), () => "Saved.");
 
-  const tabBtn = (k: "products" | "orders", label: string) => (
+  const tabBtn = (k: "products" | "orders" | "activity", label: string) => (
     <button
       type="button"
       onClick={() => setTab(k)}
@@ -163,9 +164,10 @@ export default function DropShipAdmin() {
       <div className="flex gap-2">
         {tabBtn("products", "Products and listings")}
         {tabBtn("orders", "Orders")}
+        {tabBtn("activity", "Activity")}
       </div>
 
-      {tab === "products" ? <ProductsTab avail={avail} setMsg={setMsg} /> : <OrdersTab busy={busy} run={run} setMsg={setMsg} />}
+      {tab === "products" ? <ProductsTab avail={avail} setMsg={setMsg} /> : tab === "activity" ? <DropShipActivity /> : <OrdersTab busy={busy} run={run} setMsg={setMsg} />}
     </div>
   );
 }

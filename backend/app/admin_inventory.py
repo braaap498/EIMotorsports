@@ -1359,15 +1359,52 @@ with q as (
   union all
   select 'eBay'::text, l.ebay_order_id, min(coalesce(l.sale_date, l.created_at)),
          sum(l.quantity)::int, min(coalesce(l.title, '')), count(*)::int, min(l.store), null::bigint,
-         case when bool_or(o.shipped_at_ebay is not null) then 'shipped' else 'pick' end
+         case when bool_or(o.shipped_at_ebay is not null) then 'shipped'
+              when bool_and(l.state = 'dropship') then 'dropship'
+              else 'pick' end
   from ebay_order_lines l
   join ebay_orders o on o.id = l.order_pk
-  where l.state = 'reserved'
+  where (l.state = 'reserved' or (l.state = 'dropship' and o.shipped_at_ebay is null))
     and (:q = '' or l.ebay_order_id ilike :like or l.ebay_item_id ilike :like or l.custom_label ilike :like
          or l.title ilike :like or o.tracking_number ilike :like)
   group by l.order_pk, l.ebay_order_id
 )
 """
+
+
+_DS_STAGE_LABEL = {
+    "review_po": "PO to check",
+    "po_confirmed": "PO checked",
+    "review_quote": "Quote to check",
+    "placing": "Placing order",
+    "placed": "Ordered, waiting for tracking",
+    "review_tracking": "Tracking to check",
+    "done": "Shipped",
+    "held": "On hold",
+    "problem": "Needs attention",
+}
+
+
+def _drop_ship_stages(db: Session, rows) -> dict[str, dict]:
+    """{eBay order number: where its drop ship job is} for the eBay orders on this page. The list must work without it."""
+    ids = [str(r.order_ref) for r in rows if r.channel == "eBay"]
+    if not ids:
+        return {}
+    try:
+        found = db.execute(
+            text(
+                "select j.ebay_order_id, j.stage, j.problem, coalesce(h.po_number, j.po_number) as po_number "
+                "from dropship_jobs j left join po_headers h on h.id = j.po_id where j.ebay_order_id = any(cast(:i as text[]))"
+            ),
+            {"i": ids},
+        ).all()
+    except Exception:
+        db.rollback()
+        return {}
+    return {
+        f.ebay_order_id: {"stage": f.stage, "label": _DS_STAGE_LABEL.get(f.stage, f.stage), "po_number": f.po_number, "problem": f.problem}
+        for f in found
+    }
 
 
 @router.get("/queue")
@@ -1432,6 +1469,7 @@ def order_queue(
         db.rollback()
         decided = {}
     ds_pos = _drop_ship_pos(db, [*pinned, *rows])
+    ds_stage = _drop_ship_stages(db, [*pinned, *rows])
     wh_name = _default_warehouse_name(db)
     items = []
     for r in [*pinned, *rows]:
@@ -1460,6 +1498,7 @@ def order_queue(
                 "claimed_by": claimer,
                 "claimed_by_email": claimer_email,
                 "fulfillment": fulfil,
+                "drop_ship": ds_stage.get(str(r.order_ref)) if r.channel == "eBay" else None,
                 "urgent": k in urgent,
                 "urgent_reasons": urgent.get(k, []),
                 "decision": decided.get(k),

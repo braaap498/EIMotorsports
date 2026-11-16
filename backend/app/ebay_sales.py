@@ -277,13 +277,94 @@ def _release_line(db: Session, line_id: int, sales_id: Optional[int]) -> None:
         db.execute(text("delete from sales_transactions where id = :s"), {"s": sales_id})
 
 
+_dropship_state_ready = False
+
+
+def _ensure_dropship_state(db: Session) -> None:
+    """ebay_order_lines.state can carry a CHECK listing the allowed words. If there is one that lacks 'dropship', add the word.
+    Runs once per start; a problem is logged and the caller's own try/except decides what happens next."""
+    global _dropship_state_ready
+    if _dropship_state_ready:
+        return
+    try:
+        rows = db.execute(
+            text("select conname, pg_get_constraintdef(oid) as d from pg_constraint where conrelid = 'ebay_order_lines'::regclass and contype = 'c'")
+        ).all()
+        for r in rows:
+            d = r.d or ""
+            if "state" in d and "'reserved'" in d and "'dropship'" not in d:
+                new = d.replace("'reserved'::text", "'reserved'::text, 'dropship'::text", 1)
+                if new != d:
+                    db.execute(text(f'alter table ebay_order_lines drop constraint "{r.conname}"'))
+                    db.execute(text(f'alter table ebay_order_lines add constraint "{r.conname}" {new}'))
+        db.commit()
+        _dropship_state_ready = True
+    except Exception:
+        db.rollback()
+        log.exception("could not make room for the 'dropship' line state")
+
+
+def mark_lines_dropship(db: Session, ebay_order_id: str, product_ids) -> int:
+    """A drop ship PO was made for these products of this eBay order: the distributor fills them, not our shelf. Their lines go
+    from 'reserved' (Set aside) to 'dropship', the shelf hold is dropped, and the shelf count is NOT changed. The listing quantity is
+    recalculated (the hold no longer counts). Returns how many lines moved."""
+    pids = sorted({int(p) for p in (product_ids or []) if p is not None})
+    if not pids or not ebay_order_id:
+        return 0
+    _ensure_dropship_state(db)
+    rows = db.execute(
+        text(
+            "select id, product_id from ebay_order_lines where ebay_order_id = :o and state = 'reserved' "
+            "and product_id = any(cast(:p as bigint[])) for update"
+        ),
+        {"o": ebay_order_id, "p": pids},
+    ).all()
+    for r in rows:
+        db.execute(text("delete from stock_reservations where ebay_order_line_id = :l"), {"l": r.id})
+        db.execute(text("update ebay_order_lines set state = 'dropship' where id = :l"), {"l": r.id})
+    for pid in {r.product_id for r in rows if r.product_id}:
+        enqueue_product(db, pid)
+    db.commit()
+    return len(rows)
+
+
+def undo_lines_dropship(db: Session, ebay_order_id: str, product_ids) -> int:
+    """The drop ship PO was cancelled: put its lines back to Set aside (the shelf hold returns) so the order is picked normally.
+    An order that is cancelled or already shipped on eBay is left alone."""
+    pids = sorted({int(p) for p in (product_ids or []) if p is not None})
+    if not pids or not ebay_order_id:
+        return 0
+    rows = db.execute(
+        text(
+            "select l.id, l.product_id, l.quantity from ebay_order_lines l join ebay_orders o on o.id = l.order_pk "
+            "where l.ebay_order_id = :o and l.state = 'dropship' and l.product_id = any(cast(:p as bigint[])) "
+            "and not o.cancelled and o.shipped_at_ebay is null for update of l"
+        ),
+        {"o": ebay_order_id, "p": pids},
+    ).all()
+    for r in rows:
+        lock_products(db, [r.product_id])
+        db.execute(
+            text(
+                "insert into stock_reservations (order_id, product_id, quantity, status, expires_at, ebay_order_line_id) "
+                "values (null, :p, :q, 'reserved', null, :l) on conflict (ebay_order_line_id) where ebay_order_line_id is not null do nothing"
+            ),
+            {"p": r.product_id, "q": r.quantity, "l": r.id},
+        )
+        db.execute(text("update ebay_order_lines set state = 'reserved' where id = :l"), {"l": r.id})
+    for pid in {r.product_id for r in rows if r.product_id}:
+        enqueue_product(db, pid)
+    db.commit()
+    return len(rows)
+
+
 def _apply_line(db: Session, ln, od: dict, channel_id: Optional[int], skip_shipped: bool, first_in_order: bool) -> tuple[Optional[int], dict]:
     """Moves one order line to the state it should be in. Returns (product id whose stock changed or None, counts)."""
     c = {"reserved": 0, "cancelled": 0, "unmatched": 0}
-    if ln.state in ("picked", "history", "cancelled", "reserved") and not od["cancelled"]:
-        return None, c        # nothing to do: already finished, or already set aside (do not count it again)
+    if ln.state in ("picked", "history", "cancelled", "reserved", "dropship") and not od["cancelled"]:
+        return None, c        # nothing to do: already finished, already set aside, or being drop shipped (do not count it again)
     if od["cancelled"]:
-        if ln.state in ("pending", "reserved", "unmatched"):
+        if ln.state in ("pending", "reserved", "unmatched", "dropship"):
             _release_line(db, ln.id, ln.sales_transaction_id)
             db.execute(
                 text(

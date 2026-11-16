@@ -42,6 +42,7 @@ const LIMIT = 50;
 const STATE_LABEL: Record<string, string> = {
   pending: "Not paid yet",
   reserved: "Set aside",
+  dropship: "Drop ship",
   picked: "Picked",
   cancelled: "Cancelled",
   unmatched: "Not linked to a product",
@@ -50,6 +51,7 @@ const STATE_LABEL: Record<string, string> = {
 const STATE_TONE: Record<string, "gray" | "green" | "amber" | "blue"> = {
   pending: "gray",
   reserved: "blue",
+  dropship: "amber",
   picked: "green",
   cancelled: "gray",
   unmatched: "amber",

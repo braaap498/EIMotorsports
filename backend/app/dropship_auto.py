@@ -71,10 +71,38 @@ def _ensure(db: Session) -> None:
         "alter table dropship_jobs add column if not exists supplier_mode text",
         "alter table dropship_jobs add column if not exists tracking_number text",
         "alter table dropship_jobs add column if not exists tracking_carrier text",
+        "alter table dropship_jobs add column if not exists placed_at timestamptz",
+        "alter table dropship_jobs add column if not exists shipped_at timestamptz",
+        "create index if not exists dropship_jobs_created_idx on dropship_jobs (created_at)",
+        "create index if not exists dropship_jobs_placed_idx on dropship_jobs (placed_at)",
+        "create index if not exists dropship_jobs_shipped_idx on dropship_jobs (shipped_at)",
+        "create index if not exists dropship_jobs_stage_idx on dropship_jobs (stage)",
     ):
         db.execute(text(stmt))
     db.commit()
     _ready = True
+    _backfill_line_states(db)
+
+
+def _backfill_line_states(db: Session) -> None:
+    """Once per start: eBay order lines of orders that already have a drop ship PO move from Set aside to Drop ship (only lines still
+    set aside are touched, so this does nothing once they have moved)."""
+    try:
+        from app import ebay_sales
+
+        rows = db.execute(
+            text(
+                "select j.ebay_order_id, array_agg(distinct pl.product_id) as pids from dropship_jobs j "
+                "join po_headers h on h.id = j.po_id and h.status <> 'cancelled' "
+                "join po_lines pl on pl.po_id = h.id and pl.product_id is not null "
+                "where j.stage not in ('dismissed', 'problem') group by j.ebay_order_id"
+            )
+        ).all()
+        for r in rows:
+            ebay_sales.mark_lines_dropship(db, r.ebay_order_id, list(r.pids or []))
+    except Exception:
+        db.rollback()
+        log.exception("could not move existing drop ship orders' lines to the Drop ship state")
 
 
 def _settings(db: Session) -> dict:
@@ -502,7 +530,7 @@ def place_job(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depen
         raise HTTPException(502, "The distributor did not return an order number. Check with them before trying again.")
     db.execute(
         text(
-            "update dropship_jobs set stage = 'placed', supplier_order = :o, supplier_mode = :m, problem = null, updated_at = now() where id = :i"
+            "update dropship_jobs set stage = 'placed', supplier_order = :o, supplier_mode = :m, problem = null, placed_at = now(), updated_at = now() where id = :i"
         ),
         {"o": str(res.get("order_number")), "m": res.get("mode"), "i": job_id},
     )
@@ -545,7 +573,7 @@ def send_tracking(job_id: int, db: Session = Depends(get_db), user: AuthUser = D
     if not r or not r.tracking_number:
         raise HTTPException(409, "No tracking number is on that order yet.")
     mark_shipped(r.order_pk, ShipIn(carrier=r.tracking_carrier or "Other", tracking_number=r.tracking_number), db=db, user=user)
-    db.execute(text("update dropship_jobs set stage = 'done', updated_at = now() where id = :i"), {"i": job_id})
+    db.execute(text("update dropship_jobs set stage = 'done', shipped_at = now(), updated_at = now() where id = :i"), {"i": job_id})
     db.commit()
     return {"ok": True, "stage": "done"}
 
@@ -570,3 +598,110 @@ def retry_job(job_id: int, db: Session = Depends(get_db)):
     db.execute(text("delete from dropship_jobs where id = :i"), {"i": job_id})
     db.commit()
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# activity: what drop shipped in a time frame (built to stay quick with thousands of orders a day: every number is counted
+# in the database over an indexed time window, and the list is paged)
+# --------------------------------------------------------------------------
+_PLACED = "coalesce(j.placed_at, case when j.stage in ('placed', 'review_tracking', 'done') then j.updated_at end)"
+_SHIPPED = "coalesce(j.shipped_at, case when j.stage = 'done' then j.updated_at end)"
+_BASIS = {"received": "j.created_at", "placed": _PLACED, "shipped": _SHIPPED}
+_WAITING_STAGES = ("review_po", "po_confirmed", "review_quote", "placing", "placed", "review_tracking", "held", "problem")
+
+
+def _when(raw: str, default):
+    from datetime import datetime, timezone
+
+    if not (raw or "").strip():
+        return default
+    try:
+        d = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(422, "The dates must look like 2026-11-15T09:30:00Z.")
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+@router.get("/activity")
+@needs(*PERMS)
+def activity(
+    since: str = "",
+    until: str = "",
+    basis: str = Query("received", pattern="^(received|placed|shipped)$"),
+    stage: str = "",
+    q: str = "",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Drop ship orders in a time frame. since / until are ISO date-times (the page sends its own local day and hour boundaries).
+    basis says which moment decides if an order is in the frame: received (the eBay order reached us), placed (we placed it with the
+    distributor) or shipped (eBay was told it shipped). The summary counts all three for the frame, plus what is waiting right now."""
+    from datetime import datetime, timedelta, timezone
+
+    _ensure(db)
+    now = datetime.now(timezone.utc)
+    until_d = _when(until, now)
+    since_d = _when(since, until_d - timedelta(hours=24))
+    if since_d >= until_d:
+        raise HTTPException(422, "The start of the time frame must be before its end.")
+    params = {"s": since_d, "u": until_d}
+    # the three moments all fall within weeks of an order being received, which keeps every scan on the indexed column
+    bound = "j.created_at >= cast(:s as timestamptz) - interval '90 days' and j.stage <> 'dismissed'"
+    summ = db.execute(
+        text(
+            f"""
+            select count(*) filter (where j.created_at >= :s and j.created_at < :u) as received,
+                   count(*) filter (where {_PLACED} >= :s and {_PLACED} < :u) as placed,
+                   count(*) filter (where {_SHIPPED} >= :s and {_SHIPPED} < :u) as shipped,
+                   count(*) filter (where j.stage = 'problem' and j.updated_at >= :s and j.updated_at < :u) as problems
+            from dropship_jobs j where {bound}
+            """
+        ),
+        params,
+    ).first()
+    waiting = {
+        r.stage: int(r.n)
+        for r in db.execute(
+            text("select stage, count(*) as n from dropship_jobs where stage = any(cast(:st as text[])) group by stage"),
+            {"st": list(_WAITING_STAGES)},
+        ).all()
+    }
+    col = _BASIS[basis]
+    where = [bound, f"{col} >= :s", f"{col} < :u"]
+    if stage.strip():
+        where.append("j.stage = :stage")
+        params["stage"] = stage.strip()
+    if q.strip():
+        where.append(
+            "(j.ebay_order_id ilike :like or j.buyer_name ilike :like or cast(coalesce(h.po_number, j.po_number) as text) ilike :like "
+            "or j.supplier_order ilike :like or j.tracking_number ilike :like)"
+        )
+        params["like"] = f"%{q.strip()}%"
+    w = " and ".join(where)
+    frm = "from dropship_jobs j left join po_headers h on h.id = j.po_id"
+    total = db.execute(text(f"select count(*) {frm} where {w}"), params).scalar()
+    rows = db.execute(
+        text(
+            f"""
+            select j.id, j.ebay_order_id, j.store, coalesce(h.po_number, j.po_number) as po_number, j.stage, j.buyer_name, j.ship_service,
+                   j.supplier_order, j.supplier_mode, j.tracking_number, j.tracking_carrier, j.problem, j.created_at,
+                   {_PLACED} as placed_at, {_SHIPPED} as shipped_at,
+                   (select coalesce(sum(l.quantity), 0) from ebay_order_lines l where l.ebay_order_id = j.ebay_order_id) as units,
+                   (select min(coalesce(l.title, '')) from ebay_order_lines l where l.ebay_order_id = j.ebay_order_id) as title
+            {frm} where {w} order by {col} desc nulls last, j.id desc limit :lim offset :off
+            """
+        ),
+        {**params, "lim": limit, "off": offset},
+    ).all()
+    return {
+        "since": since_d,
+        "until": until_d,
+        "basis": basis,
+        "summary": {
+            "received": int(summ.received or 0), "placed": int(summ.placed or 0), "shipped": int(summ.shipped or 0),
+            "problems": int(summ.problems or 0), "waiting": waiting,
+        },
+        "total": int(total or 0),
+        "rows": [dict(r._mapping) for r in rows],
+    }

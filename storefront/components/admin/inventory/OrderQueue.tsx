@@ -29,7 +29,8 @@ type Row = {
   units: number;
   summary: string | null;
   sub: string | null;
-  status: "pick" | "ship" | "shipped";
+  status: "pick" | "ship" | "shipped" | "dropship";
+  drop_ship: { stage: string; label: string; po_number: number | null; problem: string | null } | null; // where its drop ship order is
   attention: string[];
   claimed_by: string | null; // the person's name
   claimed_by_email: string | null; // shown under the name
@@ -45,6 +46,7 @@ const STATUS: Record<Row["status"], { label: string; tone: "amber" | "blue" | "g
   pick: { label: "To pick", tone: "amber" },
   ship: { label: "Picked · needs tracking", tone: "blue" },
   shipped: { label: "Shipped · waiting to be picked", tone: "green" },
+  dropship: { label: "Drop ship", tone: "blue" },
 };
 
 export default function OrderQueue({ active }: { active: boolean }) {
@@ -153,7 +155,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
     }
   }
 
-  const canSelect = (r: Row) => isAdmin && r.channel === "eBay";
+  const canSelect = (r: Row) => isAdmin && r.channel === "eBay" && r.status !== "dropship"; // nothing to pick or release on a drop ship
   const selectable = rows.filter(canSelect);
   const allTicked = selectable.length > 0 && selectable.every((r) => selected.has(r.order_ref));
   const someTicked = selectable.some((r) => selected.has(r.order_ref));
@@ -204,6 +206,10 @@ export default function OrderQueue({ active }: { active: boolean }) {
 
   async function openRow(r: Row, takeOver = false) {
     setMsg(null);
+    if (r.status === "dropship") {
+      setMsg(`eBay order ${r.order_ref} is being drop shipped, so there is nothing to pick. Follow it on the Drop ship page, Activity tab. It leaves this list once eBay is told it shipped.`);
+      return;
+    }
     if (r.urgent && !takeOver && !window.confirm(`This order is URGENT and still waiting for a decision (drop ship or our own stock).\n\nOpen it anyway?`)) return;
     try {
       const c = await api<{ ok: boolean; by?: string }>("/inventory/claims", {
@@ -514,6 +520,12 @@ export default function OrderQueue({ active }: { active: boolean }) {
                     ) : (
                       <div className="space-y-1">
                         <Badge tone={st.tone}>{st.label}</Badge>
+                        {r.drop_ship && (
+                          <div className={`text-xs ${r.drop_ship.stage === "problem" ? "font-semibold text-red-700" : "text-gray-600"}`}>
+                            {r.drop_ship.label}
+                            {r.drop_ship.problem ? `: ${r.drop_ship.problem}` : ""}
+                          </div>
+                        )}
                         {r.decision && (
                           <div>
                             <Badge tone="blue">
