@@ -55,10 +55,11 @@ const STAGE: Record<string, string> = {
   review_tracking: "Tracking to check",
   done: "Shipped",
   held: "On hold",
+  review_shipping: "Drop ship - Review Shipping",
   return_needed: "eBay order cancelled: needs you",
   problem: "Needs attention",
 };
-const WAITING_ORDER = ["return_needed", "problem", "review_po", "po_confirmed", "review_quote", "placing", "placed", "review_tracking", "held"];
+const WAITING_ORDER = ["return_needed", "problem", "review_shipping", "review_po", "po_confirmed", "review_quote", "placing", "placed", "review_tracking", "held"];
 const BASIS_LABEL: Record<Basis, string> = { received: "Received", placed: "Ordered from distributor", shipped: "Shipped to buyer" };
 
 function frameOf(range: Range, from: string, to: string): { since: Date; until: Date } | null {

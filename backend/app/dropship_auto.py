@@ -86,6 +86,7 @@ def _ensure(db: Session) -> None:
         "alter table dropship_jobs add column if not exists shipped_at timestamptz",
         "alter table dropship_jobs add column if not exists channel text not null default 'ebay'",
         "alter table dropship_jobs add column if not exists web_order_id bigint",
+        "alter table dropship_jobs add column if not exists manual_ship boolean not null default false",
         "create index if not exists dropship_jobs_channel_idx on dropship_jobs (channel, stage)",
         "create index if not exists dropship_jobs_created_idx on dropship_jobs (created_at)",
         "create index if not exists dropship_jobs_placed_idx on dropship_jobs (placed_at)",
@@ -151,7 +152,7 @@ def _flagged_short_lines(db: Session, order_id: str, honor_decision: bool = Fals
     return sorted(pid for pid in picks if has_distributor(db, pid))
 
 
-def _make_job(db: Session, order_id: str, store: Optional[str], product_ids: list[int], user: AuthUser) -> dict:
+def _make_job(db: Session, order_id: str, store: Optional[str], product_ids: list[int], user: AuthUser, manual: bool = False) -> dict:
     """Make the PO and record the job. A refusal (Global Shipping Program, incomplete address...) is recorded as 'problem'."""
     from app.admin_purchase_orders import EbayDropIn, po_from_ebay_order
 
@@ -171,10 +172,10 @@ def _make_job(db: Session, order_id: str, store: Optional[str], product_ids: lis
         return {"order": order_id, "problem": msg}
     db.execute(
         text(
-            "insert into dropship_jobs (ebay_order_id, store, po_id, po_number, stage, ship_service, buyer_name, created_by) "
-            "values (:o, :s, :pid, :pn, 'review_po', :svc, :bn, :u) on conflict (ebay_order_id) do nothing"
+            "insert into dropship_jobs (ebay_order_id, store, po_id, po_number, stage, ship_service, buyer_name, created_by, manual_ship) "
+            "values (:o, :s, :pid, :pn, 'review_po', :svc, :bn, :u, :ms) on conflict (ebay_order_id) do nothing"
         ),
-        {"o": order_id, "s": store, "pid": po["id"], "pn": po["po_number"], "svc": po.get("ship_service"), "bn": po.get("buyer_name"), "u": user.email},
+        {"o": order_id, "s": store, "pid": po["id"], "pn": po["po_number"], "svc": po.get("ship_service"), "bn": po.get("buyer_name"), "u": user.email, "ms": manual},
     )
     db.commit()
     return {"order": order_id, "po_number": po["po_number"]}
@@ -248,7 +249,7 @@ def _release_web_holds(db: Session, order_id: int, pids: list[int]) -> None:
     db.commit()
 
 
-def _make_web_job(db: Session, o, pids: list[int], user: AuthUser) -> dict:
+def _make_web_job(db: Session, o, pids: list[int], user: AuthUser, manual: bool = False) -> dict:
     """Make the PO for a website order and record the job. A refusal (incomplete address, no distributor...) is recorded as 'problem'."""
     from app.admin_purchase_orders import FromWebOrderIn, po_from_web_order
 
@@ -262,10 +263,10 @@ def _make_web_job(db: Session, o, pids: list[int], user: AuthUser) -> dict:
         return {"order": key, "problem": msg}
     db.execute(
         text(
-            "insert into dropship_jobs (ebay_order_id, store, po_id, po_number, stage, ship_service, buyer_name, created_by, channel, web_order_id) "
-            "values (:k, 'Website', :pid, :pn, 'review_po', :svc, :bn, :u, 'web', :w) on conflict (ebay_order_id) do nothing"
+            "insert into dropship_jobs (ebay_order_id, store, po_id, po_number, stage, ship_service, buyer_name, created_by, channel, web_order_id, manual_ship) "
+            "values (:k, 'Website', :pid, :pn, 'review_po', :svc, :bn, :u, 'web', :w, :ms) on conflict (ebay_order_id) do nothing"
         ),
-        {"k": key, "pid": po["id"], "pn": po["po_number"], "svc": _web_ship_label(o.notes), "bn": o.customer_name, "u": user.email, "w": o.id},
+        {"k": key, "pid": po["id"], "pn": po["po_number"], "svc": _web_ship_label(o.notes), "bn": o.customer_name, "u": user.email, "w": o.id, "ms": manual},
     )
     db.commit()
     try:
@@ -313,6 +314,12 @@ def scan_web_orders(db: Session, user: AuthUser = SYSTEM_USER) -> dict:
                 _web_problem(db, o.order_number, o.id, msg, user)
                 problems.append({"order": WEB_PREFIX + o.order_number, "problem": msg})
                 continue
+            key = WEB_PREFIX + o.order_number
+            svc = _web_ship_label(o.notes)
+            paid = _buyer_paid_shipping(db, key)
+            if _hold_for_shipping(paid, svc):
+                _hold_job(db, key, "Website", svc, o.customer_name, "web", o.id, user, paid)
+                continue
             res = _make_web_job(db, o, drop, user)
             (problems if res.get("problem") else made).append(res)
         except Exception:
@@ -325,7 +332,7 @@ def scan_new_orders(db: Session, user: AuthUser = SYSTEM_USER) -> dict:
     _ensure(db)
     rows = db.execute(
         text(
-            "select o.ebay_order_id, o.store from ebay_orders o "
+            "select o.ebay_order_id, o.store, o.shipping_service, o.shipping_charged from ebay_orders o "
             "where o.paid_at is not null and not o.cancelled and o.shipped_at_ebay is null "
             "and coalesce(o.created_at_ebay, o.paid_at) > now() - make_interval(days => :d) "
             "and not exists (select 1 from dropship_jobs j where j.ebay_order_id = o.ebay_order_id) "
@@ -333,21 +340,26 @@ def scan_new_orders(db: Session, user: AuthUser = SYSTEM_USER) -> dict:
         ),
         {"d": RECENT_DAYS},
     ).all()
-    made, problems = [], []
+    made, problems, held = [], [], []
     for r in rows:
         try:
             picks = _flagged_short_lines(db, r.ebay_order_id)
             if not picks:
+                continue
+            paid = None if r.shipping_charged is None else float(r.shipping_charged) > 0
+            if _hold_for_shipping(paid, r.shipping_service):
+                _hold_job(db, r.ebay_order_id, r.store, r.shipping_service, None, "ebay", None, user, paid)
+                held.append(r.ebay_order_id)
                 continue
             res = _make_job(db, r.ebay_order_id, r.store, picks, user)
             (problems if res.get("problem") else made).append(res)
         except Exception:
             db.rollback()
             log.exception("drop ship check failed for eBay order %s", r.ebay_order_id)
-    note = f"Checked {len(rows)} new order(s): {len(made)} PO(s) made" + (f", {len(problems)} need attention" if problems else "") + "."
+    note = f"Checked {len(rows)} new order(s): {len(made)} PO(s) made" + (f", {len(held)} waiting for a shipping review" if held else "") + (f", {len(problems)} need attention" if problems else "") + "."
     db.execute(text("update dropship_settings set last_scan_at = now(), last_scan_note = :n where id = 1"), {"n": note})
     db.commit()
-    return {"checked": len(rows), "made": made, "problems": problems, "note": note}
+    return {"checked": len(rows), "made": made, "held": held, "problems": problems, "note": note}
 
 
 def scan_if_enabled() -> None:
@@ -537,6 +549,86 @@ def _buyer_paid_shipping(db: Session, key) -> Optional[bool]:
     except Exception:
         db.rollback()
         return None
+
+
+def _hold_for_shipping(paid: Optional[bool], service: Optional[str]) -> bool:
+    """True when an order must wait for a person to review its shipping: the buyer paid for shipping, or we cannot tell and the service
+    is not a known free one. eBay's international hub orders are not held here: the PO step refuses them and they show as a problem."""
+    n = _norm(service or "")
+    if "intermi" in n or "global" in n:
+        return False
+    if paid is True:
+        return True
+    if paid is None:
+        return n not in FREE_NAMES
+    return False
+
+
+def _hold_job(db: Session, key: str, store: Optional[str], service: Optional[str], buyer: Optional[str], channel: str, web_id: Optional[int], user: AuthUser, paid: Optional[bool]) -> None:
+    """Record the order as waiting for a shipping review. No PO is made and nothing is sent to the distributor."""
+    why = "Buyer paid for shipping" if paid else "Could not tell what the buyer paid for shipping"
+    note = f"{why} ({service or 'no shipping service given'}). Choose our own stock, or drop ship and set the shipping."
+    db.execute(
+        text(
+            "insert into dropship_jobs (ebay_order_id, store, stage, ship_service, buyer_name, created_by, channel, web_order_id, manual_ship, note) "
+            "values (:k, :s, 'review_shipping', :svc, :bn, :u, :ch, :w, true, :n) on conflict (ebay_order_id) do nothing"
+        ),
+        {"k": key, "s": store, "svc": service, "bn": buyer, "u": user.email, "ch": channel, "w": web_id, "n": note[:400]},
+    )
+    db.commit()
+
+
+def held_job_for(db: Session, channel: str, order_ref: str):
+    """The job waiting for a shipping review for this order (channel 'eBay' or 'Website'), or None."""
+    _ensure(db)
+    key = WEB_PREFIX + order_ref if str(channel).lower() == "website" else order_ref
+    return db.execute(text("select id, stage from dropship_jobs where ebay_order_id = :k and stage = 'review_shipping'"), {"k": key}).first()
+
+
+def approve_held_job(db: Session, job_id: int, user: AuthUser) -> dict:
+    """Approve drop ship on an order held for a shipping review: make its PO and quote, then stop at the quote check. The job is marked
+    manual, so the automatic runner never places it: a person sets the shipping on the Drop ship page and places the order."""
+    from app import fulfillment
+
+    _ensure(db)
+    j = db.execute(
+        text("select id, stage, ebay_order_id, store, channel, web_order_id from dropship_jobs where id = :i"), {"i": job_id}
+    ).first()
+    if not j:
+        raise HTTPException(404, "That drop ship order is not in the list.")
+    if j.stage != "review_shipping":
+        raise HTTPException(409, "That order is not waiting for a shipping review.")
+    key = str(j.ebay_order_id)
+    web = j.channel == "web"
+    o = None
+    if web:
+        o = db.execute(text("select id, order_number, customer_name, notes from orders where id = :i"), {"i": j.web_order_id}).first()
+        if not o:
+            raise HTTPException(404, "The website order is no longer there.")
+        drop, other = _web_lines(db, o.id)
+        if not drop or other:
+            raise HTTPException(409, "The parts on this order are no longer all set to drop ship. Ship it from our own stock, or make the PO by hand.")
+    else:
+        drop = _flagged_short_lines(db, key)
+        if not drop:
+            raise HTTPException(409, "Nothing on this order is set to drop ship any more. Ship it from our own stock, or make the PO by hand.")
+    # the held job is replaced by the real one
+    db.execute(text("delete from dropship_jobs where id = :i and stage = 'review_shipping'"), {"i": job_id})
+    db.commit()
+    res = _make_web_job(db, o, drop, user, manual=True) if web else _make_job(db, key, j.store, drop, user, manual=True)
+    if res.get("problem"):
+        raise HTTPException(409, res["problem"])
+    new_id = db.execute(text("select id from dropship_jobs where ebay_order_id = :k"), {"k": key}).scalar()
+    ref = key[len(WEB_PREFIX):] if web else key
+    fulfillment.record_decision(db, "Website" if web else "eBay", ref, "dropship", user.email, ["Buyer paid for shipping; drop ship approved"])
+    quoted = confirm_po(new_id, db=db, user=user)
+    return {"ok": True, "job_id": new_id, "quote": quoted}
+
+
+@router.post("/jobs/{job_id}/approve-drop-ship")
+@needs(*PERMS)
+def approve_drop_ship(job_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(require_route_access)):
+    return approve_held_job(db, job_id, user)
 
 
 def pick_shipping_option(buyer_service: Optional[str], options: list[dict], free: bool = False) -> Optional[str]:
@@ -999,7 +1091,7 @@ def run_automatic(db: Session) -> dict:
     done = {"confirmed": 0, "placed": 0, "stopped": 0}
     for _ in range(2):  # a second pass lets an order that was just confirmed continue to the quote and the order in the same run
         ids = db.execute(
-            text("select id, stage, ship_method from dropship_jobs where stage in ('review_po', 'review_quote') and problem is null order by id limit 25")
+            text("select id, stage, ship_method from dropship_jobs where stage in ('review_po', 'review_quote') and problem is null and not coalesce(manual_ship, false) order by id limit 25")
         ).all()
         if not ids:
             break
@@ -1298,7 +1390,7 @@ def _web_ship_from_stock(db: Session, j, user: AuthUser) -> dict:
             queue_stock_push(db, [int(l.product_id) for l in lines])
         except Exception:
             log.exception("could not queue quantity updates after moving website order %s to our own stock", number)
-    fulfillment.record_decision(db, "Website", number, "stock", user.email, ["Could not be drop shipped; shipping from our own stock"])
+    fulfillment.record_decision(db, "Website", number, "stock", user.email, ["Buyer paid for shipping; shipping from our own stock" if j.stage == "review_shipping" else "Could not be drop shipped; shipping from our own stock"])
     db.execute(text("update dropship_jobs set stage = 'dismissed', updated_at = now() where id = :i"), {"i": j.id})
     db.commit()
     return {"ok": True}
@@ -1329,7 +1421,7 @@ def ship_from_stock(job_id: int, db: Session = Depends(get_db), user: AuthUser =
             cancel_po(j.po_id, CancelIn(reason=f"Shipping eBay order {j.ebay_order_id} from our own stock instead"), db=db, user=user)
     if pids:
         undo_lines_dropship(db, j.ebay_order_id, pids)
-    fulfillment.record_decision(db, "eBay", j.ebay_order_id, "stock", user.email, ["Could not be drop shipped; shipping from our own stock"])
+    fulfillment.record_decision(db, "eBay", j.ebay_order_id, "stock", user.email, ["Buyer paid for shipping; shipping from our own stock" if j.stage == "review_shipping" else "Could not be drop shipped; shipping from our own stock"])
     db.execute(text("update dropship_jobs set stage = 'dismissed', updated_at = now() where id = :i"), {"i": job_id})
     db.commit()
     return {"ok": True}

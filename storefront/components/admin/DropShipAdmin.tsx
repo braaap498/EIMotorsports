@@ -46,6 +46,7 @@ const STAGE: Record<string, string> = {
   review_tracking: "Waiting for you to check the tracking",
   done: "Done: eBay told it shipped",
   held: "On hold",
+  review_shipping: "Paid shipping: decide in Pick & ship",
   return_needed: "eBay order cancelled: needs you",
   problem: "Needs attention",
 };
@@ -485,7 +486,7 @@ function OrdersTab({
                 Try again
               </button>
             )}
-            {["problem", "review_po", "po_confirmed", "review_quote", "held"].includes(j.stage) && (
+            {["problem", "review_shipping", "review_po", "po_confirmed", "review_quote", "held"].includes(j.stage) && (
               <button
                 type="button"
                 className={btn2Cls}

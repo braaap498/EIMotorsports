@@ -1381,13 +1381,15 @@ _DS_STAGE_LABEL = {
     "review_tracking": "Tracking to check",
     "done": "Shipped",
     "held": "On hold",
+    "review_shipping": "Drop ship - Review Shipping",
     "problem": "Needs attention",
 }
 
 
 def _drop_ship_stages(db: Session, rows) -> dict[str, dict]:
-    """{eBay order number: where its drop ship job is} for the eBay orders on this page. The list must work without it."""
-    ids = [str(r.order_ref) for r in rows if r.channel == "eBay"]
+    """{job key: where its drop ship job is} for the orders on this page (an eBay order's key is its order number, a website order's is
+    'web:<order number>'). The list must work without it."""
+    ids = [("web:" if r.channel == "Website" else "") + str(r.order_ref) for r in rows]
     if not ids:
         return {}
     try:
@@ -1404,7 +1406,20 @@ def _drop_ship_stages(db: Session, rows) -> dict[str, dict]:
     return {
         f.ebay_order_id: {"stage": f.stage, "label": _DS_STAGE_LABEL.get(f.stage, f.stage), "po_number": f.po_number, "problem": f.problem}
         for f in found
+        if not (str(f.ebay_order_id).startswith("web:") and f.stage == "dismissed")
     }
+
+
+def _held_for_shipping(db: Session) -> dict[str, list[str]]:
+    """{order key: reasons} for orders held for a shipping review (paid shipping, or shipping amount unknown). They are pinned in the
+    list like an urgent order, with the same two buttons."""
+    rows = db.execute(text("select ebay_order_id, channel, ship_service, note from dropship_jobs where stage = 'review_shipping'")).all()
+    out: dict[str, list[str]] = {}
+    for r in rows:
+        ref = str(r.ebay_order_id)
+        key = fulfillment.key_of("Website", ref[len("web:"):]) if r.channel == "web" else fulfillment.key_of("eBay", ref)
+        out[key] = [r.note or f"Buyer chose {r.ship_service or 'a shipping service'}. Choose our own stock, or drop ship and set the shipping."]
+    return out
 
 
 @router.get("/queue")
@@ -1427,6 +1442,12 @@ def order_queue(
         db.rollback()
         log.exception("could not work out urgent orders")
         urgent = {}
+    try:  # orders held for a shipping review are pinned like urgent ones
+        for hk, hv in _held_for_shipping(db).items():
+            urgent.setdefault(hk, hv)
+    except Exception:
+        db.rollback()
+        log.exception("could not look up orders held for a shipping review")
     params = {
         "q": q.strip(),
         "like": f"%{q.strip()}%",
@@ -1498,7 +1519,7 @@ def order_queue(
                 "claimed_by": claimer,
                 "claimed_by_email": claimer_email,
                 "fulfillment": fulfil,
-                "drop_ship": ds_stage.get(str(r.order_ref)) if r.channel == "eBay" else None,
+                "drop_ship": ds_stage.get(("web:" if r.channel == "Website" else "") + str(r.order_ref)),
                 "urgent": k in urgent,
                 "urgent_reasons": urgent.get(k, []),
                 "decision": decided.get(k),
@@ -1598,6 +1619,15 @@ def fulfillment_decision(body: DecisionIn, db: Session = Depends(get_db), user: 
     channel = "eBay" if body.channel.strip().lower() == "ebay" else "Website"
     ref = body.order_ref.strip()
     key = fulfillment.key_of(channel, ref)
+    from app import dropship_auto
+
+    held = dropship_auto.held_job_for(db, channel, ref)
+    if held:  # held for a shipping review: the buttons do the real work
+        if body.decision == "dropship":
+            res = dropship_auto.approve_held_job(db, held.id, user)
+        else:
+            res = dropship_auto.ship_from_stock(held.id, db=db, user=user)
+        return {"ok": True, "decision": body.decision, "by": _who(user.email or user.user_id), "drop_ship": res}
     urgent = fulfillment.urgent_orders(db)
     already = fulfillment.decisions_for(db, [key])
     if key not in urgent and key not in already:

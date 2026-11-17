@@ -142,7 +142,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
       decision === "dropship"
         ? "APPROVE A DROP SHIP for"
         : "SHIP FROM OUR OWN STOCK instead for";
-    if (!window.confirm(`${what} ${r.channel} order ${r.order_ref}?\n\n${r.urgent_reasons.join("\n")}\n\nThis records your decision. It does not place the distributor order.`)) return;
+    if (!window.confirm(`${what} ${r.channel} order ${r.order_ref}?\n\n${r.urgent_reasons.join("\n")}\n\n${r.drop_ship?.stage === "review_shipping" && decision === "dropship" ? "This makes the drop ship PO and quote, then stops so you can set the shipping and place the order on the Drop ship page." : "This records your decision. It does not place the distributor order."}`)) return;
     setMsg(null);
     setDeciding(`${r.channel}:${r.order_ref}`);
     try {
