@@ -40,6 +40,8 @@ type Probe = {
   compat_truncated?: boolean;
 };
 type StoreChoice = { store: string; seller: string | null; live: boolean };
+type FoundProduct = { id: number; title: string; sku: string | null; custom_label: string | null; price: number | null; listings: number };
+type Made = { id: number; store_done: boolean; compat_rows: number; compat_from_listing: number; specifics_added: string[]; warnings: string[] };
 
 export default function EbayLookup() {
   const [q, setQ] = useState("");
@@ -52,6 +54,10 @@ export default function EbayLookup() {
   const [stores, setStores] = useState<StoreChoice[]>([]);
   const [store, setStore] = useState("");
   const [busy, setBusy] = useState("");
+  const [pq, setPq] = useState("");
+  const [found, setFound] = useState<FoundProduct[] | null>(null);
+  const [product, setProduct] = useState<FoundProduct | null>(null);
+  const [made, setMade] = useState<Made | null>(null);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   useEffect(() => {
@@ -93,17 +99,51 @@ export default function EbayLookup() {
       setInfo(await api<ItemInfo>(`/ebay-lookup/item/${n}`));
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
+      setBusy("");
+      return;
+    }
+    setBusy("");
+    if (store) await runProbe(n); // reading a listing also asks for its compatibility table
+  }
+
+  async function runProbe(id?: string) {
+    setBusy("probe");
+    setMsg(null);
+    setProbe(null);
+    try {
+      setProbe(await api<Probe>("/ebay-lookup/compat-probe", { method: "POST", body: { item_id: id ?? itemNo, store } }));
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
     } finally {
       setBusy("");
     }
   }
 
-  async function runProbe() {
-    setBusy("probe");
+  async function findProducts() {
+    if (pq.trim().length < 2) return;
+    setBusy("find");
     setMsg(null);
-    setProbe(null);
     try {
-      setProbe(await api<Probe>("/ebay-lookup/compat-probe", { method: "POST", body: { item_id: itemNo, store } }));
+      setFound((await api<{ products: FoundProduct[] }>(`/ebay-draft/products?q=${encodeURIComponent(pq.trim())}`)).products);
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function makeIt() {
+    if (!info || !product || !store) return;
+    setBusy("make");
+    setMsg(null);
+    setMade(null);
+    try {
+      const r = await api<Made>("/ebay-lookup/make-draft", { method: "POST", body: { item_id: info.item_id, product_id: product.id, store } });
+      if (r.warnings.length === 0 && r.store_done) {
+        window.location.href = `/admin/ebay-copy?id=${r.id}`;
+        return;
+      }
+      setMade(r);
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -113,10 +153,10 @@ export default function EbayLookup() {
 
   return (
     <div className="space-y-5">
-      <h1 className="text-2xl font-semibold">Look up a part on eBay (test)</h1>
+      <h1 className="text-2xl font-semibold">Look up a part on eBay</h1>
       <p className="max-w-3xl text-sm text-gray-600">
-        Search eBay for the same part, open a listing, and see what eBay lets us read from it: its item specifics and its compatible-vehicle table. This is a read-only test.
-        It saves nothing and does not make a draft. It is here to show whether copying from someone else&apos;s listing is possible.
+        Search eBay for the same part, open a listing, and see what eBay lets us read from it: its item specifics and its compatible-vehicle table. Reading a listing saves nothing. Once it is read you can make a draft of one of our products with its
+        compatibility table and item specifics filled in; nothing is listed on eBay until you check the draft and list it.
       </p>
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
 
@@ -209,9 +249,9 @@ export default function EbayLookup() {
           <p className="text-xs text-gray-500">Fields eBay returned: {info.keys_returned.join(", ")}</p>
 
           <div className="space-y-2 border-t border-gray-100 pt-3">
-            <h3 className="font-semibold">Try the compatibility table</h3>
+            <h3 className="font-semibold">Compatibility table</h3>
             <p className="text-gray-600">
-              This asks eBay&apos;s Trading API for the listing with its compatibility list, using one of our connected stores. It only reads.
+              Asked for automatically when a listing is read, through eBay&apos;s Trading API using the store below (any of ours works; it only reads). The store chosen here is also the store the new listing goes to.
             </p>
             {stores.length === 0 ? (
               <p className="text-amber-700">No eBay store is connected, so this check cannot run yet. Connect one under Store API.</p>
@@ -225,8 +265,8 @@ export default function EbayLookup() {
                     ))}
                   </select>
                 </label>
-                <button type="button" className={btnCls} disabled={busy !== "" || !store} onClick={() => void runProbe()}>
-                  {busy === "probe" ? "Asking eBay…" : "Get compatibility table"}
+                <button type="button" className={btn2Cls} disabled={busy !== "" || !store} onClick={() => void runProbe()}>
+                  {busy === "probe" ? "Asking eBay…" : "Ask again"}
                 </button>
               </div>
             )}
@@ -290,6 +330,67 @@ export default function EbayLookup() {
               )}
               {probe.compat_truncated && <p className="text-xs text-gray-500">Only the first rows are shown.</p>}
             </>
+          )}
+        </div>
+      )}
+
+      {info && (
+        <div className="space-y-3 rounded border-2 border-gray-900 bg-white p-4 text-sm">
+          <h2 className="font-semibold">Make a listing like this one</h2>
+          <p className="text-gray-600">
+            Pick the product this listing is for. One click makes the draft from our product (title, description, price, photos), takes the category and
+            shipping from a similar live listing in <strong>{store || "the chosen store"}</strong>, and adds this listing&apos;s compatibility rows and item specifics that the
+            product does not have. The other seller&apos;s title, description and photos are not copied.
+          </p>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="block">
+              <span className="mb-1 block font-semibold">Find our product (title, EI number, label, part number or id)</span>
+              <input className={`${inputCls} w-96 max-w-full`} value={pq} onChange={(e) => setPq(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void findProducts(); }} />
+            </label>
+            <button type="button" className={btn2Cls} disabled={busy !== "" || pq.trim().length < 2} onClick={() => void findProducts()}>
+              {busy === "find" ? "Searching…" : "Search"}
+            </button>
+          </div>
+          {found && found.length === 0 && <p className="text-gray-500">No product matched.</p>}
+          {found && found.length > 0 && (
+            <ul className="divide-y divide-gray-100">
+              {found.map((f) => (
+                <li key={f.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                  <span>
+                    <span className="font-medium">{f.title}</span>{" "}
+                    <span className="text-xs text-gray-500">{f.sku ?? ""}{f.custom_label ? ` · label ${f.custom_label}` : ""} · id {f.id}</span>
+                  </span>
+                  <span className="flex items-center gap-3">
+                    <span className={`text-xs ${f.listings ? "text-amber-700" : "text-gray-500"}`}>{f.listings ? `${f.listings} eBay listing${f.listings === 1 ? "" : "s"}` : "no eBay listing"}</span>
+                    <button type="button" className={btn2Cls} disabled={busy !== "" || f.listings > 0} title={f.listings > 0 ? "This product already has eBay listings: use Sell similar from one of them" : ""} onClick={() => { setProduct(f); setMade(null); }}>
+                      {product?.id === f.id ? "Chosen" : "Choose"}
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {product && (
+            <div className="flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3">
+              <span>
+                For <strong>{product.title}</strong> in <strong>{store}</strong>.
+              </span>
+              <button type="button" className={btnCls} disabled={busy !== "" || !store} onClick={() => void makeIt()}>
+                {busy === "make" ? "Making the draft…" : "Make the draft"}
+              </button>
+            </div>
+          )}
+          {made && (
+            <div className="space-y-2">
+              <Notice kind={made.store_done ? "success" : "info"}>
+                Draft made with {made.compat_rows} compatibility row{made.compat_rows === 1 ? "" : "s"} ({made.compat_from_listing} added from this listing)
+                {made.specifics_added.length ? ` and ${made.specifics_added.length} added item specific${made.specifics_added.length === 1 ? "" : "s"}: ${made.specifics_added.join(", ")}` : ""}.
+              </Notice>
+              {made.warnings.map((w, i) => (
+                <Notice key={i}>{w}</Notice>
+              ))}
+              <a className={btnCls} href={`/admin/ebay-copy?id=${made.id}`}>Open the draft</a>
+            </div>
           )}
         </div>
       )}

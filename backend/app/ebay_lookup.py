@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.auth import require_admin
+from app.auth import AuthUser, require_admin
 from app.database import get_db
 from app.ebay_edit import NS, _errors, _failed, _trading
 from app.ebay_feedback import FeedbackError, _token, configured
@@ -169,25 +169,21 @@ class ProbeIn(BaseModel):
     store: str = Field(..., min_length=1, max_length=60)
 
 
-@router.post("/compat-probe")
-def compat_probe(body: ProbeIn, db: Session = Depends(get_db)):
-    """Ask eBay's Trading API for the listing WITH its compatibility list, using one of our connected stores' tokens. Read only."""
-    item_id = body.item_id.strip()
-    if not ITEM_RE.fullmatch(item_id):
-        raise HTTPException(400, "That does not look like an eBay item number.")
+def _read_reference(db: Session, store: str, item_id: str) -> dict:
+    """Trading API GetItem on any listing, with its item specifics and compatibility list, using one of our stores' tokens. Read only."""
     root = _trading(
-        db, body.store.strip(), "GetItem",
+        db, store, "GetItem",
         f"<ItemID>{item_id}</ItemID><DetailLevel>ReturnAll</DetailLevel>"
         "<IncludeItemSpecifics>true</IncludeItemSpecifics><IncludeItemCompatibilityList>true</IncludeItemCompatibilityList>",
     )
     errs = _errors(root)
-    if _failed(root):
-        return {"ok": False, "ack": root.findtext(f"{NS}Ack") or "", "errors": errs, "compat_count": 0, "compat": [], "specifics": []}
+    ack = root.findtext(f"{NS}Ack") or ""
     it = root.find(f"{NS}Item")
-    if it is None:
-        return {"ok": False, "ack": root.findtext(f"{NS}Ack") or "", "errors": errs or [{"code": "", "severity": "", "message": "eBay did not return the listing."}], "compat_count": 0, "compat": [], "specifics": []}
+    if _failed(root) or it is None:
+        return {"ok": False, "ack": ack, "errors": errs or [{"code": "", "severity": "", "message": "eBay did not return the listing."}],
+                "compat_count": 0, "compat": [], "specifics": []}
     seller = (it.findtext(f"{NS}Seller/{NS}UserID") or "").strip()
-    row = db.execute(text("select seller_username from ebay_accounts where lower(store) = lower(:s)"), {"s": body.store.strip()}).first()
+    row = db.execute(text("select seller_username from ebay_accounts where lower(store) = lower(:s)"), {"s": store}).first()
     mine = bool(row and row.seller_username and row.seller_username.lower() == seller.lower())
     specifics = []
     for nv in it.findall(f"{NS}ItemSpecifics/{NS}NameValueList"):
@@ -206,7 +202,7 @@ def compat_probe(body: ProbeIn, db: Session = Depends(get_db)):
     declared = (it.findtext(f"{NS}ItemCompatibilityCount") or "").strip()
     return {
         "ok": True,
-        "ack": root.findtext(f"{NS}Ack") or "",
+        "ack": ack,
         "errors": errs,  # warnings are kept: eBay sometimes explains why a list was left out
         "item_id": item_id,
         "seller": seller,
@@ -217,6 +213,135 @@ def compat_probe(body: ProbeIn, db: Session = Depends(get_db)):
         "specifics": specifics,
         "compat_declared_count": int(declared) if declared.isdigit() else None,
         "compat_count": len(compat),
-        "compat": compat[:MAX_COMPAT_SHOWN],
-        "compat_truncated": len(compat) > MAX_COMPAT_SHOWN,
+        "compat_all": compat,
+    }
+
+
+def _shown(ref: dict) -> dict:
+    out = {k: v for k, v in ref.items() if k != "compat_all"}
+    allc = ref.get("compat_all") or []
+    out["compat"] = allc[:MAX_COMPAT_SHOWN]
+    out["compat_truncated"] = len(allc) > MAX_COMPAT_SHOWN
+    return out
+
+
+@router.post("/compat-probe")
+def compat_probe(body: ProbeIn, db: Session = Depends(get_db)):
+    """Ask eBay's Trading API for the listing WITH its compatibility list, using one of our connected stores' tokens. Read only."""
+    item_id = body.item_id.strip()
+    if not ITEM_RE.fullmatch(item_id):
+        raise HTTPException(400, "That does not look like an eBay item number.")
+    return _shown(_read_reference(db, body.store.strip(), item_id))
+
+
+# --------------------------------------------------------------------------
+# one click: a draft from one of our products, filled with what the looked-up listing carries
+# --------------------------------------------------------------------------
+class MakeIn(BaseModel):
+    item_id: str = Field(..., min_length=9, max_length=15)     # the listing to take specifics and compatibility from
+    product_id: int                                            # OUR product the new listing is for
+    store: str = Field(..., min_length=1, max_length=60)       # the store the new listing goes to (also the login used to read)
+
+
+# Specifics that identify the OTHER seller's part, not ours: never copied. Our own product supplies these.
+_SKIP_SPECIFICS = {"upc", "ean", "isbn", "gtin", "manufacturer part number", "mpn", "brand"}
+
+
+@router.post("/make-draft")
+def make_draft(body: MakeIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Everything between 'I read a listing' and 'a draft ready to check', in one go:
+         1. read the listing (item specifics and compatibility table);
+         2. make a draft from our product (title, description, price, photos, specifics, our own fitment as eBay rows);
+         3. choose the store (category, shipping and return rules from a similar live listing of ours there);
+         4. add the listing's compatibility rows that the draft does not have yet, and its item specifics that the draft lacks.
+       The other seller's title, description and photos are NOT taken: those come from our product. NOTHING is listed on eBay. The draft is
+       then checked with eBay and listed from the draft screen, as for any other draft."""
+    from app.ebay_copy import _row
+    from app.ebay_newdraft import MAX_COMPAT_ROWS, CreateIn, StoreIn, _pairs, choose_store, create
+
+    item_id = body.item_id.strip()
+    if not ITEM_RE.fullmatch(item_id):
+        raise HTTPException(400, "That does not look like an eBay item number.")
+    store = body.store.strip()
+    ref = _read_reference(db, store, item_id)
+    if not ref["ok"]:
+        raise HTTPException(502, "eBay would not give us that listing: " + "; ".join(e["message"] for e in ref["errors"])[:300])
+
+    made = create(CreateIn(product_id=body.product_id), db=db, user=user)   # refuses (409) a product that already has eBay listings
+    copy_id = int(made["id"])
+    warnings: list[str] = list(made.get("warnings") or [])
+
+    store_done = False
+    try:
+        choose_store(copy_id, StoreIn(store=store), db=db, user=user)
+        store_done = True
+    except HTTPException as e:
+        db.rollback()
+        warnings.append(f"The store step did not finish: {e.detail} Choose the store on the draft.")
+
+    added_rows = 0
+    added_specs: list[str] = []
+    try:
+        r = _row(db, copy_id)
+        d = dict(r.data or {})
+        # item specifics the draft does not have
+        have = {str(x.get("name", "")).lower() for x in d.get("item_specifics", [])}
+        specs = list(d.get("item_specifics") or [])
+        for sp in ref["specifics"]:
+            n = " ".join(str(sp["name"]).split())
+            vals = [" ".join(v.split()) for v in sp["values"] if v and len(" ".join(v.split())) <= 65]
+            if not n or not vals or len(n) > 65 or n.lower() in have or n.lower() in _SKIP_SPECIFICS:
+                continue
+            specs.append({"name": n, "values": vals})
+            have.add(n.lower())
+            added_specs.append(n)
+        d["item_specifics"] = specs[:100]
+        # compatibility rows the draft does not have
+        rows = list(d.get("compat") or [])
+        seen = {tuple(sorted(map(tuple, x.get("pairs") or []))) for x in rows}
+        skipped_long = 0
+        for c in ref["compat_all"]:
+            pairs = _pairs(c["values"])
+            if not pairs:
+                continue
+            if any(len(a) > 65 or len(b) > 65 for a, b in pairs):
+                skipped_long += 1
+                continue
+            key = tuple(sorted(map(tuple, pairs)))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"pairs": pairs, "notes": (c.get("notes") or "")[:500]})
+            added_rows += 1
+        if len(rows) > MAX_COMPAT_ROWS:
+            warnings.append(f"eBay takes at most {MAX_COMPAT_ROWS} compatibility rows; {len(rows) - MAX_COMPAT_ROWS} were cut.")
+            rows = rows[:MAX_COMPAT_ROWS]
+        if skipped_long:
+            warnings.append(f"{skipped_long} compatibility row(s) had a value over eBay's 65-character limit and were left out.")
+        d["compat"] = rows
+        d["compat_edited"] = True   # so choosing a store later does not throw these rows away
+        d["reference_item_id"] = item_id
+        notes = list(d.get("compat_notes") or [])
+        notes.append(f"{added_rows} compatibility row(s) were added from eBay listing {item_id} (seller {ref['seller']}); the rest came from our own fitment.")
+        d["compat_notes"] = notes
+        db.execute(
+            text("update ebay_listing_copies set data = cast(:d as jsonb), updated_at = now() where id = :i"),
+            {"d": json.dumps(d), "i": copy_id},
+        )
+        db.commit()
+        total_rows = len(rows)
+    except Exception:
+        db.rollback()
+        log.exception("could not add the looked-up listing's details to draft %s", copy_id)
+        warnings.append("The draft was made, but the listing's specifics and compatibility rows could not be added to it. Check the draft.")
+        total_rows = int(made.get("compat_rows") or 0)
+    if not ref["compat_all"]:
+        warnings.append("eBay returned no compatibility rows for that listing, so the table comes only from our own fitment.")
+    return {
+        "id": copy_id,
+        "store_done": store_done,
+        "compat_rows": total_rows,
+        "compat_from_listing": added_rows,
+        "specifics_added": added_specs,
+        "warnings": warnings,
     }
