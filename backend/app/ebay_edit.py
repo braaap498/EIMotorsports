@@ -404,6 +404,16 @@ def _no_qty(ch: "Changes") -> "Changes":
     return ch.model_copy(update=upd) if hasattr(ch, "model_copy") else ch.copy(update=upd)
 
 
+def _keep_product_label(db: Session, store: str, item_id: str, asked: "Changes", base: "Changes") -> "Changes":
+    """_no_qty drops any custom label sent with an edit, because the label comes from the product. The one label that may pass
+    is the product's OWN label for this listing (what the kit sync sends), so a changed product label can reach eBay.
+    Any other text is still ignored."""
+    want = (asked.sku or "").strip()
+    if want and want == (_product_label_for(db, store, item_id) or ""):
+        return base.model_copy(update={"sku": want}) if hasattr(base, "model_copy") else base.copy(update={"sku": want})
+    return base
+
+
 class EditIn(BaseModel):
     store: str
     item_id: str
@@ -946,7 +956,7 @@ _ACTION = {"revise": "revise_fixed_price_item", "relist": "relist_fixed_price_it
 def preview(body: EditIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     row = _store_row(db, body.store)
     current = _read_item(db, row.store, body.item_id.strip())
-    base = _no_qty(body.changes)
+    base = _keep_product_label(db, row.store, body.item_id.strip(), body.changes, _no_qty(body.changes))
     changes = _relist_changes(db, row.store, current, _relist_quantity(db, row.store, current, base)) if body.action == "relist" else base
     calls, diff = _plan(current, changes, body.action)
     fp = _fingerprint(row.store, calls)
@@ -972,7 +982,7 @@ def push(body: PushIn, db: Session = Depends(get_db), user: AuthUser = Depends(r
     if not enabled:
         raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
     current = _read_item(db, row.store, body.item_id.strip())
-    base = _no_qty(body.changes)
+    base = _keep_product_label(db, row.store, body.item_id.strip(), body.changes, _no_qty(body.changes))
     changes = _relist_changes(db, row.store, current, _relist_quantity(db, row.store, current, base)) if body.action == "relist" else base
     calls, diff = _plan(current, changes, body.action)
     act = _ACTION[body.action]
