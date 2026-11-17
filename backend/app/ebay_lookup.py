@@ -236,6 +236,30 @@ def _call(method: str, url: str, token: str, params: Optional[dict] = None, body
         raise HTTPException(502, "Could not reach eBay.")
 
 
+def _epids_from_browse(q: str, mpn: str, gtin: str) -> list[dict]:
+    """Fallback when the Catalog API is closed to us: live listings of this part carry the ePID eBay matched them to. Most common first."""
+    params: dict = {"limit": "50"}
+    if gtin:
+        params["gtin"] = gtin
+    else:
+        params["q"] = mpn or q
+    try:
+        data = _browse_get("/item_summary/search", params)
+    except HTTPException:
+        return []
+    tally: dict[str, dict] = {}
+    for it in data.get("itemSummaries") or []:
+        e = str(it.get("epid") or "").strip()
+        if not e:
+            continue
+        t = tally.setdefault(e, {"epid": e, "title": it.get("title") or "", "image": (it.get("image") or {}).get("imageUrl"), "brand": None, "mpn": [mpn] if mpn else [], "_n": 0})
+        t["_n"] += 1
+    ranked = sorted(tally.values(), key=lambda t: -t["_n"])[:5]
+    for t in ranked:
+        t.pop("_n", None)
+    return ranked
+
+
 @router.get("/catalog/search")
 def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max_length=20), mpn: str = Query("", max_length=60)):
     """Find eBay catalog products (and their ePID) for a part number, UPC or words."""
@@ -251,11 +275,26 @@ def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max
         params["mpn"] = mpn
     if q and not (gtin or mpn):
         params["q"] = q
+    note = ""
+    out = []
+    data: dict = {}
     try:
         data = _call("GET", f"{CATALOG}/product_summary/search", _catalog_token(), params=params)
     except FeedbackError as e:
         raise HTTPException(502, str(e))
-    out = []
+    except HTTPException as e:
+        if not _refused(e):
+            raise
+        # The Catalog API refused this app (403 / eBay 1100: the keys are not approved for it). Do not stop there: ask the Browse API
+        # for live listings of the same part number / UPC and collect the catalog product (ePID) they are matched to.
+        out = _epids_from_browse(q, mpn, gtin)
+        if not out:
+            raise HTTPException(
+                502,
+                f"{e.detail} The Catalog API is not open to this app's keys, and no live listing for that part number or UPC carries an eBay catalog product either, "
+                "so there is nothing to look up here. The listing's own Trading API table (above) is still read.",
+            )
+        note = "eBay's Catalog API refused this app, so these products were found from live listings of the same part number or UPC instead."
     for s_ in data.get("productSummaries") or []:
         if not s_.get("epid"):
             continue
@@ -266,6 +305,8 @@ def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max
             "brand": s_.get("brand"),
             "mpn": s_.get("mpn") if isinstance(s_.get("mpn"), list) else ([s_["mpn"]] if s_.get("mpn") else []),
         })
+    if note:
+        return {"total": len(out), "products": out, "note": note}
     return {"total": int(data.get("total") or len(out)), "products": out}
 
 
@@ -307,37 +348,97 @@ def _store_token_for_catalog(db: Session, store: str = "") -> str:
     raise last or HTTPException(409, "No eBay store is connected, so there is no seller login to retry the catalog call with.")
 
 
+PAGE_LIMIT = 1000        # rows asked per page; eBay's own default is 100, which is why only 100 rows used to come back
+MAX_PAGES = 40           # safety stop (a listing never takes more than 3000 rows anyway)
+
+
+def _total_in(data: dict) -> Optional[int]:
+    """The total row count eBay declares, wherever it keeps it (paginationOutput.total or similar)."""
+    for k, v in data.items():
+        if k == "compatibilityDetails":
+            continue
+        if isinstance(v, dict) and ("page" in k.lower() or "pagin" in k.lower()):
+            for kk, vv in v.items():
+                if "total" in kk.lower() and "page" not in kk.lower() and str(vv).isdigit():
+                    return int(vv)
+        elif "total" in k.lower() and "page" not in k.lower() and str(v).isdigit():
+            return int(v)
+    return None
+
+
+def _fetch_pages(token: str, ident: dict) -> tuple[list, dict, dict]:
+    """Read EVERY page of a catalog product's compatibility table. eBay sends 100 rows unless told otherwise, so the request
+    carries paginationInput {limit, offset} and keeps asking until the declared total is reached or a page comes back empty."""
+    url_ = f"{METADATA}/compatibilities/get_product_compatibilities"
+    limit = PAGE_LIMIT
+    offset = 0
+    details: list = []
+    first: dict = {}
+    declared: Optional[int] = None
+    seen_first_rows: set[str] = set()
+    pages = 0
+    while pages < MAX_PAGES:
+        body_ = {"productIdentifier": ident, "paginationInput": {"limit": limit, "offset": offset}}
+        try:
+            data = _call("POST", url_, token, body=body_, marketplace=COMPAT_MARKETPLACE)
+        except HTTPException as e:
+            # a page size eBay does not accept (400): fall back to its default size once, on the first page only
+            if pages == 0 and limit != 100 and "(400)" in str(e.detail):
+                limit = 100
+                continue
+            raise
+        pages += 1
+        if pages == 1:
+            first = data
+        page = data.get("compatibilityDetails") or []
+        if not page:
+            break
+        sig = json.dumps(page[0], sort_keys=True)
+        if sig in seen_first_rows:  # eBay ignored the offset and sent the same page again: stop rather than loop
+            break
+        seen_first_rows.add(sig)
+        details += page
+        t = _total_in(data)
+        if t is not None:
+            declared = t
+        offset += len(page)
+        if declared is not None and offset >= declared:
+            break
+        if declared is None and len(page) < min(limit, 100):  # no total sent: a short page is the last one
+            break
+    paging = {k: v for k, v in first.items() if k != "compatibilityDetails" and ("page" in k.lower() or "next" in k.lower() or "total" in k.lower())}
+    return details, first, {"pages": pages, "declared_total": declared, "paging": paging, "limit": limit}
+
+
 def _catalog_rows(epid: Optional[str], upc: Optional[str], db: Optional[Session] = None, store: str = "") -> dict:
-    """The catalog product's compatibility table as rows of {Make, Model, Year ...}. Read only. Never raises for an empty table:
-    the answer says what eBay sent, so an empty or odd answer can be seen rather than guessed at."""
+    """The catalog product's compatibility table as rows of {Make, Model, Year ...}, ALL pages. Read only. Never raises for an empty
+    table: the answer says what eBay sent, so an empty or odd answer can be seen rather than guessed at."""
     epid, upc = (epid or "").strip(), re.sub(r"\D", "", upc or "")
     if not epid and not upc:
         raise HTTPException(400, "An eBay catalog product (ePID) or a UPC is needed.")
     ident = {"epid": epid} if epid else {"upc": upc}
-    body_ = {"productIdentifier": ident}
-    url_ = f"{METADATA}/compatibilities/get_product_compatibilities"
     try:
         try:
-            data = _call("POST", url_, _token(), body=body_, marketplace=COMPAT_MARKETPLACE)
+            details, first, info = _fetch_pages(_token(), ident)
         except HTTPException as e:
             # 403 / eBay 1100: the app-only token is not allowed this call. Retry once as a connected seller.
             if not (_refused(e) and db is not None):
                 raise
-            first = str(e.detail)
+            first_err = str(e.detail)
             try:
                 seller = _store_token_for_catalog(db, store)
             except HTTPException as e_tok:
                 raise HTTPException(
                     502,
-                    f"eBay refused the app login for this catalog product ({first}), and no store login could be used to retry: {e_tok.detail}",
+                    f"eBay refused the app login for this catalog product ({first_err}), and no store login could be used to retry: {e_tok.detail}",
                 )
             try:
-                data = _call("POST", url_, seller, body=body_, marketplace=COMPAT_MARKETPLACE)
+                details, first, info = _fetch_pages(seller, ident)
             except HTTPException as e2:
                 if _refused(e2):
                     raise HTTPException(
                         502,
-                        f"eBay refused both logins for this catalog product's compatibility table. App login: {first} "
+                        f"eBay refused both logins for this catalog product's compatibility table. App login: {first_err} "
                         f"Store login ({store.strip() or 'first connected store'}): {e2.detail} "
                         "If the store login is refused too, either eBay limits this table to some catalog products, or the store was "
                         "connected without the sell.inventory permission this call accepts (reconnect it under Store API to test that).",
@@ -345,7 +446,6 @@ def _catalog_rows(epid: Optional[str], upc: Optional[str], db: Optional[Session]
                 raise
     except FeedbackError as e:
         raise HTTPException(502, str(e))
-    details = data.get("compatibilityDetails") or []
     rows = []
     for d in details:
         vals: dict[str, str] = {}
@@ -358,13 +458,17 @@ def _catalog_rows(epid: Optional[str], upc: Optional[str], db: Optional[Session]
                 vals[n] = v
         if vals:
             rows.append({"values": vals, "notes": "; ".join(notes)[:500]})
+    declared = info["declared_total"]
     return {
         "identifier": ident,
         "rows": rows,
         "declared_entries": len(details),
-        "response_keys": sorted(data.keys()),
-        # anything that looks like paging, so a table that arrives in pieces is noticed
-        "paging": {k: v for k, v in data.items() if k != "compatibilityDetails" and ("page" in k.lower() or "next" in k.lower() or "total" in k.lower())},
+        "response_keys": sorted(first.keys()),
+        "paging": info["paging"],
+        "pages": info["pages"],
+        "declared_total": declared,
+        # False only when eBay says there are more rows than we collected
+        "complete": declared is None or len(details) >= declared,
     }
 
 

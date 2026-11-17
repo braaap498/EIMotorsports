@@ -50,6 +50,9 @@ type CatCompat = {
   declared_entries: number;
   response_keys: string[];
   paging: Record<string, unknown>;
+  complete?: boolean;
+  pages?: number;
+  declared_total?: number | null;
 };
 type Made = { id: number; store_done: boolean; compat_rows: number; compat_from_listing: number; specifics_added: string[]; warnings: string[] };
 
@@ -192,8 +195,9 @@ export default function EbayLookup() {
         setCatMsg("This listing has no ePID, part number or UPC to look the catalog up with. Search it by words below.");
         return;
       }
-      const r = await api<{ products: CatProduct[] }>(`/ebay-lookup/catalog/search?mpn=${encodeURIComponent(mpn)}&gtin=${encodeURIComponent(upc)}`);
+      const r = await api<{ products: CatProduct[]; note?: string }>(`/ebay-lookup/catalog/search?mpn=${encodeURIComponent(mpn)}&gtin=${encodeURIComponent(upc)}`);
       setCatProducts(r.products);
+      if (r.note) setCatMsg(r.note);
       if (r.products.length === 1) await catalogCompat(r.products[0].epid);
       else if (r.products.length === 0) setCatMsg("eBay's catalog has no product for this part number or UPC.");
     } catch (e) {
@@ -344,41 +348,24 @@ export default function EbayLookup() {
           )}
 
           <p className="text-xs text-gray-500">Fields eBay returned: {info.keys_returned.join(", ")}</p>
-
-          <div className="space-y-2 border-t border-gray-100 pt-3">
-            <h3 className="font-semibold">Compatibility table</h3>
-            <p className="text-gray-600">
-              Asked for automatically when a listing is read, through eBay&apos;s Trading API using the store below (any of ours works; it only reads). The store chosen here is also the store the new listing goes to.
-            </p>
-            {stores.length === 0 ? (
-              <p className="text-amber-700">No eBay store is connected, so this check cannot run yet. Connect one under Store API.</p>
-            ) : (
-              <div className="flex flex-wrap items-end gap-3">
-                <label className="block">
-                  <span className="mb-1 block text-xs font-semibold">Ask as store</span>
-                  <select className={inputCls} value={store} onChange={(e) => setStore(e.target.value)}>
-                    {stores.map((s) => (
-                      <option key={s.store} value={s.store}>{s.store}</option>
-                    ))}
-                  </select>
-                </label>
-                <button type="button" className={btn2Cls} disabled={busy !== "" || !store} onClick={() => void runProbe()}>
-                  {busy === "probe" ? "Asking eBay…" : "Ask again"}
-                </button>
-              </div>
-            )}
-          </div>
         </div>
       )}
 
-      {probe && (
+      {info && (
         <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
-          <h2 className="font-semibold">What the Trading API said</h2>
-          {!probe.ok ? (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 className="font-semibold">What the Trading API said</h2>
+            <button type="button" className={btn2Cls} disabled={busy !== "" || !store} onClick={() => void runProbe()}>
+              {busy === "probe" ? "Asking eBay…" : "Ask again"}
+            </button>
+          </div>
+          {stores.length === 0 && <p className="text-amber-700">No eBay store is connected, so this check cannot run yet. Connect one under Store API.</p>}
+          {busy === "probe" && !probe && <p className="text-gray-500">Asking eBay…</p>}
+          {probe && !probe.ok ? (
             <Notice kind="error">
               eBay refused ({probe.ack || "no answer"}): {probe.errors.map((e) => `${e.message}${e.code ? ` (eBay ${e.code})` : ""}`).join("; ") || "no reason given"}
             </Notice>
-          ) : (
+          ) : probe && (
             <>
               <p>
                 Listing by <strong>{probe.seller}</strong>{probe.belongs_to_store ? " (this is one of our own listings)" : " (not ours)"}.{" "}
@@ -472,8 +459,8 @@ export default function EbayLookup() {
                   <strong className="text-amber-700">eBay returned no compatibility rows for catalog product {catEpid}{catCompat.declared_entries ? ` (it sent ${catCompat.declared_entries} entries that held no vehicle)` : ""}.</strong>
                 )}
               </p>
-              {Object.keys(catCompat.paging).length > 0 && (
-                <p className="text-xs text-gray-500">eBay also sent paging details: {JSON.stringify(catCompat.paging)}. If it says there is more than one page, only the first page was read.</p>
+              {catCompat.complete === false && (
+                <p className="text-xs text-amber-700">eBay says this table has {catCompat.declared_total} rows but only {catCompat.count} could be read ({JSON.stringify(catCompat.paging)}).</p>
               )}
               {catCompat.count === 0 && <p className="text-xs text-gray-500">Fields in eBay&apos;s answer: {catCompat.response_keys.join(", ") || "none"}.</p>}
               {catCompat.rows.length > 0 && (() => {
@@ -570,8 +557,13 @@ export default function EbayLookup() {
               </p>
               <div className="flex flex-wrap items-center gap-3">
                 <span>
-                  For <strong>{product.title}</strong> in <strong>{store}</strong>.
+                  For <strong>{product.title}</strong> in
                 </span>
+                <select className={inputCls} value={store} onChange={(e) => setStore(e.target.value)} aria-label="Store the draft goes to">
+                  {stores.map((s) => (
+                    <option key={s.store} value={s.store}>{s.store}</option>
+                  ))}
+                </select>
                 <button type="button" className={btnCls} disabled={busy !== "" || !store || product.listings > 0} onClick={() => void makeIt()}
                   title={product.listings > 0 ? "This product already has eBay listings: use Sell similar from one of them" : ""}>
                   {busy === "make" ? "Making the draft…" : "Make the draft"}
