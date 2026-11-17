@@ -18,12 +18,15 @@ Mounted at /admin/ebay-lookup/* (owner/admin only).
                                 matched to our makes / models / years. Writes nothing.
   POST /fitment/settle          {decisions}  settle machines our vehicle list does not know (map to a model, create make/model, skip).
   POST /fitment/commit          {product_id, item_id?, store?, from_listings, picks}  add exactly the years that were ticked in the review.
+  GET  /catalog/search?q=&gtin=&mpn=   eBay Catalog API: find the catalog product (ePID) for a part number or UPC.
+  POST /catalog/compat          {epid | upc}  Metadata API getProductCompatibilities: the catalog product's compatibility table. Read only.
   POST /make-draft              a draft listing from one of our products (a separate step from the fitment review).
 
 Why two calls: the Browse API needs no seller login and works on any listing, but is not documented to return the compatibility
 table. The Trading call is documented to return it, and is known to work on our own listings; whether it works on another seller's
 listing is what the probe shows.
 """
+import base64
 import json
 import logging
 import os
@@ -42,7 +45,7 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, require_admin
 from app.database import get_db
 from app.ebay_edit import NS, _errors, _failed, _trading
-from app.ebay_feedback import FeedbackError, _token, configured
+from app.ebay_feedback import TOKEN_URL, FeedbackError, _open, _token, configured
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +173,167 @@ def item(item_id: str):
     }
 
 
+# --------------------------------------------------------------------------
+# eBay's CATALOG: a catalog product (ePID) has its own compatibility table, apart from any seller's listing
+#   Catalog API   GET  /commerce/catalog/v1_beta/product_summary/search   part number / UPC / words -> catalog products and their ePID
+#   Metadata API  POST /sell/metadata/v1/compatibilities/get_product_compatibilities   ePID or UPC -> the compatibility table
+# Both are read with the app token (no seller login). Read only.
+# --------------------------------------------------------------------------
+CATALOG = "https://api.ebay.com/commerce/catalog/v1_beta"
+METADATA = "https://api.ebay.com/sell/metadata/v1"
+_API_SCOPE = "https://api.ebay.com/oauth/api_scope"
+_CATALOG_SCOPE = "https://api.ebay.com/oauth/api_scope/commerce.catalog.readonly"
+MARKETPLACE = "EBAY_US"
+
+
+def _scoped_token(scopes: str) -> str:
+    cred = f"{os.environ['EBAY_CLIENT_ID']}:{os.environ['EBAY_CLIENT_SECRET']}".encode()
+    req = urllib.request.Request(
+        TOKEN_URL,
+        data=urllib.parse.urlencode({"grant_type": "client_credentials", "scope": scopes}).encode(),
+        method="POST",
+        headers={"Authorization": "Basic " + base64.b64encode(cred).decode(), "Content-Type": "application/x-www-form-urlencoded"},
+    )
+    tok = _open(req).get("access_token")
+    if not tok:
+        raise FeedbackError("eBay did not return an access token.")
+    return tok
+
+
+def _catalog_token() -> str:
+    """The Catalog API can ask for its own read scope; if eBay will not grant it to this app, fall back to the plain one."""
+    try:
+        return _scoped_token(f"{_API_SCOPE} {_CATALOG_SCOPE}")
+    except FeedbackError:
+        return _token()
+
+
+def _call(method: str, url: str, token: str, params: Optional[dict] = None, body: Optional[dict] = None) -> dict:
+    """One call to a catalog or metadata endpoint. A refusal becomes a readable message that includes eBay's own reason."""
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE, "Accept": "application/json", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read().decode("utf-8")
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        body_txt = e.read().decode("utf-8", "replace")
+        why = ""
+        try:
+            errs = json.loads(body_txt).get("errors") or []
+            why = "; ".join(f"{x.get('message', '')} (eBay {x.get('errorId', '')})" for x in errs)[:400]
+        except ValueError:
+            why = body_txt[:200]
+        log.warning("eBay %s %s -> %s %s", method, url.split("?")[0], e.code, why)
+        raise HTTPException(502, f"eBay answered with an error ({e.code}). {why}".strip())
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        raise HTTPException(502, "Could not reach eBay.")
+
+
+@router.get("/catalog/search")
+def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max_length=20), mpn: str = Query("", max_length=60)):
+    """Find eBay catalog products (and their ePID) for a part number, UPC or words."""
+    if not configured():
+        raise HTTPException(409, "EBAY_CLIENT_ID and EBAY_CLIENT_SECRET are not set on the API.")
+    q, mpn, gtin = q.strip(), mpn.strip(), re.sub(r"\D", "", gtin)
+    if not (q or mpn or gtin):
+        raise HTTPException(400, "Give a part number, UPC or words to find the catalog product.")
+    params: dict = {"limit": "10"}
+    if gtin:
+        params["gtin"] = gtin
+    if mpn:
+        params["mpn"] = mpn
+    if q and not (gtin or mpn):
+        params["q"] = q
+    try:
+        data = _call("GET", f"{CATALOG}/product_summary/search", _catalog_token(), params=params)
+    except FeedbackError as e:
+        raise HTTPException(502, str(e))
+    out = []
+    for s_ in data.get("productSummaries") or []:
+        if not s_.get("epid"):
+            continue
+        out.append({
+            "epid": str(s_["epid"]),
+            "title": s_.get("title") or "",
+            "image": (s_.get("image") or {}).get("imageUrl"),
+            "brand": s_.get("brand"),
+            "mpn": s_.get("mpn") if isinstance(s_.get("mpn"), list) else ([s_["mpn"]] if s_.get("mpn") else []),
+        })
+    return {"total": int(data.get("total") or len(out)), "products": out}
+
+
+def _pairs_in(node, notes: bool = False) -> list[tuple[str, str, bool]]:
+    """Every {propertyName, propertyValue} pair anywhere under node, flagged when it sits under a notes container."""
+    out: list[tuple[str, str, bool]] = []
+    if isinstance(node, dict):
+        if "propertyName" in node and ("propertyValue" in node or "value" in node):
+            out.append((str(node["propertyName"]), str(node.get("propertyValue", node.get("value", ""))), notes))
+        else:
+            for k, v in node.items():
+                out += _pairs_in(v, notes or "note" in str(k).lower())
+    elif isinstance(node, list):
+        for v in node:
+            out += _pairs_in(v, notes)
+    return out
+
+
+def _catalog_rows(epid: Optional[str], upc: Optional[str]) -> dict:
+    """The catalog product's compatibility table as rows of {Make, Model, Year ...}. Read only. Never raises for an empty table:
+    the answer says what eBay sent, so an empty or odd answer can be seen rather than guessed at."""
+    epid, upc = (epid or "").strip(), re.sub(r"\D", "", upc or "")
+    if not epid and not upc:
+        raise HTTPException(400, "An eBay catalog product (ePID) or a UPC is needed.")
+    ident = {"epid": epid} if epid else {"upc": upc}
+    try:
+        data = _call("POST", f"{METADATA}/compatibilities/get_product_compatibilities", _token(), body={"productIdentifier": ident})
+    except FeedbackError as e:
+        raise HTTPException(502, str(e))
+    details = data.get("compatibilityDetails") or []
+    rows = []
+    for d in details:
+        vals: dict[str, str] = {}
+        notes: list[str] = []
+        for n, v, is_note in _pairs_in(d):
+            if is_note:
+                if v:
+                    notes.append(f"{n}: {v}" if n.lower() not in ("notes", "note", "fitmentcomments") else v)
+            elif n and n not in vals:
+                vals[n] = v
+        if vals:
+            rows.append({"values": vals, "notes": "; ".join(notes)[:500]})
+    return {
+        "identifier": ident,
+        "rows": rows,
+        "declared_entries": len(details),
+        "response_keys": sorted(data.keys()),
+        # anything that looks like paging, so a table that arrives in pieces is noticed
+        "paging": {k: v for k, v in data.items() if k != "compatibilityDetails" and ("page" in k.lower() or "next" in k.lower() or "total" in k.lower())},
+    }
+
+
+class CatalogCompatIn(BaseModel):
+    epid: Optional[str] = Field(None, max_length=30)
+    upc: Optional[str] = Field(None, max_length=20)
+
+
+@router.post("/catalog/compat")
+def catalog_compat(body: CatalogCompatIn):
+    """The compatibility table of one eBay catalog product, as eBay's Metadata API gives it. Read only; saves nothing."""
+    got = _catalog_rows(body.epid, body.upc)
+    allrows = got["rows"]
+    got["rows"] = allrows[:MAX_COMPAT_SHOWN]
+    got["count"] = len(allrows)
+    got["truncated"] = len(allrows) > MAX_COMPAT_SHOWN
+    return got
+
+
+
 class ProbeIn(BaseModel):
     item_id: str = Field(..., min_length=9, max_length=15)
     store: str = Field(..., min_length=1, max_length=60)
@@ -247,6 +411,7 @@ class MakeIn(BaseModel):
     item_id: str = Field(..., min_length=9, max_length=15)     # the listing to take specifics and compatibility from
     product_id: int                                            # OUR product the new listing is for
     store: str = Field(..., min_length=1, max_length=60)       # the store the new listing goes to (also the login used to read)
+    epid: Optional[str] = Field(None, max_length=30)           # also take the compatibility table of this eBay catalog product
 
 
 # Specifics that identify the OTHER seller's part, not ours: never copied. Our own product supplies these.
@@ -273,9 +438,21 @@ def make_draft(body: MakeIn, db: Session = Depends(get_db), user: AuthUser = Dep
     if not ref["ok"]:
         raise HTTPException(502, "eBay would not give us that listing: " + "; ".join(e["message"] for e in ref["errors"])[:300])
 
+    catalog_note = ""
+    if body.epid:
+        try:
+            cat = _catalog_rows(body.epid, None)
+            ref["compat_all"] = list(ref["compat_all"]) + cat["rows"]
+            if not cat["rows"]:
+                catalog_note = "eBay's catalog product has no compatibility rows."
+        except HTTPException as e:
+            catalog_note = f"The catalog table could not be read: {e.detail}"
+
     made = create(CreateIn(product_id=body.product_id), db=db, user=user)   # refuses (409) a product that already has eBay listings
     copy_id = int(made["id"])
     warnings: list[str] = list(made.get("warnings") or [])
+    if catalog_note:
+        warnings.append(catalog_note)
 
     store_done = False
     try:
@@ -369,6 +546,7 @@ class FitSource(BaseModel):
     item_id: Optional[str] = Field(None, max_length=15)   # read this listing's table from eBay (needs store)
     store: Optional[str] = Field(None, max_length=60)
     from_listings: bool = False                            # use the saved compatibility tables of the product's OWN eBay listings
+    epid: Optional[str] = Field(None, max_length=30)       # use the compatibility table of this eBay catalog product
 
 
 _YEAR = re.compile(r"(19|20)\d{2}")
@@ -576,7 +754,7 @@ def _fit_rows(db: Session, body: FitSource) -> tuple[list[dict], dict, str]:
         raise HTTPException(404, "That product does not exist.")
     if pj.u or pj.x:
         raise HTTPException(409, "This product is marked universal or exempt from fitment, so no fitment is added to it.")
-    if not body.item_id and not body.from_listings:
+    if not body.item_id and not body.from_listings and not body.epid:
         raise HTTPException(400, "Choose where the compatibility rows come from.")
     rows: list[dict] = []
     info: dict = {}
@@ -589,6 +767,10 @@ def _fit_rows(db: Session, body: FitSource) -> tuple[list[dict], dict, str]:
             raise HTTPException(502, "eBay would not give us that listing: " + "; ".join(e["message"] for e in ref["errors"])[:300])
         rows += [c["values"] for c in ref["compat_all"]]
         info["from_listing_rows"] = len(ref["compat_all"])
+    if body.epid:
+        cat = _catalog_rows(body.epid, None)
+        rows += [c["values"] for c in cat["rows"]]
+        info["from_catalog_rows"] = len(cat["rows"])
     if body.from_listings:
         saved, used, total = _saved_tables(db, body.product_id)
         rows += saved

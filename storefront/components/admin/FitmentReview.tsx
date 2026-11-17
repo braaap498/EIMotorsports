@@ -11,7 +11,7 @@ import { Notice, btnCls, btn2Cls, inputCls } from "./ui";
    2. Settle   - for a machine we do not have: use one of our models, create the make / model (names are editable), or skip it.
    3. Commit   - adds the years that are ticked, and only years that are still new. */
 
-type Src = "listing" | "own" | "both";
+type Src = { listing: boolean; catalog: boolean; own: boolean };
 type Suggestion = { model_id: number; name: string; make: string; score: number };
 type FitModel = { model_id: number; make: string; model: string; ebay_names: string[]; new_years: number[]; already_years: number[] };
 type Unknown = { make: string; model: string; years: number[]; subs: string[]; make_exists: boolean; ambiguous: boolean; suggestions: Suggestion[] };
@@ -23,6 +23,7 @@ type Plan = {
   models: FitModel[];
   unresolved: Unknown[];
   from_listing_rows?: number;
+  from_catalog_rows?: number;
   own_listings_with_table?: number;
   own_listings?: number;
 };
@@ -89,9 +90,10 @@ function ModelPicker({ onPick }: { onPick: (m: PickedModel) => void }) {
   );
 }
 
-export default function FitmentReview({ product, itemId, store }: { product: { id: number; title: string; listings: number }; itemId: string | null; store: string }) {
+export default function FitmentReview({ product, itemId, store, epid }: { product: { id: number; title: string; listings: number }; itemId: string | null; store: string; epid: string | null }) {
   const canListing = !!itemId && !!store;
-  const [src, setSrc] = useState<Src>(canListing ? "listing" : "own");
+  const [src, setSrc] = useState<Src>({ listing: canListing, catalog: !!epid, own: !canListing && !epid && product.listings > 0 });
+  const touched = useRef(false);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [sel, setSel] = useState<Record<number, number[]>>({});
   const [dec, setDec] = useState<Record<string, Dec>>({});
@@ -109,7 +111,7 @@ export default function FitmentReview({ product, itemId, store }: { product: { i
       try {
         const p = await api<Plan>("/ebay-lookup/fitment/preview", {
           method: "POST",
-          body: { product_id: product.id, item_id: s === "own" ? null : itemId, store: store || null, from_listings: s !== "listing" },
+          body: { product_id: product.id, item_id: s.listing ? itemId : null, store: store || null, from_listings: s.own, epid: s.catalog ? epid : null },
         });
         setPlan(p);
         setSel(Object.fromEntries(p.models.filter((m) => m.new_years.length).map((m) => [m.model_id, [...m.new_years]])));
@@ -121,14 +123,20 @@ export default function FitmentReview({ product, itemId, store }: { product: { i
         setBusy("");
       }
     },
-    [product.id, itemId, store]
+    [product.id, itemId, store, epid]
   );
 
   // the review starts by itself when the product is chosen (the parent re-mounts this for each product)
   useEffect(() => {
-    if (canListing || product.listings > 0) void preview(canListing ? "listing" : "own");
+    if (src.listing || src.own || src.catalog) void preview(src);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // the listing's catalog product is found a moment after the listing is read: include it unless the sources were already chosen by hand
+  useEffect(() => {
+    if (epid && !touched.current && !src.catalog) void preview({ ...src, catalog: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [epid]);
 
   // makes and vehicle types are only needed when there is a machine to settle
   useEffect(() => {
@@ -208,9 +216,10 @@ export default function FitmentReview({ product, itemId, store }: { product: { i
         method: "POST",
         body: {
           product_id: product.id,
-          item_id: src === "own" ? null : itemId,
+          item_id: src.listing ? itemId : null,
           store: store || null,
-          from_listings: src !== "listing",
+          from_listings: src.own,
+          epid: src.catalog ? epid : null,
           picks: Object.entries(sel).filter(([, ys]) => ys.length > 0).map(([id, years]) => ({ model_id: Number(id), years })),
         },
       });
@@ -225,18 +234,32 @@ export default function FitmentReview({ product, itemId, store }: { product: { i
     }
   }
 
-  const srcBtn = (s: Src, label: string, off: boolean, why: string) => (
-    <button type="button" className={`${btn2Cls} ${src === s && plan ? "border-black bg-gray-100" : ""}`} disabled={busy !== "" || off} title={off ? why : ""} onClick={() => void preview(s)}>
+  const srcBox = (key: keyof Src, label: string, off: boolean, why: string) => (
+    <label className={`flex items-center gap-2 rounded border px-3 py-2 ${off ? "border-gray-200 text-gray-400" : "border-gray-300 bg-white"}`} title={off ? why : ""}>
+      <input
+        type="checkbox"
+        disabled={busy !== "" || off}
+        checked={src[key] && !off}
+        onChange={() => {
+          touched.current = true;
+          const next = { ...src, [key]: !src[key] };
+          if (next.listing || next.catalog || next.own) void preview(next);
+          else setSrc(next);
+        }}
+      />
       {label}
-    </button>
+    </label>
   );
 
   return (
     <div className="space-y-3 text-sm">
-      <div className="flex flex-wrap gap-2">
-        {srcBtn("listing", "From this listing", !canListing, "Read a listing and choose a store first")}
-        {srcBtn("own", "From this product's own eBay listings", product.listings === 0, "This product has no eBay listings of its own")}
-        {srcBtn("both", "From both", !canListing || product.listings === 0, "Needs a listing read and a product with eBay listings")}
+      <div className="space-y-1">
+        <p className="text-xs text-gray-600">Where the rows come from (tick any combination; the review updates):</p>
+        <div className="flex flex-wrap gap-2">
+          {srcBox("listing", "This listing", !canListing, "Read a listing and choose a store first")}
+          {srcBox("catalog", "eBay's catalog product for this part", !epid, "No catalog product found for this listing yet. Find one in the catalog box above.")}
+          {srcBox("own", "This product's own eBay listings", product.listings === 0, "This product has no eBay listings of its own")}
+        </div>
       </div>
       {busy === "preview" && <p className="text-gray-500">Matching the eBay vehicles to ours…</p>}
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
@@ -246,6 +269,7 @@ export default function FitmentReview({ product, itemId, store }: { product: { i
           <p className="text-gray-700">
             {plan.rows_read.toLocaleString()} eBay row{plan.rows_read === 1 ? "" : "s"} read
             {plan.from_listing_rows !== undefined ? ` (${plan.from_listing_rows} from this listing)` : ""}
+            {plan.from_catalog_rows !== undefined ? ` (${plan.from_catalog_rows} from eBay's catalog product)` : ""}
             {plan.own_listings !== undefined ? `; ${plan.own_listings_with_table} of ${plan.own_listings} of the product's own listings have a saved table` : ""}.
             {plan.no_year > 0 ? ` ${plan.no_year} row${plan.no_year === 1 ? " had" : "s had"} no usable year and were left out.` : ""}
           </p>

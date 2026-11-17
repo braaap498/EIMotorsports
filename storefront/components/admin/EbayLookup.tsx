@@ -42,6 +42,15 @@ type Probe = {
 };
 type StoreChoice = { store: string; seller: string | null; live: boolean };
 type FoundProduct = { id: number; title: string; sku: string | null; custom_label: string | null; price: number | null; listings: number };
+type CatProduct = { epid: string; title: string; image: string | null; brand: string | null; mpn: string[] };
+type CatCompat = {
+  rows: { values: Record<string, string>; notes: string }[];
+  count: number;
+  truncated: boolean;
+  declared_entries: number;
+  response_keys: string[];
+  paging: Record<string, unknown>;
+};
 type Made = { id: number; store_done: boolean; compat_rows: number; compat_from_listing: number; specifics_added: string[]; warnings: string[] };
 
 export default function EbayLookup() {
@@ -59,6 +68,11 @@ export default function EbayLookup() {
   const [found, setFound] = useState<FoundProduct[] | null>(null);
   const [product, setProduct] = useState<FoundProduct | null>(null);
   const [made, setMade] = useState<Made | null>(null);
+  const [catProducts, setCatProducts] = useState<CatProduct[] | null>(null);
+  const [catEpid, setCatEpid] = useState<string | null>(null);
+  const [catCompat, setCatCompat] = useState<CatCompat | null>(null);
+  const [catMsg, setCatMsg] = useState<string>("");
+  const [catBusy, setCatBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   useEffect(() => {
@@ -96,8 +110,14 @@ export default function EbayLookup() {
     setMsg(null);
     setInfo(null);
     setProbe(null);
+    setCatProducts(null);
+    setCatEpid(null);
+    setCatCompat(null);
+    setCatMsg("");
     try {
-      setInfo(await api<ItemInfo>(`/ebay-lookup/item/${n}`));
+      const got = await api<ItemInfo>(`/ebay-lookup/item/${n}`);
+      setInfo(got);
+      void lookCatalog(got); // the listing's catalog product, if it has one or can be found from its part number / UPC
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
       setBusy("");
@@ -133,6 +153,72 @@ export default function EbayLookup() {
     }
   }
 
+  const aspectOf = (i: ItemInfo, ...names: string[]) => {
+    const all = [...i.aspects.map((a) => [a.name, a.value] as const), ...i.product_aspects.map((a) => [a.name, a.values[0] ?? ""] as const)];
+    for (const n of names) {
+      const hit = all.find(([k, v]) => k.toLowerCase() === n && v);
+      if (hit) return hit[1];
+    }
+    return "";
+  };
+
+  async function catalogCompat(epid: string) {
+    setCatBusy(true);
+    setCatMsg("");
+    setCatCompat(null);
+    setCatEpid(epid);
+    try {
+      setCatCompat(await api<CatCompat>("/ebay-lookup/catalog/compat", { method: "POST", body: { epid } }));
+    } catch (e) {
+      setCatMsg(errMsg(e));
+    } finally {
+      setCatBusy(false);
+    }
+  }
+
+  async function lookCatalog(i: ItemInfo) {
+    setCatBusy(true);
+    setCatMsg("");
+    try {
+      if (i.epid) {
+        setCatProducts([]);
+        await catalogCompat(i.epid);
+        return;
+      }
+      const mpn = aspectOf(i, "manufacturer part number", "mpn", "part number");
+      const upc = aspectOf(i, "upc", "ean", "gtin");
+      if (!mpn && !upc) {
+        setCatProducts([]);
+        setCatMsg("This listing has no ePID, part number or UPC to look the catalog up with. Search it by words below.");
+        return;
+      }
+      const r = await api<{ products: CatProduct[] }>(`/ebay-lookup/catalog/search?mpn=${encodeURIComponent(mpn)}&gtin=${encodeURIComponent(upc)}`);
+      setCatProducts(r.products);
+      if (r.products.length === 1) await catalogCompat(r.products[0].epid);
+      else if (r.products.length === 0) setCatMsg("eBay's catalog has no product for this part number or UPC.");
+    } catch (e) {
+      setCatProducts([]);
+      setCatMsg(errMsg(e));
+    } finally {
+      setCatBusy(false);
+    }
+  }
+
+  async function searchCatalogWords() {
+    if (!q.trim()) return;
+    setCatBusy(true);
+    setCatMsg("");
+    try {
+      const r = await api<{ products: CatProduct[] }>(`/ebay-lookup/catalog/search?q=${encodeURIComponent(q.trim())}`);
+      setCatProducts(r.products);
+      if (r.products.length === 0) setCatMsg("eBay's catalog has no product for those words.");
+    } catch (e) {
+      setCatMsg(errMsg(e));
+    } finally {
+      setCatBusy(false);
+    }
+  }
+
   function startOver() {
     setInfo(null);
     setProbe(null);
@@ -142,6 +228,10 @@ export default function EbayLookup() {
     setMsg(null);
     setItemNo("");
     setPq("");
+    setCatProducts(null);
+    setCatEpid(null);
+    setCatCompat(null);
+    setCatMsg("");
   }
 
   async function makeIt() {
@@ -150,7 +240,7 @@ export default function EbayLookup() {
     setMsg(null);
     setMade(null);
     try {
-      const r = await api<Made>("/ebay-lookup/make-draft", { method: "POST", body: { item_id: info.item_id, product_id: product.id, store } });
+      const r = await api<Made>("/ebay-lookup/make-draft", { method: "POST", body: { item_id: info.item_id, product_id: product.id, store, epid: catCompat && catCompat.count > 0 ? catEpid : null } });
       if (r.warnings.length === 0 && r.store_done) {
         window.location.href = `/admin/ebay-copy?id=${r.id}`;
         return;
@@ -342,6 +432,77 @@ export default function EbayLookup() {
       )}
 
       {info && (
+        <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
+          <h2 className="font-semibold">eBay&apos;s catalog product for this part</h2>
+          <p className="text-gray-600">
+            eBay keeps its own compatibility table for catalog products, apart from any seller&apos;s listing. It is looked up from the listing&apos;s catalog product, or from its part number or UPC, and
+            it is read only. It can be added to the website fitment below, and to a draft.
+          </p>
+          {catBusy && <p className="text-gray-500">Asking eBay&apos;s catalog…</p>}
+          {catMsg && <Notice kind="info">{catMsg}</Notice>}
+          {catProducts && catProducts.length > 0 && (
+            <ul className="divide-y divide-gray-100">
+              {catProducts.map((c) => (
+                <li key={c.epid} className="flex flex-wrap items-center justify-between gap-3 py-2">
+                  <span className="flex items-center gap-3">
+                    {c.image && /* eslint-disable-next-line @next/next/no-img-element */ <img src={c.image} alt="" className="h-12 w-12 rounded border border-gray-200 object-cover" />}
+                    <span>
+                      <span className="font-medium">{c.title}</span>
+                      <span className="block text-xs text-gray-500">ePID {c.epid}{c.brand ? ` · ${c.brand}` : ""}{c.mpn.length ? ` · MPN ${c.mpn.join(", ")}` : ""}</span>
+                    </span>
+                  </span>
+                  <button type="button" className={btn2Cls} disabled={catBusy} onClick={() => void catalogCompat(c.epid)}>
+                    {catEpid === c.epid ? "Read again" : "Read its compatibility table"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="flex flex-wrap items-end gap-2 border-t border-gray-100 pt-2">
+            <span className="text-xs text-gray-500">Wrong or no product? Look it up by the words in the search box at the top:</span>
+            <button type="button" className={btn2Cls} disabled={catBusy || q.trim().length < 2} onClick={() => void searchCatalogWords()}>Search the catalog</button>
+            <button type="button" className={btn2Cls} disabled={catBusy} onClick={() => void lookCatalog(info)}>Look up from this listing again</button>
+          </div>
+          {catCompat && (
+            <div className="space-y-2">
+              <p>
+                {catCompat.count > 0 ? (
+                  <strong className="text-green-700">eBay&apos;s catalog product {catEpid} has {catCompat.count} compatibility row{catCompat.count === 1 ? "" : "s"}.</strong>
+                ) : (
+                  <strong className="text-amber-700">eBay returned no compatibility rows for catalog product {catEpid}{catCompat.declared_entries ? ` (it sent ${catCompat.declared_entries} entries that held no vehicle)` : ""}.</strong>
+                )}
+              </p>
+              {Object.keys(catCompat.paging).length > 0 && (
+                <p className="text-xs text-gray-500">eBay also sent paging details: {JSON.stringify(catCompat.paging)}. If it says there is more than one page, only the first page was read.</p>
+              )}
+              {catCompat.count === 0 && <p className="text-xs text-gray-500">Fields in eBay&apos;s answer: {catCompat.response_keys.join(", ") || "none"}.</p>}
+              {catCompat.rows.length > 0 && (() => {
+                const cols = Array.from(new Set<string>(catCompat.rows.flatMap((c) => Object.keys(c.values))));
+                return (
+                  <div className="max-h-72 overflow-auto rounded border border-gray-200">
+                    <table className="w-full text-left text-xs">
+                      <thead className="sticky top-0 bg-gray-50">
+                        <tr>{cols.map((k) => <th key={k} className="px-2 py-1 font-semibold">{k}</th>)}<th className="px-2 py-1 font-semibold">Notes</th></tr>
+                      </thead>
+                      <tbody>
+                        {catCompat.rows.map((c, i) => (
+                          <tr key={i} className="border-t border-gray-100">
+                            {cols.map((k) => <td key={k} className="px-2 py-1">{c.values[k] ?? ""}</td>)}
+                            <td className="px-2 py-1">{c.notes}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+              {catCompat.truncated && <p className="text-xs text-gray-500">Only the first rows are shown here; all of them are used when added.</p>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {info && (
         <div className="space-y-4 rounded border-2 border-gray-900 bg-white p-4 text-sm">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -395,7 +556,7 @@ export default function EbayLookup() {
                 Review first: only years that are new for <strong>{product.title}</strong> are offered, you tick what to add, and a make or model we do not have is shown for you to settle or edit
                 before anything is created. Nothing is ever removed.
               </p>
-              <FitmentReview key={`${product.id}:${info.item_id}`} product={product} itemId={info.item_id} store={store} />
+              <FitmentReview key={`${product.id}:${info.item_id}`} product={product} itemId={info.item_id} store={store} epid={catCompat && catCompat.count > 0 ? catEpid : null} />
             </div>
           )}
 
