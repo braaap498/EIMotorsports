@@ -6,7 +6,7 @@ import { SortTh, sortRows, useSort } from "../../../components/admin/SortHeader"
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
-import { Badge, Field, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
+import { Badge, Field, Modal, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
 
 /* ------------------------------------------------------------------ types */
 
@@ -79,6 +79,48 @@ type LogRow = {
   qty_before: number;
   qty_after: number;
   note: string | null;
+  unmerged_at?: string | null;
+};
+type UnmergeRestoring = {
+  id: number;
+  ebay_item_id: string | null;
+  custom_label_sku: string | null;
+  title: string | null;
+  list_price: number | null;
+  snapshot_quantity: number;
+  listings_returning: number;
+  sales_rows_returning: number;
+  order_lines_returning: number;
+  fitment_count: number;
+  photo_count: number;
+};
+type UnmergePreview = {
+  log: { id: number; created_at: string; merged_by_email: string | null; survivor_product_id: number; survivor_title: string | null; merged_count: number; note: string | null };
+  survivor: { id: number; title: string; list_price: number | null; custom_label_sku: string | null; quantity_on_hand: number } | null;
+  restoring: UnmergeRestoring[];
+  price_groups: { price: string; products: number }[];
+  totals: { products_restored: number; ebay_listings_returning: number; sales_rows_returning: number; order_lines_returning: number };
+  stays_on_kept_part: { inventory_rows: number; po_lines: number; listing_rows_not_found: number };
+  blockers: string[];
+};
+type UnmergeResult = {
+  log_id: number;
+  restored_product_ids: number[];
+  products_restored: number;
+  ebay_links_returned: number;
+  sales_rows_returned: number;
+  order_lines_returned: number;
+};
+type PriceDiffRow = {
+  id: number;
+  created_at: string;
+  merged_by_email: string | null;
+  survivor_product_id: number;
+  survivor_title: string | null;
+  merged_count: number;
+  unmerged: boolean;
+  labels: string[];
+  prices: { price: string; products: number }[];
 };
 type Step = "search" | "review" | "fitment" | "confirm" | "done";
 
@@ -186,9 +228,246 @@ function ProductBadges({ p }: { p: Item }) {
   );
 }
 
+/* ------------------------------------------------ unmerge (undo one merge) */
+
+function UnmergeModal({ logId, onClose, onDone }: { logId: number; onClose: () => void; onDone: () => void }) {
+  const [pv, setPv] = useState<UnmergePreview | null>(null);
+  const [error, setError] = useState("");
+  const [qtys, setQtys] = useState<Record<number, string>>({});
+  const [note, setNote] = useState("");
+  const [ack, setAck] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<UnmergeResult | null>(null);
+
+  useEffect(() => {
+    api<UnmergePreview>(`/cleanup/unmerge/${logId}/preview`)
+      .then(setPv)
+      .catch((e) => setError(errMsg(e)));
+  }, [logId]);
+
+  const allTyped = !!pv && pv.restoring.every((r) => /^\d+$/.test((qtys[r.id] ?? "").trim()));
+  const blocked = !pv || pv.blockers.length > 0 || pv.restoring.length === 0;
+
+  async function run() {
+    if (!pv) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await api<UnmergeResult>(`/cleanup/unmerge/${logId}`, {
+        method: "POST",
+        body: {
+          quantities: pv.restoring.map((r) => ({ product_id: r.id, quantity_on_hand: Number(qtys[r.id]) })),
+          confirm_count: pv.restoring.length,
+          note: note.trim() || null,
+        },
+      });
+      setResult(res);
+      onDone();
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={`Undo merge #${logId}`} onClose={onClose}>
+      {error && <Notice kind="error">{error}</Notice>}
+      {!pv && !error && <p className="text-sm text-gray-500">Loading…</p>}
+
+      {result && (
+        <div className="space-y-3">
+          <Notice kind="success">
+            Done. {result.products_restored} product{result.products_restored === 1 ? "" : "s"} restored (
+            {result.restored_product_ids.map((i) => `#${i}`).join(", ")}). {result.ebay_links_returned} eBay link
+            {result.ebay_links_returned === 1 ? "" : "s"}, {result.sales_rows_returned} sales row
+            {result.sales_rows_returned === 1 ? "" : "s"} and {result.order_lines_returned} order line
+            {result.order_lines_returned === 1 ? "" : "s"} went back to their own product.
+          </Notice>
+          <button type="button" className={btnCls} onClick={onClose}>
+            Close
+          </button>
+        </div>
+      )}
+
+      {pv && !result && (
+        <div className="space-y-4 text-sm">
+          <div>
+            Merged {new Date(pv.log.created_at).toLocaleString()} by {pv.log.merged_by_email ?? "someone"} into{" "}
+            <Link href={`/admin/products/${pv.log.survivor_product_id}`} className="font-medium underline">
+              {pv.log.survivor_title ?? `product ${pv.log.survivor_product_id}`}
+            </Link>
+            . Undoing it brings back the {pv.restoring.length} product{pv.restoring.length === 1 ? "" : "s"} that were deleted.
+          </div>
+
+          {pv.price_groups.length > 1 && (
+            <Notice>
+              The prices were different at merge time:{" "}
+              {pv.price_groups.map((g) => `${g.price} (${g.products})`).join(", ")}.
+            </Notice>
+          )}
+          {pv.blockers.map((b) => (
+            <Notice key={b} kind="error">
+              {b}
+            </Notice>
+          ))}
+
+          <div className="overflow-x-auto rounded border border-gray-200">
+            <table className="w-full text-left">
+              <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+                <tr>
+                  <th className="px-2 py-2">Product</th>
+                  <th className="px-2 py-2">Price</th>
+                  <th className="px-2 py-2">Comes back with</th>
+                  <th className="px-2 py-2">Stock to set</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {pv.restoring.map((r) => (
+                  <tr key={r.id}>
+                    <td className="max-w-xs px-2 py-2">
+                      <div className="font-medium">{r.title ?? `Product ${r.id}`}</div>
+                      <div className="text-xs text-gray-500">
+                        #{r.id} · {r.ebay_item_id ?? "no eBay item"} · {r.custom_label_sku ?? "no label"}
+                      </div>
+                    </td>
+                    <td className="px-2 py-2">{money(r.list_price)}</td>
+                    <td className="px-2 py-2 text-xs text-gray-600">
+                      {r.listings_returning} eBay link{r.listings_returning === 1 ? "" : "s"}, {r.sales_rows_returning} sale
+                      {r.sales_rows_returning === 1 ? "" : "s"}, {r.order_lines_returning} order line
+                      {r.order_lines_returning === 1 ? "" : "s"}, {r.fitment_count} fitment, {r.photo_count} photo
+                      {r.photo_count === 1 ? "" : "s"}
+                    </td>
+                    <td className="px-2 py-2">
+                      <input
+                        className={`${inputCls} w-24`}
+                        inputMode="numeric"
+                        placeholder="qty"
+                        value={qtys[r.id] ?? ""}
+                        onChange={(e) => setQtys((q) => ({ ...q, [r.id]: e.target.value }))}
+                        aria-label={`Stock for product ${r.id}`}
+                      />
+                      <div className="text-xs text-gray-400">was {r.snapshot_quantity}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <Notice>
+            Stock is not restored automatically: type the real quantity for every product. Inventory history rows (
+            {pv.stays_on_kept_part.inventory_rows}) and purchase-order lines ({pv.stays_on_kept_part.po_lines}) cannot be
+            traced to one product, so they stay on the kept product. Edits made to the kept product since the merge are kept.
+          </Notice>
+
+          <Field label="Note (optional)">
+            <input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} />
+          </Field>
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} />
+            Restore these {pv.restoring.length} products and move their eBay listings and sales back
+          </label>
+          <div className="flex gap-2">
+            <button type="button" className={btnCls} disabled={busy || blocked || !allTyped || !ack} onClick={run}>
+              {busy ? "Restoring…" : `Undo merge (${pv.restoring.length} products)`}
+            </button>
+            <button type="button" className={btn2Cls} onClick={onClose}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function PriceDifferences({ refreshKey, onUnmerge }: { refreshKey: number; onUnmerge: (id: number) => void }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<PriceDiffRow[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    api<{ total: number; items: PriceDiffRow[] }>("/cleanup/price-differences")
+      .then((r) => {
+        setRows(r.items);
+        setError("");
+      })
+      .catch((e) => setError(errMsg(e)));
+  }, [open, refreshKey]);
+
+  return (
+    <section className="rounded-lg border border-gray-200 bg-white p-4">
+      <button type="button" className="text-sm font-semibold underline" onClick={() => setOpen((o) => !o)}>
+        {open ? "Hide" : "Show"} past merges that combined different prices
+      </button>
+      {open && (
+        <div className="mt-3">
+          {error && <Notice kind="error">{error}</Notice>}
+          {rows && rows.length === 0 && <p className="text-sm text-gray-500">No past merge had different prices.</p>}
+          {rows && rows.length > 0 && (
+            <>
+              <p className="mb-2 text-sm text-gray-600">
+                {rows.length} merge{rows.length === 1 ? "" : "s"}. The merge kept one price and threw the others away, so
+                these may be different sizes, pack counts or kits.
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+                    <tr>
+                      <th className="px-2 py-2">#</th>
+                      <th className="px-2 py-2">When</th>
+                      <th className="px-2 py-2">Kept part</th>
+                      <th className="px-2 py-2">Prices (products)</th>
+                      <th className="px-2 py-2" />
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {rows.map((r) => (
+                      <tr key={r.id}>
+                        <td className="px-2 py-2 text-gray-500">{r.id}</td>
+                        <td className="whitespace-nowrap px-2 py-2">{new Date(r.created_at).toLocaleDateString()}</td>
+                        <td className="max-w-xs px-2 py-2">
+                          <Link href={`/admin/products/${r.survivor_product_id}`} className="hover:underline">
+                            {r.survivor_title ?? `Product ${r.survivor_product_id}`}
+                          </Link>
+                          {r.labels.length > 0 && <div className="text-xs text-gray-500">{r.labels.join(", ")}</div>}
+                        </td>
+                        <td className="px-2 py-2">
+                          <span className="flex flex-wrap gap-1">
+                            {r.prices.map((g) => (
+                              <Badge key={g.price} tone="amber">
+                                {g.price} ({g.products})
+                              </Badge>
+                            ))}
+                          </span>
+                        </td>
+                        <td className="px-2 py-2">
+                          {r.unmerged ? (
+                            <Badge tone="gray">Unmerged</Badge>
+                          ) : (
+                            <button type="button" className={btn2Cls} onClick={() => onUnmerge(r.id)}>
+                              Review undo
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 /* ------------------------------------------------------- history (bottom) */
 
-function HistoryPanel({ refreshKey }: { refreshKey: number }) {
+function HistoryPanel({ refreshKey, onUnmerge }: { refreshKey: number; onUnmerge: (id: number) => void }) {
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<LogRow[] | null>(null);
   const [error, setError] = useState("");
@@ -223,6 +502,7 @@ function HistoryPanel({ refreshKey }: { refreshKey: number }) {
                     <th className="px-2 py-2">Kept part</th>
                     <th className="px-2 py-2">Merged</th>
                     <th className="px-2 py-2">Stock</th>
+                    <th className="px-2 py-2" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -240,6 +520,23 @@ function HistoryPanel({ refreshKey }: { refreshKey: number }) {
                       <td className="px-2 py-2">{r.merged_count}</td>
                       <td className="whitespace-nowrap px-2 py-2">
                         {r.qty_before} → {r.qty_after}
+                      </td>
+                      <td className="whitespace-nowrap px-2 py-2">
+                        {r.unmerged_at ? (
+                          <Badge tone="gray">Unmerged {new Date(r.unmerged_at).toLocaleDateString()}</Badge>
+                        ) : (
+                          <button
+                            type="button"
+                            className={btn2Cls}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              onUnmerge(r.id);
+                            }}
+                          >
+                            Unmerge
+                          </button>
+                        )}
                       </td>
                     </ClickRow>
                   ))}
@@ -633,6 +930,7 @@ export default function PartsCleanupPage() {
   const [mergeErr, setMergeErr] = useState<{ text: string; stale: boolean } | null>(null);
   const [result, setResult] = useState<MergeResult | null>(null);
   const [logKey, setLogKey] = useState(0);
+  const [unmergeId, setUnmergeId] = useState<number | null>(null);
 
   // Warn before a refresh or tab close while a merge is half-set-up.
   useEffect(() => {
@@ -848,6 +1146,22 @@ export default function PartsCleanupPage() {
   });
   const tooMany = selected.size - 1 > 1500;
 
+  // "Find unmerged" view: for every shared label part, do the products that share it have different prices?
+  // Those are shown in amber so a different-size or different-kit product is not merged by mistake.
+  const pricesByPart = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    if (!unmergedMode) return m;
+    for (const it of items) {
+      const k = it.list_price == null ? "none" : Number(it.list_price).toFixed(2);
+      for (const part of it.shared_parts ?? []) {
+        if (!m.has(part)) m.set(part, new Set());
+        m.get(part)!.add(k);
+      }
+    }
+    return m;
+  }, [items, unmergedMode]);
+  const priceDiffers = (p: Item) => (p.shared_parts ?? []).some((part) => (pricesByPart.get(part)?.size ?? 0) > 1);
+
   /* ------------------------------------------------------------- render */
   return (
     <div className="space-y-5">
@@ -938,7 +1252,9 @@ export default function PartsCleanupPage() {
                   {listMode === "items"
                     ? `${items.length} part${items.length === 1 ? "" : "s"} added by item number`
                     : unmergedMode
-                      ? `${items.length} product${items.length === 1 ? "" : "s"} not yet merged that share a custom label number with another product`
+                      ? `${items.length} product${items.length === 1 ? "" : "s"} not yet merged that share a custom label number with another product${
+                          items.some(priceDiffers) ? ` (${items.filter(priceDiffers).length} highlighted because the prices differ)` : ""
+                        }`
                       : `${items.length} ${searchedExact ? "exact " : ""}result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
                 </span>
                 <button type="button" className={btn2Cls} onClick={() => applySelection(new Set(items.map((i) => i.id)))} disabled={items.length === 0}>
@@ -972,7 +1288,7 @@ export default function PartsCleanupPage() {
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {sortedItems.map((p) => (
-                      <tr key={p.id} className={selected.has(p.id) ? "bg-blue-50" : ""}>
+                      <tr key={p.id} className={selected.has(p.id) ? "bg-blue-50" : unmergedMode && priceDiffers(p) ? "bg-amber-50" : ""}>
                         <td className="px-3 py-2">
                           <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} aria-label={`Merge ${p.ebay_item_id ?? p.title}`} />
                         </td>
@@ -997,7 +1313,15 @@ export default function PartsCleanupPage() {
                           <div className="font-medium">{p.title}</div>
                         </td>
                         <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.part_number ?? "—"}</td>
-                        <td className="px-3 py-2">{money(p.list_price)}</td>
+                        <td className="px-3 py-2">
+                          {unmergedMode && priceDiffers(p) ? (
+                            <span title="Another product with the same label number has a different price. Check it is really the same part (size, pack count, kit).">
+                              <Badge tone="amber">{money(p.list_price)} · price differs</Badge>
+                            </span>
+                          ) : (
+                            money(p.list_price)
+                          )}
+                        </td>
                         <td className="px-3 py-2">{p.quantity_on_hand}</td>
                         <td className="px-3 py-2">{p.fitment_count}</td>
                         <td className="px-3 py-2">
@@ -1046,7 +1370,8 @@ export default function PartsCleanupPage() {
           )}
 
           <FillDescriptions />
-          <HistoryPanel refreshKey={logKey} />
+          <PriceDifferences refreshKey={logKey} onUnmerge={setUnmergeId} />
+          <HistoryPanel refreshKey={logKey} onUnmerge={setUnmergeId} />
         </>
       )}
 
@@ -1296,6 +1621,17 @@ export default function PartsCleanupPage() {
             </button>
           </div>
         </section>
+      )}
+
+      {unmergeId != null && (
+        <UnmergeModal
+          logId={unmergeId}
+          onClose={() => setUnmergeId(null)}
+          onDone={() => {
+            setLogKey((k) => k + 1);
+            reloadList();
+          }}
+        />
       )}
     </div>
   );

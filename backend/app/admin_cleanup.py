@@ -9,6 +9,9 @@ Mounted at /admin/cleanup/* (owner/admin only). The flow the page follows:
   3. POST /admin/cleanup/merge                      the commit. One database transaction:
                                                     all of it happens or none of it does.
   4. GET  /admin/cleanup/log                        who merged what, and when
+  5. GET  /admin/cleanup/unmerge/{id}/preview       read-only: what undoing a merge would put back
+     POST /admin/cleanup/unmerge/{id}               the undo (one transaction), from the snapshot in part_merge_log
+     GET  /admin/cleanup/price-differences          past merges that combined products with different prices
 
 What a merge does (and does not do):
   * eBay links (channel_listings) are MOVED to the surviving product - never deleted.
@@ -937,6 +940,528 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
 
 
 # --------------------------------------------------------------------------
+# 5. unmerge: undo one merge from the snapshot saved in part_merge_log
+#    Plus a read-only report of past merges that combined products with different prices.
+# --------------------------------------------------------------------------
+_unmerge_ready = False
+
+
+def _ensure_unmerge_table(db: Session) -> None:
+    """Creates the unmerge history table once per server start (it is what stops a merge being unmerged twice)."""
+    global _unmerge_ready
+    if _unmerge_ready:
+        return
+    db.execute(
+        text(
+            """
+            create table if not exists part_unmerge_log (
+              id bigserial primary key,
+              created_at timestamptz not null default now(),
+              merge_log_id bigint not null unique,
+              unmerged_by_email text,
+              restored_product_ids bigint[] not null default '{}',
+              summary jsonb
+            )
+            """
+        )
+    )
+    db.commit()
+    _unmerge_ready = True
+
+
+def _json_obj(v):
+    if v is None or isinstance(v, (dict, list)):
+        return v
+    return json.loads(v)
+
+
+def _digits(v) -> str:
+    return re.sub(r"\D", "", str(v or ""))
+
+
+def _insertable_columns(db: Session, table: str) -> tuple[list[str], bool]:
+    """Columns of a table that can be written to (generated columns such as products.sku_display are left out),
+    and whether an identity column needs OVERRIDING SYSTEM VALUE to keep its old id."""
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
+        raise ValueError(f"bad table name {table}")
+    rows = db.execute(
+        text(
+            "select column_name, is_generated, identity_generation from information_schema.columns "
+            "where table_schema = 'public' and table_name = :t order by ordinal_position"
+        ),
+        {"t": table},
+    ).all()
+    if not rows:
+        raise ValueError(f"table {table} not found")
+    cols = [r.column_name for r in rows if (r.is_generated or "NEVER") != "ALWAYS"]
+    if any('"' in c for c in cols):
+        raise ValueError("unexpected column name")
+    return cols, any((r.identity_generation or "") == "ALWAYS" for r in rows)
+
+
+def _restore_rows(db: Session, table: str, rows: list[dict], *, where_sql: str = "", skip_id: bool = False) -> int:
+    """Puts rows saved in a snapshot back into a table. Rows that clash with an existing row are skipped.
+    skip_id=True inserts them as NEW rows (fresh ids), for rows whose old id is taken by a row that lives on."""
+    if not rows:
+        return 0
+    cols, override = _insertable_columns(db, table)
+    if skip_id:
+        cols = [c for c in cols if c != "id"]
+        override = False
+    col_sql = ", ".join(f'"{c}"' for c in cols)
+    sel_sql = ", ".join(f'r."{c}"' for c in cols)
+    res = db.execute(
+        text(
+            f"insert into {table} ({col_sql}){' overriding system value' if override else ''} "
+            f"select {sel_sql} from jsonb_populate_recordset(null::{table}, cast(:rows as jsonb)) r {where_sql} "
+            "on conflict do nothing"
+        ),
+        {"rows": json.dumps(rows)},
+    )
+    return res.rowcount or 0
+
+
+def _price_key(v) -> Optional[str]:
+    try:
+        return f"{float(v):.2f}" if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _unmerge_plan(db: Session, log_id: int) -> dict:
+    """Everything an unmerge would do, worked out from the saved snapshot and today's data. Writes nothing."""
+    _ensure_unmerge_table(db)
+    log = db.execute(
+        text(
+            "select id, created_at, merged_by_email, survivor_product_id, survivor_title, merged_product_ids, "
+            "merged_count, qty_before, qty_after, note, snapshot from part_merge_log where id = :i"
+        ),
+        {"i": log_id},
+    ).first()
+    if not log:
+        raise HTTPException(404, "That merge is not in the log")
+    snap = _json_obj(log.snapshot) or {}
+    sid = log.survivor_product_id
+    restore_ids = sorted(int(i) for i in (log.merged_product_ids or []))
+    problems: list[str] = []
+
+    done = db.execute(
+        text("select created_at, unmerged_by_email from part_unmerge_log where merge_log_id = :i"), {"i": log_id}
+    ).first()
+    if done:
+        problems.append(
+            f"This merge was already unmerged on {done.created_at:%Y-%m-%d %H:%M} by {done.unmerged_by_email or 'someone'}."
+        )
+
+    snap_products = {int(p["id"]): p for p in (snap.get("products") or []) if p.get("id") is not None}
+    no_snapshot = [i for i in restore_ids if i not in snap_products]
+    if no_snapshot:
+        problems.append(
+            f"The saved snapshot of this merge does not hold product(s) {no_snapshot[:10]}, so they cannot be restored."
+        )
+
+    survivor = db.execute(
+        text("select id, ebay_item_id, custom_label_sku, title, list_price, quantity_on_hand from products where id = :s"),
+        {"s": sid},
+    ).first()
+    if not survivor:
+        problems.append("The kept product no longer exists (it may have been merged into another part), so this merge cannot be undone.")
+
+    clash = [r.id for r in db.execute(text("select id from products where id = any(cast(:i as bigint[]))"), {"i": restore_ids})]
+    if clash:
+        problems.append(f"Product id(s) {clash[:10]} exist again, so the old products cannot be put back under those ids.")
+
+    snap_listings = snap.get("listings") or []
+    survivor_digits = {_digits((snap_products.get(sid) or {}).get("ebay_item_id"))} | {
+        _digits(l.get("external_id")) for l in snap_listings if l.get("product_id") == sid
+    }
+    survivor_digits.discard("")
+
+    digit_owner: dict[str, int] = {}
+    for pid in restore_ids:
+        digs = {_digits((snap_products.get(pid) or {}).get("ebay_item_id"))} | {
+            _digits(l.get("external_id")) for l in snap_listings if l.get("product_id") == pid
+        }
+        digs.discard("")
+        digs -= survivor_digits
+        for d in digs:
+            digit_owner.setdefault(d, pid)
+
+    restore_set = set(restore_ids)
+    cl_ids = [int(l["id"]) for l in snap_listings if l.get("product_id") in restore_set and l.get("id") is not None]
+    movable = {
+        r.id
+        for r in db.execute(
+            text("select id from channel_listings where id = any(cast(:c as bigint[])) and product_id = :s"),
+            {"c": cl_ids, "s": sid},
+        )
+    }
+    cl_pairs = [
+        (int(l["id"]), int(l["product_id"]))
+        for l in snap_listings
+        if l.get("id") in movable and l.get("product_id") in restore_set
+    ]
+
+    pids = list(digit_owner.values())
+    digs = list(digit_owner.keys())
+    sales_by_pid: dict[int, int] = {}
+    lines_by_pid: dict[int, int] = {}
+    if digs:
+        for tbl, target in (("sales_transactions", sales_by_pid), ("ebay_order_lines", lines_by_pid)):
+            for r in db.execute(
+                text(
+                    f"select m.pid, count(*) as n from {tbl} t "
+                    "join unnest(cast(:p as bigint[]), cast(:d as text[])) as m(pid, dig) "
+                    "  on regexp_replace(coalesce(cast(t.ebay_item_id as text), ''), '[^0-9]', '', 'g') = m.dig "
+                    "where t.product_id = :s group by m.pid"
+                ),
+                {"p": pids, "d": digs, "s": sid},
+            ):
+                target[r.pid] = r.n
+
+    def snap_count(key: str, pid: int) -> int:
+        return sum(1 for r in (snap.get(key) or []) if r.get("product_id") == pid)
+
+    restoring = []
+    for pid in restore_ids:
+        p = snap_products.get(pid) or {}
+        restoring.append(
+            {
+                "id": pid,
+                "ebay_item_id": p.get("ebay_item_id"),
+                "custom_label_sku": p.get("custom_label_sku"),
+                "title": p.get("title"),
+                "list_price": float(p["list_price"]) if _price_key(p.get("list_price")) else None,
+                "snapshot_quantity": int(p.get("quantity_on_hand") or 0),
+                "listings_returning": sum(1 for c, q in cl_pairs if q == pid),
+                "sales_rows_returning": sales_by_pid.get(pid, 0),
+                "order_lines_returning": lines_by_pid.get(pid, 0),
+                "fitment_count": snap_count("fitment", pid),
+                "photo_count": snap_count("photos", pid),
+            }
+        )
+
+    price_groups: dict[str, int] = {}
+    for p in snap_products.values():
+        k = _price_key(p.get("list_price")) or "No price"
+        price_groups[k] = price_groups.get(k, 0) + 1
+
+    stays = {"inventory_rows": 0, "po_lines": 0, "listing_rows_not_found": len(cl_ids) - len(movable)}
+    if survivor:
+        stays["inventory_rows"] = db.execute(
+            text("select count(*) from inventory_transactions where product_id = :s"), {"s": sid}
+        ).scalar()
+        stays["po_lines"] = db.execute(
+            text(
+                "select (select count(*) from purchase_order_lines where product_id = :s) "
+                "     + (select count(*) from po_lines where product_id = :s)"
+            ),
+            {"s": sid},
+        ).scalar()
+
+    return {
+        "log": log,
+        "sid": sid,
+        "snap": snap,
+        "snap_products": snap_products,
+        "restore_ids": restore_ids,
+        "digit_owner": digit_owner,
+        "cl_pairs": cl_pairs,
+        "restoring": restoring,
+        "survivor": dict(survivor._mapping) if survivor else None,
+        "price_groups": [
+            {"price": k, "products": v}
+            for k, v in sorted(price_groups.items(), key=lambda kv: (kv[0] == "No price", kv[0]))
+        ],
+        "stays": stays,
+        "problems": problems,
+    }
+
+
+@router.get("/unmerge/{log_id}/preview")
+def unmerge_preview(log_id: int, db: Session = Depends(get_db)):
+    """Read-only: what unmerging this merge would put back. Nothing is written."""
+    plan = _unmerge_plan(db, log_id)
+    log = plan["log"]
+    surv = plan["survivor"]
+    if surv and surv.get("list_price") is not None:
+        surv["list_price"] = float(surv["list_price"])
+    r = plan["restoring"]
+    return {
+        "log": {
+            "id": log.id,
+            "created_at": log.created_at,
+            "merged_by_email": log.merged_by_email,
+            "survivor_product_id": log.survivor_product_id,
+            "survivor_title": log.survivor_title,
+            "merged_count": log.merged_count,
+            "note": log.note,
+        },
+        "survivor": surv,
+        "restoring": r,
+        "price_groups": plan["price_groups"],
+        "totals": {
+            "products_restored": len(r),
+            "ebay_listings_returning": sum(x["listings_returning"] for x in r),
+            "sales_rows_returning": sum(x["sales_rows_returning"] for x in r),
+            "order_lines_returning": sum(x["order_lines_returning"] for x in r),
+        },
+        "stays_on_kept_part": plan["stays"],
+        "blockers": plan["problems"],
+    }
+
+
+class UnmergeQty(BaseModel):
+    product_id: int
+    quantity_on_hand: int = Field(..., ge=0)
+
+
+class UnmergeIn(BaseModel):
+    quantities: list[UnmergeQty]      # the stock to give each restored product (typed by the person)
+    confirm_count: int                # must equal the number of products being restored
+    note: Optional[str] = None
+
+
+@router.post("/unmerge/{log_id}")
+def unmerge(log_id: int, body: UnmergeIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Undo one merge. One database transaction: it all happens or none of it does.
+    The deleted products come back under their old ids, each eBay listing returns to its own product, and sales and
+    order lines are matched back by eBay item number. Inventory-ledger rows, purchase-order lines and barcodes cannot be
+    traced to a product, so they stay on the kept product."""
+    _ensure_unmerge_table(db)
+    try:
+        head = db.execute(text("select survivor_product_id from part_merge_log where id = :i"), {"i": log_id}).first()
+        if not head:
+            raise HTTPException(404, "That merge is not in the log")
+        sid = head.survivor_product_id
+        db.execute(text("select id from products where id = :s for update"), {"s": sid})
+
+        plan = _unmerge_plan(db, log_id)
+        if plan["problems"]:
+            db.rollback()
+            raise HTTPException(409, " ".join(plan["problems"]))
+        restore_ids: list[int] = plan["restore_ids"]
+        if not restore_ids:
+            db.rollback()
+            raise HTTPException(400, "This merge removed no products, so there is nothing to restore")
+        if body.confirm_count != len(restore_ids):
+            db.rollback()
+            raise HTTPException(400, "Confirmation count doesn't match the number of products being restored")
+        qty = {q.product_id: q.quantity_on_hand for q in body.quantities}
+        if set(qty) != set(restore_ids) or len(body.quantities) != len(restore_ids):
+            db.rollback()
+            raise HTTPException(400, "Type a stock quantity for every product being restored")
+
+        snap = plan["snap"]
+
+        # ---- 1. the products themselves, under their old ids ----------------------------
+        rows = []
+        for pid in restore_ids:
+            row = dict(plan["snap_products"][pid])
+            row["quantity_on_hand"] = qty[pid]
+            rows.append(row)
+        made = _restore_rows(db, "products", rows)
+        if made != len(restore_ids):
+            db.rollback()
+            raise HTTPException(500, f"Safety check failed: restored {made} of {len(restore_ids)} products. Nothing was changed.")
+        db.execute(
+            text("update products set updated_at = now() where id = any(cast(:i as bigint[]))"), {"i": restore_ids}
+        )
+
+        # ---- 2. their descriptive rows: fitment, photos, item specifics -------------------
+        rs = set(restore_ids)
+        fit = [r for r in (snap.get("fitment") or []) if r.get("product_id") in rs]
+        _restore_rows(db, "product_fitment", fit, where_sql="where exists (select 1 from vehicles v where v.id = r.vehicle_id)")
+        photos = [r for r in (snap.get("photos") or []) if r.get("product_id") in rs]
+        if photos:
+            taken = {
+                x.id
+                for x in db.execute(
+                    text("select id from product_photos where id = any(cast(:i as bigint[]))"),
+                    {"i": [int(r["id"]) for r in photos if r.get("id") is not None]},
+                )
+            }
+            _restore_rows(db, "product_photos", [r for r in photos if r.get("id") not in taken])
+            # a photo set the kept product adopted at merge time stays with it; the restored product gets a copy
+            _restore_rows(db, "product_photos", [r for r in photos if r.get("id") in taken], skip_id=True)
+        specs = [r for r in (snap.get("specifics") or []) if r.get("product_id") in rs]
+        _restore_rows(db, "product_item_specifics", specs)
+
+        # ---- 3. eBay links go back to their own product ----------------------------------
+        cl_pairs = plan["cl_pairs"]
+        moved_cl = 0
+        if cl_pairs:
+            moved_cl = db.execute(
+                text(
+                    "update channel_listings cl set product_id = m.pid "
+                    "from unnest(cast(:c as bigint[]), cast(:p as bigint[])) as m(clid, pid) "
+                    "where cl.id = m.clid and cl.product_id = :s"
+                ),
+                {"c": [c for c, _ in cl_pairs], "p": [p for _, p in cl_pairs], "s": sid},
+            ).rowcount
+            if moved_cl != len(cl_pairs):
+                db.rollback()
+                raise HTTPException(409, "An eBay link changed while unmerging. Nothing was changed - open the preview again.")
+
+        # each saved eBay listing record knows which product it came from (set by the merge itself)
+        moved_el = db.execute(
+            text(
+                "update ebay_listings set product_id = original_product_id, updated_at = now() "
+                "where merge_log_id = :m and product_id = :s and original_product_id = any(cast(:r as bigint[]))"
+            ),
+            {"m": log_id, "s": sid, "r": restore_ids},
+        ).rowcount
+
+        owner = plan["digit_owner"]
+        pids = list(owner.values())
+        digs = list(owner.keys())
+        moved_sales = moved_lines = moved_holds = 0
+        if digs:
+            args = {"p": pids, "d": digs, "s": sid}
+            # listing records the merge refreshed (so they carry another merge's id) are matched by item number
+            moved_el += db.execute(
+                text(
+                    "update ebay_listings el set product_id = m.pid, updated_at = now() "
+                    "from unnest(cast(:p as bigint[]), cast(:d as text[])) as m(pid, dig) "
+                    "where el.ebay_item_id = m.dig and el.product_id = :s"
+                ),
+                args,
+            ).rowcount
+            # ---- 4. sales and order lines, matched back by eBay item number ---------------
+            moved_sales = db.execute(
+                text(
+                    "update sales_transactions t set product_id = m.pid "
+                    "from unnest(cast(:p as bigint[]), cast(:d as text[])) as m(pid, dig) "
+                    "where t.product_id = :s "
+                    "and regexp_replace(coalesce(cast(t.ebay_item_id as text), ''), '[^0-9]', '', 'g') = m.dig"
+                ),
+                args,
+            ).rowcount
+            line_ids = [
+                x.id
+                for x in db.execute(
+                    text(
+                        "update ebay_order_lines t set product_id = m.pid "
+                        "from unnest(cast(:p as bigint[]), cast(:d as text[])) as m(pid, dig) "
+                        "where t.product_id = :s "
+                        "and regexp_replace(coalesce(cast(t.ebay_item_id as text), ''), '[^0-9]', '', 'g') = m.dig "
+                        "returning t.id"
+                    ),
+                    args,
+                )
+            ]
+            moved_lines = len(line_ids)
+            if line_ids:
+                moved_holds = db.execute(
+                    text(
+                        "update stock_reservations sr set product_id = l.product_id "
+                        "from ebay_order_lines l "
+                        "where l.id = any(cast(:l as bigint[])) and sr.ebay_order_line_id = l.id and sr.product_id = :s"
+                    ),
+                    {"l": line_ids, "s": sid},
+                ).rowcount
+
+        # ---- 5. stock: typed by the person, recorded in the ledger like a merge does -----
+        for pid in restore_ids:
+            if qty[pid] != 0:
+                db.execute(
+                    text(
+                        "insert into inventory_transactions "
+                        "(product_id, transaction_type, quantity_change, reference, legacy_created_by) "
+                        "values (:p, 'Adjustment', :d, :ref, :by)"
+                    ),
+                    {"p": pid, "d": qty[pid], "ref": f"Parts clean-up unmerge of merge #{log_id}", "by": user.email},
+                )
+
+        # ---- verify before committing -----------------------------------------------------
+        have = db.execute(
+            text("select count(*) from products where id = any(cast(:i as bigint[]))"), {"i": restore_ids}
+        ).scalar()
+        back = db.execute(
+            text("select count(*) from channel_listings where product_id = any(cast(:i as bigint[]))"), {"i": restore_ids}
+        ).scalar()
+        if have != len(restore_ids) or back < moved_cl:
+            db.rollback()
+            raise HTTPException(500, "Safety check failed after restoring. Nothing was changed.")
+
+        summary = {
+            "products_restored": len(restore_ids),
+            "ebay_links_returned": moved_cl,
+            "listing_records_returned": moved_el,
+            "sales_rows_returned": moved_sales,
+            "order_lines_returned": moved_lines,
+            "stock_holds_returned": moved_holds,
+            "note": body.note,
+        }
+        db.execute(
+            text(
+                "insert into part_unmerge_log (merge_log_id, unmerged_by_email, restored_product_ids, summary) "
+                "values (:m, :e, cast(:r as bigint[]), cast(:s as jsonb))"
+            ),
+            {"m": log_id, "e": user.email, "r": restore_ids, "s": json.dumps(summary)},
+        )
+        finish(db, refresh=True)
+        return {"log_id": log_id, "survivor_id": sid, "restored_product_ids": restore_ids, **summary}
+    except HTTPException:
+        raise
+    except Exception as exc:  # any surprise = full rollback
+        db.rollback()
+        first = (str(exc).strip().splitlines() or [""])[0][:220]
+        raise HTTPException(500, f"Unmerge failed and was rolled back; nothing changed. ({type(exc).__name__}: {first})")
+
+
+@router.get("/price-differences")
+def price_differences(limit: int = Query(500, le=2000), db: Session = Depends(get_db)):
+    """Read-only. Past merges whose products had DIFFERENT list prices when they were merged (the merge kept one
+    price and threw the others away). Newest first. A merge that was already unmerged is flagged, not hidden."""
+    _ensure_unmerge_table(db)
+    rows = db.execute(
+        text(
+            """
+            select l.id, l.created_at, l.merged_by_email, l.survivor_product_id, l.survivor_title, l.merged_count,
+                   (u.merge_log_id is not null) as unmerged,
+                   (select jsonb_agg(jsonb_build_object('price', e->>'list_price', 'label', e->>'custom_label_sku'))
+                      from jsonb_array_elements(l.snapshot->'products') e) as prods
+            from part_merge_log l
+            left join part_unmerge_log u on u.merge_log_id = l.id
+            where jsonb_typeof(l.snapshot->'products') = 'array'
+              and (select count(distinct round(nullif(e->>'list_price', '')::numeric, 2))
+                     from jsonb_array_elements(l.snapshot->'products') e) > 1
+            order by l.id desc
+            limit :limit
+            """
+        ),
+        {"limit": limit},
+    ).all()
+    items = []
+    for r in rows:
+        prices: dict[str, int] = {}
+        labels: set[str] = set()
+        for p in _json_obj(r.prods) or []:
+            k = _price_key(p.get("price")) or "No price"
+            prices[k] = prices.get(k, 0) + 1
+            if (p.get("label") or "").strip():
+                labels.add(p["label"].strip())
+        items.append(
+            {
+                "id": r.id,
+                "created_at": r.created_at,
+                "merged_by_email": r.merged_by_email,
+                "survivor_product_id": r.survivor_product_id,
+                "survivor_title": r.survivor_title,
+                "merged_count": r.merged_count,
+                "unmerged": r.unmerged,
+                "labels": sorted(labels)[:5],
+                "prices": [
+                    {"price": k, "products": v}
+                    for k, v in sorted(prices.items(), key=lambda kv: (kv[0] == "No price", kv[0]))
+                ],
+            }
+        )
+    return {"total": len(items), "items": items}
+
+
+# --------------------------------------------------------------------------
 # 6. fill a missing description, condition and item specifics from the live eBay listings
 #    Reads eBay only (GetItem). Nothing is ever sent to eBay. Only blank descriptions are written.
 # --------------------------------------------------------------------------
@@ -1170,13 +1695,20 @@ def similar(
 # 4. history
 # --------------------------------------------------------------------------
 @router.get("/log")
-def merge_log(limit: int = Query(50, le=500), db: Session = Depends(get_db)):
+def merge_log(
+    limit: int = Query(50, le=500),
+    survivor_id: Optional[int] = Query(None, description="only the merges folded into this kept product"),
+    db: Session = Depends(get_db),
+):
+    _ensure_unmerge_table(db)
     rows = db.execute(
         text(
-            "select id, created_at, merged_by_email, survivor_product_id, survivor_title, "
-            "merged_count, qty_before, qty_after, note "
-            "from part_merge_log order by id desc limit :limit"
+            "select l.id, l.created_at, l.merged_by_email, l.survivor_product_id, l.survivor_title, "
+            "l.merged_count, l.qty_before, l.qty_after, l.note, u.created_at as unmerged_at "
+            "from part_merge_log l left join part_unmerge_log u on u.merge_log_id = l.id "
+            "where (cast(:sid as bigint) is null or l.survivor_product_id = cast(:sid as bigint)) "
+            "order by l.id desc limit :limit"
         ),
-        {"limit": limit},
+        {"limit": limit, "sid": survivor_id},
     ).all()
     return [dict(r._mapping) for r in rows]
