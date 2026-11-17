@@ -11,7 +11,7 @@ import { Notice, btnCls, btn2Cls, inputCls } from "./ui";
 
 type Model = { model_id: number; make: string; model: string; years: number[] };
 
-export type Pick = { model_id: number; years: number[] };
+export type FitPickRow = { model_id: number; years: number[] };
 
 export default function FitmentPicker({
   choicesUrl,
@@ -26,7 +26,7 @@ export default function FitmentPicker({
   allowReplace: boolean;
   addLabel: string;
   beforeApply?: () => Promise<boolean>; // saves unsaved edits first, when that matters
-  apply: (picks: Pick[], mode: "add" | "replace") => Promise<string>; // does the work and returns the message to show
+  apply: (picks: FitPickRow[], mode: "add" | "replace") => Promise<string>; // does the work and returns the message to show
 }) {
   const [open, setOpen] = useState(false);
   const [models, setModels] = useState<Model[] | null>(null);
@@ -138,9 +138,7 @@ export default function FitmentPicker({
                 <button type="button" className={btnCls} disabled={busy !== "" || picked === 0} onClick={() => void apply("add")}>
                   {busy === "apply" ? "Working…" : addLabel}
                 </button>
-                {allowReplace && (
-                  <button type="button" className={btn2Cls} disabled={busy !== "" || picked === 0} onClick={() => void apply("replace")}>Make the table only these</button>
-                )}
+                {allowReplace && <button type="button" className={btn2Cls} disabled={busy !== "" || picked === 0} onClick={() => void apply("replace")}>Make the table only these</button>}
               </div>
             </>
           )}
