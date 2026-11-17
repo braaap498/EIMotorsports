@@ -345,3 +345,180 @@ def make_draft(body: MakeIn, db: Session = Depends(get_db), user: AuthUser = Dep
         "specifics_added": added_specs,
         "warnings": warnings,
     }
+
+
+# --------------------------------------------------------------------------
+# eBay compatibility rows -> a product's WEBSITE fitment
+# --------------------------------------------------------------------------
+class FitIn(BaseModel):
+    product_id: int
+    item_id: Optional[str] = Field(None, max_length=15)   # read this listing's table from eBay (needs store)
+    store: Optional[str] = Field(None, max_length=60)
+    from_listings: bool = False                            # use the saved compatibility tables of the product's OWN eBay listings
+    apply: bool = False                                    # False: show what would be added; True: add it
+
+
+_YEAR = re.compile(r"(19|20)\d{2}")
+
+
+def _resolve_model(db: Session, make: str, model: str):
+    """Our model for an eBay make + model, the same way the compat-to-fitment conversion decides it: the decisions table
+    (fitment_ebay_model_map) first, then an exact match on the normalised names when exactly one model matches. (id or None, skipped)."""
+    r = db.execute(
+        text(
+            """
+            select case when m.skip then null
+                        when exists (select 1 from vehicle_models z where z.id = m.model_id) then m.model_id
+                        when ex.n = 1 then ex.model_id end as model_id,
+                   coalesce(m.skip, false) as skip
+            from (select fitment_key(cast(:mk as text)) as make_key, fitment_key(cast(:mo as text)) as model_key) k
+            left join fitment_ebay_model_map m on m.make_key = k.make_key and m.model_key = k.model_key
+            left join lateral (
+                select min(vmo.id) as model_id, count(*) as n
+                from vehicle_makes vm join vehicle_models vmo on vmo.make_id = vm.id
+                where fitment_key(vm.name) = k.make_key and fitment_key(vmo.name) = k.model_key) ex on true
+            """
+        ),
+        {"mk": make, "mo": model},
+    ).first()
+    return (r.model_id, bool(r.skip)) if r else (None, False)
+
+
+def _fitment_plan(db: Session, product_id: int, rows: list[dict]) -> dict:
+    """What adding these eBay rows (attribute dicts with Make, Model, Year ...) to the product's fitment would do. Writes nothing."""
+    import datetime
+
+    maxyear = datetime.date.today().year + 1
+    groups: dict[tuple, dict] = {}
+    no_year = 0
+    for a in rows:
+        mk, mo = " ".join(str(a.get("Make") or "").split()), " ".join(str(a.get("Model") or "").split())
+        y = str(a.get("Year") or "").strip()
+        if not mk or not mo:
+            continue
+        if not _YEAR.fullmatch(y) or int(y) > maxyear:
+            no_year += 1
+            continue
+        g = groups.setdefault((mk, mo), {"years": set(), "subs": {}})
+        g["years"].add(int(y))
+        sub = " ".join(str(a.get("Submodel") or a.get("Trim") or "").split())
+        if sub:
+            g["subs"].setdefault(int(y), set()).add(sub)
+    models, unresolved, skipped = [], [], []
+    for (mk, mo), g in sorted(groups.items()):
+        model_id, skip = _resolve_model(db, mk, mo)
+        if skip:
+            skipped.append(f"{mk} {mo}")
+            continue
+        if model_id is None:
+            unresolved.append({"make": mk, "model": mo, "years": sorted(g["years"])})
+            continue
+        names = db.execute(
+            text("select vmk.name as make, vmo.name as model from vehicle_models vmo join vehicle_makes vmk on vmk.id = vmo.make_id where vmo.id = :m"),
+            {"m": model_id},
+        ).first()
+        have = {int(r.year) for r in db.execute(
+            text("select v.year from product_fitment pf join vehicles v on v.id = pf.vehicle_id where pf.product_id = :p and v.model_id = :m and v.year is not null"),
+            {"p": product_id, "m": model_id}).all()}
+        new = sorted(y for y in g["years"] if y not in have)
+        models.append({
+            "model_id": int(model_id), "make": names.make, "model": names.model, "ebay_make": mk, "ebay_model": mo,
+            "new_years": new, "already_years": sorted(y for y in g["years"] if y in have),
+            "subs": {str(y): sorted(g["subs"].get(y, ())) for y in new if g["subs"].get(y)},
+        })
+    return {"models": models, "unresolved": unresolved, "skipped": skipped, "no_year": no_year}
+
+
+def _fitment_apply(db: Session, product_id: int, plan: dict) -> dict:
+    """Add the planned years. Only ADDS: missing vehicle years for a model that already exists, and product_fitment links.
+    Nothing is deleted or changed, and no make or model is created."""
+    vehicles_made = links = 0
+    for m in plan["models"]:
+        for y in m["new_years"]:
+            vid = db.execute(
+                text("select min(id) from vehicles where model_id = :m and year = :y and submodel is null"), {"m": m["model_id"], "y": y}
+            ).scalar()
+            if vid is None:
+                vid = db.execute(
+                    text("insert into vehicles (model_id, year) values (:m, :y) returning id"), {"m": m["model_id"], "y": y}
+                ).scalar()
+                vehicles_made += 1
+            subs = m["subs"].get(str(y))
+            ins = db.execute(
+                text(
+                    "insert into product_fitment (product_id, vehicle_id, notes, source) select :p, :v, :n, 'ebay' "
+                    "where not exists (select 1 from product_fitment pf where pf.product_id = :p and pf.vehicle_id = :v) returning vehicle_id"
+                ),
+                {"p": product_id, "v": vid, "n": ("ebay: " + ", ".join(subs))[:400] if subs else None},
+            ).first()
+            links += 1 if ins else 0
+    return {"links_added": links, "vehicle_years_added": vehicles_made}
+
+
+def _saved_tables(db: Session, product_id: int) -> tuple[list[dict], int, int]:
+    """The compatibility tables the compat import saved for this product's own eBay listings: (rows, listings with a table, listings)."""
+    from app.admin_ebay_fitment import _DIGITS, _LIST
+
+    total = db.execute(
+        text(f"select count(distinct {_DIGITS}) from channel_listings cl where cl.product_id = :p and {_DIGITS} <> ''"), {"p": product_id}
+    ).scalar() or 0
+    found = db.execute(
+        text(
+            f"select c.item_id, {_LIST.format(c='c')} as lst from ebay_compat_items c "
+            f"join channel_listings cl on {_DIGITS} = c.item_id where cl.product_id = :p and c.status = 'ok'"
+        ),
+        {"p": product_id},
+    ).all()
+    rows, used = [], 0
+    for f in found:
+        lst = f.lst if isinstance(f.lst, list) else []
+        got = [e.get("attrs") for e in lst if isinstance(e, dict) and isinstance(e.get("attrs"), dict)]
+        if got:
+            used += 1
+            rows += got
+    return rows, used, int(total)
+
+
+@router.post("/fitment")
+def add_to_fitment(body: FitIn, db: Session = Depends(get_db)):
+    """Put eBay compatibility rows into ONE product's website fitment. With apply false it only shows what would be added; with
+    apply true it adds exactly that. Rows can come from a listing read from eBay now, from the saved tables of the product's own
+    listings, or both. A machine our vehicle list does not know is listed, never guessed (settle those in the compat import tab)."""
+    pj = db.execute(text("select title, coalesce(is_universal, false) as u, coalesce(fitment_exempt, false) as x from products where id = :p"), {"p": body.product_id}).first()
+    if not pj:
+        raise HTTPException(404, "That product does not exist.")
+    if pj.u or pj.x:
+        raise HTTPException(409, "This product is marked universal or exempt from fitment, so no fitment is added to it.")
+    if not body.item_id and not body.from_listings:
+        raise HTTPException(400, "Choose where the compatibility rows come from.")
+    rows: list[dict] = []
+    info: dict = {}
+    if body.item_id:
+        item_id = body.item_id.strip()
+        if not ITEM_RE.fullmatch(item_id) or not (body.store or "").strip():
+            raise HTTPException(400, "A listing and a store are needed to read it from eBay.")
+        ref = _read_reference(db, body.store.strip(), item_id)
+        if not ref["ok"]:
+            raise HTTPException(502, "eBay would not give us that listing: " + "; ".join(e["message"] for e in ref["errors"])[:300])
+        rows += [c["values"] for c in ref["compat_all"]]
+        info["from_listing_rows"] = len(ref["compat_all"])
+    if body.from_listings:
+        saved, used, total = _saved_tables(db, body.product_id)
+        rows += saved
+        info.update({"own_listings_with_table": used, "own_listings": total})
+    plan = _fitment_plan(db, body.product_id, rows)
+    plan.update(info)
+    plan["rows_read"] = len(rows)
+    plan["product"] = pj.title
+    if not body.apply:
+        plan["applied"] = False
+        return plan
+    try:
+        plan["added"] = _fitment_apply(db, body.product_id, plan)
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("could not add fitment to product %s", body.product_id)
+        raise HTTPException(500, "The fitment could not be added, and nothing was changed.")
+    plan["applied"] = True
+    return plan

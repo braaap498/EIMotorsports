@@ -883,7 +883,7 @@ function NewListingHome() {
     <div className="space-y-4">
       <div className="flex gap-1 border-b border-gray-300">
         {tab("product", "From a product")}
-        {tab("lookup", "Look up on eBay (test)")}
+        {tab("lookup", "Look up on eBay")}
       </div>
       {path === "product" ? <NewFromProduct /> : <EbayLookup />}
     </div>
