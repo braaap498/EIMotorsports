@@ -183,7 +183,8 @@ CATALOG = "https://api.ebay.com/commerce/catalog/v1_beta"
 METADATA = "https://api.ebay.com/sell/metadata/v1"
 _API_SCOPE = "https://api.ebay.com/oauth/api_scope"
 _CATALOG_SCOPE = "https://api.ebay.com/oauth/api_scope/commerce.catalog.readonly"
-MARKETPLACE = "EBAY_US"
+MARKETPLACE = "EBAY_US"                # catalog search
+COMPAT_MARKETPLACE = "EBAY_MOTORS_US"  # parts compatibility exists only on eBay Motors; EBAY_US is refused (eBay 47006)
 
 
 def _scoped_token(scopes: str) -> str:
@@ -208,14 +209,14 @@ def _catalog_token() -> str:
         return _token()
 
 
-def _call(method: str, url: str, token: str, params: Optional[dict] = None, body: Optional[dict] = None) -> dict:
+def _call(method: str, url: str, token: str, params: Optional[dict] = None, body: Optional[dict] = None, marketplace: str = MARKETPLACE) -> dict:
     """One call to a catalog or metadata endpoint. A refusal becomes a readable message that includes eBay's own reason."""
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         url, data=data, method=method,
-        headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE, "Accept": "application/json", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": marketplace, "Accept": "application/json", "Content-Type": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -291,7 +292,7 @@ def _catalog_rows(epid: Optional[str], upc: Optional[str]) -> dict:
         raise HTTPException(400, "An eBay catalog product (ePID) or a UPC is needed.")
     ident = {"epid": epid} if epid else {"upc": upc}
     try:
-        data = _call("POST", f"{METADATA}/compatibilities/get_product_compatibilities", _token(), body={"productIdentifier": ident})
+        data = _call("POST", f"{METADATA}/compatibilities/get_product_compatibilities", _token(), body={"productIdentifier": ident}, marketplace=COMPAT_MARKETPLACE)
     except FeedbackError as e:
         raise HTTPException(502, str(e))
     details = data.get("compatibilityDetails") or []

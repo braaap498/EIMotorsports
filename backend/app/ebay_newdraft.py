@@ -678,6 +678,68 @@ def rebuild_compat(copy_id: int, body: RebuildIn, db: Session = Depends(get_db),
     return {"rows": len(merged), "added": added, "notes": notes}
 
 
+class PickIn(BaseModel):
+    model_id: int
+    years: list[int]
+
+
+class PickFitIn(BaseModel):
+    picks: list[PickIn]
+    mode: str = "add"   # "add": keep the rows already on the draft; "replace": the table becomes only what was ticked
+
+
+def _draft_with_product(db: Session, copy_id: int):
+    r = _row(db, copy_id)
+    if r.status != "draft" or not r.product_id:
+        raise HTTPException(409, "Only a draft that belongs to a product can use the product's fitment.")
+    return r
+
+
+@router.get("/{copy_id}/fitment-choices")
+def fitment_choices(copy_id: int, db: Session = Depends(get_db)):
+    """The product's website fitment, by model with its years, so the vehicles for THIS listing can be chosen from it."""
+    r = _draft_with_product(db, copy_id)
+    groups: dict[int, dict] = {}
+    for f in _fitment_rows(db, r.product_id):
+        if f.year is None:
+            continue
+        g = groups.setdefault(int(f.model_id), {"model_id": int(f.model_id), "make": f.make, "model": f.model, "years": set()})
+        g["years"].add(int(f.year))
+    models = sorted(({**g, "years": sorted(g["years"])} for g in groups.values()), key=lambda g: (str(g["make"]).lower(), str(g["model"]).lower()))
+    return {"models": models}
+
+
+@router.post("/{copy_id}/compat-from-fitment")
+def compat_from_fitment(copy_id: int, body: PickFitIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Put only the chosen makes / models / years of the product's fitment on this draft's compatibility table, matched to eBay's own
+    vehicle list for the draft's category. Nothing on the website fitment changes."""
+    r = _draft_with_product(db, copy_id)
+    d = dict(r.data or {})
+    if not d.get("category_id"):
+        raise HTTPException(409, "Choose the store first so the eBay category is known.")
+    want = {p.model_id: set(p.years) for p in body.picks if p.years}
+    if not want:
+        raise HTTPException(400, "Tick at least one year.")
+    chosen = [f for f in _fitment_rows(db, r.product_id) if f.year is not None and int(f.year) in want.get(int(f.model_id), ())]
+    if not chosen:
+        raise HTTPException(409, "None of the ticked years are in this product's fitment any more.")
+    from app.ebay_vocab import convert_with_ebay
+    try:
+        rows, notes = convert_with_ebay(db, r.product_id, d["category_id"], rows=chosen)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(502, f"eBay's vehicle list could not be read: {getattr(e, 'detail', None) or getattr(e, 'message', None) or e}")
+    have = list(d.get("compat") or []) if body.mode != "replace" else []
+    keys = {tuple(map(tuple, c.get("pairs") or [])) for c in have}
+    new = [c for c in rows if tuple(map(tuple, c["pairs"])) not in keys]
+    merged = (have + new)[:MAX_COMPAT_ROWS]
+    d["compat"], d["compat_notes"] = merged, notes
+    d["compat_edited"] = True  # a deliberate choice: choosing a store again must not rebuild the whole fitment over it
+    db.execute(text("update ebay_listing_copies set data = cast(:d as jsonb), updated_at = now() where id = :i"), {"d": json.dumps(d), "i": copy_id})
+    db.commit()
+    return {"rows": len(merged), "added": len(new), "notes": notes}
+
+
 # --------------------------------------------------------------------------
 # picking the category by searching eBay's own category tree (no model item number needed)
 # --------------------------------------------------------------------------

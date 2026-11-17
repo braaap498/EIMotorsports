@@ -8,6 +8,7 @@ import { Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../component
 import DescriptionEditor from "../../../components/admin/DescriptionEditor";
 import CompatEditor, { type CompatRow } from "../../../components/admin/CompatEditor";
 import EbayLookup from "../../../components/admin/EbayLookup";
+import FitmentPicker from "../../../components/admin/FitmentPicker";
 
 type Spec = { name: string; values: string[] };
 type Copy = {
@@ -533,6 +534,17 @@ function CopyEditor({ id }: { id: number }) {
             </button>
             <button type="button" className={btn2Cls} disabled={off || busy !== ""} onClick={() => void rebuildCompat("replace")}>Replace table with fitment</button>
           </div>
+        )}
+        {!!copy.product_id && !!copy.category_id && (
+          <FitmentPicker
+            draftId={id}
+            disabled={off}
+            beforeApply={async () => !dirty || (await save())}
+            onApplied={async (text) => {
+              fill(await api<Copy>(`/ebay-copy/${id}`));
+              setMsg({ kind: "success", text });
+            }}
+          />
         )}
         <CompatEditor
           categoryId={copy.category_id}
