@@ -7,6 +7,7 @@ import { api, errMsg } from "../../../lib/adminApi";
 import { Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../components/admin/ui";
 import DescriptionEditor from "../../../components/admin/DescriptionEditor";
 import CompatEditor, { type CompatRow } from "../../../components/admin/CompatEditor";
+import EbayLookup from "../../../components/admin/EbayLookup";
 
 type Spec = { name: string; values: string[] };
 type Copy = {
@@ -862,8 +863,31 @@ function NewFromProduct() {
 function Inner() {
   const p = useSearchParams();
   const id = Number(p.get("id"));
-  if (!id) return <NewFromProduct />;
+  if (!id) return <NewListingHome />;
   return <CopyEditor key={id} id={id} />;
+}
+
+/* The two ways to start a new listing, kept apart: from one of our products, or by looking a part up on eBay (read-only test). */
+function NewListingHome() {
+  const [path, setPath] = useState<"product" | "lookup">("product");
+  const tab = (k: "product" | "lookup", label: string) => (
+    <button
+      type="button"
+      onClick={() => setPath(k)}
+      className={`rounded-t border border-b-0 px-4 py-2 text-sm font-medium ${path === k ? "border-gray-300 bg-white text-gray-900" : "border-transparent bg-gray-100 text-gray-600 hover:text-gray-900"}`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-1 border-b border-gray-300">
+        {tab("product", "From a product")}
+        {tab("lookup", "Look up on eBay (test)")}
+      </div>
+      {path === "product" ? <NewFromProduct /> : <EbayLookup />}
+    </div>
+  );
 }
 
 export default function EbayCopyPage() {
