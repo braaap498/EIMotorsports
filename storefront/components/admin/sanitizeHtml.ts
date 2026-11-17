@@ -127,28 +127,46 @@ function unwrapEmptyInline(root: Element): void {
 }
 
 // eBay's editor often starts a list item with an empty line (a <br> or an empty div) and puts the real text on the next
-// line. The bullet then sits alone on the first line and cannot be selected or deleted. Such an item was never a real
-// list item, so it is taken out of the list and its content is shown as ordinary text (the list is split around it).
+// line. The bullet then sits alone on the first line, above the text. The empty first line is removed so the bullet sits
+// on the text line, and the item stays a bullet like its neighbours. Text kept in blocks inside the item is turned into
+// plain lines (separated by line breaks) so the item is one tidy block.
 function unwrapSpacerItems(root: Element): void {
   root.querySelectorAll("li").forEach((li) => {
-    const list = li.parentElement;
-    if (!list || !LIST.test(list.tagName) || textOf(li) === "") return; // fully empty ones are removed separately
-    const first = Array.from(li.childNodes).find((n) => !blankNode(n));
-    if (!(isEl(first) && (first.tagName === "BR" || isBlankBlock(first)))) return;
-    first.remove(); // the empty first line itself
-    const after = document.createElement(list.tagName.toLowerCase());
-    while (li.nextSibling) after.appendChild(li.nextSibling);
-    list.after(after);
-    const kids = Array.from(li.childNodes).filter((c) => !blankNode(c));
-    if (kids.every((c) => isEl(c, BLOCK) || isEl(c, LIST))) {
-      kids.forEach((c) => after.before(c));
-    } else {
-      // text and inline parts: keep them together as their own paragraph so they do not run into the next line
-      const div = document.createElement("div");
-      kids.forEach((c) => div.appendChild(c));
-      after.before(div);
+    if (textOf(li) === "") return; // fully empty ones are removed separately
+    const firstLine = () => Array.from(li.childNodes).find((n) => !blankNode(n));
+    let first = firstLine();
+    let changed = false;
+    while (isEl(first) && (first.tagName === "BR" || isBlankBlock(first))) {
+      first.remove(); // the empty first line itself
+      changed = true;
+      first = firstLine();
     }
-    li.remove();
+    if (!changed) return;
+    const out: Node[] = [];
+    Array.from(li.childNodes).forEach((c) => {
+      if (isEl(c, /^(DIV|P)$/) && !c.querySelector("ul,ol,table")) {
+        if (out.length && !isBr(out[out.length - 1])) out.push(document.createElement("br"));
+        out.push(...Array.from(c.childNodes));
+      } else {
+        out.push(c);
+      }
+    });
+    li.replaceChildren(...out);
+  });
+}
+
+// Two lists of the same kind with nothing between them are one list: the page puts a gap between separate lists, which
+// showed up as an uneven space in the middle of a run of bullets.
+function mergeAdjacentLists(root: Element): void {
+  Array.from(root.querySelectorAll("ul,ol")).forEach((list) => {
+    if (!root.contains(list)) return;
+    for (;;) {
+      let next: Node | null = list.nextSibling;
+      while (next && blankNode(next)) next = next.nextSibling;
+      if (!(isEl(next) && next.tagName === list.tagName)) return;
+      while (next.firstChild) list.appendChild(next.firstChild);
+      next.remove();
+    }
   });
 }
 
@@ -334,6 +352,7 @@ function tidy(root: Element): void {
     if (root.contains(list)) normalizeList(list);
   });
   wrapOrphanItems(root);
+  mergeAdjacentLists(root);
   normalizeBlocks(root);
   trimLineEdges(root);
   for (let pass = 0; pass < 12; pass++) {
