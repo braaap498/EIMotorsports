@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Notice, btnCls, btn2Cls, inputCls } from "./ui";
+import FitmentReview from "./FitmentReview";
 
 /* TEST pathway on the New listing page: look a part up on eBay and see what eBay will tell us about a listing that is not ours
    (item specifics and the compatible-vehicle table). Read only: nothing is saved here and nothing is sent to eBay except reads. */
@@ -41,13 +42,6 @@ type Probe = {
 };
 type StoreChoice = { store: string; seller: string | null; live: boolean };
 type FoundProduct = { id: number; title: string; sku: string | null; custom_label: string | null; price: number | null; listings: number };
-type FitModel = { model_id: number; make: string; model: string; ebay_make: string; ebay_model: string; new_years: number[]; already_years: number[] };
-type FitPlan = {
-  product: string; applied: boolean; rows_read: number; no_year: number; skipped: string[];
-  models: FitModel[]; unresolved: { make: string; model: string; years: number[] }[];
-  from_listing_rows?: number; own_listings_with_table?: number; own_listings?: number;
-  added?: { links_added: number; vehicle_years_added: number };
-};
 type Made = { id: number; store_done: boolean; compat_rows: number; compat_from_listing: number; specifics_added: string[]; warnings: string[] };
 
 export default function EbayLookup() {
@@ -65,8 +59,6 @@ export default function EbayLookup() {
   const [found, setFound] = useState<FoundProduct[] | null>(null);
   const [product, setProduct] = useState<FoundProduct | null>(null);
   const [made, setMade] = useState<Made | null>(null);
-  const [fit, setFit] = useState<FitPlan | null>(null);
-  const [fitSrc, setFitSrc] = useState<"listing" | "own" | "both">("listing");
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   useEffect(() => {
@@ -141,24 +133,15 @@ export default function EbayLookup() {
     }
   }
 
-  async function runFit(apply: boolean, src: "listing" | "own" | "both") {
-    if (!info || !product) return;
-    if (apply && !window.confirm(`Add the new years to the website fitment of "${product.title}"? Only additions are made; nothing is removed.`)) return;
-    setBusy("fit");
+  function startOver() {
+    setInfo(null);
+    setProbe(null);
+    setProduct(null);
+    setFound(null);
+    setMade(null);
     setMsg(null);
-    setFitSrc(src);
-    try {
-      setFit(
-        await api<FitPlan>("/ebay-lookup/fitment", {
-          method: "POST",
-          body: { product_id: product.id, item_id: src === "own" ? null : info.item_id, store, from_listings: src !== "listing", apply },
-        })
-      );
-    } catch (e) {
-      setMsg({ kind: "error", text: errMsg(e) });
-    } finally {
-      setBusy("");
-    }
+    setItemNo("");
+    setPq("");
   }
 
   async function makeIt() {
@@ -359,13 +342,17 @@ export default function EbayLookup() {
       )}
 
       {info && (
-        <div className="space-y-3 rounded border-2 border-gray-900 bg-white p-4 text-sm">
-          <h2 className="font-semibold">Make a listing like this one</h2>
-          <p className="text-gray-600">
-            Pick the product this listing is for. One click makes the draft from our product (title, description, price, photos), takes the category and
-            shipping from a similar live listing in <strong>{store || "the chosen store"}</strong>, and adds this listing&apos;s compatibility rows and item specifics that the
-            product does not have. The other seller&apos;s title, description and photos are not copied.
-          </p>
+        <div className="space-y-4 rounded border-2 border-gray-900 bg-white p-4 text-sm">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="font-semibold">Use this listing for one of our products</h2>
+              <p className="max-w-3xl text-gray-600">
+                Pick the product this listing is for. You can then do either or both of two separate things: add the compatibility table to the product&apos;s website fitment (reviewed by you
+                first), and make a draft listing. Doing the first does not require the second, and you can stop after it.
+              </p>
+            </div>
+            <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={startOver}>Done / start over</button>
+          </div>
           <div className="flex flex-wrap items-end gap-3">
             <label className="block">
               <span className="mb-1 block font-semibold">Find our product (title, EI number, label, part number or id)</span>
@@ -386,7 +373,7 @@ export default function EbayLookup() {
                   </span>
                   <span className="flex items-center gap-3">
                     <span className={`text-xs ${f.listings ? "text-amber-700" : "text-gray-500"}`}>{f.listings ? `${f.listings} eBay listing${f.listings === 1 ? "" : "s"}` : "no eBay listing"}</span>
-                    <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={() => { setProduct(f); setMade(null); setFit(null); }}>
+                    <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={() => { setProduct(f); setMade(null); }}>
                       {product?.id === f.id ? "Chosen" : "Choose"}
                     </button>
                   </span>
@@ -394,81 +381,45 @@ export default function EbayLookup() {
               ))}
             </ul>
           )}
+
           {product && (
-            <div className="flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3">
-              <span>
-                For <strong>{product.title}</strong> in <strong>{store}</strong>.
-              </span>
-              <button type="button" className={btnCls} disabled={busy !== "" || !store || product.listings > 0} onClick={() => void makeIt()}
-                title={product.listings > 0 ? "This product already has eBay listings: use Sell similar from one of them" : ""}>
-                {busy === "make" ? "Making the draft…" : "Make the draft"}
-              </button>
-              {product.listings > 0 && <span className="text-xs text-amber-700">This product already has eBay listings, so no new draft from here. Use Sell similar.</span>}
-            </div>
+            <p className="border-t border-gray-100 pt-3">
+              Chosen: <strong>{product.title}</strong> <span className="text-xs text-gray-500">(id {product.id})</span>
+            </p>
           )}
+
           {product && (
-            <div className="space-y-2 border-t border-gray-100 pt-3">
-              <h3 className="font-semibold">Add to this product&apos;s website fitment</h3>
+            <div className="space-y-2 rounded border border-gray-200 p-3">
+              <h3 className="font-semibold">1 · Add this compatibility table to the product&apos;s website fitment</h3>
               <p className="text-gray-600">
-                Matches the eBay vehicles to our makes, models and years and shows what is new for <strong>{product.title}</strong> before anything is added. Only additions are
-                made. A model our vehicle list does not have is listed, not guessed.
+                Review first: only years that are new for <strong>{product.title}</strong> are offered, you tick what to add, and a make or model we do not have is shown for you to settle or edit
+                before anything is created. Nothing is ever removed.
               </p>
-              <div className="flex flex-wrap gap-2">
-                <button type="button" className={btn2Cls} disabled={busy !== "" || !store} onClick={() => void runFit(false, "listing")}>From this listing</button>
-                <button type="button" className={btn2Cls} disabled={busy !== "" || product.listings === 0} title={product.listings === 0 ? "This product has no eBay listings of its own" : ""} onClick={() => void runFit(false, "own")}>From all of this product&apos;s own eBay listings</button>
-                <button type="button" className={btn2Cls} disabled={busy !== "" || !store || product.listings === 0} onClick={() => void runFit(false, "both")}>From both</button>
-              </div>
-              {busy === "fit" && <p className="text-gray-500">Working…</p>}
-              {fit && (
-                <div className="space-y-2">
-                  <p>
-                    {fit.rows_read.toLocaleString()} eBay row{fit.rows_read === 1 ? "" : "s"} read
-                    {fit.from_listing_rows !== undefined ? ` (${fit.from_listing_rows} from this listing)` : ""}
-                    {fit.own_listings !== undefined ? `; ${fit.own_listings_with_table} of ${fit.own_listings} of the product's own listings have a saved table` : ""}.
-                    {fit.no_year > 0 ? ` ${fit.no_year} had no usable year and were left out.` : ""}
-                  </p>
-                  {fit.models.length === 0 && fit.unresolved.length === 0 && <p className="text-gray-500">Nothing to add.</p>}
-                  {fit.models.length > 0 && (
-                    <table className="w-full max-w-3xl text-left text-xs">
-                      <thead>
-                        <tr className="border-b border-gray-200">
-                          <th className="py-1 pr-3">Our model</th>
-                          <th className="py-1 pr-3">New years</th>
-                          <th className="py-1">Already on the product</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {fit.models.map((m) => (
-                          <tr key={m.model_id} className="border-b border-gray-100 align-top">
-                            <td className="py-1 pr-3">{m.make} {m.model}{m.ebay_model !== m.model || m.ebay_make !== m.make ? <span className="text-gray-500"> (eBay: {m.ebay_make} {m.ebay_model})</span> : null}</td>
-                            <td className={`py-1 pr-3 ${m.new_years.length ? "font-semibold text-green-700" : "text-gray-400"}`}>{m.new_years.length ? m.new_years.join(", ") : "none"}</td>
-                            <td className="py-1 text-gray-500">{m.already_years.length ? m.already_years.join(", ") : "none"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                  {fit.unresolved.length > 0 && (
-                    <Notice>
-                      Not in our vehicle list, so not added: {fit.unresolved.map((u) => `${u.make} ${u.model} (${u.years.length} year${u.years.length === 1 ? "" : "s"})`).join(", ")}. Settle these in
-                      Store API, eBay compatibility import, Convert to fitment.
-                    </Notice>
-                  )}
-                  {fit.skipped.length > 0 && <p className="text-xs text-gray-500">Marked skip in the conversion decisions: {fit.skipped.join(", ")}.</p>}
-                  {fit.applied && fit.added ? (
-                    <Notice kind="success">
-                      Added {fit.added.links_added} year{fit.added.links_added === 1 ? "" : "s"} to the product&apos;s fitment
-                      {fit.added.vehicle_years_added ? `, and ${fit.added.vehicle_years_added} new vehicle year${fit.added.vehicle_years_added === 1 ? "" : "s"} to existing models` : ""}.
-                    </Notice>
-                  ) : (
-                    fit.models.some((m) => m.new_years.length > 0) && (
-                      <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => void runFit(true, fitSrc)}>Add these to the product&apos;s fitment</button>
-                    )
-                  )}
-                </div>
-              )}
+              <FitmentReview key={`${product.id}:${info.item_id}`} product={product} itemId={info.item_id} store={store} />
             </div>
           )}
+
+          {product && (
+            <div className="space-y-2 rounded border border-gray-200 p-3">
+              <h3 className="font-semibold">2 · Make a listing like this one (optional)</h3>
+              <p className="text-gray-600">
+                One click makes the draft from our product (title, description, price, photos), takes the category and shipping from a similar live listing in <strong>{store || "the chosen store"}</strong>,
+                and adds this listing&apos;s compatibility rows and item specifics that the product does not have. The other seller&apos;s title, description and photos are not copied. This is separate from step 1:
+                the draft carries the rows from the listing whether or not you added them to the website fitment, and you can trim them on the draft screen.
+              </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <span>
+                  For <strong>{product.title}</strong> in <strong>{store}</strong>.
+                </span>
+                <button type="button" className={btnCls} disabled={busy !== "" || !store || product.listings > 0} onClick={() => void makeIt()}
+                  title={product.listings > 0 ? "This product already has eBay listings: use Sell similar from one of them" : ""}>
+                  {busy === "make" ? "Making the draft…" : "Make the draft"}
+                </button>
+                {product.listings > 0 && <span className="text-xs text-amber-700">This product already has eBay listings, so no new draft from here. Use Sell similar.</span>}
+              </div>
+            </div>
+          )}
+
           {made && (
             <div className="space-y-2">
               <Notice kind={made.store_done ? "success" : "info"}>

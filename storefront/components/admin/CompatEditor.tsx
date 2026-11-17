@@ -50,6 +50,8 @@ export default function CompatEditor({
   const [note, setNote] = useState("");
   const [loading, setLoading] = useState("");
   const [msg, setMsg] = useState("");
+  const [ticked, setTicked] = useState<Set<string>>(new Set()); // rows ticked for removal, by row signature
+  const [byModel, setByModel] = useState(false);
 
   const locked = !!lockedReason;
   const off = !!disabled || locked;
@@ -182,6 +184,32 @@ export default function CompatEditor({
 
   const dropIdx = (idx: Set<number>) => onChange(rows.filter((_, i) => !idx.has(i)));
 
+  // Quick removal: tick rows, or remove a whole model / one year of a model from the grouped view.
+  const groups = useMemo(() => {
+    const m = new Map<string, { make: string; model: string; years: Map<string, number[]>; n: number }>();
+    rows.forEach((r, i) => {
+      const mk = valueOf(r, makeName) || "(no make)";
+      const mo = valueOf(r, modelName) || "(no model)";
+      const k = mk + "|" + mo;
+      const g = m.get(k) ?? { make: mk, model: mo, years: new Map<string, number[]>(), n: 0 };
+      const y = valueOf(r, yearName) || "(no year)";
+      g.years.set(y, [...(g.years.get(y) ?? []), i]);
+      g.n += 1;
+      m.set(k, g);
+    });
+    return Array.from(m.values()).sort((a, b) => a.make.localeCompare(b.make) || a.model.localeCompare(b.model));
+  }, [rows, makeName, modelName, yearName]);
+
+  const askDrop = (idx: number[], what: string) => {
+    if (idx.length === 0) return;
+    if (idx.length === 1 || window.confirm(`Remove ${what} (${idx.length} rows) from this list? Nothing is sent to eBay until you save.`)) {
+      dropIdx(new Set(idx));
+      setTicked(new Set());
+    }
+  };
+  const tickedIdx = rows.map((r, i) => (ticked.has(sigOf(r)) ? i : -1)).filter((i) => i >= 0);
+  const shownAllTicked = shown.length > 0 && shown.slice(0, SHOW).every(({ r }) => ticked.has(sigOf(r)));
+
   return (
     <div className="space-y-3 text-sm">
       {locked && <Notice>{lockedReason}</Notice>}
@@ -214,7 +242,46 @@ export default function CompatEditor({
             {open ? "Close vehicle picker" : "Add vehicles"}
           </button>
         )}
+        {!off && rows.length > 0 && (
+          <button type="button" className={btn2Cls} onClick={() => setByModel(!byModel)}>
+            {byModel ? "Hide the list by model" : "Remove by model or year"}
+          </button>
+        )}
+        {!off && tickedIdx.length > 0 && (
+          <button type="button" className="rounded border border-red-300 bg-white px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50" onClick={() => askDrop(tickedIdx, "the ticked vehicles")}>
+            Remove {tickedIdx.length} ticked
+          </button>
+        )}
+        {!off && rows.length > 1 && (
+          <button type="button" className="text-xs text-red-700 hover:underline" onClick={() => askDrop(rows.map((_, i) => i), "every vehicle")}>
+            Clear the whole list
+          </button>
+        )}
       </div>
+
+      {byModel && !off && (
+        <div className="space-y-1 rounded border border-gray-200 bg-gray-50 p-3">
+          <p className="text-xs text-gray-600">Remove a whole model with one click, or click a year to take just that year out.</p>
+          <div className="max-h-72 space-y-1 overflow-auto">
+            {groups.map((g) => (
+              <div key={g.make + "|" + g.model} className="flex flex-wrap items-center gap-2 rounded bg-white px-2 py-1 text-xs">
+                <button type="button" className="rounded border border-red-300 px-2 py-0.5 text-red-700 hover:bg-red-50" onClick={() => askDrop(Array.from(g.years.values()).flat(), `${g.make} ${g.model}`)}>
+                  Remove all
+                </button>
+                <span className="font-medium">{g.make} {g.model}</span>
+                <span className="text-gray-500">{g.n} row{g.n === 1 ? "" : "s"}</span>
+                <span className="flex flex-wrap gap-1">
+                  {Array.from(g.years.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([y, idx]) => (
+                    <button key={y} type="button" title={`Remove ${y} from ${g.make} ${g.model}`} className="rounded border border-gray-300 px-1.5 py-0.5 hover:border-red-400 hover:bg-red-50 hover:text-red-700" onClick={() => askDrop(idx, `${y} ${g.make} ${g.model}`)}>
+                      {y} ×
+                    </button>
+                  ))}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {open && !off && (
         <div className="space-y-3 rounded border border-blue-200 bg-blue-50 p-3">
@@ -309,6 +376,20 @@ export default function CompatEditor({
           <table className="w-full text-left text-xs">
             <thead className="sticky top-0 bg-gray-50 uppercase text-gray-500">
               <tr>
+                {!off && (
+                  <th className="w-6 px-2 py-1">
+                    <input
+                      type="checkbox"
+                      aria-label="Tick all shown"
+                      checked={shownAllTicked}
+                      onChange={() => {
+                        const n = new Set(ticked);
+                        shown.slice(0, SHOW).forEach(({ r }) => (shownAllTicked ? n.delete(sigOf(r)) : n.add(sigOf(r))));
+                        setTicked(n);
+                      }}
+                    />
+                  </th>
+                )}
                 {columns.map((c) => <th key={c} className="px-2 py-1">{c}</th>)}
                 <th className="px-2 py-1">Notes</th>
                 <th className="px-2 py-1" />
@@ -316,7 +397,22 @@ export default function CompatEditor({
             </thead>
             <tbody className="divide-y divide-gray-100">
               {shown.slice(0, SHOW).map(({ r, i }) => (
-                <tr key={i}>
+                <tr key={i} className={ticked.has(sigOf(r)) ? "bg-red-50" : ""}>
+                  {!off && (
+                    <td className="px-2 py-1">
+                      <input
+                        type="checkbox"
+                        aria-label="Tick to remove"
+                        checked={ticked.has(sigOf(r))}
+                        onChange={() => {
+                          const n = new Set(ticked);
+                          if (n.has(sigOf(r))) n.delete(sigOf(r));
+                          else n.add(sigOf(r));
+                          setTicked(n);
+                        }}
+                      />
+                    </td>
+                  )}
                   {columns.map((c) => <td key={c} className="px-2 py-1">{valueOf(r, c)}</td>)}
                   <td className="px-2 py-1">
                     {off ? (

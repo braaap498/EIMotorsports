@@ -14,6 +14,12 @@ Mounted at /admin/ebay-lookup/* (owner/admin only).
                                 called with a CONNECTED store's token. Says whether the listing belongs to that store and returns
                                 the compatibility rows eBay sent back (or that it sent none).
 
+  POST /fitment/preview         {product_id, item_id?, store?, from_listings}  what the eBay rows would add to ONE product's website fitment,
+                                matched to our makes / models / years. Writes nothing.
+  POST /fitment/settle          {decisions}  settle machines our vehicle list does not know (map to a model, create make/model, skip).
+  POST /fitment/commit          {product_id, item_id?, store?, from_listings, picks}  add exactly the years that were ticked in the review.
+  POST /make-draft              a draft listing from one of our products (a separate step from the fitment review).
+
 Why two calls: the Browse API needs no seller login and works on any listing, but is not documented to return the compatibility
 table. The Trading call is documented to return it, and is known to work on our own listings; whether it works on another seller's
 listing is what the probe shows.
@@ -26,7 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -348,14 +354,21 @@ def make_draft(body: MakeIn, db: Session = Depends(get_db), user: AuthUser = Dep
 
 
 # --------------------------------------------------------------------------
-# eBay compatibility rows -> a product's WEBSITE fitment
+# eBay compatibility rows -> a product's WEBSITE fitment: preview, settle unknown machines, commit what was ticked
+#
+# Three separate calls so the person reviews everything by hand:
+#   preview  reads the rows and shows, per model, the years that are NEW for the product and the years already on it.
+#            Machines our vehicle list does not know are listed with a best guess. Nothing is written.
+#   settle   saves the person's decisions for those machines (use an existing model / create the make and model with the
+#            names they edited / skip), into the same decisions table the compat import uses. No fitment is added.
+#   commit   adds ONLY the years the person ticked, and only years that are new for the product. Never deletes or changes.
+# Making a listing is a different button and does not need any of this to have happened.
 # --------------------------------------------------------------------------
-class FitIn(BaseModel):
+class FitSource(BaseModel):
     product_id: int
     item_id: Optional[str] = Field(None, max_length=15)   # read this listing's table from eBay (needs store)
     store: Optional[str] = Field(None, max_length=60)
     from_listings: bool = False                            # use the saved compatibility tables of the product's OWN eBay listings
-    apply: bool = False                                    # False: show what would be added; True: add it
 
 
 _YEAR = re.compile(r"(19|20)\d{2}")
@@ -384,12 +397,50 @@ def _resolve_model(db: Session, make: str, model: str):
     return (r.model_id, bool(r.skip)) if r else (None, False)
 
 
+def _unknown_machine(db: Session, make: str, model: str, subs: list[str]) -> dict:
+    """For a machine we could not place: does the make exist, is the model name ambiguous, and our closest models of that make."""
+    r = db.execute(
+        text(
+            """
+            select exists (select 1 from vehicle_makes vm where fitment_key(vm.name) = fitment_key(cast(:mk as text))) as make_exists,
+                   (select count(*) from vehicle_makes vm join vehicle_models vmo on vmo.make_id = vm.id
+                     where fitment_key(vm.name) = fitment_key(cast(:mk as text)) and fitment_key(vmo.name) = fitment_key(cast(:mo as text))) as exact_n
+            """
+        ),
+        {"mk": make, "mo": model},
+    ).first()
+    sugg = db.execute(
+        text(
+            """
+            select * from (
+              select vmo.id, vmo.name, vm.name as make,
+                     greatest(
+                       similarity(fitment_key(vmo.name), fitment_key(cast(:mo as text))),
+                       case when length(fitment_key(vmo.name)) >= 3 and position(fitment_key(vmo.name) in fitment_key(cast(:mo as text))) > 0 then 0.8 else 0 end,
+                       case when length(fitment_key(cast(:mo as text))) >= 3 and position(fitment_key(cast(:mo as text)) in fitment_key(vmo.name)) > 0 then 0.8 else 0 end,
+                       case when exists (select 1 from unnest(cast(:subs as text[])) s where fitment_key(s) = fitment_key(vmo.name)) then 0.95 else 0 end
+                     ) as score
+              from vehicle_makes vm join vehicle_models vmo on vmo.make_id = vm.id
+              where fitment_key(vm.name) = fitment_key(cast(:mk as text))) q
+            where score >= 0.4 order by score desc, name limit 3
+            """
+        ),
+        {"mk": make, "mo": model, "subs": subs[:50]},
+    ).all()
+    return {
+        "make_exists": bool(r.make_exists),
+        "ambiguous": int(r.exact_n or 0) > 1,
+        "suggestions": [{"model_id": int(x.id), "name": x.name, "make": x.make, "score": round(float(x.score), 2)} for x in sugg],
+    }
+
+
 def _fitment_plan(db: Session, product_id: int, rows: list[dict]) -> dict:
-    """What adding these eBay rows (attribute dicts with Make, Model, Year ...) to the product's fitment would do. Writes nothing."""
+    """What adding these eBay rows (attribute dicts with Make, Model, Year ...) to the product's fitment would do. Writes nothing.
+    Spellings that normalise to the same machine are one line, and two eBay machines that map to the same model of ours are one line."""
     import datetime
 
     maxyear = datetime.date.today().year + 1
-    groups: dict[tuple, dict] = {}
+    spelled: dict[tuple[str, str], dict] = {}
     no_year = 0
     for a in rows:
         mk, mo = " ".join(str(a.get("Make") or "").split()), " ".join(str(a.get("Model") or "").split())
@@ -399,42 +450,81 @@ def _fitment_plan(db: Session, product_id: int, rows: list[dict]) -> dict:
         if not _YEAR.fullmatch(y) or int(y) > maxyear:
             no_year += 1
             continue
-        g = groups.setdefault((mk, mo), {"years": set(), "subs": {}})
+        g = spelled.setdefault((mk, mo), {"years": set(), "subs": {}})
         g["years"].add(int(y))
         sub = " ".join(str(a.get("Submodel") or a.get("Trim") or "").split())
         if sub:
             g["subs"].setdefault(int(y), set()).add(sub)
-    models, unresolved, skipped = [], [], []
-    for (mk, mo), g in sorted(groups.items()):
-        model_id, skip = _resolve_model(db, mk, mo)
+
+    # one machine per normalised make + model (the normalising is done by the database so it is the same one the conversion uses)
+    names = sorted(spelled)
+    keys = []
+    if names:
+        keys = [
+            (r.mk, r.ok)
+            for r in db.execute(
+                text("select fitment_key(a) as mk, fitment_key(b) as ok from unnest(cast(:a as text[]), cast(:b as text[])) with ordinality as t(a, b, n) order by n"),
+                {"a": [n[0] for n in names], "b": [n[1] for n in names]},
+            ).all()
+        ]
+    machines: dict[tuple[str, str], dict] = {}
+    for (mk, mo), key in zip(names, keys):
+        if not key[0] or not key[1]:
+            continue
+        m = machines.setdefault(key, {"make": mk, "model": mo, "years": set(), "subs": {}})
+        m["years"] |= spelled[(mk, mo)]["years"]
+        for y, v in spelled[(mk, mo)]["subs"].items():
+            m["subs"].setdefault(y, set()).update(v)
+
+    resolved: dict[int, dict] = {}
+    unresolved, skipped = [], []
+    for key, m in sorted(machines.items(), key=lambda kv: (kv[1]["make"].lower(), kv[1]["model"].lower())):
+        model_id, skip = _resolve_model(db, m["make"], m["model"])
         if skip:
-            skipped.append(f"{mk} {mo}")
+            skipped.append(f"{m['make']} {m['model']}")
             continue
         if model_id is None:
-            unresolved.append({"make": mk, "model": mo, "years": sorted(g["years"])})
+            subnames = sorted({s for v in m["subs"].values() for s in v})
+            unresolved.append({"make": m["make"], "model": m["model"], "years": sorted(m["years"]), "subs": subnames[:12], **_unknown_machine(db, m["make"], m["model"], subnames)})
             continue
-        names = db.execute(
-            text("select vmk.name as make, vmo.name as model from vehicle_models vmo join vehicle_makes vmk on vmk.id = vmo.make_id where vmo.id = :m"),
-            {"m": model_id},
-        ).first()
-        have = {int(r.year) for r in db.execute(
-            text("select v.year from product_fitment pf join vehicles v on v.id = pf.vehicle_id where pf.product_id = :p and v.model_id = :m and v.year is not null"),
-            {"p": product_id, "m": model_id}).all()}
-        new = sorted(y for y in g["years"] if y not in have)
-        models.append({
-            "model_id": int(model_id), "make": names.make, "model": names.model, "ebay_make": mk, "ebay_model": mo,
-            "new_years": new, "already_years": sorted(y for y in g["years"] if y in have),
-            "subs": {str(y): sorted(g["subs"].get(y, ())) for y in new if g["subs"].get(y)},
-        })
+        r = resolved.setdefault(int(model_id), {"model_id": int(model_id), "years": set(), "subs": {}, "ebay": []})
+        r["years"] |= m["years"]
+        for y, v in m["subs"].items():
+            r["subs"].setdefault(y, set()).update(v)
+        r["ebay"].append(f"{m['make']} {m['model']}")
+
+    models = []
+    if resolved:
+        ids = list(resolved)
+        label = {r.id: (r.make, r.model) for r in db.execute(
+            text("select vmo.id, vmo.name as model, vmk.name as make from vehicle_models vmo join vehicle_makes vmk on vmk.id = vmo.make_id where vmo.id = any(cast(:i as bigint[]))"),
+            {"i": ids}).all()}
+        have: dict[int, set[int]] = {}
+        for r in db.execute(
+            text("select v.model_id, v.year from product_fitment pf join vehicles v on v.id = pf.vehicle_id "
+                 "where pf.product_id = :p and v.model_id = any(cast(:i as bigint[])) and v.year is not null"),
+            {"p": product_id, "i": ids}).all():
+            have.setdefault(int(r.model_id), set()).add(int(r.year))
+        for mid, r in resolved.items():
+            h = have.get(mid, set())
+            new = sorted(y for y in r["years"] if y not in h)
+            mk, mo = label.get(mid, ("", str(mid)))
+            models.append({
+                "model_id": mid, "make": mk, "model": mo, "ebay_names": sorted(set(r["ebay"])),
+                "new_years": new, "already_years": sorted(y for y in r["years"] if y in h),
+                "subs": {str(y): sorted(r["subs"].get(y, ())) for y in new if r["subs"].get(y)},
+            })
+        models.sort(key=lambda x: (x["make"].lower(), x["model"].lower()))
+    unresolved.sort(key=lambda u: (-len(u["years"]), u["make"].lower(), u["model"].lower()))
     return {"models": models, "unresolved": unresolved, "skipped": skipped, "no_year": no_year}
 
 
-def _fitment_apply(db: Session, product_id: int, plan: dict) -> dict:
-    """Add the planned years. Only ADDS: missing vehicle years for a model that already exists, and product_fitment links.
-    Nothing is deleted or changed, and no make or model is created."""
+def _fitment_apply(db: Session, product_id: int, chosen: list[dict]) -> dict:
+    """Add the chosen years. Only ADDS: missing vehicle years for a model that already exists, and product_fitment links.
+    Nothing is deleted or changed. chosen: [{model_id, years, subs}]."""
     vehicles_made = links = 0
-    for m in plan["models"]:
-        for y in m["new_years"]:
+    for m in chosen:
+        for y in m["years"]:
             vid = db.execute(
                 text("select min(id) from vehicles where model_id = :m and year = :y and submodel is null"), {"m": m["model_id"], "y": y}
             ).scalar()
@@ -479,11 +569,8 @@ def _saved_tables(db: Session, product_id: int) -> tuple[list[dict], int, int]:
     return rows, used, int(total)
 
 
-@router.post("/fitment")
-def add_to_fitment(body: FitIn, db: Session = Depends(get_db)):
-    """Put eBay compatibility rows into ONE product's website fitment. With apply false it only shows what would be added; with
-    apply true it adds exactly that. Rows can come from a listing read from eBay now, from the saved tables of the product's own
-    listings, or both. A machine our vehicle list does not know is listed, never guessed (settle those in the compat import tab)."""
+def _fit_rows(db: Session, body: FitSource) -> tuple[list[dict], dict, str]:
+    """The eBay rows for a fitment preview or commit, and what they came from. Reads eBay (and our saved tables); writes nothing."""
     pj = db.execute(text("select title, coalesce(is_universal, false) as u, coalesce(fitment_exempt, false) as x from products where id = :p"), {"p": body.product_id}).first()
     if not pj:
         raise HTTPException(404, "That product does not exist.")
@@ -506,19 +593,120 @@ def add_to_fitment(body: FitIn, db: Session = Depends(get_db)):
         saved, used, total = _saved_tables(db, body.product_id)
         rows += saved
         info.update({"own_listings_with_table": used, "own_listings": total})
+    return rows, info, pj.title
+
+
+@router.post("/fitment/preview")
+def fitment_preview(body: FitSource, db: Session = Depends(get_db)):
+    """Show what the eBay rows would add to the product's website fitment. Changes nothing. Rows can come from a listing read from eBay
+    now, from the saved tables of the product's own listings, or both."""
+    rows, info, title = _fit_rows(db, body)
     plan = _fitment_plan(db, body.product_id, rows)
     plan.update(info)
     plan["rows_read"] = len(rows)
-    plan["product"] = pj.title
-    if not body.apply:
-        plan["applied"] = False
-        return plan
+    plan["product"] = title
+    return plan
+
+
+class FitDecision(BaseModel):
+    ebay_make: str = Field(..., min_length=1, max_length=100)    # the machine as eBay spells it (what the decision is remembered under)
+    ebay_model: str = Field(..., min_length=1, max_length=100)
+    action: Literal["map", "create", "skip"]
+    model_id: Optional[int] = None                                # map: our existing model
+    make: str = Field("", max_length=100)                         # create: the make and model names to create, as edited in the review
+    model: str = Field("", max_length=100)
+    type_id: Optional[int] = None                                 # create: vehicle type of a NEW model
+
+
+class SettleIn(BaseModel):
+    decisions: list[FitDecision] = Field(..., min_length=1, max_length=200)
+
+
+def _settle(db: Session, d: FitDecision) -> str:
+    from app.admin_ebay_fitment import Decision, _create_model, _save_map
+
+    eb_make, eb_model = " ".join(d.ebay_make.split()), " ".join(d.ebay_model.split())
+    k = db.execute(text("select fitment_key(:a) as mk, fitment_key(:b) as ok"), {"a": eb_make, "b": eb_model}).first()
+    if not k.mk or not k.ok:
+        raise HTTPException(400, f"“{eb_make} {eb_model}” has no usable make and model.")
+    # remembered under the eBay spelling, so this and every later import land on the same decision
+    remembered = Decision(make_key=k.mk, model_key=k.ok, make=eb_make, model=eb_model, action="skip")
+    if d.action == "skip":
+        _save_map(db, remembered, None, True)
+        return "skipped"
+    if d.action == "map":
+        if not d.model_id or not db.execute(text("select 1 from vehicle_models where id = :i"), {"i": d.model_id}).first():
+            raise HTTPException(404, f"Choose one of our models for {eb_make} {eb_model}.")
+        _save_map(db, remembered, d.model_id, False)
+        return "mapped"
+    make, model = " ".join(d.make.split()), " ".join(d.model.split())
+    if not make or not model:
+        raise HTTPException(400, f"A make and a model name are needed to create {eb_make} {eb_model}.")
+    if d.type_id is not None and not db.execute(text("select 1 from vehicle_types where id = :i"), {"i": d.type_id}).first():
+        raise HTTPException(404, "That vehicle type does not exist.")
+    ck = db.execute(text("select fitment_key(:a) as mk, fitment_key(:b) as ok"), {"a": make, "b": model}).first()
+    if not ck.mk or not ck.ok:
+        raise HTTPException(400, f"“{make} {model}” has no usable make and model name.")
+    mid = _create_model(db, Decision(make_key=ck.mk, model_key=ck.ok, make=make, model=model, action="create", type_id=d.type_id))
+    _save_map(db, remembered, mid, False)
+    return "created"
+
+
+@router.post("/fitment/settle")
+def fitment_settle(body: SettleIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Save the decisions made in the review for machines our vehicle list does not know. A made-up make or model is created only here,
+    with the names the person edited, and the decision is remembered so the compat import agrees. No fitment is added by this call."""
+    from app.admin_catalog import finish
+
+    counts = {"mapped": 0, "created": 0, "skipped": 0}
     try:
-        plan["added"] = _fitment_apply(db, body.product_id, plan)
-        db.commit()
+        for d in body.decisions:
+            counts[_settle(db, d)] += 1
+        finish(db, refresh=counts["created"] > 0)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        log.exception("could not save the fitment decisions")
+        raise HTTPException(500, "Nothing was saved.")
+    log.info("ebay lookup fitment decisions by %s: %s", user.email, counts)
+    return counts
+
+
+class PickIn(BaseModel):
+    model_id: int
+    years: list[int] = Field(..., min_length=1, max_length=200)
+
+
+class FitCommitIn(FitSource):
+    picks: list[PickIn] = Field(..., min_length=1, max_length=2000)
+
+
+@router.post("/fitment/commit")
+def fitment_commit(body: FitCommitIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Add the years that were ticked in the review to the product's website fitment. The rows are read again and matched again, and a
+    ticked year is added only if it is still new for the product, so nothing already there is touched and nothing is removed."""
+    from app.admin_catalog import finish
+
+    rows, info, title = _fit_rows(db, body)
+    plan = _fitment_plan(db, body.product_id, rows)
+    wanted: dict[int, set[int]] = {}
+    for p in body.picks:
+        wanted.setdefault(p.model_id, set()).update(p.years)
+    chosen = []
+    for m in plan["models"]:
+        ys = [y for y in m["new_years"] if y in wanted.get(m["model_id"], ())]
+        if ys:
+            chosen.append({"model_id": m["model_id"], "years": ys, "subs": m["subs"]})
+    if not chosen:
+        raise HTTPException(409, "None of the ticked years are new for this product any more, so nothing was added.")
+    try:
+        added = _fitment_apply(db, body.product_id, chosen)
+        finish(db, refresh=True)
     except Exception:
         db.rollback()
         log.exception("could not add fitment to product %s", body.product_id)
         raise HTTPException(500, "The fitment could not be added, and nothing was changed.")
-    plan["applied"] = True
-    return plan
+    log.info("ebay lookup fitment by %s: product %s %s", user.email, body.product_id, added)
+    return {"product": title, "models": len(chosen), **added}
