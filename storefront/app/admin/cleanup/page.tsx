@@ -358,7 +358,7 @@ function UnmergeModal({ logId, onClose, onDone }: { logId: number; onClose: () =
           <Notice>
             Stock is not restored automatically: type the real quantity for every product. Inventory history rows (
             {pv.stays_on_kept_part.inventory_rows}) and purchase-order lines ({pv.stays_on_kept_part.po_lines}) cannot be
-            traced to one product, so they stay on the kept product. Edits made to the kept product since the merge are kept.
+            traced to one product, so they stay on the kept product. Edits made to the kept product since the merge are kept. Every restored product also gets the kept product's current fitment, so merging them again keeps the same fitment.
           </Notice>
 
           <Field label="Note (optional)">
