@@ -922,6 +922,87 @@ def _record_photo_urls(db: Session, store: str, item_id: str, refs: list[PhotoRe
     return notes
 
 
+# --------------------------------------------------------------------------
+# adding the product's website fitment to a LIVE listing's compatibility table: only what the listing does not have yet
+# These two calls change nothing on eBay. The new rows go into the table on the edit screen, and reach eBay only through the
+# normal preview and confirm (which shows how many rows are added and removed).
+# --------------------------------------------------------------------------
+def _linked_product(db: Session, store: str, item_id: str):
+    r = db.execute(
+        text("select cl.product_id, p.title from channel_listings cl join products p on p.id = cl.product_id "
+             "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i "
+             "and lower(coalesce(cl.store, '')) = lower(:s) and cl.product_id is not null limit 1"),
+        {"i": item_id, "s": store},
+    ).first()
+    if not r:
+        raise HTTPException(409, "This listing is not linked to a product on the website, so there is no website fitment to take vehicles from. Link it first.")
+    return r
+
+
+@router.get("/fitment-choices")
+def fitment_choices(store: str = Query(...), item_id: str = Query(...), db: Session = Depends(get_db)):
+    """The linked product's website fitment, by model with its years, to choose vehicles for this listing from."""
+    from app.ebay_newdraft import _fitment_rows
+
+    item_id = item_id.strip()
+    if not ITEM_RE.fullmatch(item_id):
+        raise HTTPException(400, "That does not look like an eBay item number.")
+    pr = _linked_product(db, store, item_id)
+    groups: dict[int, dict] = {}
+    for f in _fitment_rows(db, pr.product_id):
+        if f.year is None:
+            continue
+        g = groups.setdefault(int(f.model_id), {"model_id": int(f.model_id), "make": f.make, "model": f.model, "years": set()})
+        g["years"].add(int(f.year))
+    models = sorted(({**g, "years": sorted(g["years"])} for g in groups.values()), key=lambda g: (str(g["make"]).lower(), str(g["model"]).lower()))
+    return {"product": pr.title, "models": models}
+
+
+class FitPick(BaseModel):
+    model_id: int
+    years: list[int]
+
+
+class FitToListingIn(BaseModel):
+    store: str
+    item_id: str
+    picks: list[FitPick] = Field(..., min_length=1, max_length=2000)
+
+
+@router.post("/compat-from-fitment")
+def compat_from_fitment(body: FitToListingIn, db: Session = Depends(get_db)):
+    """The chosen fitment as eBay compatibility rows for THIS listing's category, minus the rows the listing already has on eBay.
+    Returns only the new rows. Nothing is sent to eBay."""
+    from app.ebay_newdraft import _fitment_rows
+    from app.ebay_vocab import convert_with_ebay
+
+    item_id = body.item_id.strip()
+    item = _read_item(db, body.store, item_id)
+    comp = item["compatibility"]
+    if not comp.get("editable"):
+        raise HTTPException(409, comp.get("reason") or item.get("not_editable_reason") or "The compatible vehicles of this listing cannot be edited here.")
+    if not item.get("category_id"):
+        raise HTTPException(409, "eBay did not say which category this listing is in.")
+    pr = _linked_product(db, item["store"], item["item_id"])
+    want = {p.model_id: set(p.years) for p in body.picks if p.years}
+    chosen = [f for f in _fitment_rows(db, pr.product_id) if f.year is not None and int(f.year) in want.get(int(f.model_id), ())]
+    if not chosen:
+        raise HTTPException(409, "None of the ticked years are in the product's fitment any more.")
+    try:
+        rows, notes = convert_with_ebay(db, pr.product_id, item["category_id"], rows=chosen)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(502, f"eBay's vehicle list could not be read: {getattr(e, 'detail', None) or getattr(e, 'message', None) or e}")
+    have = _compat_sig(_clean_compat([CompatRowIn(pairs=r["pairs"], notes=r.get("notes", "")) for r in comp["list"]]))
+    new = []
+    for c in rows:
+        for pairs, notes_ in _clean_compat([CompatRowIn(pairs=c["pairs"], notes=c.get("notes", ""))]):
+            if (tuple(sorted(pairs)), notes_) not in have:
+                new.append({"pairs": [list(p) for p in pairs], "notes": notes_})
+                have.add((tuple(sorted(pairs)), notes_))
+    return {"rows": new, "already": len(rows) - len(new), "converted": len(rows), "notes": notes, "on_listing": len(comp["list"])}
+
+
 class UploadIn(BaseModel):
     data: str = Field(..., max_length=21 * 1024 * 1024, description="the picture, base64 encoded")
 

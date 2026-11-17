@@ -537,12 +537,15 @@ function CopyEditor({ id }: { id: number }) {
         )}
         {!!copy.product_id && !!copy.category_id && (
           <FitmentPicker
-            draftId={id}
+            choicesUrl={`/ebay-draft/${id}/fitment-choices`}
             disabled={off}
+            allowReplace
+            addLabel="Add the ticked vehicles to the table"
             beforeApply={async () => !dirty || (await save())}
-            onApplied={async (text) => {
+            apply={async (picks, mode) => {
+              const r = await api<{ rows: number; added: number; notes: string[] }>(`/ebay-draft/${id}/compat-from-fitment`, { method: "POST", body: { mode, picks } });
               fill(await api<Copy>(`/ebay-copy/${id}`));
-              setMsg({ kind: "success", text });
+              return `${r.added} vehicle row${r.added === 1 ? "" : "s"} added from the ticked fitment; the table now has ${r.rows}.${r.notes.length ? ` ${r.notes.length} note${r.notes.length === 1 ? "" : "s"} about what eBay does not list are below.` : ""}`;
             }}
           />
         )}

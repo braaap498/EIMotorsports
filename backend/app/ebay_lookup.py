@@ -284,15 +284,55 @@ def _pairs_in(node, notes: bool = False) -> list[tuple[str, str, bool]]:
     return out
 
 
-def _catalog_rows(epid: Optional[str], upc: Optional[str]) -> dict:
+def _refused(e: HTTPException) -> bool:
+    """eBay said 403 / 'Access denied' (eBay 1100): the token used is not allowed to make this call."""
+    d = str(e.detail)
+    return "(403)" in d or "eBay 1100" in d
+
+
+def _store_token_for_catalog(db: Session, store: str = "") -> str:
+    """A seller token from one of our connected stores. The compatibility table call refuses the app-only token with
+    'Access denied' (eBay 1100) for some catalog products, but accepts a connected seller's token."""
+    from app.ebay_oauth import get_user_token
+
+    if store.strip():
+        return get_user_token(db, store.strip())
+    rows = db.execute(text("select store from ebay_accounts where refresh_token_enc is not null order by store")).all()
+    last: Optional[HTTPException] = None
+    for r in rows:
+        try:
+            return get_user_token(db, r.store)
+        except HTTPException as e:  # expired or not approved: try the next store
+            last = e
+    raise last or HTTPException(409, "No eBay store is connected, so there is no seller login to retry the catalog call with.")
+
+
+def _catalog_rows(epid: Optional[str], upc: Optional[str], db: Optional[Session] = None, store: str = "") -> dict:
     """The catalog product's compatibility table as rows of {Make, Model, Year ...}. Read only. Never raises for an empty table:
     the answer says what eBay sent, so an empty or odd answer can be seen rather than guessed at."""
     epid, upc = (epid or "").strip(), re.sub(r"\D", "", upc or "")
     if not epid and not upc:
         raise HTTPException(400, "An eBay catalog product (ePID) or a UPC is needed.")
     ident = {"epid": epid} if epid else {"upc": upc}
+    body_ = {"productIdentifier": ident}
+    url_ = f"{METADATA}/compatibilities/get_product_compatibilities"
     try:
-        data = _call("POST", f"{METADATA}/compatibilities/get_product_compatibilities", _token(), body={"productIdentifier": ident}, marketplace=COMPAT_MARKETPLACE)
+        try:
+            data = _call("POST", url_, _token(), body=body_, marketplace=COMPAT_MARKETPLACE)
+        except HTTPException as e:
+            # 403 / eBay 1100: the app-only token is not allowed this call. Retry once as a connected seller.
+            if not (_refused(e) and db is not None):
+                raise
+            try:
+                data = _call("POST", url_, _store_token_for_catalog(db, store), body=body_, marketplace=COMPAT_MARKETPLACE)
+            except HTTPException as e2:
+                if _refused(e2):
+                    raise HTTPException(
+                        502,
+                        "eBay refused both the app login and the store login for this catalog product's compatibility table "
+                        f"({e2.detail}). eBay limits this table to some catalog products; its own answer is above.",
+                    )
+                raise
     except FeedbackError as e:
         raise HTTPException(502, str(e))
     details = data.get("compatibilityDetails") or []
@@ -321,12 +361,13 @@ def _catalog_rows(epid: Optional[str], upc: Optional[str]) -> dict:
 class CatalogCompatIn(BaseModel):
     epid: Optional[str] = Field(None, max_length=30)
     upc: Optional[str] = Field(None, max_length=20)
+    store: Optional[str] = Field(None, max_length=60)  # optional: which connected store's login to retry with
 
 
 @router.post("/catalog/compat")
-def catalog_compat(body: CatalogCompatIn):
+def catalog_compat(body: CatalogCompatIn, db: Session = Depends(get_db)):
     """The compatibility table of one eBay catalog product, as eBay's Metadata API gives it. Read only; saves nothing."""
-    got = _catalog_rows(body.epid, body.upc)
+    got = _catalog_rows(body.epid, body.upc, db, body.store or "")
     allrows = got["rows"]
     got["rows"] = allrows[:MAX_COMPAT_SHOWN]
     got["count"] = len(allrows)
@@ -442,7 +483,7 @@ def make_draft(body: MakeIn, db: Session = Depends(get_db), user: AuthUser = Dep
     catalog_note = ""
     if body.epid:
         try:
-            cat = _catalog_rows(body.epid, None)
+            cat = _catalog_rows(body.epid, None, db, body.store)
             ref["compat_all"] = list(ref["compat_all"]) + cat["rows"]
             if not cat["rows"]:
                 catalog_note = "eBay's catalog product has no compatibility rows."
@@ -769,7 +810,7 @@ def _fit_rows(db: Session, body: FitSource) -> tuple[list[dict], dict, str]:
         rows += [c["values"] for c in ref["compat_all"]]
         info["from_listing_rows"] = len(ref["compat_all"])
     if body.epid:
-        cat = _catalog_rows(body.epid, None)
+        cat = _catalog_rows(body.epid, None, db, (body.store or "").strip())
         rows += [c["values"] for c in cat["rows"]]
         info["from_catalog_rows"] = len(cat["rows"])
     if body.from_listings:

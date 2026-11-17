@@ -9,6 +9,7 @@ import DescriptionEditor from "../../../components/admin/DescriptionEditor";
 import { sanitizeHtml } from "../../../components/admin/sanitizeHtml";
 import { shrink } from "../../../components/admin/PhotosPanel";
 import CompatEditor, { type CompatRow } from "../../../components/admin/CompatEditor";
+import FitmentPicker from "../../../components/admin/FitmentPicker";
 
 type Variation = { sku: string; price: string | null; quantity_available: number; quantity_sold: number; specifics: string };
 type Item = {
@@ -808,7 +809,29 @@ function EbayEditPage({ urlStore, urlItem }: { urlStore: string; urlItem: string
               Compatible vehicles ({compat.length}
               {compatChanged ? `, was ${item.compatibility.count} on eBay` : ""})
             </summary>
-            <div className="mt-3">
+            <div className="mt-3 space-y-3">
+              {item.compatibility.editable && !!item.category_id && (
+                <FitmentPicker
+                  choicesUrl={`/ebay-edit/fitment-choices?store=${encodeURIComponent(item.store)}&item_id=${encodeURIComponent(item.item_id)}`}
+                  disabled={busy !== ""}
+                  allowReplace={false}
+                  addLabel="Add the ticked vehicles that this listing does not have yet"
+                  apply={async (picks) => {
+                    const r = await api<{ rows: CompatRow[]; already: number; converted: number; notes: string[]; on_listing: number }>("/ebay-edit/compat-from-fitment", {
+                      method: "POST",
+                      body: { store: item.store, item_id: item.item_id, picks },
+                    });
+                    if (r.rows.length > 0) {
+                      setCompat((cur) => [...cur, ...r.rows]);
+                      touch();
+                    }
+                    const notes = r.notes.length ? ` ${r.notes.length} note${r.notes.length === 1 ? "" : "s"}: ${r.notes.slice(0, 3).join(" ")}${r.notes.length > 3 ? " …" : ""}` : "";
+                    return r.rows.length === 0
+                      ? `Nothing new: the listing already has all ${r.converted} row${r.converted === 1 ? "" : "s"} for the ticked vehicles.${notes}`
+                      : `${r.rows.length} new row${r.rows.length === 1 ? "" : "s"} added to the table below (${r.already} already on the listing). Nothing is on eBay yet: use Preview, then confirm.${notes}`;
+                  }}
+                />
+              )}
               <CompatEditor
                 categoryId={item.category_id ?? ""}
                 rows={compat}
