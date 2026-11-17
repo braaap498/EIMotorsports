@@ -323,14 +323,24 @@ def _catalog_rows(epid: Optional[str], upc: Optional[str], db: Optional[Session]
             # 403 / eBay 1100: the app-only token is not allowed this call. Retry once as a connected seller.
             if not (_refused(e) and db is not None):
                 raise
+            first = str(e.detail)
             try:
-                data = _call("POST", url_, _store_token_for_catalog(db, store), body=body_, marketplace=COMPAT_MARKETPLACE)
+                seller = _store_token_for_catalog(db, store)
+            except HTTPException as e_tok:
+                raise HTTPException(
+                    502,
+                    f"eBay refused the app login for this catalog product ({first}), and no store login could be used to retry: {e_tok.detail}",
+                )
+            try:
+                data = _call("POST", url_, seller, body=body_, marketplace=COMPAT_MARKETPLACE)
             except HTTPException as e2:
                 if _refused(e2):
                     raise HTTPException(
                         502,
-                        "eBay refused both the app login and the store login for this catalog product's compatibility table "
-                        f"({e2.detail}). eBay limits this table to some catalog products; its own answer is above.",
+                        f"eBay refused both logins for this catalog product's compatibility table. App login: {first} "
+                        f"Store login ({store.strip() or 'first connected store'}): {e2.detail} "
+                        "If the store login is refused too, either eBay limits this table to some catalog products, or the store was "
+                        "connected without the sell.inventory permission this call accepts (reconnect it under Store API to test that).",
                     )
                 raise
     except FeedbackError as e:

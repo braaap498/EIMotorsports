@@ -168,7 +168,7 @@ export default function EbayLookup() {
     setCatCompat(null);
     setCatEpid(epid);
     try {
-      setCatCompat(await api<CatCompat>("/ebay-lookup/catalog/compat", { method: "POST", body: { epid } }));
+      setCatCompat(await api<CatCompat>("/ebay-lookup/catalog/compat", { method: "POST", body: { epid, store } }));
     } catch (e) {
       setCatMsg(errMsg(e));
     } finally {
