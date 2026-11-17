@@ -236,17 +236,26 @@ def _call(method: str, url: str, token: str, params: Optional[dict] = None, body
         raise HTTPException(502, "Could not reach eBay.")
 
 
-def _epids_from_browse(q: str, mpn: str, gtin: str) -> list[dict]:
+def _epids_from_browse(q: str, mpn: str, gtin: str, category: str = "") -> list[dict]:
     """Fallback when the Catalog API is closed to us: live listings of this part carry the ePID eBay matched them to. Most common first."""
     params: dict = {"limit": "50"}
     if gtin:
         params["gtin"] = gtin
     else:
         params["q"] = mpn or q
-    try:
-        data = _browse_get("/item_summary/search", params)
-    except HTTPException:
-        return []
+    # Stay in the listing's own category: a bare part number like 56-132 also matches trading cards and anything else numbered that way.
+    # If that category turns up no catalog product, try once without it.
+    data: dict = {}
+    for cat in ([category] if category else []) + [""]:
+        p_ = dict(params)
+        if cat:
+            p_["category_ids"] = cat
+        try:
+            data = _browse_get("/item_summary/search", p_)
+        except HTTPException:
+            return []
+        if any(i.get("epid") for i in data.get("itemSummaries") or []):
+            break
     tally: dict[str, dict] = {}
     for it in data.get("itemSummaries") or []:
         e = str(it.get("epid") or "").strip()
@@ -255,13 +264,16 @@ def _epids_from_browse(q: str, mpn: str, gtin: str) -> list[dict]:
         t = tally.setdefault(e, {"epid": e, "title": it.get("title") or "", "image": (it.get("image") or {}).get("imageUrl"), "brand": None, "mpn": [mpn] if mpn else [], "_n": 0})
         t["_n"] += 1
     ranked = sorted(tally.values(), key=lambda t: -t["_n"])[:5]
+    # the top product is "clear" when strictly more listings carry it than the runner-up: the page reads it without a click
+    if ranked:
+        ranked[0]["best"] = len(ranked) == 1 or ranked[0]["_n"] > ranked[1]["_n"]
     for t in ranked:
-        t.pop("_n", None)
+        t["matches"] = t.pop("_n", 0)
     return ranked
 
 
 @router.get("/catalog/search")
-def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max_length=20), mpn: str = Query("", max_length=60)):
+def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max_length=20), mpn: str = Query("", max_length=60), category: str = Query("", max_length=20)):
     """Find eBay catalog products (and their ePID) for a part number, UPC or words."""
     if not configured():
         raise HTTPException(409, "EBAY_CLIENT_ID and EBAY_CLIENT_SECRET are not set on the API.")
@@ -287,7 +299,7 @@ def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max
             raise
         # The Catalog API refused this app (403 / eBay 1100: the keys are not approved for it). Do not stop there: ask the Browse API
         # for live listings of the same part number / UPC and collect the catalog product (ePID) they are matched to.
-        out = _epids_from_browse(q, mpn, gtin)
+        out = _epids_from_browse(q, mpn, gtin, category.strip() if re.fullmatch(r"\d+", category.strip()) else "")
         if not out:
             raise HTTPException(
                 502,

@@ -42,7 +42,7 @@ type Probe = {
 };
 type StoreChoice = { store: string; seller: string | null; live: boolean };
 type FoundProduct = { id: number; title: string; sku: string | null; custom_label: string | null; price: number | null; listings: number };
-type CatProduct = { epid: string; title: string; image: string | null; brand: string | null; mpn: string[] };
+type CatProduct = { epid: string; title: string; image: string | null; brand: string | null; mpn: string[]; best?: boolean; matches?: number };
 type CatCompat = {
   rows: { values: Record<string, string>; notes: string }[];
   count: number;
@@ -55,6 +55,19 @@ type CatCompat = {
   declared_total?: number | null;
 };
 type Made = { id: number; store_done: boolean; compat_rows: number; compat_from_listing: number; specifics_added: string[]; warnings: string[] };
+
+/** A text box with an x inside it that empties the box in one click. */
+function ClearInput({ value, onChange, onEnter, width }: { value: string; onChange: (v: string) => void; onEnter?: () => void; width: string }) {
+  return (
+    <span className={`relative inline-block max-w-full ${width}`}>
+      <input className={`${inputCls} w-full pr-8`} value={value} onChange={(e) => onChange(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && onEnter) onEnter(); }} />
+      {value !== "" && (
+        <button type="button" aria-label="Clear" title="Clear" onClick={() => onChange("")}
+          className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-1.5 text-lg leading-none text-gray-400 hover:text-gray-700">×</button>
+      )}
+    </span>
+  );
+}
 
 export default function EbayLookup() {
   const [q, setQ] = useState("");
@@ -195,10 +208,10 @@ export default function EbayLookup() {
         setCatMsg("This listing has no ePID, part number or UPC to look the catalog up with. Search it by words below.");
         return;
       }
-      const r = await api<{ products: CatProduct[]; note?: string }>(`/ebay-lookup/catalog/search?mpn=${encodeURIComponent(mpn)}&gtin=${encodeURIComponent(upc)}`);
+      const r = await api<{ products: CatProduct[]; note?: string }>(`/ebay-lookup/catalog/search?mpn=${encodeURIComponent(mpn)}&gtin=${encodeURIComponent(upc)}&category=${encodeURIComponent(i.category_id ?? "")}`);
       setCatProducts(r.products);
       if (r.note) setCatMsg(r.note);
-      if (r.products.length === 1) await catalogCompat(r.products[0].epid);
+      if (r.products.length === 1 || r.products[0]?.best) await catalogCompat(r.products[0].epid);
       else if (r.products.length === 0) setCatMsg("eBay's catalog has no product for this part number or UPC.");
     } catch (e) {
       setCatProducts([]);
@@ -270,11 +283,11 @@ export default function EbayLookup() {
         <div className="flex flex-wrap items-end gap-3">
           <label className="block">
             <span className="mb-1 block font-semibold">Part number or words</span>
-            <input className={`${inputCls} w-80 max-w-full`} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void search(); }} />
+            <ClearInput width="w-80" value={q} onChange={setQ} onEnter={() => void search()} />
           </label>
           <label className="block">
             <span className="mb-1 block font-semibold">UPC / barcode (optional)</span>
-            <input className={`${inputCls} w-48 max-w-full`} value={gtin} onChange={(e) => setGtin(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void search(); }} />
+            <ClearInput width="w-48" value={gtin} onChange={setGtin} onEnter={() => void search()} />
           </label>
           <button type="button" className={btnCls} disabled={busy !== "" || (q.trim().length < 2 && gtin.trim() === "")} onClick={() => void search()}>
             {busy === "search" ? "Searching…" : "Search eBay"}
@@ -283,7 +296,7 @@ export default function EbayLookup() {
         <div className="flex flex-wrap items-end gap-3 border-t border-gray-100 pt-3">
           <label className="block">
             <span className="mb-1 block font-semibold">Or an eBay item number</span>
-            <input className={`${inputCls} w-56 max-w-full`} value={itemNo} onChange={(e) => setItemNo(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void read(itemNo); }} />
+            <ClearInput width="w-56" value={itemNo} onChange={setItemNo} onEnter={() => void read(itemNo)} />
           </label>
           <button type="button" className={btn2Cls} disabled={busy !== "" || itemNo.trim() === ""} onClick={() => void read(itemNo)}>
             {busy === "item" ? "Reading…" : "Read this listing"}
@@ -435,7 +448,7 @@ export default function EbayLookup() {
                     {c.image && /* eslint-disable-next-line @next/next/no-img-element */ <img src={c.image} alt="" className="h-12 w-12 rounded border border-gray-200 object-cover" />}
                     <span>
                       <span className="font-medium">{c.title}</span>
-                      <span className="block text-xs text-gray-500">ePID {c.epid}{c.brand ? ` · ${c.brand}` : ""}{c.mpn.length ? ` · MPN ${c.mpn.join(", ")}` : ""}</span>
+                      <span className="block text-xs text-gray-500">ePID {c.epid}{c.brand ? ` · ${c.brand}` : ""}{c.matches ? ` · on ${c.matches} live listing${c.matches === 1 ? "" : "s"}` : ""}{c.mpn.length ? ` · MPN ${c.mpn.join(", ")}` : ""}</span>
                     </span>
                   </span>
                   <button type="button" className={btn2Cls} disabled={catBusy} onClick={() => void catalogCompat(c.epid)}>
@@ -504,7 +517,7 @@ export default function EbayLookup() {
           <div className="flex flex-wrap items-end gap-3">
             <label className="block">
               <span className="mb-1 block font-semibold">Find our product (title, EI number, label, part number or id)</span>
-              <input className={`${inputCls} w-96 max-w-full`} value={pq} onChange={(e) => setPq(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void findProducts(); }} />
+              <ClearInput width="w-96" value={pq} onChange={setPq} onEnter={() => void findProducts()} />
             </label>
             <button type="button" className={btn2Cls} disabled={busy !== "" || pq.trim().length < 2} onClick={() => void findProducts()}>
               {busy === "find" ? "Searching…" : "Search"}
