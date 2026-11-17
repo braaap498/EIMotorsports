@@ -40,6 +40,13 @@ DROP_WITH_CONTENT = {
 ATTRS = {"a": {"href"}, "td": {"colspan", "rowspan"}, "th": {"colspan", "rowspan"}}
 SAFE_LINK = re.compile(r"^(https?:|mailto:|tel:)", re.I)
 CONTROL = re.compile(r"[\x00-\x20\x7f-\x9f]+")
+# Characters that show nothing but are not spaces (soft hyphen, left/right-to-left marks, braille blank, Hangul
+# filler, ...). eBay uses them as the "empty" first line of a bullet, which then cannot be cleaned up. Dropped
+# from the text. (Zero-width joiner and variation selectors are kept because emoji need them.)
+INVISIBLE_JUNK = re.compile(
+    "[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b\u200c\u200e\u200f"
+    "\u202a-\u202e\u2060-\u2064\u2800\u3164\ufeff\uffa0]"
+)
 
 
 def _clean_href(value: str) -> Optional[str]:
@@ -131,7 +138,7 @@ class _Cleaner(HTMLParser):
     def handle_data(self, data):
         if self.skip_tag:
             return
-        self.out.append(escape(data.replace("\xa0", " "), quote=False))
+        self.out.append(escape(INVISIBLE_JUNK.sub("", data.replace("\xa0", " ")), quote=False))
 
     # Comments, doctype, processing instructions and CDATA are ignored (the
     # base-class handlers do nothing).

@@ -25,10 +25,16 @@ export function isSafeLink(href: string): boolean {
   return SAFE_LINK.test(href.replace(/[\u0000-\u0020\u007f-\u009f]+/g, ""));
 }
 
+// Characters that show nothing but are not spaces (soft hyphen, left/right-to-left marks, braille blank, Hangul filler,
+// and so on). eBay descriptions carry them as the "empty" line of a bullet, which then looks blank but is not, so the
+// bullet cannot be cleaned or deleted. They are dropped from the text. (Zero-width joiner and variation selectors are
+// kept in the text because emoji need them, but they still count as "blank" when checking for empty lines below.)
+const INVISIBLE_JUNK = /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b\u200c\u200e\u200f\u202a-\u202e\u2060-\u2064\u2800\u3164\ufeff\uffa0]/g;
+
 function copyInto(source: Node, target: Node): void {
   source.childNodes.forEach((child) => {
     if (child.nodeType === Node.TEXT_NODE) {
-      target.appendChild(document.createTextNode((child.textContent ?? "").replace(/\u00a0/g, " ")));
+      target.appendChild(document.createTextNode((child.textContent ?? "").replace(/\u00a0/g, " ").replace(INVISIBLE_JUNK, "")));
       return;
     }
     if (child.nodeType !== Node.ELEMENT_NODE) return; // comments etc.
@@ -65,7 +71,7 @@ const BLOCK = /^(DIV|P|H2|H3|H4|TABLE|HR)$/;
 const LIST = /^(UL|OL)$/;
 
 // Visible text, ignoring spaces and the invisible characters eBay's editor leaves in "empty" lines.
-const INVISIBLE = /[\u200b-\u200d\u2060\ufeff\s]+/g;
+const INVISIBLE = /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2800\u3164\ufe00-\ufe0f\ufeff\uffa0\s]+/g;
 const textOf = (el: Element) => (el.textContent ?? "").replace(INVISIBLE, "");
 const hasObject = (el: Element) => !!el.querySelector("hr,table");
 const isEl = (n: Node | null | undefined, re?: RegExp): n is Element =>
