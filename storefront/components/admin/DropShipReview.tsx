@@ -103,6 +103,7 @@ export function PoReview({ job, onDone, onClose }: { job: DsJob; onDone: () => v
               onChange={(e) => e.target.value && void requote(e.target.value)}
             >
               <option value="">{job.ship_method ? job.ship_method : "Pick one (no safe match to the buyer's choice)"}</option>
+              <option value="BEST">Best Way (flat rate)</option>
               {(q.options ?? []).map((o) => (
                 <option key={String(o.name)} value={String(o.name)}>
                   {o.name} – {money(o.cost)}{o.date ? `, by ${o.date}` : ""}

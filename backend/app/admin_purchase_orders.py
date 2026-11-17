@@ -776,6 +776,7 @@ def _ebay_buyer_address(db: Session, store: str, order_id: str) -> dict:
         _ebay_text(found, "IsMultilegShipping").lower() == "true"
         or found.find(f"{NS}MultiLegShippingDetails") is not None
         or "global" in service.lower()
+        or "intermi" in service.lower()  # eBay international hub program (spelled "Intermidated" in one variant)
     )
     phone = _ebay_text(found, "ShippingAddress/Phone")
     if phone.lower().startswith("invalid") or not any(c.isdigit() for c in phone):

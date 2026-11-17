@@ -505,7 +505,7 @@ def _service_words(name: str) -> tuple[Optional[str], Optional[str]]:
     carrier = "fedex" if ("fedex" in n or "fdx" in n) else "ups" if "ups" in n else "usps" if ("usps" in n or "postal" in n) else None
     speed = None
     for key, words in (
-        ("overnight", ("nextday", "overnight", "1day", "nextbusiness")),
+        ("overnight", ("nextday", "overnight", "1day", "nextbusiness", "expressmail", "mailexpress")),
         ("2day", ("2day", "secondday", "2ndday", "twoday")),
         ("3day", ("3day", "threeday", "express saver", "expresssaver")),
         ("ground", ("ground", "standard", "economy", "homedelivery", "surepost", "groundadvantage")),
@@ -517,22 +517,40 @@ def _service_words(name: str) -> tuple[Optional[str], Optional[str]]:
     return carrier, speed
 
 
-# eBay shipping services that always go out on one specific distributor option (compared with letters and digits only).
-# USPSParcel is the free shipping service on the listings: it is shipped as USPS Ground Advantage.
-FIXED_OPTIONS = {"uspsparcel": "uspsgroundadvantage"}
+# Free shipping goes out on the distributor's flat-rate "Best Way" service. "BEST" is always available and lets them pick from the
+# services they have for the order; any other code is billed at a variable rate that is usually higher. Free is decided by what the
+# buyer PAID ($0 shipping), because some listings offer Priority Mail as the free service. The names below are only used when the
+# amount paid is unknown.
+FLAT_RATE_CODE = "BEST"
+FREE_NAMES = {"uspsparcel", "uspsgroundadvantage"}  # eBay's free service; the website's $0 option
+PAID_CODES = {"uspspriority": "USPR", "uspsprioritymail": "USPR"}  # a buyer who paid for Priority Mail gets Priority Mail
 
 
-def pick_shipping_option(buyer_service: Optional[str], options: list[dict]) -> Optional[str]:
-    """The distributor's shipping option closest to the buyer's eBay choice, or None when there is no safe match
-    (a person then picks it at the quote check). A match needs the same speed; the same carrier is preferred.
-    A service in FIXED_OPTIONS uses its own option when the distributor offers it."""
+def _buyer_paid_shipping(db: Session, key) -> Optional[bool]:
+    """True/False when we know whether the buyer paid anything for shipping, None when unknown."""
+    try:
+        if _is_web(key):
+            v = db.execute(text("select shipping_cents from orders where 'web:' || order_number = :k"), {"k": key}).scalar()
+            return None if v is None else int(v) > 0
+        v = db.execute(text("select shipping_charged from ebay_orders where ebay_order_id = :o limit 1"), {"o": key}).scalar()
+        return None if v is None else float(v) > 0
+    except Exception:
+        db.rollback()
+        return None
+
+
+def pick_shipping_option(buyer_service: Optional[str], options: list[dict], free: bool = False) -> Optional[str]:
+    """What to ship the order on. Free shipping (the buyer paid $0, or it is a known free service) is "BEST". A paid Priority Mail
+    uses USPR when the distributor offers it. Anything else is the quoted option closest to the buyer's choice (same speed; the same
+    carrier is preferred), or None when there is no match."""
+    n = _norm(buyer_service or "")
+    if free or n in FREE_NAMES:
+        return FLAT_RATE_CODE
+    code = PAID_CODES.get(n)
+    if code and any(str(o.get("carrier_code") or "") == code for o in options or []):
+        return code
     if not buyer_service or not options:
         return None
-    fixed = FIXED_OPTIONS.get(_norm(buyer_service))
-    if fixed:
-        hits = [str(o.get("name") or "") for o in options if _norm(str(o.get("name") or "")) == fixed]
-        if hits:
-            return hits[0]
     bc, bs = _service_words(buyer_service)
     if not bs:
         return None
@@ -601,20 +619,13 @@ def _run_quote(db: Session, job_id: int, method: Optional[str]) -> dict:
         body = _order_in(db, j, method, False)
         first = api_order_quote(body)
         options = (first.get("totals") or {}).get("shipping_options") or []
-        chosen = method or pick_shipping_option(j.ship_service, options)
+        paid = _buyer_paid_shipping(db, j.ebay_order_id)
+        chosen = method or pick_shipping_option(j.ship_service, options, free=(paid is False))
         fallback = False
-        if not chosen and options and not _settings(db)["manual_checks"]:
-            # no option matches what the buyer picked: with Manual checks OFF use the cheapest the distributor offers
-            def _cost(o):
-                try:
-                    return float(o.get("cost"))
-                except (TypeError, ValueError):
-                    return 1e9
-
-            named = [o for o in options if isinstance(o, dict) and o.get("name")]
-            if named:
-                chosen = str(min(named, key=_cost)["name"])
-                fallback = True
+        if not chosen and not _settings(db)["manual_checks"]:
+            # no option matches what the buyer picked: with Manual checks OFF use the flat-rate Best Way service
+            chosen = FLAT_RATE_CODE
+            fallback = True
         quote = first
         code = method_code(chosen, options)  # the order API takes the option's code, not its display name
         if code and code != (body.shipping_method or ""):
@@ -636,7 +647,7 @@ def _run_quote(db: Session, job_id: int, method: Optional[str]) -> dict:
         ),
         {
             "q": json.dumps(quote, default=str), "m": quote["method"], "i": job_id,
-            "n": (f"No option matched the buyer's choice ({j.ship_service or 'none given'}); the cheapest, {quote['method']}, was used." if quote.get("fallback") else None),
+            "n": (f"No option matched the buyer's choice ({j.ship_service or 'none given'}); {quote['method']} (flat rate Best Way) was used." if quote.get("fallback") else None),
         },
     )
     db.commit()
