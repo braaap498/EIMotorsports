@@ -55,6 +55,35 @@ def child_for(db: Session, parent_id: int, sub: str, create: bool = True) -> Opt
     if not create:
         return None
     name = child_name(parent.name, sub)
+    # A model of this make with the same name may already exist as a stand-alone model (the database allows one per make and name).
+    # It is the same machine, so it becomes the submodel instead of a duplicate being made: it keeps its id, its years and its parts.
+    # Not adopted when it is the parent itself, already has submodels, or already belongs to another model.
+    same = db.execute(
+        text(
+            "select m.id, m.parent_model_id from vehicle_models m "
+            "where m.make_id = :mk and m.id <> :p and (m.name = :n or fitment_key(m.name) = fitment_key(cast(:n as text))) "
+            "order by (m.name = :n) desc, m.id limit 1"
+        ),
+        {"mk": parent.make_id, "p": parent_id, "n": name},
+    ).first()
+    if same is not None and same.parent_model_id is None and not db.execute(
+        text("select 1 from vehicle_models where parent_model_id = :i limit 1"), {"i": same.id}
+    ).first():
+        db.execute(
+            text(
+                "update vehicle_models set parent_model_id = :p, ebay_submodel = :e, "
+                "vehicle_type_id = coalesce(vehicle_type_id, :t) where id = :i"
+            ),
+            {"p": parent_id, "e": sub, "t": parent.vehicle_type_id, "i": same.id},
+        )
+        return int(same.id)
+    if same is not None:
+        # taken by something that cannot be adopted: keep the name unique by adding the model it sits under
+        name = f"{name} ({parent.name})"
+        n = 1
+        while db.execute(text("select 1 from vehicle_models where make_id = :m and name = :n"), {"m": parent.make_id, "n": name}).first():
+            n += 1
+            name = f"{child_name(parent.name, sub)} ({parent.name} {n})"
     base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "model"
     slug, n = base, 1
     while db.execute(text("select 1 from vehicle_models where make_id = :m and slug = :s"), {"m": parent.make_id, "s": slug}).first():
