@@ -687,7 +687,7 @@ def _fitment_plan(db: Session, product_id: int, rows: list[dict]) -> dict:
         g = spelled.setdefault((mk, mo), {"years": set(), "subs": {}, "plain": set()})
         g["years"].add(int(y))
         sub = " ".join(str(a.get("Submodel") or a.get("Trim") or "").split())
-        if sub:
+        if sub and re.search(r"[A-Za-z0-9]", sub):  # eBay's "--" means no submodel
             g["subs"].setdefault(int(y), {}).setdefault(sub.lower(), sub)
         else:
             g["plain"].add(int(y))

@@ -211,7 +211,7 @@ _TITLE = _sql("""
 # every candidate: part + machine name + year + where it came from
 _CAND = _sql("""
     create temp table _cand on commit drop as
-    select product_id, make, model, sub, yr, src,
+    select product_id, make, model, case when sub ~ '[A-Za-z0-9]' then sub end as sub, yr, src,
            fitment_key(make) as make_key, fitment_key(model) as model_key
     from (
       select product_id, make, model, sub, yr, 'ebay' as src from _eb

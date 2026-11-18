@@ -38,7 +38,7 @@ def child_for(db: Session, parent_id: int, sub: str, create: bool = True) -> Opt
     Returns the parent itself when there is nothing to split off: the text is the same as the parent's own name, or the
     parent is already a submodel (submodels are one level deep). Returns None only when create is False and it does not exist."""
     sub = clean_sub(sub)
-    if not sub:
+    if not _nk(sub):  # nothing, or only punctuation such as eBay's "--" placeholder: there is no submodel
         return parent_id
     parent = db.execute(
         text("select id, make_id, vehicle_type_id, name, parent_model_id from vehicle_models where id = :p"), {"p": parent_id}
