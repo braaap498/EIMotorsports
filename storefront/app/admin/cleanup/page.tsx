@@ -1172,21 +1172,31 @@ export default function PartsCleanupPage() {
   });
   const tooMany = selected.size - 1 > 1500;
 
-  // "Find unmerged" view: for every shared label part, do the products that share it have different prices?
-  // Those are shown in amber so a different-size or different-kit product is not merged by mistake.
+  // Price note (all searches): for every label part (a custom label split on "xx", parts of 4+ characters), do the
+  // products in the list that carry it have different prices? Those prices get an amber "price differs" note so a
+  // different-size or different-kit product is not merged by mistake. Only the price cell is marked, not the row.
+  const partsOf = (p: Item): string[] =>
+    unmergedMode && p.shared_parts
+      ? p.shared_parts
+      : (p.custom_label_sku ?? "")
+          .toUpperCase()
+          .trim()
+          .split("XX")
+          .map((x) => x.trim())
+          .filter((x) => x.length >= 4);
   const pricesByPart = useMemo(() => {
     const m = new Map<string, Set<string>>();
-    if (!unmergedMode) return m;
     for (const it of items) {
       const k = it.list_price == null ? "none" : Number(it.list_price).toFixed(2);
-      for (const part of it.shared_parts ?? []) {
+      for (const part of partsOf(it)) {
         if (!m.has(part)) m.set(part, new Set());
         m.get(part)!.add(k);
       }
     }
     return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, unmergedMode]);
-  const priceDiffers = (p: Item) => (p.shared_parts ?? []).some((part) => (pricesByPart.get(part)?.size ?? 0) > 1);
+  const priceDiffers = (p: Item) => partsOf(p).some((part) => (pricesByPart.get(part)?.size ?? 0) > 1);
 
   /* ------------------------------------------------------------- render */
   return (
@@ -1288,7 +1298,7 @@ export default function PartsCleanupPage() {
                     ? `${items.length} part${items.length === 1 ? "" : "s"} added by item number`
                     : unmergedMode
                       ? `${items.length} product${items.length === 1 ? "" : "s"} not yet merged that share a custom label number with another product${
-                          items.some(priceDiffers) ? ` (${items.filter(priceDiffers).length} highlighted because the prices differ)` : ""
+                          items.some(priceDiffers) ? ` (${items.filter(priceDiffers).length} marked because the prices differ)` : ""
                         }`
                       : `${items.length} ${searchedExact ? "exact " : ""}result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
                 </span>
@@ -1323,7 +1333,7 @@ export default function PartsCleanupPage() {
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {sortedItems.map((p) => (
-                      <tr key={p.id} className={selected.has(p.id) ? "bg-blue-50" : unmergedMode && priceDiffers(p) ? "bg-amber-50" : ""}>
+                      <tr key={p.id} className={selected.has(p.id) ? "bg-blue-50" : ""}>
                         <td className="px-3 py-2">
                           <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggle(p.id)} aria-label={`Merge ${p.ebay_item_id ?? p.title}`} />
                         </td>
@@ -1349,8 +1359,8 @@ export default function PartsCleanupPage() {
                         </td>
                         <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.part_number ?? "—"}</td>
                         <td className="px-3 py-2">
-                          {unmergedMode && priceDiffers(p) ? (
-                            <span title="Another product with the same label number has a different price. Check it is really the same part (size, pack count, kit).">
+                          {priceDiffers(p) ? (
+                            <span title="Another product in this list with the same label number has a different price. Check it is really the same part (size, pack count, kit).">
                               <Badge tone="amber">{money(p.list_price)} · price differs</Badge>
                             </span>
                           ) : (
