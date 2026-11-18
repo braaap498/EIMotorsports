@@ -5,8 +5,9 @@ A submodel is a normal row in vehicle_models (so it shows in the website's vehic
 under (parent_model_id) and remembers eBay's exact text for it (ebay_submodel). Going back to eBay, a fitment row on a submodel
 is sent as the PARENT's make and model plus that text as Submodel (see ebay_newdraft._fitment_rows).
 
-Rule used everywhere: a part that fits a model fits all of its submodels. A part linked to one submodel shows under that submodel
-and under its parent.
+Rule used everywhere on the website: a model and its submodels are one family. A part linked to the model or to any one of its
+submodels shows for the model and for every submodel of it. (Going back to eBay stays exact: a link on a submodel is sent as that
+Submodel, a link on the model itself is sent without one.)
 """
 import re
 from typing import Optional
@@ -101,10 +102,7 @@ def child_for(db: Session, parent_id: int, sub: str, create: bool = True) -> Opt
 
 
 def family_sql(param: str = "model_id") -> str:
-    """SQL for 'this model, its submodels, and its parent': for a parent pick the parts of every submodel show up; for a
-    submodel pick the parts that fit the whole model show up too."""
-    p = f"cast(:{param} as bigint)"
-    return (
-        f"(select id from vehicle_models where id = {p} or parent_model_id = {p} "
-        f"or id = (select parent_model_id from vehicle_models where id = {p}))"
-    )
+    """SQL for 'the family of this model': the model its submodels hang under, that model itself, and all of its submodels.
+    Picking the model or any one of its submodels finds the parts linked to any of them."""
+    root = f"(select coalesce(r.parent_model_id, r.id) from vehicle_models r where r.id = cast(:{param} as bigint))"
+    return f"(select m.id from vehicle_models m where m.id = {root} or m.parent_model_id = {root})"
