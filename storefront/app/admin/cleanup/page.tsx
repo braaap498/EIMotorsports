@@ -903,6 +903,7 @@ export default function PartsCleanupPage() {
   const [exactInput, setExactInput] = useState(false); // "Exact match" tick box next to the search
   const [searchedExact, setSearchedExact] = useState(false);
   const [unmergedMode, setUnmergedMode] = useState(false); // list came from the "Find unmerged" button
+  const [commaMode, setCommaMode] = useState(false); // list came from the "Labels with a comma" button
   const [items, setItems] = useState<Item[]>([]);
   const [total, setTotal] = useState(0);
   const [searching, setSearching] = useState(false);
@@ -952,6 +953,7 @@ export default function PartsCleanupPage() {
       setSearchedQ("all products with custom labels");
       setSearchedExact(false);
       setUnmergedMode(true);
+      setCommaMode(false);
       setListMode("title");
       setNotFound([]);
       setSelected(new Set());
@@ -973,6 +975,29 @@ export default function PartsCleanupPage() {
       setSearchedQ(q);
       setSearchedExact(exact);
       setUnmergedMode(false);
+      setCommaMode(false);
+      setListMode("title");
+      setNotFound([]);
+      setSelected(new Set());
+      setKeeper(null);
+    } catch (e) {
+      setSearchErr(errMsg(e));
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  const runFindCommas = useCallback(async () => {
+    setSearching(true);
+    setSearchErr("");
+    try {
+      const r = await api<SearchResp>("/cleanup/comma-labels");
+      setItems(r.items);
+      setTotal(r.total);
+      setSearchedQ("custom labels with a comma");
+      setSearchedExact(false);
+      setUnmergedMode(false);
+      setCommaMode(true);
       setListMode("title");
       setNotFound([]);
       setSelected(new Set());
@@ -1026,7 +1051,7 @@ export default function PartsCleanupPage() {
         setSearchErr(errMsg(e));
       }
     } else if (searchedQ) {
-      await (unmergedMode ? runFindUnmerged() : runSearch(searchedQ, searchedExact));
+      await (unmergedMode ? runFindUnmerged() : commaMode ? runFindCommas() : runSearch(searchedQ, searchedExact));
     }
   }
 
@@ -1042,6 +1067,7 @@ export default function PartsCleanupPage() {
     setItems([]);
     setTotal(0);
     setSearchedQ("");
+    setCommaMode(false);
     setListMode("title");
     setNotFound([]);
     setSelected(new Set());
@@ -1187,7 +1213,7 @@ export default function PartsCleanupPage() {
                 if (qInput.trim().length >= 2) runSearch(qInput.trim(), exactInput);
               }}
             >
-              <Field label="Search Title, Item Number or Custom Label" className="w-full max-w-md">
+              <Field label="Search Title, Item Number or Custom Label" className="w-[28rem] max-w-full shrink-0">
                 <ClearableInput className={inputCls} value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder={'e.g. "Tusk 1.8 bar" or 536M07200xx1032020111'} autoFocus />
               </Field>
               <label
@@ -1197,17 +1223,26 @@ export default function PartsCleanupPage() {
                 <input type="checkbox" checked={exactInput} onChange={(e) => setExactInput(e.target.checked)} />
                 Exact match
               </label>
-              <button className={btnCls} disabled={searching || qInput.trim().length < 2}>
+              <button className={`${btnCls} w-28`} disabled={searching || qInput.trim().length < 2}>
                 {searching ? "Searching…" : "Search"}
               </button>
               <button
                 type="button"
-                className={btnCls}
+                className={`${btnCls} w-36`}
                 disabled={searching}
                 title="Looks at every product with a custom label and lists the ones that were never merged but share a number with another product's label. No search words needed."
                 onClick={runFindUnmerged}
               >
                 {searching ? "Searching…" : "Find unmerged"}
+              </button>
+              <button
+                type="button"
+                className={`${btnCls} w-44`}
+                disabled={searching}
+                title="Lists every product whose custom label contains a comma (usually two labels typed into one box). No search words needed."
+                onClick={runFindCommas}
+              >
+                {searching ? "Searching…" : "Labels with a comma"}
               </button>
             </form>
 
@@ -1218,7 +1253,7 @@ export default function PartsCleanupPage() {
                 if (itemInput.trim()) addByItemNumbers(itemInput.trim());
               }}
             >
-              <Field label="Search Item Number" className="w-full max-w-md">
+              <Field label="Search Item Number" className="w-[28rem] max-w-full shrink-0">
                 <ClearableInput
                   className={inputCls}
                   value={itemInput}
@@ -1226,7 +1261,7 @@ export default function PartsCleanupPage() {
                   placeholder="e.g. EBAY-178554199250, EBAY-178554199250"
                 />
               </Field>
-              <button className={btnCls} disabled={itemSearching || !itemInput.trim()}>
+              <button className={`${btnCls} w-28`} disabled={itemSearching || !itemInput.trim()}>
                 {itemSearching ? "Searching…" : "Search"}
               </button>
             </form>

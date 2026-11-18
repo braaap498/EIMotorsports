@@ -546,9 +546,9 @@ export default function ProductForm({ productId }: { productId?: number }) {
         <section className={card}>
           <h2 className="text-lg font-semibold">Visibility</h2>
           <div className="flex flex-wrap gap-6 text-sm">
-            <label className="flex items-center gap-2">
+            <label className="flex items-center gap-2" title="Shows the product on the website. eBay is controlled per listing under Sales channels, not by this box.">
               <input type="checkbox" disabled={!mayPublish} checked={flags.is_published} onChange={(e) => setFlags((f) => ({ ...f, is_published: e.target.checked }))} />
-              Published (to sales channels)
+              Published (to website)
             </label>
             <label className="flex items-center gap-2">
               <input type="checkbox" disabled={!mayPublish} checked={flags.is_active} onChange={(e) => setFlags((f) => ({ ...f, is_active: e.target.checked }))} />
