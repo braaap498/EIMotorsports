@@ -201,8 +201,10 @@ def convert_with_ebay(db: Session, product_id: int, category_id: str, rows=None,
     """Our fitment as compatibility rows made only of values eBay lists for this category. Returns (rows, notes).
 
     Make and Model are matched with eBay's lists (the spellings the compat conversion mapped to our model first, then ours);
-    Year must be one eBay lists for that make + model. Other properties (Trim, Engine) are not set. A model or year eBay
-    does not list is left out and named in the notes."""
+    Year must be one eBay lists for that make + model. A fitment row on a submodel (row.sub, with the parent's make and model) is
+    sent as Submodel (or Trim, whichever the category has) under that model, when eBay lists it for that year; a part linked to
+    the model itself is sent without one. Engine is not set. A model, year or submodel eBay does not list is left out and named
+    in the notes."""
     from concurrent.futures import ThreadPoolExecutor
 
     from app.ebay_newdraft import MAX_COMPAT_ROWS, _ebay_names, _fitment_rows, _years_text
@@ -215,13 +217,20 @@ def convert_with_ebay(db: Session, product_id: int, category_id: str, rows=None,
     make_name = next((p for p in have if p.lower() == "make"), "Make")
     model_name = next((p for p in have if p.lower() == "model"), "Model")
 
-    groups: dict[tuple, set] = {}
+    groups: dict[tuple, dict] = {}
     no_year = 0
     for r in rows:
         if r.year is None:
             no_year += 1
             continue
-        groups.setdefault((r.model_id, r.make, r.model), set()).add(int(r.year))
+        g = groups.setdefault((r.model_id, r.make, r.model), {"years": set(), "subs": {}, "plain": set()})
+        y = int(r.year)
+        g["years"].add(y)
+        sub = " ".join(str(getattr(r, "sub", None) or "").split())
+        if sub:
+            g["subs"].setdefault(y, {}).setdefault(sub.lower(), sub)
+        else:
+            g["plain"].add(y)  # a link on the model itself: it fits every submodel
     notes: list[str] = []
     if no_year:
         notes.append(f"{no_year} fitment {'entry has' if no_year == 1 else 'entries have'} no year, and eBay needs one, so {'it was' if no_year == 1 else 'they were'} left out.")
@@ -230,7 +239,8 @@ def convert_with_ebay(db: Session, product_id: int, category_id: str, rows=None,
     seen: set = set()
     # pass 1: match each of our models to eBay's make + model names (one list per make, cached)
     todo = []
-    for (mid, make, model), years in sorted(groups.items(), key=lambda kv: (str(kv[0][1]), str(kv[0][2]))):
+    for (mid, make, model), g in sorted(groups.items(), key=lambda kv: (str(kv[0][1]), str(kv[0][2]))):
+        years = g["years"]
         cands = names(db, mid, make, model)
         ebay_make = _pick(makes, [m for m, _ in cands])
         if not ebay_make:
@@ -241,7 +251,7 @@ def convert_with_ebay(db: Session, product_id: int, category_id: str, rows=None,
         if not ebay_model:
             notes.append(f"{make} {model}: eBay has no model with that name under {ebay_make}, so it was left out.")
             continue
-        todo.append((make, model, years, ebay_make, ebay_model))
+        todo.append((make, model, years, ebay_make, ebay_model, g))
     # pass 2: the years eBay lists for each model, several at a time (answers are cached for hours)
     def year_list(t):
         try:
@@ -251,13 +261,63 @@ def convert_with_ebay(db: Session, product_id: int, category_id: str, rows=None,
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         year_sets = list(pool.map(year_list, todo))
-    for (make, model, years, ebay_make, ebay_model), ok_years in zip(todo, year_sets):
+
+    # submodels: which of eBay's Submodel / Trim values exist for a make + model + year (only asked for years that need one)
+    sub_props = [p for p in have if p.lower() in ("submodel", "trim")]
+    sub_props.sort(key=lambda p: p.lower() != "submodel")
+    asks = []
+    if sub_props:
+        for t, ok_years in zip(todo, year_sets):
+            if isinstance(ok_years, Exception):
+                continue
+            g = t[5]
+            for y in sorted(t[2]):
+                if str(y) in ok_years and y not in g["plain"] and g["subs"].get(y):
+                    asks.append((t[3], t[4], y))
+
+    def sub_list(a):
+        got = {}
+        for prop in sub_props:
+            try:
+                got[prop] = vals(category_id, prop, {make_name: a[0], model_name: a[1], year_name: str(a[2])})
+            except Exception as e:
+                got[prop] = e
+        return got
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        sub_lists = dict(zip(asks, pool.map(sub_list, asks)))
+
+    for (make, model, years, ebay_make, ebay_model, g), ok_years in zip(todo, year_sets):
         if isinstance(ok_years, Exception):
             notes.append(f"{make} {model}: eBay's year list could not be read ({ok_years}), so it was left out.")
             continue
         keep = sorted(y for y in years if str(y) in ok_years)
         missing = sorted(y for y in years if str(y) not in ok_years)
+        lost_subs: dict[str, list[int]] = {}
         for y in keep:
+            wanted = {} if y in g["plain"] else g["subs"].get(y, {})
+            if wanted and sub_props:
+                found: dict[tuple, None] = {}
+                for k, disp in wanted.items():
+                    hit = None
+                    for prop, avail in sub_lists.get((ebay_make, ebay_model, y), {}).items():
+                        if isinstance(avail, Exception):
+                            continue
+                        v = _pick(avail, [disp])
+                        if v:
+                            hit = (prop, v)
+                            break
+                    if hit:
+                        found[hit] = None
+                    else:
+                        lost_subs.setdefault(disp, []).append(y)
+                for prop, v in found:
+                    pairs = [[make_name, ebay_make], [model_name, ebay_model], [prop, v], [year_name, str(y)]]
+                    key = tuple(map(tuple, pairs))
+                    if key not in seen:
+                        seen.add(key)
+                        out.append({"pairs": pairs, "notes": ""})
+                continue
             pairs = [[make_name, ebay_make], [model_name, ebay_model], [year_name, str(y)]]
             key = tuple(map(tuple, pairs))
             if key not in seen:
@@ -265,6 +325,8 @@ def convert_with_ebay(db: Session, product_id: int, category_id: str, rows=None,
                 out.append({"pairs": pairs, "notes": ""})
         if missing:
             notes.append(f"{make} {model}: {_years_text(missing)} {'is' if len(missing) == 1 else 'are'} not in eBay's list for {ebay_make} {ebay_model}, so left out.")
+        for disp, ys in sorted(lost_subs.items()):
+            notes.append(f"{make} {model} {disp}: eBay does not list this submodel for {_years_text(ys)}, so left out.")
     if len(out) > MAX_COMPAT_ROWS:
         notes.append(f"eBay takes at most {MAX_COMPAT_ROWS} compatibility rows; {len(out) - MAX_COMPAT_ROWS} were cut.")
         out = out[:MAX_COMPAT_ROWS]

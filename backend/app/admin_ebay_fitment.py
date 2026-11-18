@@ -271,9 +271,9 @@ _OPEN = _sql("""
 
 _FINAL = _sql("""
     create temp table _fin on commit drop as
-    select k.product_id, r.model_id, k.yr, k.src,
+    select k.product_id, coalesce(kid.child_id, r.model_id) as model_id, k.yr, k.src,
            case k.src
-             when 'ebay' then case when count(k.sub) > 0
+             when 'ebay' then case when max(kid.child_id) is null and count(k.sub) > 0
                   then 'ebay: ' || left(string_agg(distinct k.sub, ', ' order by k.sub), 400) end
              when 'title' then left(string_agg(distinct k.sub, ', ' order by k.sub), 400)
              else btrim('possible fit: year not in title, linked to all known years '
@@ -281,8 +281,9 @@ _FINAL = _sql("""
            end as notes
     from _cand k
     join _res r on r.make_key = k.make_key and r.model_key = k.model_key
+    left join _kids kid on kid.parent_id = r.model_id and kid.sub_lc = lower(btrim(k.sub)) and k.src = 'ebay'
     where r.model_id is not null
-    group by k.product_id, r.model_id, k.yr, k.src
+    group by k.product_id, coalesce(kid.child_id, r.model_id), k.yr, k.src
 """)
 
 _NEW_YEARS = _sql("""
@@ -345,6 +346,35 @@ def _scalar(db: Session, q: str) -> int:
     return db.execute(text(q)).scalar() or 0
 
 
+def _make_children(db: Session) -> int:
+    """Submodels as models: every Submodel eBay lists for one of our models becomes a model of its own under that model (found or
+    created, see fitment_sub.child_for), and the rows that carry it are linked to it instead of to the parent. Fills _kids for _FINAL.
+    Returns how many submodel models were created. Inside the caller's transaction, so a preview that rolls back creates nothing."""
+    from app.fitment_sub import child_for
+
+    db.execute(text("create temp table _kids (parent_id bigint, sub_lc text, child_id bigint) on commit drop"))
+    rows = db.execute(
+        text(
+            """
+            select r.model_id as parent_id, lower(btrim(k.sub)) as sub_lc, min(btrim(k.sub)) as sub
+            from _cand k join _res r on r.make_key = k.make_key and r.model_key = k.model_key
+            where k.src = 'ebay' and r.model_id is not null and nullif(btrim(k.sub), '') is not null
+            group by r.model_id, lower(btrim(k.sub))
+            """
+        )
+    ).all()
+    made, kids = 0, []
+    for r in rows:
+        if child_for(db, r.parent_id, r.sub, create=False) is None:
+            made += 1
+        cid = child_for(db, r.parent_id, r.sub)
+        if cid is not None and cid != r.parent_id:
+            kids.append({"p": r.parent_id, "s": r.sub_lc, "c": cid})
+    if kids:
+        db.execute(text("insert into _kids (parent_id, sub_lc, child_id) values (:p, :s, :c)"), kids)
+    return made
+
+
 def _run(db: Session, include_existing: bool) -> dict:
     """The whole conversion inside the open transaction. The caller commits (merge) or rolls back (preview)."""
     db.execute(text(TIMEOUT))
@@ -368,6 +398,7 @@ def _run(db: Session, include_existing: bool) -> dict:
         "open": open_rows,
     }
 
+    out["submodels_created"] = _make_children(db)
     db.execute(_FINAL)
     new_years = db.execute(_NEW_YEARS).all()
     out["years_created"] = len(new_years)

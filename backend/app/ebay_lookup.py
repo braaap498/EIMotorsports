@@ -236,44 +236,8 @@ def _call(method: str, url: str, token: str, params: Optional[dict] = None, body
         raise HTTPException(502, "Could not reach eBay.")
 
 
-def _epids_from_browse(q: str, mpn: str, gtin: str, category: str = "") -> list[dict]:
-    """Fallback when the Catalog API is closed to us: live listings of this part carry the ePID eBay matched them to. Most common first."""
-    params: dict = {"limit": "50"}
-    if gtin:
-        params["gtin"] = gtin
-    else:
-        params["q"] = mpn or q
-    # Stay in the listing's own category: a bare part number like 56-132 also matches trading cards and anything else numbered that way.
-    # If that category turns up no catalog product, try once without it.
-    data: dict = {}
-    for cat in ([category] if category else []) + [""]:
-        p_ = dict(params)
-        if cat:
-            p_["category_ids"] = cat
-        try:
-            data = _browse_get("/item_summary/search", p_)
-        except HTTPException:
-            return []
-        if any(i.get("epid") for i in data.get("itemSummaries") or []):
-            break
-    tally: dict[str, dict] = {}
-    for it in data.get("itemSummaries") or []:
-        e = str(it.get("epid") or "").strip()
-        if not e:
-            continue
-        t = tally.setdefault(e, {"epid": e, "title": it.get("title") or "", "image": (it.get("image") or {}).get("imageUrl"), "brand": None, "mpn": [mpn] if mpn else [], "_n": 0})
-        t["_n"] += 1
-    ranked = sorted(tally.values(), key=lambda t: -t["_n"])[:5]
-    # the top product is "clear" when strictly more listings carry it than the runner-up: the page reads it without a click
-    if ranked:
-        ranked[0]["best"] = len(ranked) == 1 or ranked[0]["_n"] > ranked[1]["_n"]
-    for t in ranked:
-        t["matches"] = t.pop("_n", 0)
-    return ranked
-
-
 @router.get("/catalog/search")
-def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max_length=20), mpn: str = Query("", max_length=60), category: str = Query("", max_length=20)):
+def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max_length=20), mpn: str = Query("", max_length=60)):
     """Find eBay catalog products (and their ePID) for a part number, UPC or words."""
     if not configured():
         raise HTTPException(409, "EBAY_CLIENT_ID and EBAY_CLIENT_SECRET are not set on the API.")
@@ -287,26 +251,11 @@ def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max
         params["mpn"] = mpn
     if q and not (gtin or mpn):
         params["q"] = q
-    note = ""
-    out = []
-    data: dict = {}
     try:
         data = _call("GET", f"{CATALOG}/product_summary/search", _catalog_token(), params=params)
     except FeedbackError as e:
         raise HTTPException(502, str(e))
-    except HTTPException as e:
-        if not _refused(e):
-            raise
-        # The Catalog API refused this app (403 / eBay 1100: the keys are not approved for it). Do not stop there: ask the Browse API
-        # for live listings of the same part number / UPC and collect the catalog product (ePID) they are matched to.
-        out = _epids_from_browse(q, mpn, gtin, category.strip() if re.fullmatch(r"\d+", category.strip()) else "")
-        if not out:
-            raise HTTPException(
-                502,
-                f"{e.detail} The Catalog API is not open to this app's keys, and no live listing for that part number or UPC carries an eBay catalog product either, "
-                "so there is nothing to look up here. The listing's own Trading API table (above) is still read.",
-            )
-        note = "eBay's Catalog API refused this app, so these products were found from live listings of the same part number or UPC instead."
+    out = []
     for s_ in data.get("productSummaries") or []:
         if not s_.get("epid"):
             continue
@@ -317,8 +266,6 @@ def catalog_search(q: str = Query("", max_length=120), gtin: str = Query("", max
             "brand": s_.get("brand"),
             "mpn": s_.get("mpn") if isinstance(s_.get("mpn"), list) else ([s_["mpn"]] if s_.get("mpn") else []),
         })
-    if note:
-        return {"total": len(out), "products": out, "note": note}
     return {"total": int(data.get("total") or len(out)), "products": out}
 
 
@@ -360,97 +307,37 @@ def _store_token_for_catalog(db: Session, store: str = "") -> str:
     raise last or HTTPException(409, "No eBay store is connected, so there is no seller login to retry the catalog call with.")
 
 
-PAGE_LIMIT = 1000        # rows asked per page; eBay's own default is 100, which is why only 100 rows used to come back
-MAX_PAGES = 40           # safety stop (a listing never takes more than 3000 rows anyway)
-
-
-def _total_in(data: dict) -> Optional[int]:
-    """The total row count eBay declares, wherever it keeps it (paginationOutput.total or similar)."""
-    for k, v in data.items():
-        if k == "compatibilityDetails":
-            continue
-        if isinstance(v, dict) and ("page" in k.lower() or "pagin" in k.lower()):
-            for kk, vv in v.items():
-                if "total" in kk.lower() and "page" not in kk.lower() and str(vv).isdigit():
-                    return int(vv)
-        elif "total" in k.lower() and "page" not in k.lower() and str(v).isdigit():
-            return int(v)
-    return None
-
-
-def _fetch_pages(token: str, ident: dict) -> tuple[list, dict, dict]:
-    """Read EVERY page of a catalog product's compatibility table. eBay sends 100 rows unless told otherwise, so the request
-    carries paginationInput {limit, offset} and keeps asking until the declared total is reached or a page comes back empty."""
-    url_ = f"{METADATA}/compatibilities/get_product_compatibilities"
-    limit = PAGE_LIMIT
-    offset = 0
-    details: list = []
-    first: dict = {}
-    declared: Optional[int] = None
-    seen_first_rows: set[str] = set()
-    pages = 0
-    while pages < MAX_PAGES:
-        body_ = {"productIdentifier": ident, "paginationInput": {"limit": limit, "offset": offset}}
-        try:
-            data = _call("POST", url_, token, body=body_, marketplace=COMPAT_MARKETPLACE)
-        except HTTPException as e:
-            # a page size eBay does not accept (400): fall back to its default size once, on the first page only
-            if pages == 0 and limit != 100 and "(400)" in str(e.detail):
-                limit = 100
-                continue
-            raise
-        pages += 1
-        if pages == 1:
-            first = data
-        page = data.get("compatibilityDetails") or []
-        if not page:
-            break
-        sig = json.dumps(page[0], sort_keys=True)
-        if sig in seen_first_rows:  # eBay ignored the offset and sent the same page again: stop rather than loop
-            break
-        seen_first_rows.add(sig)
-        details += page
-        t = _total_in(data)
-        if t is not None:
-            declared = t
-        offset += len(page)
-        if declared is not None and offset >= declared:
-            break
-        if declared is None and len(page) < min(limit, 100):  # no total sent: a short page is the last one
-            break
-    paging = {k: v for k, v in first.items() if k != "compatibilityDetails" and ("page" in k.lower() or "next" in k.lower() or "total" in k.lower())}
-    return details, first, {"pages": pages, "declared_total": declared, "paging": paging, "limit": limit}
-
-
 def _catalog_rows(epid: Optional[str], upc: Optional[str], db: Optional[Session] = None, store: str = "") -> dict:
-    """The catalog product's compatibility table as rows of {Make, Model, Year ...}, ALL pages. Read only. Never raises for an empty
-    table: the answer says what eBay sent, so an empty or odd answer can be seen rather than guessed at."""
+    """The catalog product's compatibility table as rows of {Make, Model, Year ...}. Read only. Never raises for an empty table:
+    the answer says what eBay sent, so an empty or odd answer can be seen rather than guessed at."""
     epid, upc = (epid or "").strip(), re.sub(r"\D", "", upc or "")
     if not epid and not upc:
         raise HTTPException(400, "An eBay catalog product (ePID) or a UPC is needed.")
     ident = {"epid": epid} if epid else {"upc": upc}
+    body_ = {"productIdentifier": ident}
+    url_ = f"{METADATA}/compatibilities/get_product_compatibilities"
     try:
         try:
-            details, first, info = _fetch_pages(_token(), ident)
+            data = _call("POST", url_, _token(), body=body_, marketplace=COMPAT_MARKETPLACE)
         except HTTPException as e:
             # 403 / eBay 1100: the app-only token is not allowed this call. Retry once as a connected seller.
             if not (_refused(e) and db is not None):
                 raise
-            first_err = str(e.detail)
+            first = str(e.detail)
             try:
                 seller = _store_token_for_catalog(db, store)
             except HTTPException as e_tok:
                 raise HTTPException(
                     502,
-                    f"eBay refused the app login for this catalog product ({first_err}), and no store login could be used to retry: {e_tok.detail}",
+                    f"eBay refused the app login for this catalog product ({first}), and no store login could be used to retry: {e_tok.detail}",
                 )
             try:
-                details, first, info = _fetch_pages(seller, ident)
+                data = _call("POST", url_, seller, body=body_, marketplace=COMPAT_MARKETPLACE)
             except HTTPException as e2:
                 if _refused(e2):
                     raise HTTPException(
                         502,
-                        f"eBay refused both logins for this catalog product's compatibility table. App login: {first_err} "
+                        f"eBay refused both logins for this catalog product's compatibility table. App login: {first} "
                         f"Store login ({store.strip() or 'first connected store'}): {e2.detail} "
                         "If the store login is refused too, either eBay limits this table to some catalog products, or the store was "
                         "connected without the sell.inventory permission this call accepts (reconnect it under Store API to test that).",
@@ -458,6 +345,7 @@ def _catalog_rows(epid: Optional[str], upc: Optional[str], db: Optional[Session]
                 raise
     except FeedbackError as e:
         raise HTTPException(502, str(e))
+    details = data.get("compatibilityDetails") or []
     rows = []
     for d in details:
         vals: dict[str, str] = {}
@@ -470,17 +358,13 @@ def _catalog_rows(epid: Optional[str], upc: Optional[str], db: Optional[Session]
                 vals[n] = v
         if vals:
             rows.append({"values": vals, "notes": "; ".join(notes)[:500]})
-    declared = info["declared_total"]
     return {
         "identifier": ident,
         "rows": rows,
         "declared_entries": len(details),
-        "response_keys": sorted(first.keys()),
-        "paging": info["paging"],
-        "pages": info["pages"],
-        "declared_total": declared,
-        # False only when eBay says there are more rows than we collected
-        "complete": declared is None or len(details) >= declared,
+        "response_keys": sorted(data.keys()),
+        # anything that looks like paging, so a table that arrives in pieces is noticed
+        "paging": {k: v for k, v in data.items() if k != "compatibilityDetails" and ("page" in k.lower() or "next" in k.lower() or "total" in k.lower())},
     }
 
 
@@ -782,7 +666,11 @@ def _unknown_machine(db: Session, make: str, model: str, subs: list[str]) -> dic
 
 def _fitment_plan(db: Session, product_id: int, rows: list[dict]) -> dict:
     """What adding these eBay rows (attribute dicts with Make, Model, Year ...) to the product's fitment would do. Writes nothing.
-    Spellings that normalise to the same machine are one line, and two eBay machines that map to the same model of ours are one line."""
+    Spellings that normalise to the same machine are one line, and two eBay machines that map to the same model of ours are one line.
+
+    Submodels: a row with a Submodel (or Trim) is a submodel of its model on the website, a model of its own under that model.
+    A year is 'new' for a model when the product does not yet have every submodel eBay lists for it, or the model itself for a
+    row without a submodel. A product linked to the model itself already fits all its submodels."""
     import datetime
 
     maxyear = datetime.date.today().year + 1
@@ -796,11 +684,20 @@ def _fitment_plan(db: Session, product_id: int, rows: list[dict]) -> dict:
         if not _YEAR.fullmatch(y) or int(y) > maxyear:
             no_year += 1
             continue
-        g = spelled.setdefault((mk, mo), {"years": set(), "subs": {}})
+        g = spelled.setdefault((mk, mo), {"years": set(), "subs": {}, "plain": set()})
         g["years"].add(int(y))
         sub = " ".join(str(a.get("Submodel") or a.get("Trim") or "").split())
         if sub:
-            g["subs"].setdefault(int(y), set()).add(sub)
+            g["subs"].setdefault(int(y), {}).setdefault(sub.lower(), sub)
+        else:
+            g["plain"].add(int(y))
+
+    def _merge(into: dict, src: dict):
+        into["years"] |= src["years"]
+        into["plain"] |= src["plain"]
+        for y, v in src["subs"].items():
+            for k, d in v.items():
+                into["subs"].setdefault(y, {}).setdefault(k, d)
 
     # one machine per normalised make + model (the normalising is done by the database so it is the same one the conversion uses)
     names = sorted(spelled)
@@ -817,10 +714,8 @@ def _fitment_plan(db: Session, product_id: int, rows: list[dict]) -> dict:
     for (mk, mo), key in zip(names, keys):
         if not key[0] or not key[1]:
             continue
-        m = machines.setdefault(key, {"make": mk, "model": mo, "years": set(), "subs": {}})
-        m["years"] |= spelled[(mk, mo)]["years"]
-        for y, v in spelled[(mk, mo)]["subs"].items():
-            m["subs"].setdefault(y, set()).update(v)
+        m = machines.setdefault(key, {"make": mk, "model": mo, "years": set(), "subs": {}, "plain": set()})
+        _merge(m, spelled[(mk, mo)])
 
     resolved: dict[int, dict] = {}
     unresolved, skipped = [], []
@@ -830,65 +725,99 @@ def _fitment_plan(db: Session, product_id: int, rows: list[dict]) -> dict:
             skipped.append(f"{m['make']} {m['model']}")
             continue
         if model_id is None:
-            subnames = sorted({s for v in m["subs"].values() for s in v})
+            subnames = sorted({d for v in m["subs"].values() for d in v.values()})
             unresolved.append({"make": m["make"], "model": m["model"], "years": sorted(m["years"]), "subs": subnames[:12], **_unknown_machine(db, m["make"], m["model"], subnames)})
             continue
-        r = resolved.setdefault(int(model_id), {"model_id": int(model_id), "years": set(), "subs": {}, "ebay": []})
-        r["years"] |= m["years"]
-        for y, v in m["subs"].items():
-            r["subs"].setdefault(y, set()).update(v)
+        r = resolved.setdefault(int(model_id), {"model_id": int(model_id), "years": set(), "subs": {}, "plain": set(), "ebay": []})
+        _merge(r, m)
         r["ebay"].append(f"{m['make']} {m['model']}")
 
     models = []
     if resolved:
         ids = list(resolved)
-        label = {r.id: (r.make, r.model) for r in db.execute(
-            text("select vmo.id, vmo.name as model, vmk.name as make from vehicle_models vmo join vehicle_makes vmk on vmk.id = vmo.make_id where vmo.id = any(cast(:i as bigint[]))"),
+        info = {r.id: r for r in db.execute(
+            text("select vmo.id, vmo.name as model, vmk.name as make, vmo.parent_model_id as parent from vehicle_models vmo "
+                 "join vehicle_makes vmk on vmk.id = vmo.make_id where vmo.id = any(cast(:i as bigint[]))"),
             {"i": ids}).all()}
-        have: dict[int, set[int]] = {}
+        # what the product already has, by model family: the model itself ('') or one of its submodels (their eBay text)
+        have: dict[tuple[int, int], set[str]] = {}
         for r in db.execute(
-            text("select v.model_id, v.year from product_fitment pf join vehicles v on v.id = pf.vehicle_id "
-                 "where pf.product_id = :p and v.model_id = any(cast(:i as bigint[])) and v.year is not null"),
+            text("select coalesce(c.parent_model_id, c.id) as root, c.id as model_id, v.year, "
+                 "       case when c.parent_model_id is not null then lower(btrim(coalesce(c.ebay_submodel, c.name))) "
+                 "            when v.submodel is not null then lower(btrim(v.submodel)) else '' end as k "
+                 "from product_fitment pf join vehicles v on v.id = pf.vehicle_id join vehicle_models c on c.id = v.model_id "
+                 "where pf.product_id = :p and v.year is not null "
+                 "  and (c.id = any(cast(:i as bigint[])) or c.parent_model_id = any(cast(:i as bigint[])))"),
             {"p": product_id, "i": ids}).all():
-            have.setdefault(int(r.model_id), set()).add(int(r.year))
+            have.setdefault((int(r.root), int(r.year)), set()).add(r.k)
+            if int(r.model_id) != int(r.root):
+                have.setdefault((int(r.model_id), int(r.year)), set()).add("")  # a submodel that is itself the target
         for mid, r in resolved.items():
-            h = have.get(mid, set())
-            new = sorted(y for y in r["years"] if y not in h)
-            mk, mo = label.get(mid, ("", str(mid)))
+            leaf = info[mid].parent is not None if mid in info else False
+            new, already = [], []
+            for y in sorted(r["years"]):
+                h = have.get((mid, y), set())
+                if leaf or "" in h:
+                    ok = bool(h)
+                else:
+                    subs_y = r["subs"].get(y, {})
+                    need = set(subs_y) | ({""} if (y in r["plain"] or not subs_y) else set())
+                    ok = need <= h
+                (already if ok else new).append(y)
+            i = info.get(mid)
+            subs_out = {} if leaf else {str(y): sorted(r["subs"][y].values(), key=str.lower) for y in new if r["subs"].get(y)}
             models.append({
-                "model_id": mid, "make": mk, "model": mo, "ebay_names": sorted(set(r["ebay"])),
-                "new_years": new, "already_years": sorted(y for y in r["years"] if y in h),
-                "subs": {str(y): sorted(r["subs"].get(y, ())) for y in new if r["subs"].get(y)},
+                "model_id": mid, "make": i.make if i else "", "model": i.model if i else str(mid), "ebay_names": sorted(set(r["ebay"])),
+                "new_years": new, "already_years": already,
+                "subs": subs_out,
+                "plain_years": sorted(y for y in new if y in r["plain"] or not r["subs"].get(y) or leaf),
             })
         models.sort(key=lambda x: (x["make"].lower(), x["model"].lower()))
     unresolved.sort(key=lambda u: (-len(u["years"]), u["make"].lower(), u["model"].lower()))
     return {"models": models, "unresolved": unresolved, "skipped": skipped, "no_year": no_year}
 
 
+def _link(db: Session, product_id: int, model_id: int, year: int) -> tuple[bool, bool]:
+    """Link the product to this model and year. (vehicle year created, link created). Never changes or deletes anything."""
+    vid = db.execute(
+        text("select min(id) from vehicles where model_id = :m and year = :y and submodel is null"), {"m": model_id, "y": year}
+    ).scalar()
+    made = False
+    if vid is None:
+        vid = db.execute(text("insert into vehicles (model_id, year) values (:m, :y) returning id"), {"m": model_id, "y": year}).scalar()
+        made = True
+    ins = db.execute(
+        text(
+            "insert into product_fitment (product_id, vehicle_id, notes, source) select :p, :v, null, 'ebay' "
+            "where not exists (select 1 from product_fitment pf where pf.product_id = :p and pf.vehicle_id = :v) returning vehicle_id"
+        ),
+        {"p": product_id, "v": vid},
+    ).first()
+    return made, ins is not None
+
+
 def _fitment_apply(db: Session, product_id: int, chosen: list[dict]) -> dict:
-    """Add the chosen years. Only ADDS: missing vehicle years for a model that already exists, and product_fitment links.
-    Nothing is deleted or changed. chosen: [{model_id, years, subs}]."""
-    vehicles_made = links = 0
+    """Add the chosen years. Only ADDS: missing vehicle years, product_fitment links, and a model for each submodel eBay lists
+    that the website does not have yet (under the model it came under). Nothing is deleted or changed.
+    chosen: [{model_id, years, subs: {year: [submodel text]}, plain_years: [years]}]."""
+    from app.fitment_sub import child_for
+
+    vehicles_made = links = subs_made = 0
     for m in chosen:
+        plain = set(m.get("plain_years") or [])
         for y in m["years"]:
-            vid = db.execute(
-                text("select min(id) from vehicles where model_id = :m and year = :y and submodel is null"), {"m": m["model_id"], "y": y}
-            ).scalar()
-            if vid is None:
-                vid = db.execute(
-                    text("insert into vehicles (model_id, year) values (:m, :y) returning id"), {"m": m["model_id"], "y": y}
-                ).scalar()
-                vehicles_made += 1
-            subs = m["subs"].get(str(y))
-            ins = db.execute(
-                text(
-                    "insert into product_fitment (product_id, vehicle_id, notes, source) select :p, :v, :n, 'ebay' "
-                    "where not exists (select 1 from product_fitment pf where pf.product_id = :p and pf.vehicle_id = :v) returning vehicle_id"
-                ),
-                {"p": product_id, "v": vid, "n": ("ebay: " + ", ".join(subs))[:400] if subs else None},
-            ).first()
-            links += 1 if ins else 0
-    return {"links_added": links, "vehicle_years_added": vehicles_made}
+            targets: list[int] = []
+            for sub in m["subs"].get(str(y), []):
+                if child_for(db, m["model_id"], sub, create=False) is None:
+                    subs_made += 1
+                targets.append(int(child_for(db, m["model_id"], sub)))
+            if y in plain or not targets:
+                targets.append(int(m["model_id"]))
+            for t in dict.fromkeys(targets):
+                made, linked = _link(db, product_id, t, y)
+                vehicles_made += 1 if made else 0
+                links += 1 if linked else 0
+    return {"links_added": links, "vehicle_years_added": vehicles_made, "submodels_added": subs_made}
 
 
 def _saved_tables(db: Session, product_id: int) -> tuple[list[dict], int, int]:
@@ -1048,7 +977,7 @@ def fitment_commit(body: FitCommitIn, db: Session = Depends(get_db), user: AuthU
     for m in plan["models"]:
         ys = [y for y in m["new_years"] if y in wanted.get(m["model_id"], ())]
         if ys:
-            chosen.append({"model_id": m["model_id"], "years": ys, "subs": m["subs"]})
+            chosen.append({"model_id": m["model_id"], "years": ys, "subs": m["subs"], "plain_years": m["plain_years"]})
     if not chosen:
         raise HTTPException(409, "None of the ticked years are new for this product any more, so nothing was added.")
     try:

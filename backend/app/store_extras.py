@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app.admin_users import _call as _auth_admin_call
 from app.auth import AuthUser, current_user
 from app.database import get_db
+from app.fitment_sub import family_sql
 from app.images import card_image
 from app.availability import stock_mode_sql, web_effective_sql
 from app.stock import available_sql
@@ -121,7 +122,7 @@ def search(
               select 1 from product_fitment pf
               join vehicles v on v.id = pf.vehicle_id
               where pf.product_id = p.id
-                and v.model_id = cast(:model_id as bigint)
+                and v.model_id in {family_sql()}
                 and (cast(:year as int) is null or v.year = cast(:year as int))
             )
           ))
@@ -268,7 +269,7 @@ def garage_list(user: AuthUser = Depends(current_user), db: Session = Depends(ge
 @router.post("/garage", status_code=201)
 def garage_add(body: GarageAdd, user: AuthUser = Depends(current_user), db: Session = Depends(get_db)):
     exists = db.execute(
-        text("select 1 from vehicles where model_id = :m and year = :y limit 1"),
+        text(f"select 1 from vehicles where model_id in {family_sql('m')} and year = :y limit 1"),
         {"m": body.model_id, "y": body.year},
     ).first()
     if not exists:

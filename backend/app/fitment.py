@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.fitment_sub import family_sql
 from app.images import card_image, gallery
 from app.sanitize import clean_description
 from app.availability import stock_mode_sql, web_effective_sql
@@ -77,18 +78,28 @@ def models(
     # With no year, fitment_catalog has one row per year for each model, so group
     # to one row per model. "products" is then the best single year's count
     # (summing would double count); the selector doesn't display it.
+    # Submodels are models of their own (vehicle_models.parent_model_id). A model that only has fitment through its submodels is
+    # still listed, so choosing it shows the parts of all its submodels (see /products).
     rows = db.execute(
         text(
-            "select fc.model_id, fc.model, max(fc.products) as products, "
-            "vt.slug as vehicle_type "
-            "from fitment_catalog fc "
-            "left join vehicle_models vm on vm.id = fc.model_id "
-            "left join vehicle_types vt on vt.id = vm.vehicle_type_id "
-            "where fc.make_id = :make_id "
-            "and (cast(:year as int) is null or fc.year = cast(:year as int)) "
-            "and (cast(:type as text) is null or vt.slug = cast(:type as text)) "
-            "group by fc.model_id, fc.model, vt.slug "
-            "order by fc.model"
+            "select q.model_id, q.model, max(q.products) as products, max(q.vehicle_type) as vehicle_type from ("
+            " select fc.model_id, fc.model, fc.products, vt.slug as vehicle_type"
+            " from fitment_catalog fc"
+            " left join vehicle_models vm on vm.id = fc.model_id"
+            " left join vehicle_types vt on vt.id = vm.vehicle_type_id"
+            " where fc.make_id = :make_id"
+            " and (cast(:year as int) is null or fc.year = cast(:year as int))"
+            " and (cast(:type as text) is null or vt.slug = cast(:type as text))"
+            " union all"
+            " select vp.id, vp.name, fc.products, vt.slug"
+            " from fitment_catalog fc"
+            " join vehicle_models vc on vc.id = fc.model_id"
+            " join vehicle_models vp on vp.id = vc.parent_model_id"
+            " left join vehicle_types vt on vt.id = vp.vehicle_type_id"
+            " where vp.make_id = :make_id"
+            " and (cast(:year as int) is null or fc.year = cast(:year as int))"
+            " and (cast(:type as text) is null or vt.slug = cast(:type as text))"
+            ") q group by q.model_id, q.model order by q.model"
         ),
         {"year": year, "make_id": make_id, "type": clean_type(type)},
     ).all()
@@ -127,7 +138,7 @@ def products(
               select 1 from product_fitment pf
               join vehicles v on v.id = pf.vehicle_id
               where pf.product_id = p.id
-                and v.model_id = :model_id
+                and v.model_id in {family_sql()}
                 and (cast(:year as int) is null or v.year = cast(:year as int))
             )
           )

@@ -13,7 +13,7 @@ import { Notice, btnCls, btn2Cls, inputCls } from "./ui";
 
 type Src = { listing: boolean; catalog: boolean; own: boolean };
 type Suggestion = { model_id: number; name: string; make: string; score: number };
-type FitModel = { model_id: number; make: string; model: string; ebay_names: string[]; new_years: number[]; already_years: number[] };
+type FitModel = { model_id: number; make: string; model: string; ebay_names: string[]; new_years: number[]; already_years: number[]; subs?: Record<string, string[]> };
 type Unknown = { make: string; model: string; years: number[]; subs: string[]; make_exists: boolean; ambiguous: boolean; suggestions: Suggestion[] };
 type Plan = {
   product: string;
@@ -400,6 +400,10 @@ export default function FitmentReview({ product, itemId, store, epid }: { produc
                           <td className="px-2 py-1">
                             {m.make} {m.model}
                             {m.ebay_names.some((n) => n.toLowerCase() !== `${m.make} ${m.model}`.toLowerCase()) && <span className="block text-gray-500">eBay: {m.ebay_names.join(", ")}</span>}
+                            {(() => {
+                              const subs = Array.from(new Set(Object.values(m.subs ?? {}).flat()));
+                              return subs.length > 0 ? <span className="block text-gray-500">Submodels (each becomes a model under {m.model}): {subs.join(", ")}</span> : null;
+                            })()}
                           </td>
                           <td className="px-2 py-1">
                             {m.new_years.length === 0 ? (

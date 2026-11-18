@@ -271,6 +271,9 @@ def list_models(
             f"""
             select vm.id, vm.name, vm.slug, vm.make_id, mk.name as make,
                    vm.vehicle_type_id, vt.slug as vehicle_type,
+                   vm.parent_model_id, vm.ebay_submodel,
+                   (select pm.name from vehicle_models pm where pm.id = vm.parent_model_id) as parent_name,
+                   (select count(*) from vehicle_models ch where ch.parent_model_id = vm.id) as submodels,
                    (select min(v.year) from vehicles v where v.model_id = vm.id) as year_min,
                    (select max(v.year) from vehicles v where v.model_id = vm.id) as year_max,
                    (select count(distinct pf.product_id)
@@ -346,6 +349,9 @@ def merge_model(model_id: int, body: MergeIn, db: Session = Depends(get_db)):
     ).scalar()
     if found != 2:
         raise HTTPException(404, "Model not found")
+    subs = db.execute(text("select count(*) from vehicle_models where parent_model_id = :s"), {"s": src}).scalar()
+    if subs:
+        conflict(db, f"This model has {subs} submodel(s) under it. Merge or delete those first, or merge this model's submodels one at a time.")
 
     # Source vehicles whose (year, submodel) already exists on the target.
     dupes = db.execute(
@@ -383,6 +389,9 @@ def merge_model(model_id: int, body: MergeIn, db: Session = Depends(get_db)):
 
 @router.delete("/models/{model_id}", status_code=204)
 def delete_model(model_id: int, db: Session = Depends(get_db)):
+    subs = db.execute(text("select count(*) from vehicle_models where parent_model_id = :id"), {"id": model_id}).scalar()
+    if subs:
+        conflict(db, f"This model has {subs} submodel(s) under it; merge or delete those first")
     used = db.execute(
         text(
             "select count(*) from product_fitment pf join vehicles v on v.id = pf.vehicle_id "

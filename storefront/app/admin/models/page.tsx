@@ -20,6 +20,10 @@ type ModelRow = {
   year_min: number | null;
   year_max: number | null;
   products: number;
+  parent_model_id: number | null;
+  parent_name: string | null;
+  ebay_submodel: string | null;
+  submodels: number;
 };
 type ModelsResp = { total: number; items: ModelRow[] };
 type YearRow = { vehicle_id: number; year: number; submodel: string | null; products: number };
@@ -538,7 +542,11 @@ export default function ModelsPage() {
             {data.items.map((m) => (
               <tr key={m.id}>
                 <td className="px-3 py-2">{m.make}</td>
-                <td className="px-3 py-2 font-medium">{m.name}</td>
+                <td className="px-3 py-2 font-medium">
+                  {m.name}
+                  {m.parent_name && <span className="block text-xs font-normal text-gray-500">submodel of {m.parent_name}</span>}
+                  {m.submodels > 0 && <span className="block text-xs font-normal text-gray-500">{m.submodels} submodel{m.submodels === 1 ? "" : "s"}</span>}
+                </td>
                 <td className="px-3 py-2">
                   <select
                     className={`${inputCls} ${m.vehicle_type_id ? "" : "border-amber-400"}`}

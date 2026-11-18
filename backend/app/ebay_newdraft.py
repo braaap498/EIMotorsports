@@ -101,14 +101,17 @@ def _years_text(years: list[int]) -> str:
 # our fitment -> eBay's compatibility table
 # --------------------------------------------------------------------------
 def _fitment_rows(db: Session, product_id: int):
+    """The product's fitment, one row per year. A submodel (a model with a parent) is returned as its PARENT's model id, make and
+    model with the submodel text in `sub`, so it goes back to eBay as Submodel under that model."""
     return db.execute(
         text(
             """
-            select vmo.id as model_id, vmk.name as make, vmo.name as model, v.year as year,
-                   nullif(btrim(cast(v.submodel as text)), '') as sub
+            select coalesce(par.id, vmo.id) as model_id, vmk.name as make, coalesce(par.name, vmo.name) as model, v.year as year,
+                   coalesce(nullif(btrim(cast(vmo.ebay_submodel as text)), ''), nullif(btrim(cast(v.submodel as text)), '')) as sub
             from product_fitment pf
             join vehicles v on v.id = pf.vehicle_id
             join vehicle_models vmo on vmo.id = v.model_id
+            left join vehicle_models par on par.id = vmo.parent_model_id
             join vehicle_makes vmk on vmk.id = vmo.make_id
             where pf.product_id = :p
             """
@@ -181,12 +184,14 @@ def convert_fitment(db: Session, product_id: int, rows=None, names=_ebay_names, 
         if r.year is None:
             no_year += 1
             continue
-        g = groups.setdefault((r.model_id, r.make, r.model), {"years": set(), "subs": {}})
+        g = groups.setdefault((r.model_id, r.make, r.model), {"years": set(), "subs": {}, "plain": set()})
         y = int(r.year)
         g["years"].add(y)
         g["subs"].setdefault(y, set())
         if r.sub:
             g["subs"][y].add(r.sub.strip().lower())
+        else:
+            g["plain"].add(y)  # a link on the model itself: it fits every submodel
     out: list[dict] = []
     seen: set[tuple] = set()
     notes: list[str] = []
@@ -214,7 +219,7 @@ def convert_fitment(db: Session, product_id: int, rows=None, names=_ebay_names, 
             if not opts:
                 missing.append(y)
                 continue
-            want = g["subs"].get(y) or set()
+            want = set() if y in g["plain"] else (g["subs"].get(y) or set())
             if want:
                 pick = [a for a in opts if str(a.get("Submodel") or a.get("Trim") or "").strip().lower() in want]
                 if not pick:
