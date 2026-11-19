@@ -26,7 +26,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/distributors", label: "Distributors", any: ["inventory.purchase"], match: ["/admin/distributors", "/admin/supplier"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
-  { href: "/admin/ebay-listings", label: "Sales channels", match: ["/admin/ebay-listings", "/admin/ebay-edit", "/admin/ebay-sales", "/admin/ebay-stores", "/admin/ebay-connect", "/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/availability", "/admin/ebay-copy", "/admin/dropship"] },
+  { href: "/admin/ebay-listings", label: "Sales channels", match: ["/admin/ebay-listings", "/admin/ebay-edit", "/admin/ebay-sales", "/admin/ebay-stores", "/admin/ebay-connect", "/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/availability", "/admin/ebay-copy", "/admin/dropship", "/admin/ebay-inventory-labels"] },
   { href: "/admin/analytics", label: "Analytics" },
   { href: "/admin/quickbooks", label: "QuickBooks" },
   { href: "/admin/users", label: "Team" },
@@ -53,6 +53,7 @@ const STORE_API_TABS: Tab[] = [
   { href: "/admin/ebay-photos", label: "eBay photo import" },
   { href: "/admin/ebay-compat", label: "eBay compatibility import" },
   { href: "/admin/ebay-import", label: "eBay listing import" },
+  { href: "/admin/ebay-inventory-labels", label: "eBay inventory labels" },
   { href: "/admin/merge-link", label: "Merge and link products", match: ["/admin/merge-link", "/admin/cleanup", "/admin/ebay-new"] },
 ];
 

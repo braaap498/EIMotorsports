@@ -126,3 +126,112 @@ def sm_label(body: SmLabelIn, db: Session = Depends(get_db), user: AuthUser = De
             db.rollback()
             res["status"], res["detail"] = "error", "Something unexpected went wrong with this listing."
     return {"cls": cls, "applied": body.apply, "results": results}
+
+
+# --------------------------------------------------------------------------
+# bulk: find inventory records that still have the OLD label (with commas) and give them the new one
+# --------------------------------------------------------------------------
+# The kit label used to join its parts with "," and now joins them with "xx". An old record's new label is the old one
+# with every "," swapped for "xx"; a change is only offered when a product really has that new label.
+OLD_JOIN, NEW_JOIN = ",", "xx"
+ENTRIES_PER_PAGE = 200
+
+
+def _new_label(old: str) -> str:
+    return old.replace(OLD_JOIN, NEW_JOIN)
+
+
+class SmScanIn(BaseModel):
+    store: str
+    page: int = Field(1, ge=1)
+    pages: int = Field(6, ge=1, le=12)
+
+
+@router.post("/sm-scan")
+def sm_scan(body: SmScanIn, db: Session = Depends(get_db)):
+    """Reads a few pages of the store's Selling Manager inventory (nothing is written) and returns the records whose
+    custom label still has a comma. The page asks again with `next_page` until it is null."""
+    row = _store_row(db, body.store)
+    scanned, total_pages = 0, None
+    found: list[dict] = []
+    page = body.page
+    last = body.page + body.pages
+    while page < last and (total_pages is None or page <= total_pages):
+        inner = f"<Pagination><EntriesPerPage>{ENTRIES_PER_PAGE}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>"
+        root = _trading(db, row.store, "GetSellingManagerInventory", inner)
+        if _failed(root):
+            raise HTTPException(502, "eBay would not list the inventory records: " + _first_message(root))
+        tp = (root.findtext(f".//{NS}PaginationResult/{NS}TotalNumberOfPages") or "").strip()
+        if tp.isdigit():
+            total_pages = int(tp)
+        for n in root.iter(f"{NS}SellingManagerProduct"):
+            pid = (n.findtext(f".//{NS}ProductID") or "").strip()
+            label = (n.findtext(f".//{NS}CustomLabel") or "").strip()
+            if not pid:
+                continue
+            scanned += 1
+            if OLD_JOIN in label:
+                found.append({"product_id": pid, "name": (n.findtext(f".//{NS}ProductName") or "").strip(), "before": label, "after": _new_label(label)})
+        page += 1
+        if total_pages is None:  # eBay did not say how many pages there are: stop at an empty page
+            if not list(root.iter(f"{NS}SellingManagerProduct")):
+                break
+    known: set[str] = set()
+    if found:
+        known = {
+            r[0]
+            for r in db.execute(
+                text("select custom_label_sku from products where custom_label_sku = any(:l)"), {"l": list({f["after"] for f in found})}
+            ).all()
+        }
+    ready = [f for f in found if f["after"] in known]
+    nomatch = [f for f in found if f["after"] not in known]
+    more = total_pages is not None and page <= total_pages
+    return {
+        "store": row.store,
+        "total_pages": total_pages,
+        "scanned": scanned,
+        "next_page": page if more else None,
+        "ready": ready,
+        "no_match": nomatch,
+    }
+
+
+class SmItem(BaseModel):
+    product_id: str = Field(..., max_length=40)
+    before: str = Field(..., max_length=200)
+    after: str = Field(..., max_length=200)
+
+
+class SmApplyIn(BaseModel):
+    store: str
+    items: list[SmItem] = Field(..., min_length=1, max_length=25)
+
+
+@router.post("/sm-apply")
+def sm_apply(body: SmApplyIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Changes the listed inventory records. The server re-checks each one: the new label must be the old one with
+    commas swapped for xx AND a product must have it. Anything else is refused, whatever the page sent."""
+    row = _store_row(db, body.store)
+    enabled = db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
+    if not enabled:
+        raise HTTPException(403, f"Live pushes are OFF for {row.store}. Turn them on in the Stores box first.")
+    out: list[dict] = []
+    for it in body.items:
+        res = {"product_id": it.product_id, "before": it.before, "after": it.after, "status": "", "detail": ""}
+        out.append(res)
+        if OLD_JOIN not in it.before or it.after != _new_label(it.before):
+            res["status"], res["detail"] = "refused", "The new label is not the old one with the commas swapped."
+            continue
+        if not db.execute(text("select 1 from products where custom_label_sku = :c limit 1"), {"c": it.after}).first():
+            res["status"], res["detail"] = "refused", "No product has that label."
+            continue
+        try:
+            ok, errs, msg = _revise(db, row.store, it.product_id, it.after)
+            _log(db, user, row.store, it.product_id, "sm_product_label", False,
+                 {"sm_product_id": it.product_id, "from": it.before, "to": it.after}, {"errors": errs}, ok, None if ok else msg)
+            res["status"], res["detail"] = ("updated", "") if ok else ("error", "eBay did not accept it: " + msg)
+        except HTTPException as e:
+            db.rollback()
+            res["status"], res["detail"] = "error", str(e.detail)
+    return {"results": out}
