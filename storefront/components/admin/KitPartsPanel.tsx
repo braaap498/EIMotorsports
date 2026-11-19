@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
-import { Notice, btnCls, inputCls } from "./ui";
+import { Notice, btnCls, btn2Cls, inputCls } from "./ui";
 
 export type KitPart = {
   key: string;
@@ -26,6 +26,7 @@ type CatItem = {
 type Brand = { name: string; count: number };
 type Listing = { id: number; store: string; item_id: string; status: string | null; in_sync: boolean };
 type SyncResult = { store: string; item_id: string; status: string; detail: string };
+type SmResult = { store: string; item_id: string; product_id: string | null; name: string; before: string; after: string; status: string; detail: string };
 
 const JOIN = "xx";
 // Same rule as the server (app/kits.py build_cls); the server is the one that decides.
@@ -116,6 +117,7 @@ export default function KitPartsPanel({
   const [listings, setListings] = useState<Listing[]>([]);
   const [canSync, setCanSync] = useState(false);
   const [results2, setResults2] = useState<SyncResult[] | null>(null);
+  const [smRes, setSmRes] = useState<SmResult[] | null>(null);
   const [dirty, setDirty] = useState(false);
   const [savedCls, setSavedCls] = useState<string | null>(null);
   // the parts as last saved, so Cancel changes can put them back
@@ -283,6 +285,20 @@ export default function KitPartsPanel({
       setResults2(r.results);
       const fresh = await api<{ listings: Listing[] }>(`/kits/${productId}`);
       setListings(fresh.listings);
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function inventoryRecords(apply: boolean, limit?: number) {
+    if (!productId) return;
+    if (apply && !confirm(limit === 1 ? "Change the custom label on ONE eBay inventory record?" : "Change the custom label on every eBay inventory record listed as 'would change'?")) return;
+    setBusy(true);
+    try {
+      const r = await api<{ results: SmResult[] }>("/ebay-edit/sm-label", { method: "POST", body: { product_id: productId, apply, limit: limit ?? null } });
+      setSmRes(r.results);
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -538,6 +554,32 @@ export default function KitPartsPanel({
             <p className="text-xs text-gray-600">
               {listings.length} eBay listing{listings.length === 1 ? "" : "s"} linked; {listings.length - pending} show this label{pending ? `, ${pending} not confirmed yet` : ""}.
             </p>
+          )}
+          {!disabled && !dirty && labelSaved && !!savedCls && listings.length > 0 && canSync && (
+            <div className="space-y-2 rounded border border-gray-200 p-3">
+              <p className="text-xs text-gray-600">
+                Seller Hub &gt; Listings &gt; Inventory keeps its own record of each product, and it does not follow a listing&apos;s custom label.
+                Check shows what would change and writes nothing.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" className={btn2Cls} disabled={busy} onClick={() => void inventoryRecords(false)}>Check eBay inventory records</button>
+                {smRes && smRes.some((r) => r.status === "would_change") && (
+                  <>
+                    <button type="button" className={btnCls} disabled={busy} onClick={() => void inventoryRecords(true, 1)}>Change one (test)</button>
+                    <button type="button" className={btnCls} disabled={busy} onClick={() => void inventoryRecords(true)}>Change all</button>
+                  </>
+                )}
+              </div>
+              {smRes && (
+                <ul className="space-y-1 text-xs">
+                  {smRes.map((r, i) => (
+                    <li key={`${r.store}-${r.item_id}-${i}`} className={r.status === "error" || r.status === "not_sent" ? "text-red-700" : "text-gray-700"}>
+                      <span className="font-mono">{r.item_id}</span> ({r.store}) – <b>{r.status.replace(/_/g, " ")}</b>: {r.detail}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
           {results2 && (
             <ul className="space-y-1 text-xs">
