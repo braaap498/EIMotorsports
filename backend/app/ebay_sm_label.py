@@ -18,6 +18,7 @@ Register next to the other eBay routers in main.py:
     from app.ebay_sm_label import router as ebay_sm_label_router
     admin_router.include_router(ebay_sm_label_router)
 """
+import re
 from typing import Optional
 from xml.sax.saxutils import escape
 
@@ -131,14 +132,30 @@ def sm_label(body: SmLabelIn, db: Session = Depends(get_db), user: AuthUser = De
 # --------------------------------------------------------------------------
 # bulk: find inventory records that still have the OLD label (with commas) and give them the new one
 # --------------------------------------------------------------------------
-# The kit label used to join its parts with "," and now joins them with "xx". An old record's new label is the old one
-# with every "," swapped for "xx"; a change is only offered when a product really has that new label.
+# The kit label used to join its parts with "," (sometimes ", ") and now joins them with "xx". The new label of an old
+# record is NOT just a swap: it is the label a product really has. The old label is split into its part numbers, each
+# is cleaned the way the kit builder cleans it, they are joined with "xx", and the result must equal (any letter case)
+# the custom label of one of your products. The product's own spelling is what gets written.
 OLD_JOIN, NEW_JOIN = ",", "xx"
 ENTRIES_PER_PAGE = 200
 
 
-def _new_label(old: str) -> str:
-    return old.replace(OLD_JOIN, NEW_JOIN)
+def _candidate(old: str) -> str:
+    toks = [re.sub(r"[^A-Za-z0-9\-_.]", "", t) for t in re.split(r"[,\s]+", old)]
+    return NEW_JOIN.join(t for t in toks if t)
+
+
+def _resolve(db: Session, olds: list[str]) -> dict[str, Optional[str]]:
+    """old label -> the product's custom label, or None when no product has it."""
+    cands = {o: _candidate(o) for o in olds}
+    want = list({c.lower() for c in cands.values() if c})
+    have: dict[str, str] = {}
+    if want:
+        for lab in db.execute(
+            text("select custom_label_sku from products where lower(custom_label_sku) = any(:l)"), {"l": want}
+        ).scalars():
+            have[lab.lower()] = lab
+    return {o: (have.get(c.lower()) if c else None) for o, c in cands.items()}
 
 
 class SmScanIn(BaseModel):
@@ -171,21 +188,16 @@ def sm_scan(body: SmScanIn, db: Session = Depends(get_db)):
                 continue
             scanned += 1
             if OLD_JOIN in label:
-                found.append({"product_id": pid, "name": (n.findtext(f".//{NS}ProductName") or "").strip(), "before": label, "after": _new_label(label)})
+                found.append({"product_id": pid, "name": (n.findtext(f".//{NS}ProductName") or "").strip(), "before": label})
         page += 1
         if total_pages is None:  # eBay did not say how many pages there are: stop at an empty page
             if not list(root.iter(f"{NS}SellingManagerProduct")):
                 break
-    known: set[str] = set()
-    if found:
-        known = {
-            r[0]
-            for r in db.execute(
-                text("select custom_label_sku from products where custom_label_sku = any(:l)"), {"l": list({f["after"] for f in found})}
-            ).all()
-        }
-    ready = [f for f in found if f["after"] in known]
-    nomatch = [f for f in found if f["after"] not in known]
+    mapping = _resolve(db, list({f["before"] for f in found})) if found else {}
+    ready, nomatch = [], []
+    for f in found:
+        after = mapping.get(f["before"])
+        (ready if after else nomatch).append({**f, "after": after or ""})
     more = total_pages is not None and page <= total_pages
     return {
         "store": row.store,
@@ -210,8 +222,8 @@ class SmApplyIn(BaseModel):
 
 @router.post("/sm-apply")
 def sm_apply(body: SmApplyIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
-    """Changes the listed inventory records. The server re-checks each one: the new label must be the old one with
-    commas swapped for xx AND a product must have it. Anything else is refused, whatever the page sent."""
+    """Changes the listed inventory records. The server re-checks each one: the new label must be the custom label that
+    one of your products has for that old label. Anything else is refused, whatever the page sent."""
     row = _store_row(db, body.store)
     enabled = db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
     if not enabled:
@@ -220,11 +232,8 @@ def sm_apply(body: SmApplyIn, db: Session = Depends(get_db), user: AuthUser = De
     for it in body.items:
         res = {"product_id": it.product_id, "before": it.before, "after": it.after, "status": "", "detail": ""}
         out.append(res)
-        if OLD_JOIN not in it.before or it.after != _new_label(it.before):
-            res["status"], res["detail"] = "refused", "The new label is not the old one with the commas swapped."
-            continue
-        if not db.execute(text("select 1 from products where custom_label_sku = :c limit 1"), {"c": it.after}).first():
-            res["status"], res["detail"] = "refused", "No product has that label."
+        if OLD_JOIN not in it.before or _resolve(db, [it.before]).get(it.before) != it.after:
+            res["status"], res["detail"] = "refused", "That is not the custom label a product has for this old label."
             continue
         try:
             ok, errs, msg = _revise(db, row.store, it.product_id, it.after)

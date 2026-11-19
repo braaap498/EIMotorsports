@@ -103,8 +103,9 @@ export default function EbayInventoryLabelsPage() {
       <h1 className="text-2xl font-semibold">eBay inventory labels</h1>
       <p className="max-w-3xl text-sm text-gray-600">
         Seller Hub &gt; Listings &gt; Inventory keeps its own custom label for each product, and it did not change when the label changed from commas to xx.
-        This reads that inventory from eBay, finds the records that still have a comma, and gives each the same label with xx, but only when one of your
-        products has that label. Reading changes nothing. Nothing is changed until you press a Change button.
+        This reads that inventory from eBay and finds the records that still have a comma. Each one is matched to the custom label a product has
+        in your products (the old part numbers joined with xx), and that product label is what gets written. A record no product matches is left alone.
+        Reading changes nothing. Nothing is changed until you press a Change button.
       </p>
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
       <div className="flex flex-wrap items-center gap-3 rounded border border-gray-200 bg-white p-4 text-sm">
@@ -123,7 +124,7 @@ export default function EbayInventoryLabelsPage() {
         <div className="space-y-3 rounded border border-gray-200 bg-white p-4 text-sm">
           <p>
             Looked at <b>{scanned.toLocaleString()}</b> records. <b>{ready.length}</b> can be changed
-            {noMatch.length > 0 ? `; ${noMatch.length} have a comma but no product has the matching xx label, so they are left alone` : ""}.
+            {noMatch.length > 0 ? `; ${noMatch.length} have a comma but match no product's custom label, so they are left alone` : ""}.
           </p>
           {ready.length > 0 && (
             <div className="flex flex-wrap items-center gap-2">
