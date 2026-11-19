@@ -61,9 +61,11 @@ def _sm_details(db: Session, store: str, item_id: str) -> Optional[dict]:
 
 def _revise(db: Session, store: str, pid: str, label: str) -> tuple[bool, list[dict], str]:
     """Try the documented shape first, then a flatter one; return (ok, errors, message)."""
+    pid_x, lab_x = escape(pid), escape(label)
     shapes = [
-        f"<ProductID>{escape(pid)}</ProductID><SellingManagerProductDetails><CustomLabel>{escape(label)}</CustomLabel></SellingManagerProductDetails>",
-        f"<ProductID>{escape(pid)}</ProductID><CustomLabel>{escape(label)}</CustomLabel>",
+        # eBay's own error said the ProductID belongs inside SellingManagerProductDetails
+        f"<SellingManagerProductDetails><ProductID>{pid_x}</ProductID><CustomLabel>{lab_x}</CustomLabel></SellingManagerProductDetails>",
+        f"<ProductID>{pid_x}</ProductID><SellingManagerProductDetails><ProductID>{pid_x}</ProductID><CustomLabel>{lab_x}</CustomLabel></SellingManagerProductDetails>",
     ]
     msgs: list[str] = []
     errs: list[dict] = []
