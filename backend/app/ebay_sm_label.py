@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from app.auth import AuthUser, require_admin
 from app.database import get_db
 from app.ebay_edit import NS, _errors, _failed, _first_message, _log, _store_row, _trading
-from app.kits import _linked_listings, _product_cls
+from app.kits import _DIGITS, _linked_listings, _product_cls
 
 router = APIRouter(prefix="/ebay-edit", tags=["ebay-edit"], dependencies=[Depends(require_admin)])
 
@@ -165,25 +165,38 @@ def _norm_title(t: str) -> str:
 
 
 def _resolve_by_title(db: Session, names: list[str]) -> dict[str, Optional[str]]:
-    """inventory record name -> the custom label of the ONE product with that same title (letters and digits only,
-    any case). None when no product, or more than one product, has that title, or the product has no label."""
+    """inventory record name -> the custom label of the ONE product it belongs to by name, or None.
+    A name belongs to a product when it equals (letters and digits only, any case) the product's own title or the title
+    of one of that product's linked eBay listings. None when no product, or more than one product, matches, or when
+    the product has no label."""
     keys = list({_norm_title(n) for n in names if _norm_title(n)})
     hit: dict[str, set] = {}
     if keys:
+        norm = "btrim(regexp_replace(lower({c}), '[^a-z0-9]+', ' ', 'g'))"
+        ltitle = "coalesce(nullif(btrim(lr.title), ''), nullif(btrim(la.title), ''), nullif(btrim(lc.title), ''), '')"
         rows = db.execute(
             text(
-                "select btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g')) as k, id, custom_label_sku "
-                "from products where btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g')) = any(:k)"
+                f"select k, id, label from ("
+                f"  select {norm.format(c='p.title')} as k, p.id, p.custom_label_sku as label from products p "
+                f"  union all "
+                f"  select {norm.format(c=ltitle)} as k, "
+                f"         p.id, p.custom_label_sku as label "
+                f"  from channel_listings cl join products p on p.id = cl.product_id "
+                f"  left join ebay_report_rows lr on lr.item_id = {_DIGITS} "
+                f"  left join ebay_api_details la on la.item_id = {_DIGITS} "
+                f"  left join ebay_compat_items lc on lc.item_id = {_DIGITS} "
+                f") t where k = any(:k)"
             ),
             {"k": keys},
         ).all()
         for r in rows:
-            hit.setdefault(r.k, set()).add((r.id, (r.custom_label_sku or "").strip()))
+            hit.setdefault(r.k, set()).add((r.id, (r.label or "").strip()))
     out: dict[str, Optional[str]] = {}
     for n in names:
         found = hit.get(_norm_title(n), set())
+        ids = {i for i, _ in found}
         labels = {lab for _, lab in found}
-        out[n] = next(iter(labels)) if len(found) == 1 and len(labels) == 1 and next(iter(labels)) else None
+        out[n] = next(iter(labels)) if len(ids) == 1 and len(labels) == 1 and next(iter(labels)) else None
     return out
 
 
