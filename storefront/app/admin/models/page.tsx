@@ -251,8 +251,8 @@ function EditModal({
 
         <section className="space-y-3">
           <h3 className="font-medium">Details</h3>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <Field label="Model name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+          <Field label="Model name"><input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+          <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Make">
               <select className={inputCls} value={makeId} onChange={(e) => setMakeId(e.target.value)}>
                 {makes.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
