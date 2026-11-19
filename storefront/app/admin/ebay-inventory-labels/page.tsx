@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Notice, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 
-type Rec = { product_id: string; name: string; before: string; after: string };
+type Rec = { product_id: string; name: string; before: string; after: string; via?: string };
 type ScanResp = { store: string; total_pages: number | null; scanned: number; next_page: number | null; ready: Rec[]; no_match: Rec[] };
 type ApplyResult = { product_id: string; before: string; after: string; status: string; detail: string };
 type StoreChoice = { store: string };
@@ -65,8 +65,7 @@ export default function EbayInventoryLabelsPage() {
     }
   }
 
-  async function change(limit: number | null) {
-    const items = limit === null ? ready : ready.slice(0, limit);
+  async function change(items: Rec[]) {
     if (items.length === 0) return;
     if (!confirm(`Change the custom label on ${items.length} eBay inventory record${items.length === 1 ? "" : "s"} in ${store}?`)) return;
     setBusy(true);
@@ -76,7 +75,7 @@ export default function EbayInventoryLabelsPage() {
       const all: ApplyResult[] = [];
       for (let i = 0; i < items.length && !stop.current; i += BATCH) {
         setProgress(`Changing ${Math.min(i + BATCH, items.length)} of ${items.length}…`);
-        const chunk = items.slice(i, i + BATCH).map((x) => ({ product_id: x.product_id, before: x.before, after: x.after }));
+        const chunk = items.slice(i, i + BATCH).map((x) => ({ product_id: x.product_id, before: x.before, after: x.after, name: x.name, via: x.via ?? "label" }));
         const r = await api<{ results: ApplyResult[] }>("/ebay-edit/sm-apply", { method: "POST", body: { store, items: chunk } });
         all.push(...r.results);
         setDone([...all]);
@@ -104,7 +103,7 @@ export default function EbayInventoryLabelsPage() {
       <p className="max-w-3xl text-sm text-gray-600">
         Seller Hub &gt; Listings &gt; Inventory keeps its own custom label for each product, and it did not change when the label changed from commas to xx.
         This reads that inventory from eBay and finds the records that still have a comma. Each one is matched to the custom label a product has
-        in your products (the old part numbers joined with xx), and that product label is what gets written. A record no product matches is left alone.
+        in your products (the old part numbers joined with xx, or failing that the exact same name), and that product label is what gets written. A record no product matches is left alone.
         Reading changes nothing. Nothing is changed until you press a Change button.
       </p>
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
@@ -128,15 +127,17 @@ export default function EbayInventoryLabelsPage() {
           </p>
           {ready.length > 0 && (
             <div className="flex flex-wrap items-center gap-2">
-              <button type="button" className={btnCls} disabled={busy} onClick={() => void change(1)}>Change one (test)</button>
-              <button type="button" className={btnCls} disabled={busy} onClick={() => void change(null)}>Change all {ready.length}</button>
+              <button type="button" className={btnCls} disabled={busy} onClick={() => void change(ready.slice(0, 1))}>Change the first one (test)</button>
+              <button type="button" className={btnCls} disabled={busy} onClick={() => void change(ready)}>Change all {ready.length}</button>
             </div>
           )}
           {ready.length > 0 && (
             <ul className="max-h-80 divide-y divide-gray-100 overflow-y-auto text-xs">
               {ready.slice(0, 200).map((r) => (
                 <li key={r.product_id} className="py-1">
+                  <button type="button" className="mr-2 rounded border border-gray-300 px-2 py-0.5 text-xs" disabled={busy} onClick={() => void change([r])}>Change</button>
                   <span className="break-all font-mono">{r.before}</span> → <span className="break-all font-mono">{r.after}</span>
+                  {r.via === "name" && <span className="ml-2 rounded bg-amber-50 px-1 text-amber-800">matched by name</span>}
                   <span className="ml-2 text-gray-500">{r.name}</span>
                 </li>
               ))}

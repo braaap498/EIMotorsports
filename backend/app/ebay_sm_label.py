@@ -158,6 +158,33 @@ def _resolve(db: Session, olds: list[str]) -> dict[str, Optional[str]]:
     return {o: (have.get(c.lower()) if c else None) for o, c in cands.items()}
 
 
+def _norm_title(t: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).strip()
+
+
+def _resolve_by_title(db: Session, names: list[str]) -> dict[str, Optional[str]]:
+    """inventory record name -> the custom label of the ONE product with that same title (letters and digits only,
+    any case). None when no product, or more than one product, has that title, or the product has no label."""
+    keys = list({_norm_title(n) for n in names if _norm_title(n)})
+    hit: dict[str, set] = {}
+    if keys:
+        rows = db.execute(
+            text(
+                "select btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g')) as k, id, custom_label_sku "
+                "from products where btrim(regexp_replace(lower(title), '[^a-z0-9]+', ' ', 'g')) = any(:k)"
+            ),
+            {"k": keys},
+        ).all()
+        for r in rows:
+            hit.setdefault(r.k, set()).add((r.id, (r.custom_label_sku or "").strip()))
+    out: dict[str, Optional[str]] = {}
+    for n in names:
+        found = hit.get(_norm_title(n), set())
+        labels = {lab for _, lab in found}
+        out[n] = next(iter(labels)) if len(found) == 1 and len(labels) == 1 and next(iter(labels)) else None
+    return out
+
+
 class SmScanIn(BaseModel):
     store: str
     page: int = Field(1, ge=1)
@@ -194,10 +221,16 @@ def sm_scan(body: SmScanIn, db: Session = Depends(get_db)):
             if not list(root.iter(f"{NS}SellingManagerProduct")):
                 break
     mapping = _resolve(db, list({f["before"] for f in found})) if found else {}
+    by_title = _resolve_by_title(db, list({f["name"] for f in found if not mapping.get(f["before"])})) if found else {}
     ready, nomatch = [], []
     for f in found:
-        after = mapping.get(f["before"])
-        (ready if after else nomatch).append({**f, "after": after or ""})
+        after, via = mapping.get(f["before"]), "label"
+        if not after:
+            after, via = by_title.get(f["name"]), "name"
+        if after and after != f["before"] and "," not in after:
+            ready.append({**f, "after": after, "via": via})
+        else:
+            nomatch.append({**f, "after": "", "via": ""})
     more = total_pages is not None and page <= total_pages
     return {
         "store": row.store,
@@ -213,6 +246,8 @@ class SmItem(BaseModel):
     product_id: str = Field(..., max_length=40)
     before: str = Field(..., max_length=200)
     after: str = Field(..., max_length=200)
+    name: str = Field("", max_length=300)
+    via: str = Field("label", pattern="^(label|name)$")
 
 
 class SmApplyIn(BaseModel):
@@ -222,8 +257,8 @@ class SmApplyIn(BaseModel):
 
 @router.post("/sm-apply")
 def sm_apply(body: SmApplyIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
-    """Changes the listed inventory records. The server re-checks each one: the new label must be the custom label that
-    one of your products has for that old label. Anything else is refused, whatever the page sent."""
+    """Changes the listed inventory records. The server re-checks each one: the new label must be the custom label of the
+    product that matches the record, by its old part numbers or by its exact name. Anything else is refused, whatever the page sent."""
     row = _store_row(db, body.store)
     enabled = db.execute(text("select live_pushes_enabled from ebay_accounts where store = :s"), {"s": row.store}).scalar()
     if not enabled:
@@ -232,8 +267,12 @@ def sm_apply(body: SmApplyIn, db: Session = Depends(get_db), user: AuthUser = De
     for it in body.items:
         res = {"product_id": it.product_id, "before": it.before, "after": it.after, "status": "", "detail": ""}
         out.append(res)
-        if OLD_JOIN not in it.before or _resolve(db, [it.before]).get(it.before) != it.after:
-            res["status"], res["detail"] = "refused", "That is not the custom label a product has for this old label."
+        if it.via == "name":
+            good = bool(it.name) and _resolve_by_title(db, [it.name]).get(it.name) == it.after
+        else:
+            good = _resolve(db, [it.before]).get(it.before) == it.after
+        if OLD_JOIN not in it.before or not good or "," in it.after:
+            res["status"], res["detail"] = "refused", "That is not the custom label a product has for this record."
             continue
         try:
             ok, errs, msg = _revise(db, row.store, it.product_id, it.after)
