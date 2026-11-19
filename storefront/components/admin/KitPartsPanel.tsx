@@ -26,7 +26,7 @@ type CatItem = {
 type Brand = { name: string; count: number };
 type Listing = { id: number; store: string; item_id: string; status: string | null; in_sync: boolean };
 type SyncResult = { store: string; item_id: string; status: string; detail: string };
-type SmResult = { store: string; item_id: string; product_id: string | null; name: string; before: string; after: string; status: string; detail: string };
+type SmResult = { store: string; sm_product_id: string; name: string; before: string; after: string; status: string; detail: string };
 
 const JOIN = "xx";
 // Same rule as the server (app/kits.py build_cls); the server is the one that decides.
@@ -280,9 +280,11 @@ export default function KitPartsPanel({
     if (!productId) return;
     setBusy(true);
     setResults2(null);
+    setSmRes(null);
     try {
-      const r = await api<{ cls: string; results: SyncResult[] }>(`/kits/${productId}/sync`, { method: "POST" });
+      const r = await api<{ cls: string; results: SyncResult[]; inventory?: SmResult[] }>(`/kits/${productId}/sync`, { method: "POST" });
       setResults2(r.results);
+      setSmRes(r.inventory ?? null);
       const fresh = await api<{ listings: Listing[] }>(`/kits/${productId}`);
       setListings(fresh.listings);
     } catch (e) {
@@ -292,12 +294,12 @@ export default function KitPartsPanel({
     }
   }
 
-  async function inventoryRecords(apply: boolean, limit?: number) {
+  async function inventoryRecords(apply: boolean) {
     if (!productId) return;
-    if (apply && !confirm(limit === 1 ? "Change the custom label on ONE eBay inventory record?" : "Change the custom label on every eBay inventory record listed as 'would change'?")) return;
+    if (apply && !confirm("Change the custom label on the eBay inventory records listed as 'would change'?")) return;
     setBusy(true);
     try {
-      const r = await api<{ results: SmResult[] }>("/ebay-edit/sm-label", { method: "POST", body: { product_id: productId, apply, limit: limit ?? null } });
+      const r = await api<{ results: SmResult[] }>("/ebay-edit/sm-label", { method: "POST", body: { product_id: productId, apply } });
       setSmRes(r.results);
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
@@ -558,23 +560,21 @@ export default function KitPartsPanel({
           {!disabled && !dirty && labelSaved && !!savedCls && listings.length > 0 && canSync && (
             <div className="space-y-2 rounded border border-gray-200 p-3">
               <p className="text-xs text-gray-600">
-                Seller Hub &gt; Listings &gt; Inventory keeps its own record of each product, and it does not follow a listing&apos;s custom label.
-                Check shows what would change and writes nothing.
+                Sending the label to eBay also updates the matching records in Seller Hub &gt; Listings &gt; Inventory. This checks or redoes only those records.
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <button type="button" className={btn2Cls} disabled={busy} onClick={() => void inventoryRecords(false)}>Check eBay inventory records</button>
                 {smRes && smRes.some((r) => r.status === "would_change") && (
-                  <>
-                    <button type="button" className={btnCls} disabled={busy} onClick={() => void inventoryRecords(true, 1)}>Change one (test)</button>
-                    <button type="button" className={btnCls} disabled={busy} onClick={() => void inventoryRecords(true)}>Change all</button>
-                  </>
+                  <button type="button" className={btnCls} disabled={busy} onClick={() => void inventoryRecords(true)}>
+                    Update {smRes.filter((r) => r.status === "would_change").length} inventory record(s)
+                  </button>
                 )}
               </div>
               {smRes && (
                 <ul className="space-y-1 text-xs">
                   {smRes.map((r, i) => (
-                    <li key={`${r.store}-${r.item_id}-${i}`} className={r.status === "error" || r.status === "not_sent" ? "text-red-700" : "text-gray-700"}>
-                      <span className="font-mono">{r.item_id}</span> ({r.store}) – <b>{r.status.replace(/_/g, " ")}</b>: {r.detail}
+                    <li key={`${r.store}-${r.sm_product_id}-${i}`} className={r.status === "error" || r.status === "not_sent" ? "text-red-700" : "text-gray-700"}>
+                      Inventory{r.name ? ` “${r.name}”` : ""} – <b>{r.status.replace(/_/g, " ")}</b>: {r.detail}
                     </li>
                   ))}
                 </ul>

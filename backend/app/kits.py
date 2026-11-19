@@ -23,7 +23,8 @@ could not be sent is reported back per listing, never hidden.
   GET  /kits/catalog/brands             brands in the catalog, for the brand filter
   GET  /kits/{product_id}               the pieces, the CLS, and the linked eBay listings
   PUT  /kits/{product_id}/parts         replace the pieces; builds the CLS only if there is none yet (does NOT talk to eBay)
-  POST /kits/{product_id}/sync          send the CLS to every linked eBay listing (admins; needs the store's switch ON)
+  POST /kits/{product_id}/sync          send the CLS to every linked eBay listing, then to their Selling Manager inventory
+                                        records (admins; needs the store's switch ON)
 
 Also used by other modules:
   expand_rows()           purchase orders: a kit on a PO becomes one line per piece
@@ -484,7 +485,18 @@ def sync(product_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
     if user.role not in ("owner", "admin"):
         raise HTTPException(403, "Only an owner or admin can send changes to eBay. The label is saved here; ask an admin to send it.")
     results = sync_listings(db, user, product_id)
-    return {"cls": _product_cls(db, product_id), "results": results}
+    # Seller Hub > Listings > Inventory keeps its own custom label per product; bring those records along too
+    try:
+        from app.ebay_sm_label import sync_inventory  # imported here: it pulls in the eBay stack
+
+        inventory = sync_inventory(db, user, product_id, True)
+    except HTTPException as e:
+        inventory = [{"store": "", "sm_product_id": "", "name": "", "before": "", "after": "", "status": "error", "detail": str(e.detail)}]
+    except Exception:
+        db.rollback()
+        log.exception("inventory label sync failed for product %s", product_id)
+        inventory = [{"store": "", "sm_product_id": "", "name": "", "before": "", "after": "", "status": "error", "detail": "Something unexpected went wrong with the inventory records."}]
+    return {"cls": _product_cls(db, product_id), "results": results, "inventory": inventory}
 
 
 # --------------------------------------------------------------------------
