@@ -341,20 +341,19 @@ def search(
 
 @router.get("/unmerged-labels")
 def unmerged_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get_db)):
-    """No search term. Looks at EVERY product that has a custom label SKU and finds the ones that were never
-    merged (no MASTER badge) but share a number with another product's label. A label such as
-    CYL0041xx50000KS is split on "xx" into its parts (CYL0041, 50000KS), so a part number that sits inside a
-    longer label still counts. Shared parts shorter than 4 characters are ignored as noise. Products that
-    share a part are listed next to each other, and each row says which part it shares."""
+    """No search term. Finds custom labels that belong to two or more products where at least one of them
+    was never merged (no MASTER badge). The whole label must match (ignoring case and surrounding spaces).
+    A label used by only one product is never listed, and neither is a merged master that has no other
+    product with the same label. A master only appears as a reference row next to an unmerged product
+    that has its exact label."""
     _ensure_unmerge_table(db)  # part_unmerge_log may not exist yet on a fresh server
     rows = db.execute(
         text(
             f"""
-            with tok as (
-              select p.id as pid, btrim(t.part) as part
+            with lab as (
+              select p.id as pid, upper(btrim(p.custom_label_sku)) as label
               from products p
-              cross join lateral regexp_split_to_table(upper(btrim(p.custom_label_sku)), 'XX') as t(part)
-              where btrim(coalesce(p.custom_label_sku, '')) <> '' and length(btrim(t.part)) >= 4
+              where btrim(coalesce(p.custom_label_sku, '')) <> ''
             ),
             merged as (
               -- a master = a survivor of at least one merge that has NOT since been unmerged
@@ -363,14 +362,10 @@ def unmerged_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get
               group by survivor_product_id having coalesce(sum(merged_count), 0) > 0
             ),
             shared as (
-              select part from tok group by part
-              having count(distinct pid) >= 2
-                 and count(distinct pid) filter (where pid not in (select pid from merged)) >= 1
-            ),
-            hits as (
-              select tok.pid, array_agg(distinct tok.part order by tok.part) as shared_parts
-              from tok join shared using (part)
-              group by tok.pid
+              select label from lab
+              group by label
+              having count(*) >= 2
+                 and count(*) filter (where pid not in (select pid from merged)) >= 1
             )
             select p.id, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
                    (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
@@ -379,17 +374,18 @@ def unmerged_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get
                      where l.survivor_product_id = p.id
                        and not exists (select 1 from part_unmerge_log u where u.merge_log_id = l.id)) as prior_merges,
                    {_PN_SUBQUERY} as part_number,
-                   h.shared_parts
-            from hits h
+                   array[h.label] as shared_parts
+            from lab h
+            join shared s on s.label = h.label
             join products p on p.id = h.pid
-            order by h.shared_parts[1], p.title, p.id
+            order by h.label, p.title, p.id
             limit :limit
             """
         ),
         {"limit": limit},
     ).all()
     items = [dict(r._mapping) for r in rows]
-    # Masters are only here as reference rows (they share a label part with an unmerged product).
+    # Masters are only here as reference rows (they share their exact label with an unmerged product).
     unmerged = sum(1 for d in items if not d["prior_merges"])
     return {"total": unmerged, "shown": len(items), "items": items}
 

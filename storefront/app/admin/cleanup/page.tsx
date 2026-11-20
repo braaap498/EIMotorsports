@@ -1290,7 +1290,7 @@ export default function PartsCleanupPage() {
                   {listMode === "items"
                     ? `${items.length} part${items.length === 1 ? "" : "s"} added by item number`
                     : unmergedMode
-                      ? `${countedItems.length} product${countedItems.length === 1 ? "" : "s"} not yet merged that share a custom label number with another product${
+                      ? `${countedItems.length} product${countedItems.length === 1 ? "" : "s"} not yet merged that share the same custom label with another product${
                           countedItems.some(priceDiffers) ? ` (${countedItems.filter(priceDiffers).length} have the same custom label but a different price)` : ""
                         }${items.length > countedItems.length ? `. ${items.length - countedItems.length} existing masters shown for reference.` : ""}`
                       : `${items.length} ${searchedExact ? "exact " : ""}result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
