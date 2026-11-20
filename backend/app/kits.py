@@ -46,7 +46,7 @@ from app.database import get_db
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/kits", tags=["admin-kits"], dependencies=[Depends(require_route_access)])
 
-SUPPLIER = "autodist"
+SUPPLIER = "autodist"  # the default catalog (Automatic Distributors)
 CLS_MAX = 50  # eBay's limit for a custom label
 CLS_JOIN = "xx"
 TOKEN_RE = re.compile(r"[A-Za-z0-9\-_.]+")
@@ -86,9 +86,23 @@ def build_cls(parts: list[dict]) -> str:
     return cls
 
 
-def is_catalog_vendor(name: Optional[str]) -> bool:
+def supplier_for(name: Optional[str]) -> Optional[str]:
+    """Which stored catalog (supplier_items.supplier) a distributor's name goes with, or None when it has no catalog here."""
     n = (name or "").lower()
-    return "autodist" in n or "automatic distributors" in n
+    if "autodist" in n or "automatic distributors" in n:
+        return "autodist"
+    if re.search(r"rocky\s*mountain\s*atv|rmatv", n):
+        return "rmatv"
+    return None
+
+
+def is_catalog_vendor(name: Optional[str]) -> bool:
+    return supplier_for(name) is not None
+
+
+SUPPLIER_RE = "^(autodist|rmatv)$"
+# a part's stock across every warehouse column (Rocky Mountain has just the one, qty_other)
+_STOCK = "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0) + coalesce(s.qty_other, 0))"
 
 
 # --------------------------------------------------------------------------
@@ -98,18 +112,18 @@ def is_catalog_vendor(name: Optional[str]) -> bool:
 @needs("products.edit_details", "products.create")
 def vendors(db: Session = Depends(get_db)):
     rows = db.execute(text("select id, name from po_distributors order by lower(name), id")).all()
-    return {"items": [{"id": r.id, "name": r.name, "has_catalog": is_catalog_vendor(r.name)} for r in rows]}
+    return {"items": [{"id": r.id, "name": r.name, "has_catalog": is_catalog_vendor(r.name), "supplier": supplier_for(r.name)} for r in rows]}
 
 
 @router.get("/catalog/brands")
 @needs("products.edit_details", "products.create")
-def catalog_brands(db: Session = Depends(get_db)):
+def catalog_brands(supplier: str = Query(SUPPLIER, pattern=SUPPLIER_RE), db: Session = Depends(get_db)):
     rows = db.execute(
         text(
             "select manufacturer, count(*) as n from supplier_items where supplier = :s and active "
             "and coalesce(manufacturer, '') <> '' group by manufacturer order by manufacturer"
         ),
-        {"s": SUPPLIER},
+        {"s": supplier},
     ).all()
     return {"items": [{"name": r.manufacturer, "count": r.n} for r in rows]}
 
@@ -121,6 +135,7 @@ def _norm(v: str) -> str:
 @router.get("/catalog")
 @needs("products.edit_details", "products.create")
 def catalog_search(
+    supplier: str = Query(SUPPLIER, pattern=SUPPLIER_RE, description="which distributor's catalog to search"),
     q: Optional[str] = Query(None, max_length=200),
     field: str = Query("all", pattern="^(all|sku|mfr|name|brand|upc)$"),
     match: str = Query("contains", pattern="^(contains|starts|exact)$"),
@@ -143,14 +158,14 @@ def catalog_search(
     filterable for people who may see what the shop pays."""
     see_cost = has_perm(user, "products.edit_price")
     where = ["s.supplier = :s"]
-    params: dict = {"s": SUPPLIER, "n": limit, "o": offset}
+    params: dict = {"s": supplier, "n": limit, "o": offset}
     if not include_inactive:
         where.append("s.active")
     if brand:
         where.append("lower(s.manufacturer) = lower(:brand)")
         params["brand"] = brand.strip()
     if in_stock:
-        where.append("coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0) > 0")
+        where.append(f"{_STOCK} > 0")
     if see_cost:
         if min_cost is not None:
             where.append("coalesce(s.effective_cost, s.dealer_cost) >= :minc")
@@ -245,7 +260,7 @@ def catalog_search(
         "brand": "s.manufacturer, s.sku",
         "cost_asc": "coalesce(s.effective_cost, s.dealer_cost) asc nulls last, s.sku" if see_cost else "s.sku",
         "cost_desc": "coalesce(s.effective_cost, s.dealer_cost) desc nulls last, s.sku" if see_cost else "s.sku",
-        "stock": "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0)) desc, s.sku",
+        "stock": f"{_STOCK} desc, s.sku",
     }.get(sort)
     if order is None:  # "best": an exact number match first, then in-stock, then by brand and SKU
         first = (q or "").strip()
@@ -255,14 +270,14 @@ def catalog_search(
             "(case when cast(:best_n as text) <> '' and (upper(regexp_replace(s.sku, '[^A-Za-z0-9]', '', 'g')) = cast(:best_n as text) "
             "or s.mfr_number_norm = cast(:best_n as text)) then 0 "
             "when lower(s.sku) = cast(:best_l as text) then 0 else 1 end), "
-            "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0) > 0) desc, s.manufacturer, s.sku"
+            f"({_STOCK} > 0) desc, s.manufacturer, s.sku"
         )
     clause = " and ".join(where)
     total = db.execute(text(f"select count(*) from supplier_items s where {clause}"), params).scalar()
     rows = db.execute(
         text(
             f"select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, coalesce(s.effective_cost, s.dealer_cost) as dealer_cost, "
-            f"s.qty_maine, s.qty_indiana, s.qty_nevada, s.upc, s.active from supplier_items s "
+            f"s.qty_maine, s.qty_indiana, s.qty_nevada, coalesce(s.qty_other, 0) as qty_other, s.upc, s.active from supplier_items s "
             f"where {clause} order by {order} limit :n offset :o"
         ),
         params,
@@ -270,7 +285,7 @@ def catalog_search(
     items = []
     for r in rows:
         d = dict(r._mapping)
-        d["in_stock_total"] = sum(int(d.get(k) or 0) for k in ("qty_maine", "qty_indiana", "qty_nevada"))
+        d["in_stock_total"] = sum(int(d.get(k) or 0) for k in ("qty_maine", "qty_indiana", "qty_nevada", "qty_other"))
         if not see_cost:
             d.pop("dealer_cost", None)
         else:
@@ -335,13 +350,16 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
         number, desc, cost = (p.part_number or "").strip(), (p.description or "").strip() or None, p.unit_cost
         label = ""
         if p.supplier_item_id:
+            sup = supplier_for(dists[p.distributor_id])
+            if sup is None:
+                raise HTTPException(400, f"{dists[p.distributor_id]} has no catalog here, so a piece cannot point at a catalog part. Type the part number instead.")
             it = db.execute(
                 text("select sku, mfr_number, name, manufacturer, coalesce(effective_cost, dealer_cost) as dealer_cost from supplier_items where id = :i and supplier = :s"),
-                {"i": p.supplier_item_id, "s": SUPPLIER},
+                {"i": p.supplier_item_id, "s": sup},
             ).first()
             if not it:
                 raise HTTPException(400, "A piece points at a catalog part that is no longer in the catalog. Pick it again.")
-            number = it.sku  # the Autodist SKU is what goes on the purchase order
+            number = it.sku  # the distributor's own part number (Autodist SKU, Rocky Mountain part #) is what goes on the purchase order
             # the label uses the manufacturer number (default) or the vendor SKU, as chosen; no manufacturer number -> the SKU
             label = label_token_for(it.mfr_number or "") if label_by != "sku" else ""
             desc = desc or " ".join(x for x in (it.manufacturer, it.name) if x)[:250]

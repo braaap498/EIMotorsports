@@ -3,13 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../../lib/adminApi";
 import { Badge, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "../../../../components/admin/ui";
-import { DistributorForm, deleteDistributor, isAutodist, useDistributors, type Dist } from "../../../../components/admin/Distributors";
+import { DistributorForm, RMATV_NAME, deleteDistributor, isAutodist, isRmatv, useDistributors, type Dist } from "../../../../components/admin/Distributors";
 import { useAccess } from "../../../../components/admin/AdminAccess";
 import AutodistCatalog from "../../../../components/admin/AutodistCatalog";
 import AutodistOpportunities from "../../../../components/admin/AutodistOpportunities";
 import AutodistOrders from "../../../../components/admin/AutodistOrders";
 import AutodistInvoices from "../../../../components/admin/AutodistInvoices";
 import AutodistProducts from "../../../../components/admin/AutodistProducts";
+import RmatvInner from "../../../../components/admin/Rmatv";
 
 // Automatic Distributors supplier data (owners and admins only). Licensed data: dealer cost and stock
 // are for this screen only and must never be shown on the public store.
@@ -866,6 +867,8 @@ function DistributorHub() {
   const row = dists.find((d) => String(d.id) === cur) ?? null;
   const notListed = cur === AUTODIST;
   const showCatalog = isAdmin && (notListed || (row !== null && isAutodist(row.name)));
+  const showRmatv = isAdmin && row !== null && isRmatv(row.name);
+  const rmatvListed = dists.some((d) => isRmatv(d.name));
   const ordered = [...dists].sort((a, b) => Number(isAutodist(b.name)) - Number(isAutodist(a.name)) || a.name.localeCompare(b.name));
 
   function start(target: Dist | "new", name = "") {
@@ -940,6 +943,11 @@ function DistributorHub() {
             <button type="button" className={btnCls} onClick={() => start("new")}>
               Add a distributor
             </button>
+            {isAdmin && loaded && !rmatvListed && (
+              <button type="button" className={btn2Cls} onClick={() => start("new", RMATV_NAME)}>
+                Add {RMATV_NAME}
+              </button>
+            )}
             {row && (
               <button type="button" className={dangerCls} onClick={() => void remove(row)}>
                 Delete
@@ -966,6 +974,8 @@ function DistributorHub() {
 
       {showCatalog ? (
         <AutodistInner />
+      ) : showRmatv ? (
+        <RmatvInner />
       ) : row ? (
         <p className="text-sm text-gray-500">{row.name} has no catalog or feed here. Its details above print on its purchase orders.</p>
       ) : null}

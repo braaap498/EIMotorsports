@@ -17,11 +17,11 @@ export type KitPart = {
   quantity: number;
 };
 
-type Vendor = { id: number; name: string; has_catalog: boolean };
+type Vendor = { id: number; name: string; has_catalog: boolean; supplier?: string | null };
 type CatItem = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
   list_price: number | null; dealer_cost?: number | null; upc: string | null; in_stock_total: number;
-  qty_maine: number; qty_indiana: number; qty_nevada: number;
+  qty_maine: number; qty_indiana: number; qty_nevada: number; qty_other?: number;
 };
 type Brand = { name: string; count: number };
 type Listing = { id: number; store: string; item_id: string; status: string | null; in_sync: boolean };
@@ -134,8 +134,15 @@ export default function KitPartsPanel({
         if (auto) setVendorId(auto.id);
       })
       .catch((e) => setMsg({ kind: "error", text: errMsg(e) }));
-    api<{ items: Brand[] }>("/kits/catalog/brands").then((r) => setBrands(r.items)).catch(() => {});
   }, []);
+
+  // the brand list belongs to the chosen vendor's catalog
+  const supplier = vendor?.has_catalog ? vendor.supplier ?? "" : "";
+  useEffect(() => {
+    setBrand("");
+    if (!supplier) return setBrands([]);
+    api<{ items: Brand[] }>(`/kits/catalog/brands?supplier=${encodeURIComponent(supplier)}`).then((r) => setBrands(r.items)).catch(() => setBrands([]));
+  }, [supplier]);
 
   // existing product: load what is saved
   useEffect(() => {
@@ -167,6 +174,7 @@ export default function KitPartsPanel({
     setMsg(null);
     try {
       const p = new URLSearchParams();
+      if (supplier) p.set("supplier", supplier);
       if (q.trim()) p.set("q", q.trim());
       if (field !== "all") p.set("field", field);
       if (match !== "contains") p.set("match", match);
@@ -402,7 +410,7 @@ export default function KitPartsPanel({
 
       {parts.some((p) => p.supplier_item_id) && (
         <label className="flex flex-wrap items-center gap-2 text-xs">
-          Write Automatic Distributors parts in the label as
+          Write catalog parts in the label as
           <select className={inputCls} style={{ width: "auto" }} value={labelBy} disabled={disabled || !!keptCls} onChange={(e) => onLabelByChange(e.target.value as LabelBy)}>
             <option value="mfr">Manufacturer # (default)</option>
             <option value="sku">Vendor SKU</option>
@@ -493,7 +501,7 @@ export default function KitPartsPanel({
                             <td className="p-1">{highlight(it.name, q)}</td>
                             <td className="p-1 font-mono">{highlight(it.upc, q)}</td>
                             <td className="p-1">{it.dealer_cost != null ? `$${it.dealer_cost.toFixed(2)}` : ""}</td>
-                            <td className="p-1" title={`ME ${it.qty_maine} · IN ${it.qty_indiana} · NV ${it.qty_nevada}`}>{it.in_stock_total}</td>
+                            <td className="p-1" title={supplier === "rmatv" ? `${it.qty_other ?? 0} in stock` : `ME ${it.qty_maine} · IN ${it.qty_indiana} · NV ${it.qty_nevada}`}>{it.in_stock_total}</td>
                             <td className="p-1"><input type="number" min={1} className="w-14 rounded border px-1 py-1" value={addQty[it.id] ?? "1"} onChange={(e) => setAddQty((a) => ({ ...a, [it.id]: e.target.value }))} /></td>
                             <td className="p-1"><button type="button" className="rounded bg-gray-900 px-2 py-1 text-white" onClick={() => addFromCatalog(it)}>Add</button></td>
                           </tr>

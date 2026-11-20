@@ -51,6 +51,8 @@ from app.analytics import router as analytics_router
 from app.analytics_qb import router as analytics_qb_router
 from app.analytics_insights import router as analytics_insights_router
 from app.autodist import router as autodist_router
+from app.rmatv import ensure_columns as ensure_rmatv_columns
+from app.rmatv import router as rmatv_router
 from app.kits import router as kits_router
 from app.order_activity import ensure_tables as ensure_order_activity_tables
 from app.order_activity import router as order_activity_router
@@ -142,6 +144,7 @@ admin_router.include_router(admin_about_router)
 admin_router.include_router(admin_reviews_router)
 admin_router.include_router(admin_help_router)
 admin_router.include_router(autodist_router)
+admin_router.include_router(rmatv_router)
 admin_router.include_router(fitment_research_router)
 admin_router.include_router(kits_router)
 admin_router.include_router(analytics_router)
@@ -198,3 +201,9 @@ def _availability():
 def _po_types():
     """Allow the 'stock_drop_ship' (inventory drop ship) purchase order type if the database restricts po_type."""
     ensure_po_types()
+
+
+@app.on_event("startup")
+def _rmatv_columns():
+    """supplier_items.qty_other: Rocky Mountain's single stock number (Automatic Distributors' are per warehouse)."""
+    ensure_rmatv_columns()

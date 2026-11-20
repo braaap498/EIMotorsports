@@ -18,6 +18,9 @@ const inp = inputCls.replace("text-sm", "text-base");
 // owners and admins only, because the Automatic Distributors page shows dealer cost.
 export const AUTODIST_PAGE = "/admin/distributors/autodist";
 export const isAutodist = (name: string) => /autodist|automatic\s+distributors/i.test(name);
+// Rocky Mountain ATV/MC has a catalog on the same page (same rule as the server's kits.supplier_for)
+export const RMATV_NAME = "Rocky Mountain ATV/MC";
+export const isRmatv = (name: string) => /rocky\s*mountain\s*atv|rmatv/i.test(name);
 
 /** Where clicking a distributor goes. */
 export function distributorPage(d: Dist, isAdmin: boolean): string {
@@ -151,6 +154,7 @@ export default function DistributorList() {
 
   // Automatic Distributors always has its page for owners and admins, even before it is added as a distributor.
   const autodistListed = dists.some((d) => isAutodist(d.name));
+  const rmatvListed = dists.some((d) => isRmatv(d.name));
 
   return (
     <div className="max-w-5xl space-y-4">
@@ -163,9 +167,16 @@ export default function DistributorList() {
 
       {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
 
-      <button className={btnCls} onClick={() => start("new")}>
-        Add a distributor
-      </button>
+      <div className="flex flex-wrap gap-2">
+        <button className={btnCls} onClick={() => start("new")}>
+          Add a distributor
+        </button>
+        {isAdmin && loaded && !rmatvListed && (
+          <button className={btn2Cls} onClick={() => start("new", RMATV_NAME)}>
+            Add {RMATV_NAME}
+          </button>
+        )}
+      </div>
 
       {editing !== null && (
         <DistributorForm
@@ -227,6 +238,7 @@ export default function DistributorList() {
                         {d.name}
                       </Link>
                       {isAdmin && isAutodist(d.name) && <Badge tone="blue">Catalog feed</Badge>}
+                      {isAdmin && isRmatv(d.name) && <Badge tone="blue">Catalog</Badge>}
                     </div>
                     {d.notes && <div className="text-sm text-gray-500">{d.notes}</div>}
                   </td>
