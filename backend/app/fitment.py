@@ -181,7 +181,7 @@ def products(
 def product_detail(slug: str, db: Session = Depends(get_db)):
     p = db.execute(
         text(
-            "select id, sku_display as sku, title, slug, list_price, condition, description, "
+            "select id, sku_display as sku, title, slug, list_price, condition, description, category_id, updated_at, "
             "manufacturer_part_number, show_part_number, on_order, expected_date, "
             f"(expected_date - current_date) as days_until, "
             f"{web_effective_sql('p')} as available_qty, {stock_mode_sql('p')} as stock_mode from products p "
@@ -205,6 +205,37 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         ),
         {"id": p.id},
     ).all()
+    category = None
+    if p.category_id:
+        c = db.execute(
+            text("select name, slug from categories where id = :c"), {"c": p.category_id}
+        ).first()
+        if c:
+            category = {"name": c.name, "slug": c.slug}
+
+    # Which machines this part fits, one entry per model with its years. A submodel is shown under its own name
+    # but links (model_slug) to the page of the model it hangs under, which is the page that exists.
+    fit_rows = db.execute(
+        text(
+            "select mk.name as make, mk.slug as make_slug, vm.name as model, "
+            "coalesce(pm.slug, vm.slug) as model_slug, "
+            "array_agg(distinct v.year order by v.year) filter (where v.year is not null) as years "
+            "from product_fitment pf "
+            "join vehicles v on v.id = pf.vehicle_id "
+            "join vehicle_models vm on vm.id = v.model_id "
+            "left join vehicle_models pm on pm.id = vm.parent_model_id "
+            "join vehicle_makes mk on mk.id = vm.make_id "
+            "where pf.product_id = :id "
+            "group by mk.name, mk.slug, vm.name, coalesce(pm.slug, vm.slug) "
+            "order by mk.name, vm.name"
+        ),
+        {"id": p.id},
+    ).all()
+    fits = [
+        {"make": f.make, "make_slug": f.make_slug, "model": f.model, "model_slug": f.model_slug, "years": list(f.years or [])}
+        for f in fit_rows[:25]
+    ]
+
     backordered = bool(p.on_order) and int(p.available_qty or 0) <= 0
     return {
         "id": p.id,
@@ -223,4 +254,8 @@ def product_detail(slug: str, db: Session = Depends(get_db)):
         "description": clean_description(p.description),
         "photos": gallery(photos),
         "specifics": [{"name": s.name, "value": s.value} for s in specifics],
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        "category": category,
+        "fits": fits,
+        "fits_total": len(fit_rows),
     }
