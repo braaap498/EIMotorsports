@@ -4,7 +4,7 @@ import type { Metadata } from "next";
 import { robotsMeta } from "../../lib/site";
 import ProductImage from "../../components/site/ProductImage";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+import { getJson } from "../../lib/cachedApi";
 
 // Kept out of the index for now: the address is a number (?model_id=123), so it can't say which
 // vehicle it is. Real make/model pages (/parts/polaris/ranger-xp-900) will replace it for search engines.
@@ -34,16 +34,14 @@ async function Results({ searchParams }: { searchParams: Params }) {
   if (!model_id) {
     error = "Pick a make and model first.";
   } else {
-    try {
-      const yr = year ? `&year=${encodeURIComponent(year)}` : "";
-      const res = await fetch(
-        `${API}/store/fitment/products?model_id=${encodeURIComponent(model_id)}${yr}`,
-        { cache: "no-store" }
-      );
-      if (!res.ok) throw new Error(String(res.status));
-      const data = await res.json();
+    const yr = year ? `&year=${encodeURIComponent(year)}` : "";
+    // Only plain numbers are remembered, so odd addresses cannot fill the cache.
+    const plain = /^\d+$/.test(model_id) && (!year || /^\d{4}$/.test(year));
+    const res = await getJson<unknown>(`/store/fitment/products?model_id=${encodeURIComponent(model_id)}${yr}`, { cache: plain });
+    if (res.data) {
+      const data = res.data as { items?: Product[]; products?: Product[] } | Product[];
       products = Array.isArray(data) ? data : data.items ?? data.products ?? [];
-    } catch {
+    } else {
       error = "Could not load parts right now. Please try again.";
     }
   }

@@ -3,8 +3,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { robotsMeta } from "../../lib/site";
 import ProductImage from "../../components/site/ProductImage";
-
-const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+import { getJson } from "../../lib/cachedApi";
 const PAGE_SIZE = 24;
 
 type Item = {
@@ -35,16 +34,9 @@ export async function generateMetadata({ searchParams }: { searchParams: Params 
   }
 
   let name = "";
-  try {
-    // Same URL and options as the page's own call, so Next only sends it once.
-    const res = await fetch(`${API}/store/categories`, { cache: "no-store" });
-    if (res.ok) {
-      const cats: Cat[] = await res.json();
-      name = cats.find((c) => c.slug === p.category)?.name ?? "";
-    }
-  } catch {
-    /* fall through: no name means the page is left out of the index */
-  }
+  // No name (API down, unknown category) means the page is left out of the index.
+  const cats = (await getJson<Cat[]>("/store/categories", { ttl: "long" })).data;
+  name = cats?.find((c) => c.slug === p.category)?.name ?? "";
   if (!name) return { title: "Parts", robots: robotsMeta(false) };
 
   const qs = new URLSearchParams({ category: p.category });
@@ -85,20 +77,22 @@ async function Results({ searchParams }: { searchParams: Params }) {
   let total = 0;
   let error = "";
   let categoryName = "";
-  try {
-    const res = await fetch(`${API}/store/search?${qs}`, { cache: "no-store" });
-    if (!res.ok) throw new Error(String(res.status));
-    const data = await res.json();
-    items = data.items ?? [];
-    total = data.total ?? 0;
+  // Typed searches and odd values are fetched live; everything else is remembered, so odd addresses cannot fill the cache.
+  const plain =
+    !p.q &&
+    page <= 200 &&
+    (!p.category || /^[a-z0-9-]+$/i.test(p.category)) &&
+    (!p.model_id || /^\d+$/.test(p.model_id)) &&
+    (!p.year || /^\d{4}$/.test(p.year));
+  const list = await getJson<{ items?: Item[]; total?: number }>(`/store/search?${qs}`, { cache: plain });
+  if (list.data) {
+    items = list.data.items ?? [];
+    total = list.data.total ?? 0;
     if (p.category) {
-      const cres = await fetch(`${API}/store/categories`, { cache: "no-store" });
-      if (cres.ok) {
-        const cats: Cat[] = await cres.json();
-        categoryName = cats.find((c) => c.slug === p.category)?.name ?? "";
-      }
+      const cats = (await getJson<Cat[]>("/store/categories", { ttl: "long" })).data;
+      categoryName = cats?.find((c) => c.slug === p.category)?.name ?? "";
     }
-  } catch {
+  } else {
     error = "Could not load products right now. Please try again.";
   }
 

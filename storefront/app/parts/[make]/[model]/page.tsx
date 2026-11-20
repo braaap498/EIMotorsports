@@ -5,8 +5,7 @@ import type { Metadata } from "next";
 import ProductImage from "../../../../components/site/ProductImage";
 import { SITE_URL, jsonLdString, robotsMeta, yearRanges } from "../../../../lib/site";
 import { getVehicle } from "../../../../lib/seoApi";
-
-const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+import { getJson } from "../../../../lib/cachedApi";
 const PAGE_SIZE = 24;
 
 type Params = Promise<{ make: string; model: string }>;
@@ -52,13 +51,11 @@ async function VehicleParts({ params, searchParams }: { params: Params; searchPa
   let items: Item[] = [];
   let total = 0;
   let error = "";
-  try {
-    const res = await fetch(`${API}/store/fitment/products?${qs}`, { cache: "no-store" });
-    if (!res.ok) throw new Error(String(res.status));
-    const data = await res.json();
-    items = data.items ?? [];
-    total = data.total ?? 0;
-  } catch {
+  const list = await getJson<{ items?: Item[]; total?: number }>(`/store/fitment/products?${qs}`, { cache: page <= 200 });
+  if (list.data) {
+    items = list.data.items ?? [];
+    total = list.data.total ?? 0;
+  } else {
     error = "Could not load parts right now. Please try again.";
   }
 

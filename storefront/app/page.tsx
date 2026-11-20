@@ -3,9 +3,9 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { robotsMeta } from "../lib/site";
 import ProductImage from "../components/site/ProductImage";
+import { getJson } from "../lib/cachedApi";
 import { AtvIcon, UtvIcon, SnowmobileIcon, DirtBikeIcon, MotorcycleIcon, PwcIcon } from "../components/site/icons";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 const PAGE_SIZE = 24;
 
 // ?type= and ?page= are views of the same list, so they all point back to the home page.
@@ -62,15 +62,13 @@ async function AllProducts({ searchParams }: { searchParams: Params }) {
   let items: Item[] = [];
   let total = 0;
   let error = "";
-  try {
-    const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String((page - 1) * PAGE_SIZE) });
-    if (TYPES.some((t) => t.slug === p.type)) qs.set("type", p.type as string); // unknown ?type= means all types
-    const res = await fetch(`${API}/store/search?${qs}`, { cache: "no-store" });
-    if (!res.ok) throw new Error(String(res.status));
-    const data = await res.json();
-    items = data.items ?? [];
-    total = data.total ?? 0;
-  } catch {
+  const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String((page - 1) * PAGE_SIZE) });
+  if (TYPES.some((t) => t.slug === p.type)) qs.set("type", p.type as string); // unknown ?type= means all types
+  const list = await getJson<{ items?: Item[]; total?: number }>(`/store/search?${qs}`, { cache: page <= 200 });
+  if (list.data) {
+    items = list.data.items ?? [];
+    total = list.data.total ?? 0;
+  } else {
     error = "Could not load products right now. Please try again.";
   }
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));

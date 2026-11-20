@@ -2,8 +2,7 @@ import { Suspense } from "react";
 import type { Metadata } from "next";
 import CustomerFeedback from "../../components/site/CustomerFeedback";
 import { plainText, robotsMeta } from "../../lib/site";
-
-const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+import { getJson } from "../../lib/cachedApi";
 
 type About = {
   title: string;
@@ -18,16 +17,9 @@ type About = {
 const wrap = "mx-auto max-w-3xl px-4 py-10";
 
 // Fetched on the server, so the text is in the page's HTML for search engines.
-// generateMetadata and the page both call this with the same URL and options,
-// so Next sends one request, not two.
+// Remembered for about 5 minutes, so an edit in admin shows up within that time.
 async function getAbout(): Promise<About | null> {
-  try {
-    const res = await fetch(`${API}/store/about`, { cache: "no-store" });
-    if (!res.ok) return null;
-    return (await res.json()) as About;
-  } catch {
-    return null;
-  }
+  return (await getJson<About>("/store/about")).data;
 }
 
 export async function generateMetadata(): Promise<Metadata> {

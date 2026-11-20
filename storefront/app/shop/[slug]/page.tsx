@@ -5,8 +5,7 @@ import type { Metadata } from "next";
 import { SITE_URL, jsonLdString, plainText, robotsMeta, yearRanges } from "../../../lib/site";
 import ProductGallery from "../../../components/site/ProductGallery";
 import AddToCart from "../../../components/site/AddToCart";
-
-const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+import { getJson } from "../../../lib/cachedApi";
 
 type Detail = {
   id: number;
@@ -31,15 +30,11 @@ type Detail = {
 
 type Search = Promise<{ year?: string; model_id?: string }>;
 
-// One fetch shared by the page and generateMetadata (same URL and options, so Next sends it once).
+// Remembered for about 5 minutes (see cachedApi.ts), so price and stock can lag by that much.
+// The page and generateMetadata share the one remembered answer.
 async function getProduct(slug: string): Promise<{ status: number; product: Detail | null }> {
-  try {
-    const res = await fetch(`${API}/store/fitment/product/${encodeURIComponent(slug)}`, { cache: "no-store" });
-    if (!res.ok) return { status: res.status, product: null };
-    return { status: res.status, product: (await res.json()) as Detail };
-  } catch {
-    return { status: 0, product: null };
-  }
+  const { status, data } = await getJson<Detail>(`/store/fitment/product/${encodeURIComponent(slug)}`);
+  return { status, product: data };
 }
 
 // Unknown or unpublished slug: a real 404 and noindex. Anything else is a metadata-only fallback.
