@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import type { Metadata } from "next";
 import CustomerFeedback from "../../components/site/CustomerFeedback";
 import { plainText, robotsMeta } from "../../lib/site";
@@ -40,20 +41,22 @@ export async function generateMetadata(): Promise<Metadata> {
   };
 }
 
-export default async function AboutPage() {
+// The fetch sits inside <Suspense> (like the other pages) because the project builds with Cache Components,
+// which does not allow uncached data outside a Suspense boundary. The text is still part of the HTML the server sends.
+async function AboutContent() {
   const about = await getAbout();
 
   if (!about) {
     return (
-      <main className={wrap}>
+      <>
         <h1 className="text-3xl font-extrabold text-gray-900">About us</h1>
         <p className="mt-3 text-gray-600">This page could not be loaded right now. Please try again in a moment.</p>
-      </main>
+      </>
     );
   }
 
   return (
-    <main className={wrap}>
+    <>
       <h1 className="text-3xl font-extrabold text-gray-900">{about.title}</h1>
       <div className={about.image_url ? "mt-5 grid gap-6 md:grid-cols-[18rem_1fr] md:items-start" : "mt-5"}>
         {about.image_url && (
@@ -78,6 +81,16 @@ export default async function AboutPage() {
           storeUrl={about.ebay_store_url}
         />
       </section>
+    </>
+  );
+}
+
+export default function AboutPage() {
+  return (
+    <main className={wrap}>
+      <Suspense fallback={<p className="text-gray-600">Loading…</p>}>
+        <AboutContent />
+      </Suspense>
     </main>
   );
 }
