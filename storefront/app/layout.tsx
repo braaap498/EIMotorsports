@@ -8,6 +8,7 @@ import CheckoutGateModal from "../components/site/CheckoutGateModal";
 import { CartProvider } from "../components/site/CartProvider";
 import SiteHeader from "../components/site/SiteHeader";
 import SiteFooter from "../components/site/SiteFooter";
+import { SITE_URL, robotsMeta } from "../lib/site";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -20,8 +21,15 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "E&I Motorsports",
+  metadataBase: new URL(SITE_URL),
+  // Pages that set a title get " | E&I Motorsports" added; the home page uses the default.
+  title: {
+    default: "E&I Motorsports | ATV, UTV, Snowmobile, Dirt Bike & Motorcycle Parts",
+    template: "%s | E&I Motorsports",
+  },
   description: "Powersports parts that fit your ATV, UTV, snowmobile, dirt bike, motorcycle or PWC.",
+  openGraph: { siteName: "E&I Motorsports", type: "website" },
+  robots: robotsMeta(true),
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

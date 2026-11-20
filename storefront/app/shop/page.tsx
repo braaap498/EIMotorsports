@@ -1,8 +1,17 @@
 import { Suspense } from "react";
 import Link from "next/link";
+import type { Metadata } from "next";
+import { robotsMeta } from "../../lib/site";
 import ProductImage from "../../components/site/ProductImage";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+
+// Kept out of the index for now: the address is a number (?model_id=123), so it can't say which
+// vehicle it is. Real make/model pages (/parts/polaris/ranger-xp-900) will replace it for search engines.
+export const metadata: Metadata = {
+  title: "Parts for your vehicle",
+  robots: robotsMeta(false),
+};
 
 type Product = {
   id?: string | number;

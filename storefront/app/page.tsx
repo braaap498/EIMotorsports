@@ -1,10 +1,18 @@
 import { Suspense, type ComponentType, type SVGProps } from "react";
 import Link from "next/link";
+import type { Metadata } from "next";
+import { robotsMeta } from "../lib/site";
 import ProductImage from "../components/site/ProductImage";
 import { AtvIcon, UtvIcon, SnowmobileIcon, DirtBikeIcon, MotorcycleIcon, PwcIcon } from "../components/site/icons";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 const PAGE_SIZE = 24;
+
+// ?type= and ?page= are views of the same list, so they all point back to the home page.
+export const metadata: Metadata = {
+  alternates: { canonical: "/" },
+  robots: robotsMeta(true),
+};
 
 const TYPES = [
   { slug: "atv", name: "ATV" },

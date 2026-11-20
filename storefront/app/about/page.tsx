@@ -1,8 +1,8 @@
-"use client";
-
-import { useEffect, useState } from "react";
+import type { Metadata } from "next";
 import CustomerFeedback from "../../components/site/CustomerFeedback";
-import { storeApi } from "../../lib/storeApi";
+import { plainText, robotsMeta } from "../../lib/site";
+
+const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 type About = {
   title: string;
@@ -16,21 +16,34 @@ type About = {
 
 const wrap = "mx-auto max-w-3xl px-4 py-10";
 
-export default function AboutPage() {
-  const [about, setAbout] = useState<About | null>(null);
-  const [failed, setFailed] = useState(false);
+// Fetched on the server, so the text is in the page's HTML for search engines.
+// generateMetadata and the page both call this with the same URL and options,
+// so Next sends one request, not two.
+async function getAbout(): Promise<About | null> {
+  try {
+    const res = await fetch(`${API}/store/about`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as About;
+  } catch {
+    return null;
+  }
+}
 
-  useEffect(() => {
-    let cancelled = false;
-    storeApi<About>("/about")
-      .then((a) => !cancelled && setAbout(a))
-      .catch(() => !cancelled && setFailed(true));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+export async function generateMetadata(): Promise<Metadata> {
+  const about = await getAbout();
+  const description = plainText(about?.body, 155);
+  return {
+    title: about?.title || "About us",
+    ...(description ? { description } : {}),
+    alternates: { canonical: "/about" },
+    robots: robotsMeta(true),
+  };
+}
 
-  if (failed) {
+export default async function AboutPage() {
+  const about = await getAbout();
+
+  if (!about) {
     return (
       <main className={wrap}>
         <h1 className="text-3xl font-extrabold text-gray-900">About us</h1>
@@ -38,7 +51,6 @@ export default function AboutPage() {
       </main>
     );
   }
-  if (!about) return <main className={`${wrap} text-gray-600`}>Loading…</main>;
 
   return (
     <main className={wrap}>

@@ -1,5 +1,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
+import type { Metadata } from "next";
+import { robotsMeta } from "../../lib/site";
 import ProductImage from "../../components/site/ProductImage";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -22,6 +24,38 @@ type Params = Promise<{
   page?: string;
 }>;
 type Cat = { name: string; slug: string };
+
+// Searches and vehicle-filtered lists are endless combinations, so they stay out of the index.
+// A plain category page (?category=slug, optionally &page=N) is indexed, with its own address as canonical.
+export async function generateMetadata({ searchParams }: { searchParams: Params }): Promise<Metadata> {
+  const p = await searchParams;
+  const page = Math.max(1, Number(p.page) || 1);
+  if (p.q || p.model_id || p.year || !p.category) {
+    return { title: p.q ? `Results for “${p.q}”` : "All parts", robots: robotsMeta(false) };
+  }
+
+  let name = "";
+  try {
+    // Same URL and options as the page's own call, so Next only sends it once.
+    const res = await fetch(`${API}/store/categories`, { cache: "no-store" });
+    if (res.ok) {
+      const cats: Cat[] = await res.json();
+      name = cats.find((c) => c.slug === p.category)?.name ?? "";
+    }
+  } catch {
+    /* fall through: no name means the page is left out of the index */
+  }
+  if (!name) return { title: "Parts", robots: robotsMeta(false) };
+
+  const qs = new URLSearchParams({ category: p.category });
+  if (page > 1) qs.set("page", String(page));
+  return {
+    title: page > 1 ? `${name} - Page ${page}` : name,
+    description: `Shop ${name} for ATV, UTV, snowmobile, dirt bike, motorcycle and PWC at E&I Motorsports.`,
+    alternates: { canonical: `/search?${qs}` },
+    robots: robotsMeta(true),
+  };
+}
 
 function pageHref(p: Awaited<Params>, page: number) {
   const qs = new URLSearchParams();
