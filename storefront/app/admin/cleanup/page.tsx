@@ -1172,31 +1172,24 @@ export default function PartsCleanupPage() {
   });
   const tooMany = selected.size - 1 > 1500;
 
-  // Price note (all searches): for every label part (a custom label split on "xx", parts of 4+ characters), do the
-  // products in the list that carry it have different prices? Those prices get an amber "price differs" note so a
-  // different-size or different-kit product is not merged by mistake. Only the price cell is marked, not the row.
-  const partsOf = (p: Item): string[] =>
-    unmergedMode && p.shared_parts
-      ? p.shared_parts
-      : (p.custom_label_sku ?? "")
-          .toUpperCase()
-          .trim()
-          .split("XX")
-          .map((x) => x.trim())
-          .filter((x) => x.length >= 4);
-  const pricesByPart = useMemo(() => {
+  // Price note (all searches): products whose WHOLE custom label is identical (ignoring case and spaces) but whose
+  // prices differ get an amber "price differs" note. Parts of a label and other products' labels are not compared,
+  // so a kit next to its component, or a master next to a leftover duplicate, is not flagged.
+  const labelKey = (p: Item) => (p.custom_label_sku ?? "").toUpperCase().replace(/\s+/g, "");
+  const pricesByLabel = useMemo(() => {
     const m = new Map<string, Set<string>>();
     for (const it of items) {
-      const k = it.list_price == null ? "none" : Number(it.list_price).toFixed(2);
-      for (const part of partsOf(it)) {
-        if (!m.has(part)) m.set(part, new Set());
-        m.get(part)!.add(k);
-      }
+      const key = labelKey(it);
+      if (!key) continue;
+      if (!m.has(key)) m.set(key, new Set());
+      m.get(key)!.add(it.list_price == null ? "none" : Number(it.list_price).toFixed(2));
     }
     return m;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, unmergedMode]);
-  const priceDiffers = (p: Item) => partsOf(p).some((part) => (pricesByPart.get(part)?.size ?? 0) > 1);
+  }, [items]);
+  const priceDiffers = (p: Item) => (pricesByLabel.get(labelKey(p))?.size ?? 0) > 1;
+  // "Find unmerged": merged masters stay in the list only as reference rows (they share a label part with an unmerged
+  // product). They are not counted and not ticked by "Tick all".
+  const countedItems = unmergedMode ? items.filter((i) => !isMaster(i)) : items;
 
   /* ------------------------------------------------------------- render */
   return (
@@ -1297,13 +1290,13 @@ export default function PartsCleanupPage() {
                   {listMode === "items"
                     ? `${items.length} part${items.length === 1 ? "" : "s"} added by item number`
                     : unmergedMode
-                      ? `${items.length} product${items.length === 1 ? "" : "s"} not yet merged that share a custom label number with another product${
-                          items.some(priceDiffers) ? ` (${items.filter(priceDiffers).length} marked because the prices differ)` : ""
-                        }`
+                      ? `${countedItems.length} product${countedItems.length === 1 ? "" : "s"} not yet merged that share a custom label number with another product${
+                          countedItems.some(priceDiffers) ? ` (${countedItems.filter(priceDiffers).length} have the same custom label but a different price)` : ""
+                        }${items.length > countedItems.length ? `. ${items.length - countedItems.length} existing masters shown for reference.` : ""}`
                       : `${items.length} ${searchedExact ? "exact " : ""}result${items.length === 1 ? "" : "s"} for “${searchedQ}”`}
                 </span>
-                <button type="button" className={btn2Cls} onClick={() => applySelection(new Set(items.map((i) => i.id)))} disabled={items.length === 0}>
-                  Tick all {items.length}
+                <button type="button" className={btn2Cls} onClick={() => applySelection(new Set(countedItems.map((i) => i.id)))} disabled={countedItems.length === 0}>
+                  Tick all {countedItems.length}
                 </button>
                 <button type="button" className={btn2Cls} onClick={() => applySelection(new Set())} disabled={selected.size === 0}>
                   Clear ticks
@@ -1360,7 +1353,7 @@ export default function PartsCleanupPage() {
                         <td className="whitespace-nowrap px-3 py-2 text-gray-600">{p.part_number ?? "—"}</td>
                         <td className="px-3 py-2">
                           {priceDiffers(p) ? (
-                            <span title="Another product in this list with the same label number has a different price. Check it is really the same part (size, pack count, kit).">
+                            <span title="Another product in this list has exactly the same custom label but a different price.">
                               <Badge tone="amber">{money(p.list_price)} · price differs</Badge>
                             </span>
                           ) : (

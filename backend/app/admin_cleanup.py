@@ -346,6 +346,7 @@ def unmerged_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get
     CYL0041xx50000KS is split on "xx" into its parts (CYL0041, 50000KS), so a part number that sits inside a
     longer label still counts. Shared parts shorter than 4 characters are ignored as noise. Products that
     share a part are listed next to each other, and each row says which part it shares."""
+    _ensure_unmerge_table(db)  # part_unmerge_log may not exist yet on a fresh server
     rows = db.execute(
         text(
             f"""
@@ -356,7 +357,9 @@ def unmerged_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get
               where btrim(coalesce(p.custom_label_sku, '')) <> '' and length(btrim(t.part)) >= 4
             ),
             merged as (
-              select survivor_product_id as pid from part_merge_log
+              -- a master = a survivor of at least one merge that has NOT since been unmerged
+              select survivor_product_id as pid from part_merge_log l
+              where not exists (select 1 from part_unmerge_log u where u.merge_log_id = l.id)
               group by survivor_product_id having coalesce(sum(merged_count), 0) > 0
             ),
             shared as (
@@ -373,7 +376,8 @@ def unmerged_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get
                    (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
                    (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
                    (select coalesce(sum(l.merged_count), 0) from part_merge_log l
-                     where l.survivor_product_id = p.id) as prior_merges,
+                     where l.survivor_product_id = p.id
+                       and not exists (select 1 from part_unmerge_log u where u.merge_log_id = l.id)) as prior_merges,
                    {_PN_SUBQUERY} as part_number,
                    h.shared_parts
             from hits h
@@ -384,7 +388,10 @@ def unmerged_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get
         ),
         {"limit": limit},
     ).all()
-    return {"total": len(rows), "shown": len(rows), "items": [dict(r._mapping) for r in rows]}
+    items = [dict(r._mapping) for r in rows]
+    # Masters are only here as reference rows (they share a label part with an unmerged product).
+    unmerged = sum(1 for d in items if not d["prior_merges"])
+    return {"total": unmerged, "shown": len(items), "items": items}
 
 
 @router.get("/comma-labels")
