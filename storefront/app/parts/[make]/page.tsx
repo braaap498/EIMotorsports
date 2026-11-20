@@ -1,9 +1,8 @@
-import { Suspense } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { robotsMeta } from "../../../lib/site";
-import { getVehicleIndex } from "../../../lib/seoApi";
+import { getVehicleIndex, type VehicleIndexMake } from "../../../lib/seoApi";
 
 type Params = Promise<{ make: string }>;
 
@@ -19,13 +18,7 @@ export async function generateMetadata({ params }: { params: Params }): Promise<
   };
 }
 
-async function MakeModels({ params }: { params: Params }) {
-  const { make } = await params;
-  const makes = await getVehicleIndex();
-  if (!makes) return <p className="text-red-600">Could not load vehicles right now. Please try again.</p>;
-  const mk = makes.find((m) => m.slug === make);
-  if (!mk) notFound();
-
+function MakeModels({ mk }: { mk: VehicleIndexMake }) {
   return (
     <>
       <nav aria-label="Breadcrumb" className="text-sm text-gray-600">
@@ -47,12 +40,26 @@ async function MakeModels({ params }: { params: Params }) {
   );
 }
 
-export default function MakePage({ params }: { params: Params }) {
+// One sample address so Next can check the page at build time. Every other make is built on first visit.
+export async function generateStaticParams() {
+  const makes = await getVehicleIndex();
+  return [{ make: makes?.[0]?.slug ?? "example-make" }];
+}
+
+// The make is looked up here, outside <Suspense>, so an unknown make gets a real 404 status.
+export default async function MakePage({ params }: { params: Params }) {
+  const { make } = await params;
+  const makes = await getVehicleIndex();
+  const mk = makes?.find((m) => m.slug === make);
+  if (makes && !mk) notFound();
+
   return (
     <main className="mx-auto max-w-6xl p-6">
-      <Suspense fallback={<p className="text-gray-600">Loading…</p>}>
-        <MakeModels params={params} />
-      </Suspense>
+      {mk ? (
+        <MakeModels mk={mk} />
+      ) : (
+        <p className="text-red-600">Could not load vehicles right now. Please try again.</p>
+      )}
     </main>
   );
 }
