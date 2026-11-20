@@ -35,3 +35,16 @@ export function plainText(html: string | null | undefined, max = 155): string {
 export function jsonLdString(data: unknown): string {
   return JSON.stringify(data).replace(/</g, "\\u003c");
 }
+
+// [2015, 2016, 2017, 2019] -> "2015–2017, 2019"
+export function yearRanges(years: number[]): string {
+  const ys = [...new Set(years)].filter((y) => Number.isFinite(y)).sort((a, b) => a - b);
+  const parts: string[] = [];
+  for (let i = 0; i < ys.length; ) {
+    let j = i;
+    while (j + 1 < ys.length && ys[j + 1] === ys[j] + 1) j++;
+    parts.push(j > i ? `${ys[i]}–${ys[j]}` : `${ys[i]}`);
+    i = j + 1;
+  }
+  return parts.join(", ");
+}

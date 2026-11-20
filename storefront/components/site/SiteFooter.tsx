@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-// Every link opens a tab of the Help page (/help#returns and so on).
+// The Help links open a tab of the Help page (/help#returns and so on).
 const LINKS = [
+  { href: "/parts", label: "Shop by vehicle" },
   { href: "/help#shipping", label: "Shipping" },
   { href: "/help#returns", label: "Returns" },
   { href: "/help#refunds", label: "Refunds" },

@@ -2,7 +2,7 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { SITE_URL, jsonLdString, plainText, robotsMeta } from "../../../lib/site";
+import { SITE_URL, jsonLdString, plainText, robotsMeta, yearRanges } from "../../../lib/site";
 import ProductGallery from "../../../components/site/ProductGallery";
 import AddToCart from "../../../components/site/AddToCart";
 
@@ -24,6 +24,9 @@ type Detail = {
   description: string | null;
   photos: { url: string; thumb: string; fallback: string | null }[];
   specifics: { name: string; value: string }[];
+  category?: { name: string; slug: string } | null;
+  fits?: { make: string; make_slug: string; model: string; model_slug: string; years: number[] }[];
+  fits_total?: number;
 };
 
 type Search = Promise<{ year?: string; model_id?: string }>;
@@ -47,8 +50,10 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
 
   // Every link to this product, with or without ?model_id=&year=, points at one address.
   const url = `/shop/${p.slug}`;
+  const fitsText = (p.fits ?? []).slice(0, 3).map((f) => `${f.make} ${f.model}`).join(", ");
   const description =
-    plainText(p.description, 150) || `${p.title}.${p.price ? ` $${p.price}.` : ""} Order from E&I Motorsports.`;
+    plainText(p.description, 150) ||
+    `${p.title}.${fitsText ? ` Fits ${fitsText}.` : ""}${p.price ? ` $${p.price}.` : ""} Order from E&I Motorsports.`;
   const image = p.photos[0]?.url;
   return {
     title: p.title,
@@ -132,6 +137,13 @@ async function Product({ params }: { params: Promise<{ slug: string }> }) {
       <ProductGallery key={p.sku} photos={p.photos} title={p.title} />
 
       <div>
+        {p.category && (
+          <p className="mb-1 text-sm">
+            <Link href={`/search?category=${encodeURIComponent(p.category.slug)}`} className="text-gray-600 underline">
+              {p.category.name}
+            </Link>
+          </p>
+        )}
         <h1 className="text-2xl font-bold">{p.title}</h1>
         {p.price && <p className="mt-2 text-2xl">${p.price}</p>}
         <AddToCart productId={p.id} slug={p.slug} price={p.price} available={p.available} stockMode={p.stock_mode} backordered={p.backordered} expectedDate={p.expected_date} daysUntil={p.days_until} />
@@ -156,6 +168,25 @@ async function Product({ params }: { params: Promise<{ slug: string }> }) {
             className="product-description mt-6 text-sm"
             dangerouslySetInnerHTML={{ __html: p.description }}
           />
+        )}
+
+        {p.fits && p.fits.length > 0 && (
+          <section className="mt-6 text-sm">
+            <h2 className="font-semibold">Fits these vehicles</h2>
+            <ul className="mt-2 space-y-1">
+              {p.fits.map((f) => (
+                <li key={`${f.make_slug}/${f.model}`}>
+                  <Link href={`/parts/${f.make_slug}/${f.model_slug}`} className="text-gray-800 underline">
+                    {f.make} {f.model}
+                  </Link>
+                  {f.years.length > 0 && <span className="text-gray-500"> ({yearRanges(f.years)})</span>}
+                </li>
+              ))}
+            </ul>
+            {(p.fits_total ?? 0) > p.fits.length && (
+              <p className="mt-1 text-gray-500">and {(p.fits_total ?? 0) - p.fits.length} more</p>
+            )}
+          </section>
         )}
       </div>
     </div>
