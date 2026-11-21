@@ -40,6 +40,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
   const [flash, setFlash] = useState<Flash | null>(null);
   const [bin, setBin] = useState("");
   const [kind, setKind] = useState("box");
+  const [pendingCode, setPendingCode] = useState<string | null>(null);
   const [sizeId, setSizeId] = useState("225x125");
   const [sym, setSym] = useState<Symbology>("datamatrix");
   const [copies, setCopies] = useState(1);
@@ -67,6 +68,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
   async function link(code: string) {
     if (!data) return;
     setFlash(null);
+    setPendingCode(null);
     try {
       const r = await api<{ already?: boolean }>(`/inventory/products/${data.product.id}/barcodes`, {
         method: "POST",
@@ -240,6 +242,7 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
               onClick={() => {
                 setData(null);
                 setFlash(null);
+                setPendingCode(null);
               }}
             >
               Pick a different part
@@ -296,16 +299,39 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
             {canEdit && (
               <div className="space-y-2 rounded-lg border border-gray-200 bg-white p-4">
                 <div className="text-sm font-medium">Link another barcode: scan it here</div>
-                <div className="grid gap-2 md:grid-cols-[1fr_auto]">
-                  <ScanBox ref={scanRef} onScan={link} placeholder="Scan the box / part / UPC label…" />
-                  <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value)}>
-                    <option value="box">Box / package</option>
-                    <option value="part">Part itself</option>
-                    <option value="upc">Manufacturer UPC</option>
-                    <option value="other">Other</option>
-                    <option value="shelf">Shelf label</option>
-                  </select>
-                </div>
+                {pendingCode ? (
+                  <div className="space-y-2 rounded-lg border-2 border-amber-300 bg-amber-50 p-3">
+                    <p className="text-sm">
+                      Link <span className="rounded bg-white px-1.5 py-0.5 font-mono">{pendingCode}</span> to{" "}
+                      <b>{data.product.sku}</b>?
+                    </p>
+                    <div className="flex flex-wrap items-end gap-2">
+                      <Field label="This barcode is on the…">
+                        <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value)}>
+                          <option value="box">Box / package</option>
+                          <option value="part">Part itself</option>
+                          <option value="upc">Manufacturer UPC</option>
+                          <option value="other">Other</option>
+                          <option value="shelf">Shelf label</option>
+                        </select>
+                      </Field>
+                      <button className={btnCls} onClick={() => link(pendingCode)}>
+                        Link barcode
+                      </button>
+                      <button
+                        className={btn2Cls}
+                        onClick={() => {
+                          setPendingCode(null);
+                          setTimeout(() => scanRef.current?.focus(), 0);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <ScanBox ref={scanRef} onScan={setPendingCode} placeholder="Scan the box / part / UPC label…" />
+                )}
               </div>
             )}
           </section>
