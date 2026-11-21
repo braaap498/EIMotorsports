@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
-import { Notice, btnCls, btn2Cls, inputCls, Field } from "../ui";
+import { Notice } from "../ui";
+import LinkConfirm from "./LinkConfirm";
 import ProductPicker, { type PickRow } from "./ProductPicker";
 import type { BarcodeRef, Prod } from "./shared";
 
@@ -62,28 +63,18 @@ export default function UnknownCode({
           Your account can’t link new barcodes. Set this box aside and ask someone with the Barcodes permission.
         </Notice>
       ) : picked ? (
-        <div className="space-y-3">
-          <p className="text-sm">
-            Link it to <b>{picked.sku}</b> — {picked.title}?
-          </p>
-          <div className="flex flex-wrap items-end gap-2">
-            <Field label="This barcode is on the…">
-              <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value)}>
-                <option value="box">Box / package</option>
-                <option value="part">Part itself</option>
-                <option value="upc">Manufacturer UPC</option>
-                <option value="shelf">Shelf label</option>
-                <option value="other">Other</option>
-              </select>
-            </Field>
-            <button className={btnCls} disabled={busy} onClick={link}>
-              {busy ? "Linking…" : "Link and add"}
-            </button>
-            <button className={btn2Cls} onClick={() => setPicked(null)}>
-              Pick a different part
-            </button>
-          </div>
-        </div>
+        <LinkConfirm
+          code={code}
+          sku={picked.sku}
+          title={picked.title}
+          kind={kind}
+          onKind={setKind}
+          onLink={link}
+          busy={busy}
+          note="It will be added to this list as soon as it’s linked."
+          onCancel={() => setPicked(null)}
+          cancelLabel="Pick a different part"
+        />
       ) : (
         <ProductPicker onPick={setPicked} />
       )}

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Field, Notice, btnCls, btn2Cls, inputCls } from "../ui";
 import ProductPicker from "./ProductPicker";
+import LinkConfirm from "./LinkConfirm";
 import ScanBox from "./ScanBox";
 import { beep, type Prod } from "./shared";
 import {
@@ -300,35 +301,17 @@ export default function BarcodePanel({ canEdit, active }: { canEdit: boolean; ac
               <div className="space-y-2 rounded-lg border border-gray-200 bg-white p-4">
                 <div className="text-sm font-medium">Link another barcode: scan it here</div>
                 {pendingCode ? (
-                  <div className="space-y-2 rounded-lg border-2 border-amber-300 bg-amber-50 p-3">
-                    <p className="text-sm">
-                      Link <span className="rounded bg-white px-1.5 py-0.5 font-mono">{pendingCode}</span> to{" "}
-                      <b>{data.product.sku}</b>?
-                    </p>
-                    <div className="flex flex-wrap items-end gap-2">
-                      <Field label="This barcode is on the…">
-                        <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value)}>
-                          <option value="box">Box / package</option>
-                          <option value="part">Part itself</option>
-                          <option value="upc">Manufacturer UPC</option>
-                          <option value="other">Other</option>
-                          <option value="shelf">Shelf label</option>
-                        </select>
-                      </Field>
-                      <button className={btnCls} onClick={() => link(pendingCode)}>
-                        Link barcode
-                      </button>
-                      <button
-                        className={btn2Cls}
-                        onClick={() => {
-                          setPendingCode(null);
-                          setTimeout(() => scanRef.current?.focus(), 0);
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
+                  <LinkConfirm
+                    code={pendingCode}
+                    sku={data.product.sku}
+                    kind={kind}
+                    onKind={setKind}
+                    onLink={() => link(pendingCode)}
+                    onCancel={() => {
+                      setPendingCode(null);
+                      setTimeout(() => scanRef.current?.focus(), 0);
+                    }}
+                  />
                 ) : (
                   <ScanBox ref={scanRef} onScan={setPendingCode} placeholder="Scan the box / part / UPC label…" />
                 )}
