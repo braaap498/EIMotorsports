@@ -343,14 +343,14 @@ function ProductsTab({ avail, setMsg }: { avail: Avail | null; setMsg: (m: { kin
               {isOpen && (
                 <div className="space-y-2 border-t border-gray-100 p-3">
                   {it.listings.map((l) => (
-                    <div key={l.listing_id} className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <div key={l.listing_id} className="grid grid-cols-1 items-center gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1fr)_9.5rem_8rem]">
                       <label className="flex items-center gap-2">
                         <input type="checkbox" checked={l.dropship_ok} disabled={busy || (!it.has_distributor && !l.dropship_ok)} title={!it.has_distributor && !l.dropship_ok ? "No Automatic Distributors part is linked to this product" : ""} onChange={(e) => void tickListing(l, e.target.checked)} />
                         <span>
                           Drop ship <span className="text-gray-600">{l.store} · item {l.item_id}</span>
                         </span>
                       </label>
-                      <label className="flex items-center gap-1 text-gray-700" title="How many units of this product one sale of this listing uses. A 3-pack of a one-part product = 3. The listing shows units available divided by this, and each order sets aside quantity x this.">
+                      <label className="flex items-center justify-between gap-2 text-gray-700" title="How many units of this product one sale of this listing uses. A 3-pack of a one-part product = 3. The listing shows units available divided by this, and each order sets aside quantity x this.">
                         Pieces per sale
                         <input
                           key={`${l.listing_id}-${l.pieces_per_sale}`}
@@ -365,9 +365,9 @@ function ProductsTab({ avail, setMsg }: { avail: Avail | null; setMsg: (m: { kin
                           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
                         />
                       </label>
-                      {typeof l.listing_qty === "number" && (
-                        <span className="text-xs text-gray-500">shows {l.listing_qty} on eBay</span>
-                      )}
+                      <span className="text-xs text-gray-500">
+                        {typeof l.listing_qty === "number" ? `shows ${l.listing_qty} on eBay` : ""}
+                      </span>
                     </div>
                   ))}
                   <div className="flex flex-wrap items-center gap-2 border-t border-gray-100 pt-2">
