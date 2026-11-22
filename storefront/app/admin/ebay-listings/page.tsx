@@ -9,6 +9,7 @@ import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 import { SortTh, type SortState } from "../../../components/admin/SortHeader";
 import ClearableInput from "../../../components/admin/ClearableInput";
+import PiecesBox from "../../../components/admin/PiecesBox";
 import ProductPicker, { type PickRow } from "../../../components/admin/inventory/ProductPicker";
 
 /* ------------------------------------------------------------------ types */
@@ -38,6 +39,7 @@ type RepoItem = {
   price: number | null;
   currency: string;
   quantity: number | null;
+  pieces_per_sale?: number; // units of the product one sale of this listing uses (3 for a 3-pack); applies to every order
   quantity_from_ebay?: boolean; // true when our stock is 0 and this number is what eBay shows as available
   status: string | null;
   active: boolean;
@@ -1295,6 +1297,7 @@ export default function EbayLiveListingsPage() {
                     <SortTh label="Custom label" k="label" sort={sortState} onSort={onSort} className="px-2 py-2" />
                     <SortTh label="Price" k="price" sort={sortState} onSort={onSort} className="px-2 py-2" />
                     <SortTh label="Quantity" k="qty" sort={sortState} onSort={onSort} className="px-2 py-2" />
+                    <th className="px-2 py-2" title="How many units of the product one sale of this listing uses (a 3-pack = 3). Applies to every order, drop shipped or not.">Pieces per sale</th>
                     <SortTh label="Status" k="status" sort={sortState} onSort={onSort} className="px-2 py-2" />
                   </tr>
                 </thead>
@@ -1370,6 +1373,17 @@ export default function EbayLiveListingsPage() {
                             </span>
                           )}
                           {it.quantity_from_ebay && <span className="ml-1 text-xs text-gray-500" title="Our stock on hand is 0; this is the quantity eBay shows as available">(eBay)</span>}
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-2">
+                          <PiecesBox
+                            listingId={it.listing_id}
+                            value={it.pieces_per_sale ?? 1}
+                            onError={(t) => setActMsg({ kind: "error", text: t })}
+                            onSaved={(pc, queued) => {
+                              setRepo((cur) => (cur ? { ...cur, items: cur.items.map((x) => (x.listing_id === it.listing_id ? { ...x, pieces_per_sale: pc } : x)) } : cur));
+                              setActMsg({ kind: "success", text: `${it.item_id}: ${pc} piece${pc === 1 ? "" : "s"} per sale.${queued ? " The eBay quantity is queued to update." : ""} Reload to see the new quantity.` });
+                            }}
+                          />
                         </td>
                         <td className="whitespace-nowrap px-2 py-2">
                           <Badge tone={it.active ? "green" : "gray"}>{it.status || "no status"}</Badge>
