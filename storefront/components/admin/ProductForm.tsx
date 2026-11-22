@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import DescriptionEditor from "./DescriptionEditor";
 import FitmentPanel from "./FitmentPanel";
-import KitPartsPanel, { type KitPart, type LabelBy } from "./KitPartsPanel";
+import KitPartsPanel, { type Availability, type KitPart, type LabelBy } from "./KitPartsPanel";
 import PhotosPanel, { type Photo } from "./PhotosPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
 import { useAccess } from "./AdminAccess";
@@ -148,6 +148,9 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [kitParts, setKitParts] = useState<KitPart[]>([]); // pieces bought from a vendor that make up this product
   // the Manufacturer part # comes from the pieces' own numbers (their list), so it is shown but edited on the pieces
   const [mpnLocked, setMpnLocked] = useState(false);
+  // a product made of several distributor parts shows how many the distributor's stock can make, not an editable count
+  const [kitAvail, setKitAvail] = useState<Availability | null>(null);
+  const kitCount = productId && kitAvail?.is_kit ? kitAvail.available : null;
   const partMpns = Array.from(new Set(kitParts.map((p) => (p.mfr_number ?? "").trim()).filter(Boolean)));
   const mpnFromParts = productId ? mpnLocked : partMpns.length > 0;
   const mpnShown = !productId && partMpns.length > 0 ? partMpns.join(" / ") : null;
@@ -393,12 +396,24 @@ export default function ProductForm({ productId }: { productId?: number }) {
       <Field key={f.key} label={f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
         <input
           className={inputCls}
-          disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts)}
+          disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts) || (f.key === "quantity_on_hand" && kitCount !== null)}
           type={f.kind === "text" ? "text" : "number"}
           step={f.kind === "number" ? f.step : f.kind === "int" ? "1" : undefined}
-          value={f.key === "manufacturer_part_number" && mpnShown ? mpnShown : vals[f.key] ?? ""}
+          value={
+            f.key === "manufacturer_part_number" && mpnShown
+              ? mpnShown
+              : f.key === "quantity_on_hand" && kitCount !== null
+                ? String(kitCount)
+                : vals[f.key] ?? ""
+          }
           onChange={(e) => set(f.key, e.target.value)}
         />
+        {f.key === "quantity_on_hand" && kitCount !== null && (
+          <span className="mt-1 block text-xs font-normal text-gray-500">
+            How many kits the distributor parts below can make (the part with the fewest decides). Not editable.
+            {Number(vals.quantity_on_hand ?? 0) > 0 ? ` Kits counted on our own shelf: ${vals.quantity_on_hand}.` : ""}
+          </span>
+        )}
         {f.key === "manufacturer_part_number" && mpnFromParts && (
           <span className="mt-1 block text-xs font-normal text-gray-500">
             This shows the manufacturer numbers of the distributor parts below. To change one, change it on that part.
@@ -557,6 +572,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
             set("custom_label_sku", c);
             if (baseline) setBaseline({ ...baseline, custom_label_sku: c });
           }}
+          onAvail={setKitAvail}
           onMpn={(m, locked) => {
             setMpnLocked(locked);
             if (productId && locked) {

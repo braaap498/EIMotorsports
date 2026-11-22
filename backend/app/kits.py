@@ -503,6 +503,35 @@ class PartsIn(BaseModel):
     label_by: str = Field("mfr", pattern=LABEL_BY)
 
 
+def availability_of(db: Session, product_id: int) -> Optional[dict]:
+    """How many of this product the distributor stock can make: for each piece, floor(stock / pieces needed per product); the
+    scarcest piece decides. A piece's stock is what its catalog item shows at the distributor's Indiana and Nevada warehouses
+    (plus the single stock number of a vendor like Rocky Mountain), the same warehouses the availability rule counts
+    (availability.py dist_sql). A piece that is not matched to a live catalog item counts as 0. None when there are no pieces.
+    Read-only: nothing is stored or sent anywhere from this."""
+    rows = db.execute(
+        text(
+            "select k.id, k.part_number, k.quantity, si.id as si_id, coalesce(si.active, false) as active, "
+            "(coalesce(si.qty_indiana, 0) + coalesce(si.qty_nevada, 0) + coalesce(si.qty_other, 0)) as stock "
+            "from product_kit_parts k left join supplier_items si on si.id = k.supplier_item_id "
+            "where k.product_id = :p order by k.sort_order, k.id"
+        ),
+        {"p": product_id},
+    ).all()
+    if not rows:
+        return None
+    parts = []
+    for r in rows:
+        need = max(int(r.quantity or 1), 1)
+        matched = r.si_id is not None and bool(r.active)
+        stock = int(r.stock or 0) if matched else 0
+        parts.append({"id": r.id, "part_number": r.part_number, "need": need, "matched": matched, "stock": stock, "can_make": stock // need})
+    low = min(p["can_make"] for p in parts)
+    for p in parts:
+        p["limiting"] = p["can_make"] == low and len(parts) > 1
+    return {"available": low, "is_kit": len(parts) > 1, "parts": parts}
+
+
 def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]:
     rows = db.execute(
         text(
@@ -636,6 +665,7 @@ def get_kit(product_id: int, db: Session = Depends(get_db), user: AuthUser = Dep
         "can_sync": user.role in ("owner", "admin"),
         "mpn": _top_mpn(db, product_id) or None,
         "mpn_locked": mpn_locked(db, product_id),
+        "availability": availability_of(db, product_id),
     }
 
 
@@ -655,6 +685,7 @@ def put_parts(product_id: int, body: PartsIn, db: Session = Depends(get_db)):
         "listings_to_update": len(listings) if res["cls_changed"] else 0,
         "mpn": _top_mpn(db, product_id) or None,
         "mpn_locked": mpn_locked(db, product_id),
+        "availability": availability_of(db, product_id),
     }
 
 

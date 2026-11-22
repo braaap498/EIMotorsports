@@ -19,6 +19,13 @@ export type KitPart = {
   mfr_number?: string | null;
 };
 
+// What the distributor's stock can make of this product (the scarcest piece decides); read-only, worked out by the server.
+export type Availability = {
+  available: number;
+  is_kit: boolean;
+  parts: { id: number; part_number: string; need: number; matched: boolean; stock: number; can_make: number; limiting: boolean }[];
+};
+
 type Vendor = { id: number; name: string; has_catalog: boolean; supplier?: string | null };
 type CatItem = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
@@ -79,6 +86,7 @@ export default function KitPartsPanel({
   labelBy,
   onLabelByChange,
   onMpn,
+  onAvail,
 }: {
   productId?: number;
   parts: KitPart[];
@@ -93,6 +101,8 @@ export default function KitPartsPanel({
   onLabelByChange: (v: LabelBy) => void;
   // the product's Manufacturer part # as the server has it (the pieces' numbers, joined), and whether it comes from the pieces
   onMpn?: (mpn: string | null, locked: boolean) => void;
+  // the kit's available count from the distributor stock (null when there are no parts), for the product's quantity field
+  onAvail?: (a: Availability | null) => void;
 }) {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [vendorId, setVendorId] = useState<number | "">("");
@@ -123,6 +133,7 @@ export default function KitPartsPanel({
   const [canSync, setCanSync] = useState(false);
   const [results2, setResults2] = useState<SyncResult[] | null>(null);
   const [smRes, setSmRes] = useState<SmResult[] | null>(null);
+  const [avail, setAvail] = useState<Availability | null>(null);
   const [dirty, setDirty] = useState(false);
   const [savedCls, setSavedCls] = useState<string | null>(null);
   // the parts as last saved, so Cancel changes can put them back
@@ -152,7 +163,7 @@ export default function KitPartsPanel({
   // existing product: load what is saved
   useEffect(() => {
     if (!productId) return;
-    api<{ cls: string | null; parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[]; can_sync: boolean; mpn?: string | null; mpn_locked?: boolean }>(`/kits/${productId}`)
+    api<{ cls: string | null; parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[]; can_sync: boolean; mpn?: string | null; mpn_locked?: boolean; availability?: Availability | null }>(`/kits/${productId}`)
       .then((r) => {
         const loaded = r.parts.map((p) => ({ ...p, key: `p${p.id}`, description: p.description ?? "" }));
         onChange(loaded);
@@ -162,6 +173,8 @@ export default function KitPartsPanel({
         setSavedCls(r.cls);
         setDirty(false);
         onMpn?.(r.mpn ?? null, !!r.mpn_locked);
+        setAvail(r.availability ?? null);
+        onAvail?.(r.availability ?? null);
       })
       .catch((e) => setMsg({ kind: "error", text: errMsg(e) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -331,7 +344,7 @@ export default function KitPartsPanel({
     setMsg(null);
     setResults2(null);
     try {
-      const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number; mpn?: string | null; mpn_locked?: boolean }>(
+      const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number; mpn?: string | null; mpn_locked?: boolean; availability?: Availability | null }>(
         `/kits/${productId}/parts`,
         { method: "PUT", body: { parts: payloadParts(), label_by: labelBy } }
       );
@@ -339,6 +352,8 @@ export default function KitPartsPanel({
       setSavedCls(r.cls);
       onSaved?.(r.cls);
       onMpn?.(r.mpn ?? null, !!r.mpn_locked);
+      setAvail(r.availability ?? null);
+      onAvail?.(r.availability ?? null);
       let text = !r.cls
         ? "Parts saved (no custom label yet)."
         : r.cls_changed
@@ -396,6 +411,18 @@ export default function KitPartsPanel({
                         onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, mfr_number: e.target.value } : x)))}
                       />
                     </label>
+                    {(() => {
+                      const a = avail?.parts.find((x) => `p${x.id}` === p.key);
+                      if (!a) return null;
+                      return (
+                        <div className={`mt-1 text-xs ${a.limiting ? "font-semibold text-amber-800" : "text-gray-600"}`}>
+                          {a.matched
+                            ? `Distributor stock ${a.stock.toLocaleString()}${a.need > 1 ? `, ${a.need} per kit` : ""}: enough for ${a.can_make.toLocaleString()}`
+                            : "Not matched to a distributor catalog part, so it counts as 0"}
+                          {a.limiting ? " (the fewest, so it sets the count)" : ""}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div className="flex items-center gap-5 text-sm">
                     <div>
@@ -426,6 +453,14 @@ export default function KitPartsPanel({
         <span className="font-mono">{cls || "(none yet)"}</span>
         {cls.length > 50 && <span className="ml-2 text-xs text-red-700">{cls.length} characters: eBay allows 50</span>}
       </div>
+
+      {avail && avail.parts.length > 0 && (
+        <div className="rounded bg-gray-50 p-2 text-sm">
+          <span className="text-xs text-gray-500">{avail.is_kit ? "Kit available from distributor stock: " : "Available from distributor stock: "}</span>
+          <span className="font-semibold">{avail.available.toLocaleString()}</span>
+          {dirty && <span className="ml-2 text-xs text-gray-500">(as last saved; save the parts to update)</span>}
+        </div>
+      )}
 
       {parts.some((p) => p.supplier_item_id) && (
         <label className="flex flex-wrap items-center gap-2 text-xs">
