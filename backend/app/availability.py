@@ -1,19 +1,17 @@
 """
 What is AVAILABLE to sell, counting the distributor's stock as well as our own shelf. Mounted at /admin/availability/* (admin only).
 
-DROP SHIP NUMBER: a product or listing marked DROP SHIP shows the LOWEST of our shelf, the Indiana warehouse and the Nevada warehouse,
-ignoring any that is at 0 (so it moves to the next one when one runs out), and 0 only when all three are at 0 (dropship_qty_sql).
-Everything below describes the number for products that are NOT marked drop ship.
+DROP SHIP NUMBER: a product or listing marked DROP SHIP shows our shelf PLUS the distributor's stock (Indiana + Nevada), dropship_qty_sql.
+A product NOT marked drop ship shows our shelf only (minus what is set aside).
 
-THE RULE (a product or listing marked DROP SHIP always counts the distributor's stock; everything else only while the master switch
-"Count distributor stock" is ON; with the switch OFF and nothing marked, every number is the shelf count minus what is set aside)
+THE RULE (a product or listing marked DROP SHIP counts the distributor's stock; everything else is OUR SHELF ONLY: the shelf count
+minus what is set aside. The master switch "Count distributor stock" no longer adds distributor stock to an unmarked product)
   own          quantity_on_hand minus parts set aside (app/stock.py), never below 0
   distributor  Automatic Distributors Indiana + Nevada stock for the product's parts (product_kit_parts). With several pieces
                the scarcest piece decides: min over the pieces of floor(stock / pieces needed per product)
-  a SINGLE-part product   available = own + distributor
-  a KIT (more than one piece) is made from our own shelf, so available = own only, UNLESS drop shipping is allowed for it:
-                          products.dropship_ok = all its listings, channel_listings.dropship_ok = just that one listing.
-                          Then available = own + distributor (the scarcest piece).
+  NOT marked drop ship    available = own only (single part or kit)
+  marked drop ship        products.dropship_ok = all its listings, channel_listings.dropship_ok = just that one listing.
+                          The number is our shelf plus the distributor's stock (dropship_qty_sql).
   A piece with no live catalog item (not linked, or the item is inactive) counts as 0 distributor stock.
 
 WHO USES IT
@@ -44,7 +42,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
-from app.auth import AuthUser, require_admin, require_route_access
+from app.auth import AuthUser, needs, require_admin, require_route_access
 from app.database import _session_factory, get_db
 from app.stock import available_sql
 
@@ -166,24 +164,17 @@ def wh_sql(p: str, col: str) -> str:
 
 
 def dropship_qty_sql(p: str = "p") -> str:
-    """The number a DROP SHIP listing shows: the LOWEST of our own shelf, the Indiana warehouse and the Nevada warehouse, not
-    counting any that is at 0. When one runs out the number moves up to the next lowest; it is 0 only when all three are at 0."""
-    return (
-        f"coalesce(least(nullif({available_sql(p)}, 0), nullif({wh_sql(p, 'qty_indiana')}, 0), "
-        f"nullif({wh_sql(p, 'qty_nevada')}, 0)), 0)"
-    )
+    """The number a DROP SHIP product or listing shows: our own shelf PLUS the distributor's stock (Indiana + Nevada; with several
+    pieces the scarcest piece decides). Before, it was the lowest non-empty of the three."""
+    return f"({available_sql(p)} + {dist_sql(p)})"
 
 
 def extra_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False, flag: str = "dropship_ok") -> str:
     """What the distributor adds on top of our own count for product `p`.
-    A product or listing that is marked DROP SHIP (`{p}.dropship_ok`, or `ovr`, an SQL boolean such as "coalesce(cl.dropship_ok, false)")
-    always counts the distributor's stock, whether it is a single part or a kit, and whatever the master switch says.
-    Anything not marked counts it only while the master switch is ON and the product is a single part."""
-    switch = "true" if ignore_switch else f"{_setting_sql('use_distributor_stock', 'off')} = 'on'"
-    return (
-        f"(case when {p}.{flag} or {ovr} then {dist_sql(p)} "
-        f"when {switch} and {parts_count_sql(p)} = 1 then {dist_sql(p)} else 0 end)"
-    )
+    Only a product or listing marked DROP SHIP (`{p}.dropship_ok`, or `ovr`, an SQL boolean such as "coalesce(cl.dropship_ok, false)")
+    counts the distributor's stock, whether it is a single part or a kit. Anything NOT marked is our own shelf only: the master
+    switch no longer adds distributor stock to an unmarked product. (`ignore_switch` is kept so callers do not change.)"""
+    return f"(case when {p}.{flag} or {ovr} then {dist_sql(p)} else 0 end)"
 
 
 def effective_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False, flag: str = "dropship_ok") -> str:
@@ -199,7 +190,7 @@ def web_effective_sql(p: str = "p") -> str:
     """What the WEBSITE can sell of product `p`. Only the product's own website Drop ship tick (products.web_dropship_ok) counts here;
     the eBay drop ship ticks (per listing, in Sales channels) never change what the website shows, and neither does the
     'Count distributor stock' switch.
-      ticked   -> the lowest non-empty of our shelf, Indiana and Nevada; 0 (out of stock, cannot be ordered) when all three are empty
+      ticked   -> our shelf plus the distributor's stock; 0 (out of stock, cannot be ordered) when both are empty
       unticked -> our own shelf only (what is not set aside for other orders)"""
     return f"(case when coalesce({p}.web_dropship_ok, false) then {dropship_qty_sql(p)} else {available_sql(p)} end)"
 
@@ -207,6 +198,59 @@ def web_effective_sql(p: str = "p") -> str:
 def stock_mode_sql(p: str = "p") -> str:
     """SQL: how the website shows stock for product `p`: 'available' or 'count'."""
     return f"coalesce(nullif({p}.stock_display, ''), {_setting_sql('stock_display_default', 'available')})"
+
+
+QTY_READ = ("products.view", "products.edit_details", "products.create")
+
+
+@router.get("/products/{product_id}/quantities")
+@needs(*QTY_READ)
+def product_quantities(product_id: int, db: Session = Depends(get_db)):
+    """Everything the product screen's Quantities box shows, read only: our shelf (total and per warehouse), the distributor's
+    Indiana and Nevada, and the Total Quantity Available (our shelf only, or our shelf plus the distributor when the product is
+    set to drop ship)."""
+    r = db.execute(
+        text(
+            f"select p.id, coalesce(p.quantity_on_hand, 0) as qoh, {available_sql('p')} as own, {parts_count_sql('p')} as parts, "
+            f"{dist_sql('p')} as dist, {wh_sql('p', 'qty_indiana')} as indiana, {wh_sql('p', 'qty_nevada')} as nevada, "
+            "coalesce(p.dropship_ok, false) as ds, "
+            "(select count(*) from channel_listings cl where cl.product_id = p.id and coalesce(cl.dropship_ok, false)) as ds_listings "
+            "from products p where p.id = :i"
+        ),
+        {"i": product_id},
+    ).first()
+    if not r:
+        raise HTTPException(404, "Product not found")
+    whs: list[dict] = []
+    try:
+        rows = db.execute(
+            text(
+                "select w.id, w.name, w.is_default, coalesce(ws.quantity, 0) as q from warehouses w "
+                "left join warehouse_stock ws on ws.warehouse_id = w.id and ws.product_id = :i "
+                "where coalesce(w.active, true) order by w.is_default desc, w.id"
+            ),
+            {"i": product_id},
+        ).all()
+        others = sum(int(x.q) for x in rows if not x.is_default)
+        for x in rows:
+            q = max(0, int(r.qoh) - others) if x.is_default else int(x.q)
+            whs.append({"name": x.name, "quantity": q, "main": bool(x.is_default)})
+    except Exception:
+        db.rollback()
+    dist = int(r.dist or 0)
+    return {
+        "ei_total": int(r.qoh),
+        "own_available": int(r.own),
+        "warehouses": whs,
+        "indiana": int(r.indiana or 0),
+        "nevada": int(r.nevada or 0),
+        "distributor": dist,
+        "parts": int(r.parts or 0),
+        "is_kit": int(r.parts or 0) > 1,
+        "drop_ship": bool(r.ds),
+        "drop_ship_listings": int(r.ds_listings or 0),
+        "total_available": int(r.own) + (dist if r.ds else 0),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -394,9 +438,8 @@ class OnIn(BaseModel):
 
 
 def _queue_product(db: Session, product_id: int) -> int:
-    """Queue eBay quantity updates for this product's listings (the existing queue; only stores that allow it). Nothing when the switch is off."""
-    if not switch_on(db):
-        return 0
+    """Queue eBay quantity updates for this product's listings (the existing queue; only stores that allow it). Ticking or unticking
+    Drop ship changes the number, so this runs whatever the master switch says."""
     from app.ebay_sales import enqueue_product
 
     return enqueue_product(db, product_id)

@@ -7,6 +7,7 @@ import { api, errMsg } from "../../lib/adminApi";
 import DescriptionEditor from "./DescriptionEditor";
 import FitmentPanel from "./FitmentPanel";
 import PartTypePicker from "./PartTypePicker";
+import QuantitiesPanel from "./QuantitiesPanel";
 import KitPartsPanel, { type Availability, type KitPart, type LabelBy } from "./KitPartsPanel";
 import PhotosPanel, { type Photo } from "./PhotosPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
@@ -405,7 +406,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
           />
         </Field>
       ) : (
-      <Field key={f.key} label={f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
+      <Field key={f.key} label={f.key === "quantity_on_hand" && kitCount === null ? "E&I Warehouse Quantity" : f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
         <input
           className={inputCls}
           disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts) || (f.key === "quantity_on_hand" && kitCount !== null)}
@@ -597,6 +598,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
         <section className={card}>
           <h2 className="text-lg font-semibold">Price &amp; stock</h2>
           <div className={grid}>{renderFields(PRICING)}</div>
+          {productId && <QuantitiesPanel productId={productId} refreshKey={kitAvail} />}
         </section>
 
         <section className={card}>
