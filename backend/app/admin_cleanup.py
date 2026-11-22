@@ -1299,25 +1299,19 @@ def unmerge(log_id: int, body: UnmergeIn, db: Session = Depends(get_db), user: A
         rs = set(restore_ids)
         fit = [r for r in (snap.get("fitment") or []) if r.get("product_id") in rs]
         _restore_rows(db, "product_fitment", fit, where_sql="where exists (select 1 from vehicles v where v.id = r.vehicle_id)")
-        # Every restored product also gets the kept product's CURRENT fitment (the verified combined list), so
-        # merging them again in any grouping starts from the same fitment the single merged product had.
-        shared_fit = db.execute(
-            text(
-                "insert into product_fitment (product_id, vehicle_id, source) "
-                "select rp, pf.vehicle_id, 'admin' from product_fitment pf "
-                "cross join unnest(cast(:r as bigint[])) as rp "
-                "where pf.product_id = :s "
-                "and not exists (select 1 from product_fitment x where x.product_id = rp and x.vehicle_id = pf.vehicle_id)"
-            ),
-            {"r": restore_ids, "s": sid},
-        ).rowcount
-        db.execute(
-            text(
-                "update products set is_universal = true where id = any(cast(:r as bigint[])) "
-                "and (select is_universal from products where id = :s) is true"
-            ),
-            {"r": restore_ids, "s": sid},
-        )
+        # Each restored product gets back ONLY its own fitment (the snapshot rows above); nothing is copied between
+        # products. The kept product ended the merge with the combined list, so take back the vehicles that only came
+        # from the restored products. What it had of its own before the merge, and anything added to it since, stays.
+        snap_fit = snap.get("fitment") or []
+        kept_own = {r.get("vehicle_id") for r in snap_fit if r.get("product_id") == sid}
+        from_restored = {r.get("vehicle_id") for r in snap_fit if r.get("product_id") in rs}
+        taken_off = sorted(v for v in (from_restored - kept_own) if v is not None)
+        shared_fit = 0
+        if taken_off:
+            shared_fit = db.execute(
+                text("delete from product_fitment where product_id = :s and vehicle_id = any(cast(:v as bigint[]))"),
+                {"s": sid, "v": taken_off},
+            ).rowcount
         photos = [r for r in (snap.get("photos") or []) if r.get("product_id") in rs]
         if photos:
             taken = {
@@ -1432,7 +1426,7 @@ def unmerge(log_id: int, body: UnmergeIn, db: Session = Depends(get_db), user: A
 
         summary = {
             "products_restored": len(restore_ids),
-            "fitment_rows_copied": shared_fit,
+            "fitment_rows_taken_off_kept_part": shared_fit,
             "ebay_links_returned": moved_cl,
             "listing_records_returned": moved_el,
             "sales_rows_returned": moved_sales,
