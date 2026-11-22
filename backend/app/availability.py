@@ -238,6 +238,21 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
     dist = int(r.dist or 0)
+    # whose stock the distributor numbers are (they are counted from the catalog of this one supplier)
+    dist_names: list[str] = []
+    try:
+        dist_names = [
+            x.name
+            for x in db.execute(
+                text(
+                    "select distinct d.name from product_kit_parts k join po_distributors d on d.id = k.distributor_id "
+                    "join supplier_items si on si.id = k.supplier_item_id and si.supplier = :s where k.product_id = :i order by d.name"
+                ),
+                {"i": product_id, "s": SUPPLIER},
+            ).all()
+        ]
+    except Exception:
+        db.rollback()
     kit_parts: list[dict] = []
     if int(r.parts or 0) > 1:
         try:
@@ -263,6 +278,7 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
         "indiana": int(r.indiana or 0),
         "nevada": int(r.nevada or 0),
         "distributor": dist,
+        "distributor_name": ", ".join(dist_names) or "Automatic Distributors",
         "parts": int(r.parts or 0),
         "is_kit": int(r.parts or 0) > 1,
         "drop_ship": bool(r.ds),

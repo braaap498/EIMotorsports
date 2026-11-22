@@ -11,6 +11,7 @@ type Q = {
   indiana: number;
   nevada: number;
   distributor: number;
+  distributor_name?: string;
   parts: number;
   is_kit: boolean;
   drop_ship: boolean;
@@ -177,15 +178,15 @@ export default function QuantitiesPanel({
           {hasDist ? (
             <>
               <div className={`${row} font-medium`}>
-                <span>Distributor</span>
+                <span>{q.distributor_name ?? "Distributor"}</span>
                 <span>{q.distributor}</span>
               </div>
               <div className={`${row} pl-3 text-xs text-gray-600`}>
-                <span>Indiana</span>
+                <span>{q.distributor_name ? `${q.distributor_name} · Indiana` : "Indiana"}</span>
                 <span>{q.indiana}</span>
               </div>
               <div className={`${row} pl-3 text-xs text-gray-600`}>
-                <span>Nevada</span>
+                <span>{q.distributor_name ? `${q.distributor_name} · Nevada` : "Nevada"}</span>
                 <span>{q.nevada}</span>
               </div>
             </>
