@@ -17,7 +17,7 @@ type Status = "loading" | "signedout" | "forbidden" | "error" | "ok";
 // Items without `any` are for owners and admins only.
 const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match?: string[] }[] = [
   { href: "/admin", label: "Dashboard", exact: true, any: ["products.view", "fitment.view"] },
-  { href: "/admin/products", label: "Products", any: ["products.view", "fitment.view"] },
+  { href: "/admin/products", label: "Products", any: ["products.view", "fitment.view"], match: ["/admin/products", "/admin/part-types"] },
   {
     href: "/admin/inventory",
     label: "Inventory",

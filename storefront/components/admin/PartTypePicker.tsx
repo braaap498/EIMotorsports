@@ -129,6 +129,9 @@ export default function PartTypePicker({
               Add a type…
             </button>
           )}
+          <a href="/admin/part-types" target="_blank" rel="noreferrer" className="underline">
+            Rename types
+          </a>
         </div>
       )}
 

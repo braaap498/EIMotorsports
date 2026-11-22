@@ -11,6 +11,8 @@ The product keeps storing the type's NAME in products.part_type, so anything tha
   GET  /part-types?category_id=     every type, each marked fits (belongs to that category or one above it)
   POST /part-types                  add a type (a near-duplicate is offered back instead); links it to category_id if given
   POST /part-types/{id}/link        list an existing type under another category
+  GET  /part-types/manage           every type with its product count and linked categories (the Part types screen)
+  PATCH /part-types/{id}            rename a type; products using the old name are moved to the new one
   POST /part-types/standardize      run the one-time clean-up again by hand (owner / admin)
 """
 import difflib
@@ -297,6 +299,52 @@ def link_part_type(type_id: int, body: LinkIn, db: Session = Depends(get_db)):
     _link(db, type_id, body.category_id)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/manage")
+@needs(*READ)
+def manage_list(db: Session = Depends(get_db)):
+    """For the Part types screen: each type, how many products use it, and the categories it is listed under."""
+    counts = {
+        (r.n or "").lower(): r.c
+        for r in db.execute(
+            text("select lower(btrim(part_type)) as n, count(*) as c from products where nullif(btrim(part_type), '') is not null group by 1")
+        ).all()
+    }
+    links: dict[int, list[int]] = {}
+    for r in db.execute(text("select part_type_id, category_id from part_type_categories")).all():
+        links.setdefault(r.part_type_id, []).append(r.category_id)
+    rows = db.execute(text("select id, name from part_types order by lower(name)")).all()
+    return {"items": [{"id": r.id, "name": r.name, "products": counts.get(r.name.lower().strip(), 0), "category_ids": sorted(links.get(r.id, []))} for r in rows]}
+
+
+class RenameIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+@router.patch("/{type_id}")
+@needs(*WRITE)
+def rename_part_type(type_id: int, body: RenameIn, db: Session = Depends(get_db)):
+    """Rename a type. Products store the type's name, so every product using the old name is moved to the new one in the same step.
+    Refused when another type already means the same thing (case, '&' / 'and', a plural): use that one instead."""
+    new = _clean(body.name)
+    if not new:
+        raise HTTPException(400, "Type a name.")
+    cur = db.execute(text("select id, name from part_types where id = :i for update"), {"i": type_id}).first()
+    if not cur:
+        raise HTTPException(404, "Part type not found")
+    if cur.name == new:
+        return {"ok": True, "item": {"id": cur.id, "name": cur.name}, "products_changed": 0}
+    for e in db.execute(text("select id, name from part_types where id <> :i"), {"i": type_id}).all():
+        if _norm(e.name) == _norm(new):
+            raise HTTPException(409, f'"{e.name}" is already on the list and means the same thing. Use that one, or pick a different name.')
+    db.execute(text("update part_types set name = :n where id = :i"), {"n": new, "i": type_id})
+    changed = db.execute(
+        text("update products set part_type = :n where lower(btrim(part_type)) = lower(:o) and part_type is distinct from :n"),
+        {"n": new, "o": cur.name.strip()},
+    ).rowcount
+    db.commit()
+    return {"ok": True, "item": {"id": cur.id, "name": new}, "products_changed": changed}
 
 
 @router.post("/standardize")
