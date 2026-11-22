@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 
 from app.availability import dropship_qty_sql as _dropship_qty_sql
 
-from app.auth import require_admin
+from app.auth import AuthUser, require_admin
 from app.database import get_db, get_engine
 from app.images import thumb_url
 from app.ebay_feedback import SEARCH_URL, FeedbackError, _open, _token, configured, seller_username
@@ -508,7 +508,7 @@ def repo_listings(
             text(
                 f"""
                 select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
-                       p.id as product_id, p.sku_display as sku, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
+                       p.id as product_id, p.sku_display as sku, p.custom_label_sku as product_label, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
                        {_L_PRICE} as list_price, p.quantity_on_hand,
                        case when {_L_IS_DROPSHIP} then {_dropship_qty_sql('p')}
                             when {_L_QTY_FROM_EBAY} then {_L_EBAY_QTY} else p.quantity_on_hand end as quantity_shown,
@@ -557,6 +557,7 @@ def repo_listings(
                 "listing_id": d["listing_id"],
                 "title": d["title"] or "(no title)",
                 "custom_label": d["custom_label_sku"],
+                "product_label": d["product_label"],
                 "price": float(d["list_price"]) if d["list_price"] is not None else None,
                 "currency": "USD",
                 "quantity": d["quantity_shown"],
@@ -621,6 +622,55 @@ def repo_set_status(body: RepoStatusIn, db: Session = Depends(get_db)):
     db.commit()
     _counts_cache.clear()
     return {"store": who["store"], "status": body.status, "changed": res.rowcount, "asked": len(ids)}
+
+
+class RelinkIn(BaseModel):
+    listing_id: int
+    product_id: int
+
+
+@router.post("/repo/relink")
+def repo_relink(body: RelinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Point one listing at a different product. It changes channel_listings.product_id and nothing else: no call goes
+    to eBay, the listing's own title, price and label are untouched, and past sales and orders stay as they were.
+    Both products keep their own data; the old product simply has one listing fewer."""
+    row = db.execute(
+        text("select id, store, product_id, regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') as item_id "
+             "from channel_listings where id = :i for update"),
+        {"i": body.listing_id},
+    ).first()
+    if not row:
+        raise HTTPException(404, "That listing is not in the database.")
+    if row.product_id == body.product_id:
+        raise HTTPException(400, "The listing already points at that product.")
+    new = db.execute(
+        text("select id, sku_display as sku, title, custom_label_sku as label from products where id = :p"),
+        {"p": body.product_id},
+    ).first()
+    if not new:
+        raise HTTPException(404, "That product does not exist.")
+    old = db.execute(
+        text("select id, sku_display as sku, title, custom_label_sku as label, "
+             "regexp_replace(coalesce(cast(ebay_item_id as text), ''), '[^0-9]', '', 'g') as item_id "
+             "from products where id = :p"),
+        {"p": row.product_id},
+    ).first()
+    db.execute(text("update channel_listings set product_id = :p where id = :i"), {"p": body.product_id, "i": body.listing_id})
+    db.commit()
+    _counts_cache.clear()
+    log.info("listing %s (item %s, store %s) moved from product %s to product %s by %s",
+             row.id, row.item_id, row.store, row.product_id, body.product_id, getattr(user, "email", "?"))
+    note = ""
+    if old and old.item_id and old.item_id == row.item_id:
+        note = (f"{old.sku or 'The old product'} still lists this eBay item as its own item ID. "
+                "Change that on its edit page if it should not.")
+    return {
+        "listing_id": row.id,
+        "item_id": row.item_id,
+        "old": {"id": old.id, "sku": old.sku, "label": old.label} if old else None,
+        "new": {"id": new.id, "sku": new.sku, "title": new.title, "label": new.label},
+        "note": note,
+    }
 
 
 # --------------------------------------------------------------------------

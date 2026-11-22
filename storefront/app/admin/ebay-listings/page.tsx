@@ -9,6 +9,7 @@ import { loadSaved, saveSaved } from "../../../lib/savedState";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "../../../components/admin/ui";
 import { SortTh, type SortState } from "../../../components/admin/SortHeader";
 import ClearableInput from "../../../components/admin/ClearableInput";
+import ProductPicker, { type PickRow } from "../../../components/admin/inventory/ProductPicker";
 
 /* ------------------------------------------------------------------ types */
 
@@ -33,6 +34,7 @@ type RepoItem = {
   listing_id: number;
   title: string;
   custom_label: string | null;
+  product_label?: string | null; // the custom label of the product this listing points at
   price: number | null;
   currency: string;
   quantity: number | null;
@@ -121,6 +123,9 @@ export default function EbayLiveListingsPage() {
   const [allMatch, setAllMatch] = useState<RepoItem[] | null>(null); // every listing matching the current search, loaded by "select all matching"
   const [loadingAll, setLoadingAll] = useState(false);
   const [actMsg, setActMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const [relink, setRelink] = useState<RepoItem | null>(null); // the listing whose product is being changed
+  const [relinkTo, setRelinkTo] = useState<PickRow | null>(null); // the product chosen, waiting for the confirm
+  const [relinkBusy, setRelinkBusy] = useState(false);
   const [mainStore, setMainStore] = useState(""); // the store opened first on a first visit
   const [statusF, setStatusF] = useState<string>("all");
   const [repo, setRepo] = useState<RepoResp | null>(null);
@@ -727,6 +732,42 @@ export default function EbayLiveListingsPage() {
     await loadRepo(repo.offset);
   }
 
+  async function doRelink() {
+    if (!relink || !relinkTo) return;
+    setRelinkBusy(true);
+    setActMsg(null);
+    try {
+      const r = await api<{
+        item_id: string;
+        old: { sku: string | null; label: string | null } | null;
+        new: { sku: string | null; title: string; label: string | null };
+        note: string;
+      }>("/ebay-listings/repo/relink", { method: "POST", body: { listing_id: relink.listing_id, product_id: relinkTo.id } });
+      const lab = r.new.label ? `its custom label is ${r.new.label}` : "it has no custom label";
+      setActMsg({
+        kind: "success",
+        text: `Listing ${r.item_id} now points at ${r.new.sku ?? relinkTo.id} (${r.old?.sku ?? "no product"} before); ${lab}.${r.note ? " " + r.note : ""}`,
+      });
+      // show the change right away without reloading the page
+      setRepo((cur) =>
+        cur
+          ? {
+              ...cur,
+              items: cur.items.map((x) =>
+                x.listing_id === relink.listing_id ? { ...x, product_id: relinkTo.id, sku: r.new.sku, product_label: r.new.label } : x,
+              ),
+            }
+          : cur,
+      );
+      setRelink(null);
+      setRelinkTo(null);
+    } catch (e) {
+      setActMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setRelinkBusy(false);
+    }
+  }
+
   async function loadZero() {
     try {
       const z = await api<{ items: { store: string; item_id: string; days_at_zero: number; held?: boolean }[] }>("/ebay-edit/zero/status");
@@ -1042,6 +1083,36 @@ export default function EbayLiveListingsPage() {
             </p>
           )}
           {actMsg && <Notice kind={actMsg.kind}>{actMsg.text}</Notice>}
+          {relink && (
+            <div className="space-y-2 rounded-lg border-2 border-amber-300 bg-amber-50 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-sm">
+                  Change which product listing <b>{relink.item_id}</b> points at. It now points at <b>{relink.sku ?? `product ${relink.product_id}`}</b>
+                  {relink.product_label ? ` (label ${relink.product_label})` : ""}. The listing&apos;s own label on eBay is{" "}
+                  <b>{relink.custom_label ?? "not known"}</b>.
+                </p>
+                <button type="button" className={btn2Cls} disabled={relinkBusy} onClick={() => { setRelink(null); setRelinkTo(null); }}>
+                  Cancel
+                </button>
+              </div>
+              {relinkTo ? (
+                <div className="flex flex-wrap items-center gap-2 rounded border border-gray-300 bg-white p-2 text-sm">
+                  <span>
+                    Point it at <b>{relinkTo.sku}</b> — {relinkTo.title}?
+                  </span>
+                  <button type="button" className={btnCls} disabled={relinkBusy} onClick={() => void doRelink()}>
+                    {relinkBusy ? "Saving…" : "Change product"}
+                  </button>
+                  <button type="button" className={btn2Cls} disabled={relinkBusy} onClick={() => setRelinkTo(null)}>
+                    Pick a different one
+                  </button>
+                </div>
+              ) : (
+                <ProductPicker onPick={setRelinkTo} />
+              )}
+              <p className="text-xs text-gray-600">Only the link on this site changes. Nothing is sent to eBay, and past sales and orders stay as they are.</p>
+            </div>
+          )}
           {!allMatch && repo.totalExact && repo.total > repo.items.length && repo.items.length > 0 && repo.items.every((x) => picked.has(x.listing_id)) && (
             <div className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
               All {repo.items.length} listings on this page are selected.{" "}
@@ -1223,6 +1294,19 @@ export default function EbayLiveListingsPage() {
                           <Link href={`/admin/products/${it.product_id}`} className="ml-3 text-blue-700 hover:underline">
                             {it.sku ?? `Product ${it.product_id}`}
                           </Link>
+                          <button
+                            type="button"
+                            className="ml-2 text-xs text-gray-600 underline hover:text-black"
+                            title="Point this listing at a different product"
+                            onClick={() => { setRelink(it); setRelinkTo(null); setActMsg(null); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                          >
+                            Change product
+                          </button>
+                          {it.product_label && it.custom_label && it.product_label.trim().toLowerCase() !== it.custom_label.trim().toLowerCase() && (
+                            <span className="ml-2" title={`This listing's label is ${it.custom_label}, but the product it points at has ${it.product_label}`}>
+                              <Badge tone="amber">Label differs from product</Badge>
+                            </span>
+                          )}
                           {it.is_product_source && (
                             <span className="ml-3" title="The product's photo gallery is taken from this listing">
                               <Badge tone="gray">Product photos</Badge>
