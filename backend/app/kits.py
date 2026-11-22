@@ -105,6 +105,16 @@ def is_catalog_vendor(name: Optional[str]) -> bool:
     return supplier_for(name) is not None
 
 
+def catalog_loaded(db: Session, name: Optional[str]) -> bool:
+    """True when the distributor has a catalog here AND parts have been imported into it. A distributor that is known to have
+    a catalog (Rocky Mountain, by name) but never had one imported behaves like any other distributor with no catalog: its parts
+    are typed and saved instead."""
+    sup = supplier_for(name)
+    if sup is None:
+        return False
+    return bool(db.execute(text("select exists (select 1 from supplier_items where supplier = :s)"), {"s": sup}).scalar())
+
+
 SUPPLIER_RE = "^(autodist|rmatv)$"
 # a part's stock across every warehouse column (Rocky Mountain has just the one, qty_other)
 _STOCK = "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0) + coalesce(s.qty_other, 0))"
@@ -117,7 +127,18 @@ _STOCK = "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qt
 @needs("products.edit_details", "products.create")
 def vendors(db: Session = Depends(get_db)):
     rows = db.execute(text("select id, name from po_distributors order by lower(name), id")).all()
-    return {"items": [{"id": r.id, "name": r.name, "has_catalog": is_catalog_vendor(r.name), "supplier": supplier_for(r.name)} for r in rows]}
+    loaded = {sup: catalog_loaded(db, name) for sup, name in (("autodist", "autodist"), ("rmatv", "rmatv"))}
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "name": r.name,
+                "has_catalog": bool(supplier_for(r.name)) and loaded.get(supplier_for(r.name) or "", False),
+                "supplier": supplier_for(r.name),
+            }
+            for r in rows
+        ]
+    }
 
 
 @router.get("/manual-catalog")
@@ -202,7 +223,7 @@ def add_manual_item(body: ManualItemIn, db: Session = Depends(get_db), user: Aut
     dist = db.execute(text("select id, name from po_distributors where id = :i"), {"i": body.distributor_id}).first()
     if not dist:
         raise HTTPException(404, "That distributor no longer exists.")
-    if supplier_for(dist.name) is not None:
+    if catalog_loaded(db, dist.name):
         raise HTTPException(400, f"{dist.name} has a catalog here; its parts come from the catalog.")
     number = body.part_number.strip()
     norm = _norm(number)
@@ -890,7 +911,7 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
     # Remember typed pieces of distributors with no catalog, so the next product can pick them instead of typing them again.
     # A part already saved keeps its details (only blanks are filled), and a failure here never stops the parts from saving.
     for c in clean:
-        if c["supplier_item_id"] or c["manual_item_id"] or supplier_for(dists[c["distributor_id"]]) is not None:
+        if c["supplier_item_id"] or c["manual_item_id"] or catalog_loaded(db, dists[c["distributor_id"]]):
             continue
         try:
             with db.begin_nested():

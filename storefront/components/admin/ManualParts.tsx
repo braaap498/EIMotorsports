@@ -31,6 +31,13 @@ const money = (v: number | null) => (v == null ? "—" : `$${Number(v).toFixed(2
 export default function ManualParts({ dist }: { dist: Dist }) {
   const { can } = useAccess();
   const canMake = can("products.create");
+  // a distributor whose catalog has parts imported (Automatic Distributors, Rocky Mountain) uses the catalog instead of this list
+  const [hasCatalog, setHasCatalog] = useState(false);
+  useEffect(() => {
+    api<{ items: { id: number; has_catalog: boolean }[] }>("/kits/vendors")
+      .then((r) => setHasCatalog(Boolean(r.items.find((v) => v.id === dist.id)?.has_catalog)))
+      .catch(() => setHasCatalog(false));
+  }, [dist.id]);
   const [items, setItems] = useState<Part[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -143,13 +150,14 @@ export default function ManualParts({ dist }: { dist: Dist }) {
     }
   }
 
+  if (hasCatalog) return null;
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
         <div>
           <h2 className="text-base font-semibold">{dist.name} parts</h2>
           <p className="text-xs text-gray-500">
-            {dist.name} has no catalog loaded here, so its parts are typed once and saved in this list. Products pick from it under Distributor parts, and you can make a product from a part here.
+            {dist.name} has no catalog loaded here (none imported yet), so its parts are typed once and saved in this list. Products pick from it under Distributor parts, and you can make a product from a part here.
           </p>
         </div>
 
