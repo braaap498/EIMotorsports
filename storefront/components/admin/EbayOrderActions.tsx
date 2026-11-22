@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Field, Modal, btnCls, btn2Cls, inputCls } from "./ui";
 
 /* The buttons for one eBay order. They live on Inventory > Pick & ship > eBay orders (the Orders page under Sales
    channels only shows the result: shipped in green, plus the tracking link).
 
-     OrderShipControls  - tracking (shown, or "Check eBay" to fetch it), Open eBay label, Mark shipped (turns green)
+     OrderShipControls  - tracking (shown, or "Check eBay" to fetch it), Open eBay label, Mark shipped (turns green).
+                          After Open eBay label is clicked, coming back to this tab checks eBay for the tracking number by itself.
      LineStockButtons   - Mark picked / Release for a line whose parts are set aside
 
    Tracking and shipping belong to the ORDER (every line of an order shows the same state); picking and
@@ -79,10 +80,19 @@ export function OrderShipControls({
 }) {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
+  // Set when Open eBay label is clicked: coming back to this tab then looks for the tracking number on eBay by itself.
+  const [waiting, setWaiting] = useState(false);
+  const [waitNote, setWaitNote] = useState("");
+  const checking = useRef(false);
+  const lastBack = useRef(0);
   const shipped = !!o.shipped_at_ebay;
 
-  async function checkTracking() {
-    setBusy(true);
+  /** Ask eBay for this order's tracking number and save it. `silent` (the automatic checks) shows no error, and gives
+      back whether a number was found. */
+  async function checkTracking(silent = false): Promise<boolean> {
+    if (checking.current) return false;
+    checking.current = true;
+    if (!silent) setBusy(true);
     try {
       const r = await api<{ tracking_number: string | null; tracking_carrier: string | null; shipped: boolean; found: boolean }>(
         `${BASE}/orders/${o.order_pk}/refresh-tracking`,
@@ -93,13 +103,60 @@ export function OrderShipControls({
         tracking_carrier: r.tracking_carrier,
         ...(r.shipped && !o.shipped_at_ebay ? { shipped_at_ebay: new Date().toISOString() } : {}),
       });
-      if (!r.found) onError("eBay has no tracking number on this order yet. Print the label on eBay first, or use Mark shipped.");
+      if (!r.found && !silent) onError("eBay has no tracking number on this order yet. Print the label on eBay first, or use Mark shipped.");
+      return r.found;
     } catch (e) {
-      onError(errMsg(e));
+      if (!silent) onError(errMsg(e));
+      return false;
     } finally {
-      setBusy(false);
+      checking.current = false;
+      if (!silent) setBusy(false);
     }
   }
+  // The effect below runs from a browser event, so it calls the newest copy of the function (it reads the current order).
+  const checkRef = useRef(checkTracking);
+  checkRef.current = checkTracking;
+
+  useEffect(() => {
+    if (!waiting) return;
+    if (o.tracking_number) {
+      setWaiting(false);
+      setWaitNote("");
+      return;
+    }
+    let timers: ReturnType<typeof setTimeout>[] = [];
+    const attempt = async () => {
+      const found = await checkRef.current(true);
+      if (found) {
+        setWaiting(false);
+        setWaitNote("");
+      }
+      return found;
+    };
+    const onBack = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastBack.current < 1500) return; // focus and visibilitychange often fire together
+      lastBack.current = now;
+      timers.forEach(clearTimeout);
+      timers = [];
+      setWaitNote("Checking eBay for the tracking number…");
+      void attempt().then((found) => {
+        if (found) return;
+        setWaitNote("eBay has no tracking yet. Checking again in a moment…");
+        // eBay can take a little while to attach the number after the label is bought.
+        [6000, 15000, 30000].forEach((ms) => timers.push(setTimeout(() => void attempt(), ms)));
+        timers.push(setTimeout(() => setWaitNote("eBay still has no tracking. Press Show tracking after the label is bought."), 31000));
+      });
+    };
+    window.addEventListener("focus", onBack);
+    document.addEventListener("visibilitychange", onBack);
+    return () => {
+      window.removeEventListener("focus", onBack);
+      document.removeEventListener("visibilitychange", onBack);
+      timers.forEach(clearTimeout);
+    };
+  }, [waiting, o.tracking_number]);
 
   if (o.cancelled || o.state === "cancelled") return <span className="text-xs text-gray-400">Cancelled</span>;
 
@@ -125,6 +182,7 @@ export function OrderShipControls({
             {busy ? "Checking eBay…" : "Show tracking"}
           </button>
         )}
+        {waiting && !o.tracking_number && waitNote && <div className="mt-0.5 text-gray-500">{waitNote}</div>}
       </div>
 
       {/* label + shipped */}
@@ -138,6 +196,8 @@ export function OrderShipControls({
             title="Opens this order on eBay, where you buy and print the label"
             onClick={() => {
               // Record who pressed it (the page still opens normally; a failed log never blocks the label).
+              setWaiting(true);
+              setWaitNote("Print the label on eBay, then come back here. The tracking number is picked up automatically.");
               void api("/inventory/activity/label-opened", {
                 method: "POST",
                 body: { channel: "eBay", order_ref: o.ebay_order_id },
@@ -157,7 +217,14 @@ export function OrderShipControls({
             ✓ Shipped {new Date(o.shipped_at_ebay as string).toLocaleDateString()}
           </button>
         ) : (
-          <button type="button" className={`${btnCls} !px-2 !py-1 !text-xs`} onClick={() => setOpen(true)}>
+          <button
+            type="button"
+            className={`${btnCls} !px-2 !py-1 !text-xs`}
+            onClick={() => {
+              setOpen(true);
+              if (!o.tracking_number) void checkTracking(true); // the window fills in the number if eBay already has it
+            }}
+          >
             Mark shipped
           </button>
         )}
@@ -194,6 +261,16 @@ function ShipModal({
   const [num, setNum] = useState(o.tracking_number ?? "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // The number can arrive while the window is open (the check started when it was opened): fill it in unless typed already.
+  useEffect(() => {
+    if (!num && o.tracking_number) {
+      setNum(o.tracking_number);
+      const c = guessCarrier(o);
+      if (c) setCarrier(c);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [o.tracking_number]);
 
   async function submit() {
     const c = carrier === "Other" ? other.trim() : carrier;

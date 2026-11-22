@@ -333,9 +333,9 @@ export default function ProductsPage() {
             <option value="false">Not published</option>
           </select>
         </Field>
-        <Field label="Distributor">
+        <Field label="Distributor" className="w-56 shrink-0">
           <select
-            className={`${inputCls} max-w-[16rem]`}
+            className={inputCls}
             value={distributor}
             onChange={(e) => filterChange(() => setDistributor(e.target.value))}
           >
@@ -348,8 +348,8 @@ export default function ProductsPage() {
             <option value="none">No distributor</option>
           </select>
         </Field>
-        <Field label="Brand">
-          <select className={`${inputCls} max-w-[16rem]`} value={brand} onChange={(e) => filterChange(() => setBrand(e.target.value))}>
+        <Field label="Brand" className="w-56 shrink-0">
+          <select className={inputCls} value={brand} onChange={(e) => filterChange(() => setBrand(e.target.value))}>
             <option value="">{distributor ? "All brands of this distributor" : "All brands"}</option>
             {options.brands.map((b) => (
               <option key={b.id} value={b.id}>
@@ -358,7 +358,7 @@ export default function ProductsPage() {
             ))}
           </select>
         </Field>
-        <Field label="Stock">
+        <Field label="Stock" className="w-56 shrink-0">
           <select className={inputCls} value={stock} onChange={(e) => filterChange(() => setStock(e.target.value))}>
             <option value="">All products</option>
             <option value="shelf">On our shelf</option>
