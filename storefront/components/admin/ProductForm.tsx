@@ -43,6 +43,13 @@ const BASIC: FieldDef[] = [
   { key: "part_type", label: "Part type", kind: "text" },
   { key: "condition", label: "Condition", kind: "text" },
 ];
+// List price and cost always show two digits after the decimal (12.5 -> 12.50)
+const MONEY_KEYS = ["list_price", "cost"];
+const money2 = (v: string) => {
+  const t = v.trim();
+  if (t === "" || Number.isNaN(Number(t))) return v;
+  return Number(t).toFixed(2);
+};
 const PRICING: FieldDef[] = [
   { key: "list_price", label: "List price", kind: "number", step: "0.01" },
   { key: "cost", label: "Cost", kind: "number", step: "0.01" },
@@ -217,7 +224,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
         const next: Record<string, string> = {};
         [...ALL.map((f) => f.key), "description", "slug", "category_id", "part_manufacturer_id", "sku"].forEach((k) => {
           const v = p[k];
-          next[k] = v == null ? "" : String(v);
+          next[k] = v == null ? "" : MONEY_KEYS.includes(k) ? money2(String(v)) : String(v);
         });
         const loadedFlags = {
           is_published: !!p.is_published,
@@ -420,6 +427,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
                 : vals[f.key] ?? ""
           }
           onChange={(e) => set(f.key, e.target.value)}
+          onBlur={MONEY_KEYS.includes(f.key) ? (e) => set(f.key, money2(e.target.value)) : undefined}
         />
         {f.key === "quantity_on_hand" && kitCount !== null && (
           <span className="mt-1 block text-xs font-normal text-gray-500">
