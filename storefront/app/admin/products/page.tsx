@@ -27,13 +27,16 @@ type Row = {
 };
 type Resp = { total: number; items: Row[] };
 type Summary = { total: number } & Record<FitmentStatus, number>;
+type FilterOptions = { distributors: { id: number; name: string; count: number }[]; brands: { id: number; name: string; count: number }[] };
 type Cat = { id: number; parent_id: number | null; name: string; sort_order: number };
 type Saved = {
   q: string;
   published: string;
   fitment?: string;
   category?: string;
-  source?: string;
+  distributor?: string; // a distributor id, or "none"
+  brand?: string; // a manufacturer id
+  stock?: string; // shelf | no_shelf | distributor_only
   noFitment?: boolean; // older saved screens
   offset: number;
   sort?: SortKey | "";
@@ -109,7 +112,10 @@ export default function ProductsPage() {
   const [published, setPublished] = useState("");
   const [fitment, setFitment] = useState("");
   const [category, setCategory] = useState("");
-  const [source, setSource] = useState("");
+  const [distributor, setDistributor] = useState("");
+  const [brand, setBrand] = useState("");
+  const [stock, setStock] = useState("");
+  const [options, setOptions] = useState<FilterOptions>({ distributors: [], brands: [] });
   const [sort, setSort] = useState<SortKey | "">("");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
   const [offset, setOffset] = useState(0);
@@ -139,7 +145,9 @@ export default function ProductsPage() {
       setPublished(saved.published);
       setFitment(saved.fitment ?? (saved.noFitment ? "needs_fitment" : ""));
       setCategory(saved.category ?? "");
-      setSource(saved.source ?? "");
+      setDistributor(saved.distributor ?? "");
+      setBrand(saved.brand ?? "");
+      setStock(saved.stock ?? "");
       setOffset(saved.offset);
       setSort(saved.sort ?? "");
       setDir(saved.dir ?? "asc");
@@ -157,8 +165,19 @@ export default function ProductsPage() {
   }, []);
 
   useEffect(() => {
-    if (ready) saveSaved("products", { q, published, fitment, category, source, offset, sort, dir });
-  }, [ready, q, published, fitment, category, source, offset, sort, dir]);
+    if (ready) saveSaved("products", { q, published, fitment, category, distributor, brand, stock, offset, sort, dir });
+  }, [ready, q, published, fitment, category, distributor, brand, stock, offset, sort, dir]);
+
+  // The Distributor and Brand choices. Brands follow the chosen distributor; a chosen brand that distributor does not carry is cleared.
+  useEffect(() => {
+    if (!ready) return;
+    api<FilterOptions>(`/products/filter-options${distributor ? `?distributor_id=${encodeURIComponent(distributor)}` : ""}`)
+      .then((o) => {
+        setOptions(o);
+        setBrand((b) => (b && !o.brands.some((x) => String(x.id) === b) ? "" : b));
+      })
+      .catch(() => {});
+  }, [ready, distributor]);
 
   // The search, category and other filters shared by the list, the counts and the bulk change.
   const filterParams = useCallback(
@@ -167,11 +186,13 @@ export default function ProductsPage() {
       if (q) f.set("q", q);
       if (published) f.set("published", published);
       if (category) f.set("category_id", category);
-      if (source) f.set("source", source);
+      if (distributor) f.set("distributor_id", distributor);
+      if (brand) f.set("brand_id", brand);
+      if (stock) f.set("stock", stock);
       if (withStatus && fitment) f.set("fitment", fitment);
       return f;
     },
-    [q, published, category, source, fitment]
+    [q, published, category, distributor, brand, stock, fitment]
   );
 
   const load = useCallback(() => {
@@ -205,7 +226,7 @@ export default function ProductsPage() {
   // A different list means the ticks no longer match what is on screen.
   useEffect(() => {
     setSel(new Set());
-  }, [q, published, fitment, category, source, offset, sort, dir]);
+  }, [q, published, fitment, category, distributor, brand, stock, offset, sort, dir]);
 
   // Click a heading: ascending, click again: descending, a third click goes back to the default order.
   function clickSort(key: SortKey) {
@@ -237,7 +258,7 @@ export default function ProductsPage() {
   }
 
   const modeLabel = MODE_OPTIONS.find((o) => o.value === bulkMode)?.label ?? "";
-  const anyFilter = Boolean(q || published || fitment || category || source);
+  const anyFilter = Boolean(q || published || fitment || category || distributor || brand || stock);
   const pageIds = data.items.map((i) => i.id);
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => sel.has(id));
 
@@ -259,7 +280,9 @@ export default function ProductsPage() {
         if (published) body.published = published === "true";
         if (category) body.category_id = Number(category);
         if (fitment) body.fitment = fitment;
-        if (source) body.source = source;
+        if (distributor) body.distributor_id = distributor;
+        if (brand) body.brand_id = Number(brand);
+        if (stock) body.stock = stock;
         body.expected_count = data.total;
       }
       const r = await api<{ updated: number }>("/products/fitment-mode", { method: "POST", body });
@@ -310,10 +333,37 @@ export default function ProductsPage() {
             <option value="false">Not published</option>
           </select>
         </Field>
-        <Field label="Source">
-          <select className={inputCls} value={source} onChange={(e) => filterChange(() => setSource(e.target.value))}>
+        <Field label="Distributor">
+          <select
+            className={`${inputCls} max-w-[16rem]`}
+            value={distributor}
+            onChange={(e) => filterChange(() => setDistributor(e.target.value))}
+          >
+            <option value="">All distributors</option>
+            {options.distributors.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} ({d.count.toLocaleString()})
+              </option>
+            ))}
+            <option value="none">No distributor</option>
+          </select>
+        </Field>
+        <Field label="Brand">
+          <select className={`${inputCls} max-w-[16rem]`} value={brand} onChange={(e) => filterChange(() => setBrand(e.target.value))}>
+            <option value="">{distributor ? "All brands of this distributor" : "All brands"}</option>
+            {options.brands.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name} ({b.count.toLocaleString()})
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Stock">
+          <select className={inputCls} value={stock} onChange={(e) => filterChange(() => setStock(e.target.value))}>
             <option value="">All products</option>
-            <option value="autodist">From the Automatic Distributors catalog</option>
+            <option value="shelf">On our shelf</option>
+            <option value="no_shelf">None on our shelf</option>
+            <option value="distributor_only">Distributor only (none on shelf)</option>
           </select>
         </Field>
       </div>

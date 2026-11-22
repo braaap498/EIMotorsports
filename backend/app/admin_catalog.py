@@ -845,6 +845,15 @@ FITMENT_MODES = {
 }
 FitmentMode = Literal["vehicle", "universal_search", "universal_category", "not_vehicle"]
 
+# The Stock filter: where the product can be had from. Shelf = our own stock (quantity_on_hand); a distributor part is
+# what we can order in when the shelf is empty.
+_ON_SHELF = "coalesce(p.quantity_on_hand, 0) > 0"
+STOCK_FILTERS = {
+    "shelf": f"({_ON_SHELF})",
+    "no_shelf": f"(not {_ON_SHELF})",
+    "distributor_only": f"(not {_ON_SHELF} and exists (select 1 from product_kit_parts ks where ks.product_id = p.id and ks.distributor_id is not null))",
+}
+
 # A product's category plus everything under it, so choosing "Apparel" also finds "Apparel > Jackets".
 _CATEGORY_TREE = (
     "with recursive tree as ("
@@ -862,12 +871,24 @@ def _product_where(
     no_fitment: bool = False,
     fitment: Optional[str] = None,
     source: Optional[str] = None,
+    distributor_id: Optional[str] = None,
+    brand_id: Optional[int] = None,
+    stock: Optional[str] = None,
 ) -> tuple[str, dict]:
     """The WHERE clause and parameters shared by the products list, the fitment summary and the bulk change."""
     if fitment and fitment not in FITMENT_FILTERS:
         raise HTTPException(400, "Unknown fitment filter.")
     if source and source != "autodist":
         raise HTTPException(400, "Unknown source.")
+    if stock and stock not in STOCK_FILTERS:
+        raise HTTPException(400, "Unknown stock filter.")
+    dist_none = distributor_id == "none"
+    dist_id: Optional[int] = None
+    if distributor_id and not dist_none:
+        try:
+            dist_id = int(distributor_id)
+        except ValueError:
+            raise HTTPException(400, "Unknown distributor.")
     params = {
         "like": like(q),
         "category_id": category_id,
@@ -892,6 +913,17 @@ def _product_where(
         where += f" and {FITMENT_FILTERS[fitment]}"
     if source == "autodist":
         where += " and exists (select 1 from supplier_product_links l where l.product_id = p.id and l.supplier = :supplier)"
+    # Distributor: a product belongs to a distributor when one of its parts (product_kit_parts) is supplied by it.
+    if dist_id is not None:
+        params["dist_id"] = dist_id
+        where += " and exists (select 1 from product_kit_parts kp where kp.product_id = p.id and kp.distributor_id = :dist_id)"
+    elif dist_none:
+        where += " and not exists (select 1 from product_kit_parts kp where kp.product_id = p.id and kp.distributor_id is not null)"
+    if brand_id is not None:
+        params["brand_id"] = brand_id
+        where += " and p.part_manufacturer_id = :brand_id"
+    if stock:
+        where += f" and {STOCK_FILTERS[stock]}"
     return where, params
 
 
@@ -905,6 +937,9 @@ def list_products(
     no_fitment: bool = False,
     fitment: Optional[str] = None,
     source: Optional[str] = None,
+    distributor_id: Optional[str] = None,
+    brand_id: Optional[int] = None,
+    stock: Optional[str] = None,
     sort: Optional[str] = None,
     dir: str = "asc",
     limit: int = Query(50, le=200),
@@ -916,7 +951,7 @@ def list_products(
         raise HTTPException(400, "Unknown sort column.")
     direction = "desc" if dir == "desc" else "asc"
     order_by = f"{sort_expr} {direction} nulls last, p.id desc" if sort_expr else "p.id desc"
-    where, params = _product_where(q, category_id, published, universal, no_fitment, fitment, source)
+    where, params = _product_where(q, category_id, published, universal, no_fitment, fitment, source, distributor_id, brand_id, stock)
     params.update({"limit": limit, "offset": offset})
     total = db.execute(text(f"{_CATEGORY_TREE} select count(*) from products p {where}"), params).scalar()
     rows = db.execute(
@@ -937,6 +972,43 @@ def list_products(
     return {"total": total, "items": [dict(r._mapping) for r in rows]}
 
 
+@router.get("/products/filter-options")
+@needs(*READ_LISTS)
+def filter_options(distributor_id: Optional[str] = None, db: Session = Depends(get_db)):
+    """The choices for the Distributor and Brand filters. Brands are only those of products supplied by the chosen
+    distributor ("none" = products with no distributor part); with no distributor chosen, every brand in use."""
+    from app.manufacturers import manufacturer_table  # lazy: manufacturers.py imports this module
+
+    dists = db.execute(
+        text(
+            "select d.id, d.name, count(distinct kp.product_id) as n from po_distributors d "
+            "left join product_kit_parts kp on kp.distributor_id = d.id group by d.id, d.name order by lower(d.name)"
+        )
+    ).all()
+    out = {"distributors": [{"id": r.id, "name": r.name, "count": int(r.n or 0)} for r in dists], "brands": []}
+    ref = manufacturer_table(db)
+    if not ref:
+        return out
+    cond, params = "", {}
+    if distributor_id == "none":
+        cond = " and not exists (select 1 from product_kit_parts kp where kp.product_id = p.id and kp.distributor_id is not null)"
+    elif distributor_id:
+        try:
+            params["dist_id"] = int(distributor_id)
+        except ValueError:
+            raise HTTPException(400, "Unknown distributor.")
+        cond = " and exists (select 1 from product_kit_parts kp where kp.product_id = p.id and kp.distributor_id = :dist_id)"
+    rows = db.execute(
+        text(
+            f"select m.id, m.name, count(*) as n from products p join {ref} m on m.id = p.part_manufacturer_id "
+            f"where true{cond} group by m.id, m.name order by lower(m.name)"
+        ),
+        params,
+    ).all()
+    out["brands"] = [{"id": r.id, "name": r.name, "count": int(r.n)} for r in rows]
+    return out
+
+
 @router.get("/products/fitment-summary")
 @needs(*READ_LISTS)
 def fitment_summary(
@@ -945,10 +1017,13 @@ def fitment_summary(
     published: Optional[bool] = None,
     universal: Optional[bool] = None,
     source: Optional[str] = None,
+    distributor_id: Optional[str] = None,
+    brand_id: Optional[int] = None,
+    stock: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """How many products are in each fitment status, for the current search and category (the status filter itself is not applied)."""
-    where, params = _product_where(q, category_id, published, universal, False, None, source)
+    where, params = _product_where(q, category_id, published, universal, False, None, source, distributor_id, brand_id, stock)
     row = db.execute(
         text(
             f"""
@@ -978,6 +1053,9 @@ class FitmentModeIn(BaseModel):
     universal: Optional[bool] = None
     fitment: Optional[str] = None
     source: Optional[str] = None
+    distributor_id: Optional[str] = None
+    brand_id: Optional[int] = None
+    stock: Optional[str] = None
     expected_count: Optional[int] = None
 
 
@@ -997,11 +1075,15 @@ def set_fitment_mode(body: FitmentModeIn, db: Session = Depends(get_db)):
         n = db.execute(text(f"update products set {sets} where id = any(:ids)"), {**values, "ids": ids}).rowcount
     else:
         has_filter = any(
-            v not in (None, "") for v in (body.q, body.category_id, body.published, body.universal, body.fitment, body.source)
+            v not in (None, "") for v in (body.q, body.category_id, body.published, body.universal, body.fitment, body.source,
+                      body.distributor_id, body.brand_id, body.stock)
         )
         if not has_filter:
             raise HTTPException(400, "Pick a category, search or filter first. This will not change the whole catalog at once.")
-        where, params = _product_where(body.q, body.category_id, body.published, body.universal, False, body.fitment, body.source)
+        where, params = _product_where(
+            body.q, body.category_id, body.published, body.universal, False, body.fitment, body.source,
+            body.distributor_id, body.brand_id, body.stock,
+        )
         matched = db.execute(text(f"{_CATEGORY_TREE} select count(*) from products p {where}"), params).scalar() or 0
         if body.expected_count is None or matched != body.expected_count:
             conflict(db, f"The list now has {matched} products, not {body.expected_count}. Nothing was changed. Reload the list and try again.")
