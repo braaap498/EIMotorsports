@@ -58,12 +58,13 @@ const COLUMNS: { key: SortKey; label: string; width: string }[] = [
 ];
 
 // The status buttons above the list, in the order they are worked through.
-const STATUS_CHIPS: { key: FitmentStatus; tone: string }[] = [
-  { key: "needs_fitment", tone: "border-amber-400 bg-amber-50 text-amber-900" },
-  { key: "has_fitment", tone: "border-green-400 bg-green-50 text-green-900" },
-  { key: "universal_search", tone: "border-blue-400 bg-blue-50 text-blue-900" },
-  { key: "universal_category", tone: "border-blue-300 bg-blue-50 text-blue-900" },
-  { key: "not_vehicle", tone: "border-gray-400 bg-gray-100 text-gray-800" },
+// w = a fixed width for the bubble (wide enough for its longest text plus a 5 digit count), so it never changes size when the counts load.
+const STATUS_CHIPS: { key: FitmentStatus; tone: string; w: string }[] = [
+  { key: "needs_fitment", tone: "border-amber-400 bg-amber-50 text-amber-900", w: "w-48" },
+  { key: "has_fitment", tone: "border-green-400 bg-green-50 text-green-900", w: "w-48" },
+  { key: "universal_search", tone: "border-blue-400 bg-blue-50 text-blue-900", w: "w-72" },
+  { key: "universal_category", tone: "border-blue-300 bg-blue-50 text-blue-900", w: "w-72" },
+  { key: "not_vehicle", tone: "border-gray-400 bg-gray-100 text-gray-800", w: "w-56" },
 ];
 
 // Categories in tree order, with a depth for indentation.
@@ -373,7 +374,7 @@ export default function ProductsPage() {
         <span className="text-xs font-medium uppercase text-gray-500">Fitment</span>
         <button
           type="button"
-          className={`rounded-full border px-3 py-1 text-sm ${fitment === "" ? "border-black bg-black text-white" : "border-gray-300 bg-white hover:bg-gray-50"}`}
+          className={`w-28 shrink-0 whitespace-nowrap rounded-full border px-3 py-1 text-center text-sm ${fitment === "" ? "border-black bg-black text-white" : "border-gray-300 bg-white hover:bg-gray-50"}`}
           onClick={() => filterChange(() => setFitment(""))}
         >
           All{summary ? ` (${summary.total.toLocaleString()})` : ""}
@@ -382,7 +383,7 @@ export default function ProductsPage() {
           <button
             key={c.key}
             type="button"
-            className={`rounded-full border px-3 py-1 text-sm ${c.tone} ${fitment === c.key ? "ring-2 ring-black" : "opacity-90 hover:opacity-100"}`}
+            className={`${c.w} shrink-0 whitespace-nowrap rounded-full border px-3 py-1 text-center text-sm ${c.tone} ${fitment === c.key ? "ring-2 ring-black" : "opacity-90 hover:opacity-100"}`}
             onClick={() => filterChange(() => setFitment(fitment === c.key ? "" : c.key))}
           >
             {STATUS_LABEL[c.key]}
