@@ -112,7 +112,7 @@ export default function QuantitiesPanel({
                           type="number"
                           min={0}
                           step={1}
-                          className={`w-28 rounded border border-gray-300 py-0.5 pl-2 text-sm ${changed ? "pr-16" : "pr-1"}`}
+                          className="w-32 rounded border border-gray-300 py-0.5 pl-16 pr-1 text-right text-sm"
                           value={shown}
                           disabled={busy === w.id}
                           onChange={(e) => setDrafts((d) => ({ ...d, [w.id]: e.target.value }))}
@@ -126,7 +126,7 @@ export default function QuantitiesPanel({
                         {changed && (
                           <button
                             type="button"
-                            className="absolute right-1 top-1/2 -translate-y-1/2 rounded bg-gray-800 px-2 py-0.5 text-xs text-white disabled:opacity-50"
+                            className="absolute left-1 top-1/2 -translate-y-1/2 rounded bg-gray-800 px-2 py-0.5 text-xs text-white disabled:opacity-50"
                             disabled={busy === w.id}
                             onClick={() => void saveWarehouse(w.id)}
                           >
