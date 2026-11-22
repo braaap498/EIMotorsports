@@ -1358,7 +1358,7 @@ with q as (
                      where oi.order_id = o.id and (p.title ilike :like or p.sku_display ilike :like)))
   union all
   select 'eBay'::text, l.ebay_order_id, min(coalesce(l.sale_date, l.created_at)),
-         sum(l.quantity)::int, min(coalesce(l.title, '')), count(*)::int, min(l.store), null::bigint,
+         sum(l.quantity * coalesce(l.pieces_per_sale, 1))::int, min(coalesce(l.title, '')), count(*)::int, min(l.store), null::bigint,
          case when bool_or(o.shipped_at_ebay is not null) then 'shipped'
               when bool_and(l.state = 'dropship') then 'dropship'
               else 'pick' end

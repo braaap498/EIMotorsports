@@ -17,8 +17,8 @@ the job is kept under the key "web:<order number>" (dropship_jobs.channel = 'web
 website order is marked shipped with it (the customer sees it on Track order). An order that mixes drop ship products with shelf
 products is NOT automated: it is flagged "MIXED ORDER" and waits for a person.
 
-A listing ticked Drop ship is drop shipped automatically, whatever our shelf holds (and only a product whose parts are all matched to
-the distributor catalog can be ticked). An unticked listing that is short on our shelf asks a person on Pick & ship instead.
+A listing ticked Drop ship is drop shipped automatically while the distributor can fill the line (and only a product whose parts are all
+matched to the distributor catalog can be ticked). If the distributor is out and our shelf covers the line, it stays an order we fill ourselves. An unticked listing that is short on our shelf asks a person on Pick & ship instead.
 """
 import json
 import logging
@@ -31,6 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.auth import ADMIN_ROLES, AuthUser, needs, require_route_access
+from app.availability import line_units_sql
 from app.database import _session_factory, get_db
 
 log = logging.getLogger(__name__)
@@ -142,11 +143,23 @@ def _flagged_short_lines(db: Session, order_id: str, honor_decision: bool = Fals
     approved = False
     if honor_decision:
         approved = (fulfillment.decisions_for(db, [fulfillment.key_of("eBay", _o.ebay_order_id)]).get(fulfillment.key_of("eBay", _o.ebay_order_id)) or {}).get("decision") == "dropship"
+    # A ticked listing is drop shipped only while the distributor can fill the line. When the distributor is out (or shows too few,
+    # or its stock is unknown) and OUR shelf covers the line, it is not drop shipped: it stays a normal order we fill ourselves.
+    avail = fulfillment.distributor_availability(db, [l.product_id for l in lines if l.product_id is not None])
+
+    def _ours_instead(l) -> bool:
+        need = int(l.quantity or 1)
+        a = avail.get(int(l.product_id))
+        return (a is None or int(a["available"]) < need) and int(l.on_hand or 0) >= need
+
     picks = {
         int(l.product_id)
         for l in lines
         if l.product_id is not None
-        and (flags.get((_o.ebay_order_id, int(l.product_id))) or (approved and int(l.on_hand or 0) < int(l.quantity or 1)))
+        and (
+            (flags.get((_o.ebay_order_id, int(l.product_id))) and not _ours_instead(l))
+            or (approved and int(l.on_hand or 0) < int(l.quantity or 1))
+        )
     }
     # a product without a matched distributor part cannot be drop shipped: it stays with Pick & ship
     return sorted(pid for pid in picks if has_distributor(db, pid))
@@ -1537,7 +1550,7 @@ def activity(
                    j.supplier_order, j.supplier_mode, j.tracking_number, j.tracking_carrier, j.problem, j.created_at,
                    {_PLACED} as placed_at, {_SHIPPED} as shipped_at,
                    case when j.channel = 'web' then (select coalesce(sum(oi.quantity), 0) from order_items oi where oi.order_id = j.web_order_id)
-                        else (select coalesce(sum(l.quantity), 0) from ebay_order_lines l where l.ebay_order_id = j.ebay_order_id) end as units,
+                        else (select coalesce(sum({line_units_sql('l')}), 0) from ebay_order_lines l where l.ebay_order_id = j.ebay_order_id) end as units,
                    case when j.channel = 'web' then (select min(coalesce(oi.title, '')) from order_items oi where oi.order_id = j.web_order_id)
                         else (select min(coalesce(l.title, '')) from ebay_order_lines l where l.ebay_order_id = j.ebay_order_id) end as title,
                    j.channel

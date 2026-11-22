@@ -285,6 +285,7 @@ class DraftIn(BaseModel):
     shipping_options: Optional[list[dict]] = Field(default=None, max_length=30)  # [{kind: domestic|international, priority, cost, additional, free}]
     dispatch_days: Optional[str] = None  # handling time in business days: 0 (same day), 1-5, 10, 15, 20 or 30
     dropship: Optional[bool] = None  # count the distributor's warehouses in the quantity, and keep doing so after it is listed
+    pieces_per_sale: Optional[int] = Field(default=None, ge=1, le=999)  # units of the product one sale uses (a 3-pack = 3); the listing shows units / this
 
 
 def _row(db: Session, copy_id: int):
@@ -343,6 +344,7 @@ def _shape(r) -> dict:
         "compat": d.get("compat", []), "compat_edited": bool(d.get("compat_edited")),
         "terms": terms_summary(d), "terms_problem": _terms_problem(d),
         "dropship": bool(d.get("dropship")),
+        "pieces_per_sale": max(1, int(d.get("pieces_per_sale") or 1)),
         "dispatch_days": str(d.get("dispatch_days") or ""),
         "shipping_options": (
             [{"kind": "domestic", "priority": str(o.get("priority")), "service": o.get("service", ""), "cost": o.get("cost") or "",
@@ -496,6 +498,8 @@ def save_copy(copy_id: int, body: DraftIn, db: Session = Depends(get_db)):
         d["item_specifics"] = _spec_clean(body.item_specifics)
     if body.dropship is not None:
         d["dropship"] = bool(body.dropship)
+    if body.pieces_per_sale is not None:
+        d["pieces_per_sale"] = int(body.pieces_per_sale)
     if body.shipping_options is not None:
         sh = dict(d.get("shipping") or {})
         dom = [dict(o) for o in sh.get("services", [])]
@@ -560,9 +564,17 @@ def _product_label(db: Session, product_id: int) -> str:
     return (str(v).strip() if v is not None else "")
 
 
-def _quantity(db: Session, store: str, product_id: int, dropship: bool = False) -> int:
-    avail = db.execute(text(f"select {effective_sql('p', 'true' if dropship else 'false')} from products p where p.id = :p"), {"p": product_id}).scalar()
-    avail = int(avail or 0)
+def _quantity(db: Session, store: str, product_id: int, dropship: bool = False, pieces: int = 1) -> int:
+    """The quantity to list: units available / pieces per sale (a 3-pack of a one-part product needs 3 units for each one shown)."""
+    pieces = max(1, int(pieces or 1))
+    units = db.execute(text(f"select {effective_sql('p', 'true' if dropship else 'false')} from products p where p.id = :p"), {"p": product_id}).scalar()
+    avail = int(units or 0) // pieces
+    if avail < 1 and pieces > 1 and int(units or 0) > 0:
+        raise HTTPException(
+            409,
+            f"Only {int(units)} unit(s) are available, and each sale of this listing uses {pieces}, so it cannot be listed yet "
+            "(eBay needs at least 1). Receive more stock, tick Drop ship to count the distributor's warehouses, or lower pieces per sale. Nothing was sent.",
+        )
     if avail < 1:
         raise HTTPException(
             409,
@@ -588,7 +600,7 @@ def _ready(store: str, d: dict) -> None:
         raise HTTPException(409, "The draft has no shipping and return rules yet. Choose the store again, or pick a different model listing.")
 
 
-def _quantity_parts(db: Session, product_id: int, dropship: bool = False) -> dict:
+def _quantity_parts(db: Session, product_id: int, dropship: bool = False, pieces: int = 1) -> dict:
     """Where the quantity comes from. A drop ship listing shows the lowest of our shelf (on hand minus set aside), Indiana and Nevada,
     not counting any that is at 0; otherwise it is our shelf only."""
     from app.availability import wh_sql
@@ -616,7 +628,8 @@ def _quantity_parts(db: Session, product_id: int, dropship: bool = False) -> dic
         except Exception:
             db.rollback()
     return {"quantity_own": own, "quantity_indiana": ind, "quantity_nevada": nev, "quantity_distributor": ind + nev,
-            "distributor_counted": bool(dropship), "distributor_note": note}
+            "distributor_counted": bool(dropship), "distributor_note": note,
+            "units_available": total, "pieces_per_sale": max(1, int(pieces or 1)), "listing_quantity": total // max(1, int(pieces or 1))}
 
 
 SITE_IDS = {"US": "0", "eBayMotors": "100"}
@@ -752,7 +765,7 @@ def preview(copy_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
     d = dict(r.data or {})
     _ready(r.store, d)
     d["sku"] = _product_label(db, r.product_id) or d.get("sku", "")
-    qty = _quantity(db, r.store, r.product_id, bool(d.get("dropship")))
+    qty = _quantity(db, r.store, r.product_id, bool(d.get("dropship")), int(d.get("pieces_per_sale") or 1))
     xml = _item_xml(d, qty)
     root = _trading(db, r.store, "VerifyAddFixedPriceItem", xml, _site_id(d))
     errs = _errors(root)
@@ -788,7 +801,7 @@ def preview(copy_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
         "warnings": [e for e in errs if e["severity"] == "Warning"],
         "fees": fees,
         "quantity": qty,
-        **_quantity_parts(db, r.product_id, bool(d.get("dropship"))),
+        **_quantity_parts(db, r.product_id, bool(d.get("dropship")), int(d.get("pieces_per_sale") or 1)),
         "duplicates": _duplicates(db, r.store, " ".join((d.get("title") or "").split()), ""),
         "fingerprint": _fingerprint(r.store, xml) if ok else None,
         "live_pushes_enabled": _live_on(db, r.store),
@@ -810,7 +823,7 @@ def list_it(copy_id: int, body: ListIn, db: Session = Depends(get_db), user: Aut
     if not _live_on(db, r.store):
         raise HTTPException(403, f"Live pushes are OFF for {r.store}. Turn them on in the Stores box first.")
     d["sku"] = _product_label(db, r.product_id) or d.get("sku", "")
-    qty = _quantity(db, r.store, r.product_id, bool(d.get("dropship")))
+    qty = _quantity(db, r.store, r.product_id, bool(d.get("dropship")), int(d.get("pieces_per_sale") or 1))
     xml = _item_xml(d, qty)
     if _fingerprint(r.store, xml) != body.fingerprint:
         raise HTTPException(409, "The listing is not the same as in the preview (or the stock changed). Nothing was sent. Preview again.")
@@ -836,6 +849,12 @@ def list_it(copy_id: int, body: ListIn, db: Session = Depends(get_db), user: Aut
                 text("update channel_listings set dropship_ok = true where product_id = :p and lower(coalesce(store, '')) = lower(:s) "
                      "and regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i"),
                 {"p": r.product_id, "s": r.store, "i": new_id},
+            )
+        if int(d.get("pieces_per_sale") or 1) > 1:
+            db.execute(
+                text("update channel_listings set pieces_per_sale = :n where product_id = :p and lower(coalesce(store, '')) = lower(:s) "
+                     "and regexp_replace(cast(external_id as text), '[^0-9]', '', 'g') = :i"),
+                {"n": int(d["pieces_per_sale"]), "p": r.product_id, "s": r.store, "i": new_id},
             )
         db.commit()
         notes.append(f"Linked eBay item {new_id} to product {r.product_id}." + (" Drop ship is on for it." if d.get("dropship") else ""))

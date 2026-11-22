@@ -1283,18 +1283,20 @@ def _relist_quantity(db: Session, store: str, current: dict, ch: Changes) -> Cha
         return ch  # typed on purpose
     avail = db.execute(
         text(
-            f"select {effective_sql('p', 'coalesce(cl.dropship_ok, false)')} from channel_listings cl join products p on p.id = cl.product_id "
+            f"select {effective_sql('p', 'coalesce(cl.dropship_ok, false)')} / greatest(coalesce(cl.pieces_per_sale, 1), 1) "
+            "from channel_listings cl join products p on p.id = cl.product_id "
             "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i and lower(cl.store) = lower(:s) limit 1"
         ),
         {"i": current["item_id"], "s": store},
     ).scalar()
     if avail is None:
         return ch  # not linked to a product: nothing to go by, keep the old behaviour
-    avail = int(avail)
+    avail = int(avail)   # units available / pieces per sale (whole division, rounded down)
     if avail < 1:
         raise HTTPException(
             409,
-            "The website shows nothing available to sell for this part (stock on hand minus parts set aside for open orders), "
+            "The website shows nothing available to sell for this listing (stock on hand minus parts set aside for open orders, "
+            "divided by the pieces each sale of this listing uses), "
             "and eBay needs at least 1 to relist. Receive stock first. Nothing was sent.",
         )
     q = min(avail, 9999)
@@ -1551,7 +1553,8 @@ def restore_qty(body: RestoreIn, db: Session = Depends(get_db), user: AuthUser =
     if qty is None:
         qty = db.execute(
             text(
-                f"select {effective_sql('p', 'coalesce(cl.dropship_ok, false)')} from channel_listings cl join products p on p.id = cl.product_id "
+                f"select {effective_sql('p', 'coalesce(cl.dropship_ok, false)')} / greatest(coalesce(cl.pieces_per_sale, 1), 1) "
+                "from channel_listings cl join products p on p.id = cl.product_id "
                 "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = :i and cl.store = :s limit 1"
             ),
             {"i": current["item_id"], "s": row.store},

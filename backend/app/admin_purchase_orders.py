@@ -58,6 +58,7 @@ from app.auth import AuthUser, current_user, needs, require_route_access
 from app.database import get_db
 from app.kits import expand_rows
 from app.po_export import DEFAULT_SHIP_TO, build_pdf, build_xlsx, po_total
+from app.availability import line_pieces_sql, line_units_sql
 from app.stock import available_sql, set_aside_sql
 
 log = logging.getLogger(__name__)
@@ -808,7 +809,7 @@ def _ebay_order_and_lines(db: Session, order: str):
     lines = db.execute(
         text(
             f"""
-            select l.id, l.product_id, coalesce(l.title, p.title) as title, l.quantity, l.state,
+            select l.id, l.product_id, coalesce(l.title, p.title) as title, {line_units_sql('l')} as quantity, l.quantity as packs, {line_pieces_sql('l')} as pieces_per_sale, l.state,
                    p.sku_display as sku, coalesce(p.quantity_on_hand, 0) as on_hand, {set_aside_sql('p')} as reserved
             from ebay_order_lines l left join products p on p.id = l.product_id
             where l.order_pk = :o order by l.id
@@ -844,6 +845,7 @@ def ebay_order_lookup(order: str = Query(..., min_length=3, max_length=40), db: 
         "lines": [
             {
                 "product_id": l.product_id, "sku": l.sku, "title": l.title, "quantity": l.quantity,
+                "packs": l.packs, "pieces_per_sale": l.pieces_per_sale,
                 "on_hand": l.on_hand, "available": max(0, int(l.on_hand or 0) - int(l.reserved or 0)),
                 "short": l.product_id is not None and int(l.on_hand or 0) < int(l.quantity or 0),
                 "matched": l.product_id is not None,

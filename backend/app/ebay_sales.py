@@ -336,7 +336,7 @@ def undo_lines_dropship(db: Session, ebay_order_id: str, product_ids) -> int:
         return 0
     rows = db.execute(
         text(
-            "select l.id, l.product_id, l.quantity from ebay_order_lines l join ebay_orders o on o.id = l.order_pk "
+            "select l.id, l.product_id, l.quantity * coalesce(l.pieces_per_sale, 1) as quantity from ebay_order_lines l join ebay_orders o on o.id = l.order_pk "
             "where l.ebay_order_id = :o and l.state = 'dropship' and l.product_id = any(cast(:p as bigint[])) "
             "and not o.cancelled and o.shipped_at_ebay is null for update of l"
         ),
@@ -389,6 +389,12 @@ def _apply_line(db: Session, ln, od: dict, channel_id: Optional[int], skip_shipp
     # An order eBay shows as shipped is history (nothing to set aside) when this is a history import, OR when it shipped
     # long ago: a buyer leaving feedback, a refund, or a late tracking update makes eBay report an old order as
     # "changed", and a normal check would otherwise set its parts aside again.
+    # PIECES PER SALE: one sale of this listing uses `pieces` units of the product (a 3-pack = 3). It is read from the listing the
+    # first time the line is handled and then frozen on the line, so editing the listing later never changes an old order.
+    from app.availability import listing_pieces, pieces_of
+
+    pieces = pieces_of(ln.pieces_per_sale) if ln.pieces_per_sale else listing_pieces(db, ln.store, ln.ebay_item_id)
+    units = int(ln.quantity or 0) * pieces      # units of the product this line takes off the shelf
     shipped_long_ago = bool(od["shipped"]) and od["shipped"] < _now() - timedelta(days=SHIPPED_HISTORY_DAYS)
     shipped_already = bool(od["shipped"]) and (skip_shipped or shipped_long_ago)
     sales_id = ln.sales_transaction_id
@@ -400,13 +406,13 @@ def _apply_line(db: Session, ln, od: dict, channel_id: Optional[int], skip_shipp
                   (product_id, channel_id, quantity_sold, unit_sale_price, unit_cost_at_sale, shipping_charged,
                    platform_fees, sale_date, order_reference, ship_to_state, ship_to_zip, ebay_item_id)
                 values (:p, :ch, :q, :price,
-                        (select nullif(to_jsonb(p)->>'cost', '')::numeric from products p where p.id = :p),
+                        (select nullif(to_jsonb(p)->>'cost', '')::numeric * :pc from products p where p.id = :p),
                         :ship, :fee, :d, :ref, :st, :zip, :item)
                 returning id
                 """
             ),
             {
-                "p": pid, "ch": channel_id, "q": ln.quantity, "price": ln.unit_price,
+                "p": pid, "ch": channel_id, "q": ln.quantity, "price": ln.unit_price, "pc": pieces,
                 "ship": (od["ship_charged"] or 0) if first_in_order else 0, "fee": ln.fees,
                 "d": ln.sale_date or od["paid"], "ref": ln.ebay_order_id, "st": od["state"], "zip": od["zip"],
                 "item": ln.ebay_item_id,
@@ -414,8 +420,11 @@ def _apply_line(db: Session, ln, od: dict, channel_id: Optional[int], skip_shipp
         ).scalar()
     if shipped_already:
         db.execute(
-            text("update ebay_order_lines set state = 'history', product_id = :p, sales_transaction_id = :s where id = :l"),
-            {"p": pid, "s": sales_id, "l": ln.id},
+            text(
+                "update ebay_order_lines set state = 'history', product_id = :p, sales_transaction_id = :s, "
+                "pieces_per_sale = coalesce(pieces_per_sale, :pc) where id = :l"
+            ),
+            {"p": pid, "s": sales_id, "l": ln.id, "pc": pieces},
         )
         return None, c
 
@@ -426,14 +435,14 @@ def _apply_line(db: Session, ln, od: dict, channel_id: Optional[int], skip_shipp
             "values (null, :p, :q, 'reserved', null, :l) on conflict (ebay_order_line_id) "
             "where ebay_order_line_id is not null do nothing"
         ),
-        {"p": pid, "q": ln.quantity, "l": ln.id},
+        {"p": pid, "q": units, "l": ln.id},
     )
     db.execute(
         text(
             "update ebay_order_lines set state = 'reserved', product_id = :p, sales_transaction_id = :s, "
-            "reserved_at = coalesce(reserved_at, now()) where id = :l"
+            "pieces_per_sale = coalesce(pieces_per_sale, :pc), reserved_at = coalesce(reserved_at, now()) where id = :l"
         ),
-        {"p": pid, "s": sales_id, "l": ln.id},
+        {"p": pid, "s": sales_id, "l": ln.id, "pc": pieces},
     )
     c["reserved"] = 1
     return pid, c
@@ -441,7 +450,7 @@ def _apply_line(db: Session, ln, od: dict, channel_id: Optional[int], skip_shipp
 
 _LINE_SQL = (
     "select id, state, product_id, quantity, unit_price, fees, ebay_item_id, ebay_order_id, "
-    "sales_transaction_id, sale_date from ebay_order_lines "
+    "sales_transaction_id, sale_date, store, pieces_per_sale from ebay_order_lines "
 )
 
 
@@ -549,7 +558,7 @@ def _rematch(db: Session, store: str, channel_id: Optional[int]) -> tuple[set, d
     rows = db.execute(
         text(
             "select l.id, l.state, l.product_id, l.quantity, l.unit_price, l.fees, l.ebay_item_id, l.ebay_order_id, "
-            "l.sales_transaction_id, l.sale_date, o.paid_at, o.cancelled, o.shipped_at_ebay, o.buyer_state, "
+            "l.sales_transaction_id, l.sale_date, l.store, l.pieces_per_sale, o.paid_at, o.cancelled, o.shipped_at_ebay, o.buyer_state, "
             "o.buyer_zip, o.shipping_charged from ebay_order_lines l join ebay_orders o on o.id = l.order_pk "
             "where l.store = :s and l.state = 'unmatched' limit 500"
         ),
@@ -583,7 +592,8 @@ def enqueue_product(db: Session, product_id: int) -> int:
     """Queue a quantity update for each eBay listing of this product, on stores that allow it."""
     rows = db.execute(
         text(
-            f"select cl.store, {DIGITS.replace('external_id', 'cl.external_id')} as item, coalesce(cl.dropship_ok, false) as dropship_ok "
+            f"select cl.store, {DIGITS.replace('external_id', 'cl.external_id')} as item, coalesce(cl.dropship_ok, false) as dropship_ok, "
+            "coalesce(cl.pieces_per_sale, 1) as pieces "
             "from channel_listings cl join ebay_accounts a on a.store = cl.store "
             "where cl.product_id = :p and cl.external_id is not null "
             "and a.sales_qty_push_enabled and a.live_pushes_enabled and a.refresh_token_enc is not null"
@@ -593,7 +603,9 @@ def enqueue_product(db: Session, product_id: int) -> int:
     for r in rows:
         if not r.item:
             continue
-        avail = _available(db, product_id, bool(r.dropship_ok))
+        from app.availability import packs
+
+        avail = packs(_available(db, product_id, bool(r.dropship_ok)), r.pieces)   # a 3-pack listing shows units / 3, rounded down
         db.execute(
             text(
                 "insert into ebay_qty_queue (store, ebay_item_id, product_id, target_qty) values (:s, :i, :p, :q) "
@@ -703,9 +715,12 @@ def run_queue(db: Session, store: str, limit: int = QTY_PER_RUN) -> dict:
     ).all()
     for r in rows:
         if r.product_id:
-            from app.availability import listing_override
+            from app.availability import listing_override, listing_pieces, packs
 
-            target = _available(db, r.product_id, listing_override(db, store, r.ebay_item_id))
+            target = packs(
+                _available(db, r.product_id, listing_override(db, store, r.ebay_item_id)),
+                listing_pieces(db, store, r.ebay_item_id),
+            )
         else:
             target = r.target_qty
         held_note = _hold_gate(db, store, r.ebay_item_id, r.product_id, target) if r.product_id else None
@@ -1419,6 +1434,7 @@ def _query_lines(
         text(
             f"""
             select l.id, l.store, l.ebay_order_id, l.ebay_item_id, l.custom_label, coalesce(l.title, p.title) as title, l.quantity,
+                   coalesce(l.pieces_per_sale, 1) as pieces_per_sale, l.quantity * coalesce(l.pieces_per_sale, 1) as units,
                    l.unit_price, l.state, l.product_id, p.sku_display as sku, coalesce(l.sale_date, l.created_at) as sale_date,
                    o.id as order_pk, o.cancelled, o.refund_total, o.shipped_at_ebay, o.tracking_number,
                    o.tracking_carrier, o.shipping_service
@@ -1586,7 +1602,10 @@ def mark_shipped(order_pk: int, body: ShipIn, db: Session = Depends(get_db), use
 def pick_line(line_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     """Take this line's parts off the shelf now, without scanning (the part has left the building)."""
     ln = db.execute(
-        text("select id, product_id, quantity, sales_transaction_id, ebay_order_id, state from ebay_order_lines where id = :l"),
+        text(
+            "select id, product_id, quantity * coalesce(pieces_per_sale, 1) as quantity, sales_transaction_id, ebay_order_id, state "
+            "from ebay_order_lines where id = :l"
+        ),
         {"l": line_id},
     ).first()
     if not ln or ln.state != "reserved" or not ln.product_id:
@@ -1610,7 +1629,7 @@ def pick_line(line_id: int, db: Session = Depends(get_db), user: AuthUser = Depe
 def release_line(line_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     """Stop setting these parts aside WITHOUT changing the shelf count (use when the sale should not hold stock)."""
     ln = db.execute(
-        text("select id, product_id, quantity, ebay_order_id, state from ebay_order_lines where id = :l for update"), {"l": line_id}
+        text("select id, product_id, quantity * coalesce(pieces_per_sale, 1) as quantity, ebay_order_id, state from ebay_order_lines where id = :l for update"), {"l": line_id}
     ).first()
     if not ln or ln.state != "reserved":
         raise HTTPException(409, "Only a line whose parts are set aside can be released.")

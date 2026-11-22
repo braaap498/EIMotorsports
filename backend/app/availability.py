@@ -67,6 +67,8 @@ def ensure_tables() -> None:
             # the WEBSITE's own Drop ship tick on the product. It has nothing to do with eBay: eBay is set per listing (dropship_ok above).
             "alter table products add column if not exists web_dropship_ok boolean not null default false",
             "alter table channel_listings add column if not exists dropship_ok boolean not null default false",
+            # PIECES PER SALE: how many units of the product one sale of this listing uses (a 3-pack listing of a one-part product = 3)
+            "alter table channel_listings add column if not exists pieces_per_sale integer not null default 1",
             # the listings' ticks as they were before the whole product was switched on (so it can be switched off and put back)
             "alter table products add column if not exists dropship_prev text",
             "create table if not exists availability_settings (key text primary key, value text not null)",
@@ -78,6 +80,13 @@ def ensure_tables() -> None:
     except Exception:
         db.rollback()
         log.exception("could not set up the availability tables; counting distributor stock will not work until they exist")
+    try:
+        # frozen on each eBay order line when it is set aside, so editing a listing later never changes an old order (null = not frozen yet)
+        db.execute(text("alter table ebay_order_lines add column if not exists pieces_per_sale integer"))
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("could not add pieces_per_sale to ebay_order_lines; multi-pack listings will count as 1 piece until it exists")
     finally:
         db.close()
 
@@ -335,6 +344,58 @@ def effective(db: Session, product_id: int, listing_dropship: bool = False) -> i
     )
 
 
+def pieces_of(v) -> int:
+    """A pieces-per-sale value made safe: a whole number, at least 1."""
+    try:
+        return max(1, int(v or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def packs(avail: int, pieces) -> int:
+    """How many SALES of a listing the available units cover: units / pieces per sale, rounded down. A 3-pack listing with 2 units
+    available shows 0. With pieces = 1 this is the number itself."""
+    return max(0, int(avail or 0)) // pieces_of(pieces)
+
+
+def line_pieces_sql(l: str = "l") -> str:
+    """SQL: pieces per sale of an eBay order line `l` (an ebay_order_lines alias): the number frozen on the line when its parts were set
+    aside, else what its listing says now, else 1."""
+    return (
+        f"coalesce({l}.pieces_per_sale, (select cl.pieces_per_sale from channel_listings cl "
+        f"where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = regexp_replace(cast({l}.ebay_item_id as text), '[^0-9]', '', 'g') "
+        f"and lower(cl.store) = lower(coalesce({l}.store, '')) limit 1), 1)"
+    )
+
+
+def line_units_sql(l: str = "l") -> str:
+    """SQL: units of the product an eBay order line takes (quantity bought x pieces per sale)."""
+    return f"({l}.quantity * {line_pieces_sql(l)})"
+
+
+def listing_pieces(db: Session, store: str, item_id: str) -> int:
+    """Pieces per sale of the eBay listing with this item number in this store (1 when it is not linked or the column is not there yet)."""
+    try:
+        with db.begin_nested():
+            v = db.execute(
+                text(
+                    "select cl.pieces_per_sale from channel_listings cl "
+                    "where regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = regexp_replace(cast(:i as text), '[^0-9]', '', 'g') "
+                    "and lower(cl.store) = lower(:s) limit 1"
+                ),
+                {"i": item_id, "s": store},
+            ).scalar()
+        return pieces_of(v)
+    except Exception:
+        log.exception("could not read pieces per sale for %s", item_id)
+        return 1
+
+
+def listing_quantity(db: Session, product_id: int, store: str, item_id: str, listing_dropship: bool = False) -> int:
+    """The quantity to show on this eBay listing: units available (drop ship counted when the listing allows it) / its pieces per sale."""
+    return packs(effective(db, product_id, listing_dropship), listing_pieces(db, store, item_id))
+
+
 # --------------------------------------------------------------------------
 # settings routes
 # --------------------------------------------------------------------------
@@ -434,13 +495,15 @@ def api_zero(
         for l in db.execute(
             text(
                 "select cl.id, cl.product_id, cl.store, regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item_id, "
-                f"coalesce(cl.dropship_ok, false) as dropship_ok from channel_listings cl where cl.product_id in :ids and {_ACTIVE_LISTING} "
+                f"coalesce(cl.dropship_ok, false) as dropship_ok, coalesce(cl.pieces_per_sale, 1) as pieces_per_sale "
+                f"from channel_listings cl where cl.product_id in :ids and {_ACTIVE_LISTING} "
                 "order by cl.store, cl.id"
             ).bindparams(bindparam("ids", expanding=True)),
             {"ids": ids},
         ).all():
             listings.setdefault(l.product_id, []).append(
-                {"listing_id": l.id, "store": l.store, "item_id": l.item_id, "dropship_ok": bool(l.dropship_ok)}
+                {"listing_id": l.id, "store": l.store, "item_id": l.item_id, "dropship_ok": bool(l.dropship_ok),
+                 "pieces_per_sale": pieces_of(l.pieces_per_sale)}
             )
     out = []
     for r in rows:
@@ -527,6 +590,25 @@ def api_product_dropship(product_id: int, body: ProductDropIn, db: Session = Dep
     return {"dropship_ok": body.on, "queued": queued, "restored": restored}
 
 
+class PiecesIn(BaseModel):
+    pieces: int = Field(..., ge=1, le=999)
+
+
+@router.post("/listings/{listing_id}/pieces")
+def api_listing_pieces(listing_id: int, body: PiecesIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """PIECES PER SALE for one listing: how many units of the product one sale of it uses (1 = a single, 3 = a 3-pack). The listing then shows
+    units available / pieces (rounded down), and each order for it sets aside quantity x pieces. Orders already set aside keep the number they
+    had when they came in. The new quantity is queued to eBay."""
+    row = db.execute(
+        text("update channel_listings set pieces_per_sale = :n where id = :l returning product_id"), {"n": body.pieces, "l": listing_id}
+    ).first()
+    if not row:
+        raise HTTPException(404, "Listing not found.")
+    queued = _queue_product(db, row.product_id) if row.product_id else 0
+    db.commit()
+    return {"pieces": body.pieces, "queued": queued}
+
+
 @router.post("/listings/{listing_id}/dropship")
 def api_listing_dropship(listing_id: int, body: OnIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     if body.on:
@@ -586,17 +668,21 @@ def api_products(
         for l in db.execute(
             text(
                 "select cl.id, cl.product_id, cl.store, regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item_id, "
-                f"coalesce(cl.dropship_ok, false) as dropship_ok from channel_listings cl where cl.product_id in :ids and {_ACTIVE_LISTING} "
+                f"coalesce(cl.dropship_ok, false) as dropship_ok, coalesce(cl.pieces_per_sale, 1) as pieces_per_sale "
+                f"from channel_listings cl where cl.product_id in :ids and {_ACTIVE_LISTING} "
                 "order by cl.store, cl.id"
             ).bindparams(bindparam("ids", expanding=True)),
             {"ids": ids},
         ).all():
             listings.setdefault(l.product_id, []).append(
-                {"listing_id": l.id, "store": l.store, "item_id": l.item_id, "dropship_ok": bool(l.dropship_ok)}
+                {"listing_id": l.id, "store": l.store, "item_id": l.item_id, "dropship_ok": bool(l.dropship_ok),
+                 "pieces_per_sale": pieces_of(l.pieces_per_sale)}
             )
     items = []
     for r in rows:
         ls = listings.get(r.id, [])
+        for x in ls:   # what the listing shows on eBay: units (drop ship adds the distributor's) / pieces per sale, rounded down
+            x["listing_qty"] = packs(int(r.own) + (int(r.distributor) if (r.dropship_ok or x["dropship_ok"]) else 0), x["pieces_per_sale"])
         items.append(
             {
                 "product_id": r.id, "sku": r.sku, "title": r.title, "custom_label": r.custom_label_sku,
