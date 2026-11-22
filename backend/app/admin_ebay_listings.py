@@ -508,6 +508,7 @@ def repo_listings(
             text(
                 f"""
                 select {_DIGITS} as item_id, cl.id as listing_id, cl.store, cl.status, cl.api_type,
+                       coalesce(cl.pieces_per_sale, 1) as pieces_per_sale,
                        p.id as product_id, p.sku_display as sku, p.custom_label_sku as product_label, {_L_TITLE} as title, {_L_LABEL} as custom_label_sku,
                        {_L_PRICE} as list_price, p.quantity_on_hand,
                        case when {_L_IS_DROPSHIP} then {_dropship_qty_sql('p')}
@@ -560,7 +561,13 @@ def repo_listings(
                 "product_label": d["product_label"],
                 "price": float(d["list_price"]) if d["list_price"] is not None else None,
                 "currency": "USD",
-                "quantity": d["quantity_shown"],
+                # a multi-pack listing shows units / pieces per sale, like the number sent to eBay (not for a figure read from eBay itself)
+                "quantity": (
+                    int(d["quantity_shown"]) // max(1, int(d["pieces_per_sale"] or 1))
+                    if d["quantity_shown"] is not None and not d["qty_from_ebay"] and int(d["pieces_per_sale"] or 1) > 1
+                    else d["quantity_shown"]
+                ),
+                "pieces_per_sale": max(1, int(d["pieces_per_sale"] or 1)),
                 "quantity_from_ebay": bool(d["qty_from_ebay"]),
                 "status": (d["status"] or "").strip() or None,
                 "active": (d["status"] or "").strip().lower() == "active",
