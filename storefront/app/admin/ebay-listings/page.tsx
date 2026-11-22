@@ -1088,8 +1088,8 @@ export default function EbayLiveListingsPage() {
               <div className="flex items-start justify-between gap-3">
                 <p className="text-sm">
                   Change which product listing <b>{relink.item_id}</b> points at. It now points at <b>{relink.sku ?? `product ${relink.product_id}`}</b>
-                  {relink.product_label ? ` (label ${relink.product_label})` : ""}. The listing&apos;s own label on eBay is{" "}
-                  <b>{relink.custom_label ?? "not known"}</b>.
+                  {relink.product_label ? ` (label ${relink.product_label})` : ""}. The label last read from eBay for this listing is{" "}
+                  <b>{relink.custom_label ?? "not known"}</b> (a saved copy, so it can be out of date until the label is sent or eBay is read again).
                 </p>
                 <button type="button" className={btn2Cls} disabled={relinkBusy} onClick={() => { setRelink(null); setRelinkTo(null); }}>
                   Cancel
@@ -1303,7 +1303,7 @@ export default function EbayLiveListingsPage() {
                             Change product
                           </button>
                           {it.product_label && it.custom_label && it.product_label.trim().toLowerCase() !== it.custom_label.trim().toLowerCase() && (
-                            <span className="ml-2" title={`This listing's label is ${it.custom_label}, but the product it points at has ${it.product_label}`}>
+                            <span className="ml-2" title={`The label last read from eBay is ${it.custom_label}, but the product it points at has ${it.product_label}. The saved copy can be out of date; sending the label from the product page refreshes it.`}>
                               <Badge tone="amber">Label differs from product</Badge>
                             </span>
                           )}

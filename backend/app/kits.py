@@ -483,6 +483,16 @@ def sync_listings(db: Session, user: AuthUser, product_id: int) -> list[dict]:
                     continue
                 ee.push(ee.PushIn(store=l["store"], item_id=l["item_id"], changes=changes, fingerprint=fp), db, user)
                 res["status"], res["detail"] = "updated", f"{current.get('sku') or '(none)'} -> {cls}"
+            # The Live listings page shows the label from saved copies of what eBay reported (report upload / lookups);
+            # nothing refreshed them after a push. eBay now has this label (just sent, or it already did), so update the copies.
+            digits = re.sub(r"[^0-9]", "", str(l["item_id"] or ""))
+            if digits:
+                try:
+                    with db.begin_nested():
+                        for tbl in ("ebay_report_rows", "ebay_api_details"):
+                            db.execute(text(f"update {tbl} set custom_label_sku = :c where item_id = :i"), {"c": cls, "i": digits})
+                except Exception:
+                    log.warning("could not refresh the saved label copy for listing %s", l["item_id"], exc_info=True)
             db.execute(
                 text("update channel_listings set cls_pushed = :c, cls_pushed_at = now() where id = :i"), {"c": cls, "i": l["id"]}
             )
