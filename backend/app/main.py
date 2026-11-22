@@ -53,6 +53,7 @@ from app.analytics_insights import router as analytics_insights_router
 from app.autodist import router as autodist_router
 from app.rmatv import ensure_columns as ensure_rmatv_columns
 from app.rmatv import router as rmatv_router
+from app.kits import ensure_mfr_column, start_mfr_backfill_once
 from app.kits import router as kits_router
 from app.order_activity import ensure_tables as ensure_order_activity_tables
 from app.order_activity import router as order_activity_router
@@ -201,6 +202,13 @@ def _availability():
 def _po_types():
     """Allow the 'stock_drop_ship' (inventory drop ship) purchase order type if the database restricts po_type."""
     ensure_po_types()
+
+
+@app.on_event("startup")
+def _kit_mfr_numbers():
+    """product_kit_parts.mfr_number (a manufacturer part number per piece), and the one-time move of existing numbers onto the part lines."""
+    ensure_mfr_column()
+    start_mfr_backfill_once()
 
 
 @app.on_event("startup")

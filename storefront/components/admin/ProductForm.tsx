@@ -146,6 +146,11 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [similar, setSimilar] = useState<SimilarMatch[]>([]);
   const [labelBy, setLabelBy] = useState<LabelBy>("mfr"); // Autodist parts in a new label: manufacturer # or vendor SKU
   const [kitParts, setKitParts] = useState<KitPart[]>([]); // pieces bought from a vendor that make up this product
+  // the Manufacturer part # comes from the pieces' own numbers (their list), so it is shown but edited on the pieces
+  const [mpnLocked, setMpnLocked] = useState(false);
+  const partMpns = Array.from(new Set(kitParts.map((p) => (p.mfr_number ?? "").trim()).filter(Boolean)));
+  const mpnFromParts = productId ? mpnLocked : partMpns.length > 0;
+  const mpnShown = !productId && partMpns.length > 0 ? partMpns.join(" / ") : null;
   const [loading, setLoading] = useState(!!productId);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -306,6 +311,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
                 distributor_id: p.distributor_id,
                 supplier_item_id: p.supplier_item_id,
                 part_number: p.part_number,
+                mfr_number: (p.mfr_number ?? "").trim() || null,
                 description: p.description || null,
                 unit_cost: p.unit_cost,
                 quantity: p.quantity,
@@ -387,12 +393,17 @@ export default function ProductForm({ productId }: { productId?: number }) {
       <Field key={f.key} label={f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
         <input
           className={inputCls}
-          disabled={!fieldAllowed(f.key)}
+          disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts)}
           type={f.kind === "text" ? "text" : "number"}
           step={f.kind === "number" ? f.step : f.kind === "int" ? "1" : undefined}
-          value={vals[f.key] ?? ""}
+          value={f.key === "manufacturer_part_number" && mpnShown ? mpnShown : vals[f.key] ?? ""}
           onChange={(e) => set(f.key, e.target.value)}
         />
+        {f.key === "manufacturer_part_number" && mpnFromParts && (
+          <span className="mt-1 block text-xs font-normal text-gray-500">
+            This shows the manufacturer numbers of the distributor parts below. To change one, change it on that part.
+          </span>
+        )}
         {f.key === "cost" && (
           <span className="mt-1 block text-xs font-normal text-gray-500">
             What you pay for this part. Admin only: customers never see it anywhere on the website. It is the starting cost on purchase orders.
@@ -545,6 +556,14 @@ export default function ProductForm({ productId }: { productId?: number }) {
             if (c == null) return;
             set("custom_label_sku", c);
             if (baseline) setBaseline({ ...baseline, custom_label_sku: c });
+          }}
+          onMpn={(m, locked) => {
+            setMpnLocked(locked);
+            if (productId && locked) {
+              // the server has just set the product's number from its pieces: show it, and do not count it as an unsaved change
+              set("manufacturer_part_number", m ?? "");
+              setBaseline((b) => (b ? { ...b, manufacturer_part_number: m ?? "" } : b));
+            }
           }}
         />
 

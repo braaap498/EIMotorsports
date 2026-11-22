@@ -31,7 +31,7 @@ from app.auth import AuthUser, current_user, has_perm, needs, require_route_acce
 from app.database import get_db
 from app.images import thumb_url
 from app.permissions import FIELD_PERMS, label_for
-from app.kits import KitPartIn, replace_parts
+from app.kits import KitPartIn, mpn_locked, parts_mpn, replace_parts
 from app.skus import PLACEHOLDER_SKU, SKU_PREFIX, clean_ebay_item_id, shelf_code_for
 from app.sanitize import clean_description
 
@@ -1198,6 +1198,9 @@ def update_product(
         raise HTTPException(400, "title cannot be empty")
     if "ebay_item_id" in fields:
         fields["ebay_item_id"] = clean_ebay_item_id(fields["ebay_item_id"])
+    # A product made of parts takes its Manufacturer part # from the part lines (edit it there); a stale value from the form is ignored.
+    if "manufacturer_part_number" in fields and mpn_locked(db, product_id):
+        fields["manufacturer_part_number"] = parts_mpn(db, product_id)
     if "slug" in fields:
         fields["slug"] = _unique_slug(db, slugify(fields["slug"] or ""), exclude_id=product_id)
     new_sku = None

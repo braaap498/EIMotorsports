@@ -32,6 +32,8 @@ Also used by other modules:
 """
 import logging
 import re
+import threading
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -296,6 +298,190 @@ def catalog_search(
 
 
 # --------------------------------------------------------------------------
+# manufacturer part numbers: one per piece (product_kit_parts.mfr_number)
+# --------------------------------------------------------------------------
+# A catalog piece with no number of its own follows the catalog's manufacturer number. The product's own Manufacturer
+# part # (products.manufacturer_part_number) then shows every piece's number, " / " between them, so everything that
+# already reads or searches that one field keeps working and a search for any one of them finds the product.
+MPN_JOIN = " / "
+
+
+def _norm_mpn(v: Optional[str]) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (v or "").upper())
+
+
+def ensure_mfr_column() -> None:
+    """product_kit_parts.mfr_number, and the table that remembers the one-time move of existing numbers. Called at start-up."""
+    from app.database import _session_factory
+
+    db = _session_factory()()
+    try:
+        db.execute(text("alter table product_kit_parts add column if not exists mfr_number text"))
+        db.execute(text("create table if not exists kit_mfr_backfill (id int primary key default 1, done_at timestamptz not null default now(), summary text)"))
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("could not add product_kit_parts.mfr_number; saving distributor parts will fail until it exists")
+    finally:
+        db.close()
+
+
+def _line_numbers(db: Session, product_id: int) -> list[tuple[int, str]]:
+    """(line id, the number of that piece: its own, else the catalog's, else '') in order."""
+    rows = db.execute(
+        text(
+            "select k.id, coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), ''), '') as m "
+            "from product_kit_parts k left join supplier_items si on si.id = k.supplier_item_id "
+            "where k.product_id = :p order by k.sort_order, k.id"
+        ),
+        {"p": product_id},
+    ).all()
+    return [(r.id, r.m) for r in rows]
+
+
+def parts_mpn(db: Session, product_id: int) -> Optional[str]:
+    """Every piece's manufacturer number once, in order, joined; None when no piece has one."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for _id, m in _line_numbers(db, product_id):
+        n = _norm_mpn(m)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(m.strip())
+    return MPN_JOIN.join(out) or None
+
+
+def _top_mpn(db: Session, product_id: int) -> str:
+    return (db.execute(text("select manufacturer_part_number from products where id = :p"), {"p": product_id}).scalar() or "").strip()
+
+
+def place_existing_mpn(db: Session, product_id: int) -> str:
+    """Move the number typed on the product onto a piece when no piece has it yet: a one-piece product's only piece, else
+    the first piece that has no number. Returns 'placed', 'ok' (nothing to move), 'none' (nothing to place or no pieces)
+    or 'ambiguous' (every piece already has a different number, so it was left where it is)."""
+    top = _top_mpn(db, product_id)
+    rows = _line_numbers(db, product_id)
+    if not top or not rows:
+        return "none"
+    nt = _norm_mpn(top)
+    if nt in [_norm_mpn(m) for _, m in rows] or nt == _norm_mpn(parts_mpn(db, product_id)):
+        return "ok"
+    if len(rows) == 1:
+        target = rows[0][0]
+    else:
+        blanks = [i for i, m in rows if not _norm_mpn(m)]
+        if not blanks:
+            return "ambiguous"
+        target = blanks[0]
+    db.execute(text("update product_kit_parts set mfr_number = :m where id = :i"), {"m": top[:60], "i": target})
+    return "placed"
+
+
+def sync_product_mpn(db: Session, product_id: int) -> str:
+    """Make the product's Manufacturer part # the list of its pieces' numbers (after moving a number typed on the product
+    onto a piece). Never overwrites a number it could not place. Returns 'synced', 'ambiguous' or 'none'. No commit."""
+    state = place_existing_mpn(db, product_id)
+    if state == "ambiguous":
+        return "ambiguous"
+    m = parts_mpn(db, product_id)
+    if not m:
+        return "none"
+    db.execute(
+        text(
+            "update products set manufacturer_part_number = :m, updated_at = now() "
+            "where id = :p and manufacturer_part_number is distinct from :m"
+        ),
+        {"m": m, "p": product_id},
+    )
+    return "synced"
+
+
+def mpn_locked(db: Session, product_id: int) -> bool:
+    """True when the product's Manufacturer part # comes from its pieces (so the product screen shows it read-only):
+    some piece has a number and the product's own number is blank or is already one of those / the list."""
+    m = parts_mpn(db, product_id)
+    if not m:
+        return False
+    top = _norm_mpn(_top_mpn(db, product_id))
+    return not top or top == _norm_mpn(m) or top in [_norm_mpn(x) for _, x in _line_numbers(db, product_id)]
+
+
+def backfill_mfr_numbers(db: Session) -> dict:
+    """One-time (safe to repeat): move the numbers products already have onto their part lines. A one-piece product's own
+    number goes onto its piece when the piece does not already have it; products with several pieces are handled one by
+    one (see place_existing_mpn). Then a one-piece product with a blank number gets its piece's number. Commits."""
+    res = {"one_piece_moved": 0, "multi_products": 0, "multi_placed": 0, "multi_synced": 0, "left_alone": 0, "blank_filled": 0}
+    res["one_piece_moved"] = db.execute(
+        text(
+            """
+            update product_kit_parts k set mfr_number = left(btrim(p.manufacturer_part_number), 60)
+            from products p
+            where p.id = k.product_id
+              and nullif(btrim(p.manufacturer_part_number), '') is not null
+              and (select count(*) from product_kit_parts x where x.product_id = p.id) = 1
+              and regexp_replace(upper(p.manufacturer_part_number), '[^A-Z0-9]', '', 'g')
+                  <> regexp_replace(upper(coalesce(nullif(btrim(k.mfr_number), ''),
+                                                   (select si.mfr_number from supplier_items si where si.id = k.supplier_item_id), '')),
+                                    '[^A-Z0-9]', '', 'g')
+            """
+        )
+    ).rowcount
+    db.commit()
+    ids = [r.product_id for r in db.execute(text("select product_id from product_kit_parts group by product_id having count(*) > 1")).all()]
+    res["multi_products"] = len(ids)
+    for pid in ids:
+        try:
+            placed = place_existing_mpn(db, pid)
+            if placed == "placed":
+                res["multi_placed"] += 1
+            if sync_product_mpn(db, pid) == "ambiguous":
+                res["left_alone"] += 1
+            else:
+                res["multi_synced"] += 1
+            db.commit()
+        except Exception:
+            db.rollback()
+            log.exception("manufacturer number move failed for product %s", pid)
+    res["blank_filled"] = db.execute(
+        text(
+            """
+            update products p set manufacturer_part_number = x.m
+            from (select k.product_id, coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), '')) as m
+                  from product_kit_parts k left join supplier_items si on si.id = k.supplier_item_id
+                  where (select count(*) from product_kit_parts y where y.product_id = k.product_id) = 1) x
+            where p.id = x.product_id and x.m is not null and nullif(btrim(p.manufacturer_part_number), '') is null
+            """
+        )
+    ).rowcount
+    db.commit()
+    return res
+
+
+def start_mfr_backfill_once() -> None:
+    """Start-up: move existing numbers onto the part lines once (a minute after start, in the background), then remember
+    that it was done so later start-ups skip it. POST /kits/mfr-numbers/backfill runs it again by hand."""
+    from app.database import _session_factory
+
+    def run() -> None:
+        time.sleep(45)
+        db = _session_factory()()
+        try:
+            if db.execute(text("select 1 from kit_mfr_backfill where id = 1")).first():
+                return
+            res = backfill_mfr_numbers(db)
+            db.execute(text("insert into kit_mfr_backfill (id, summary) values (1, :s) on conflict (id) do nothing"), {"s": str(res)})
+            db.commit()
+            log.info("manufacturer numbers moved onto part lines: %s", res)
+        except Exception:
+            db.rollback()
+            log.exception("moving manufacturer numbers onto part lines failed (it will be tried again at the next start-up)")
+        finally:
+            db.close()
+
+    threading.Thread(target=run, name="kit-mfr-backfill", daemon=True).start()
+
+
+# --------------------------------------------------------------------------
 # the pieces of a kit
 # --------------------------------------------------------------------------
 class KitPartIn(BaseModel):
@@ -305,6 +491,8 @@ class KitPartIn(BaseModel):
     description: Optional[str] = Field(None, max_length=250)
     unit_cost: Optional[float] = Field(None, ge=0, le=1_000_000)
     quantity: int = Field(1, ge=1, le=1000)
+    # the manufacturer's own part number for THIS piece. Blank on a catalog part = follow the catalog's number.
+    mfr_number: Optional[str] = Field(None, max_length=60)
 
 
 LABEL_BY = "^(mfr|sku)$"  # what an Automatic Distributors part is written as in a NEW label: manufacturer number or vendor SKU
@@ -320,7 +508,8 @@ def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]
         text(
             "select k.id, k.distributor_id, d.name as vendor, k.supplier_item_id, k.part_number, k.description, "
             "k.unit_cost, k.quantity, k.sort_order, "
-            "coalesce(nullif(btrim(si.mfr_number), ''), k.part_number) as label_part from product_kit_parts k "
+            "coalesce(nullif(btrim(si.mfr_number), ''), k.part_number) as label_part, "
+            "coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), '')) as mfr_number from product_kit_parts k "
             "left join supplier_items si on si.id = k.supplier_item_id "
             "left join po_distributors d on d.id = k.distributor_id where k.product_id = :p order by k.sort_order, k.id"
         ),
@@ -366,17 +555,22 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
             cost = float(it.dealer_cost) if it.dealer_cost is not None else cost
         if not number:
             raise HTTPException(400, "Every piece needs a part number.")
+        mfr = (p.mfr_number or "").strip() or None
+        if mfr and p.supplier_item_id and _norm_mpn(mfr) == _norm_mpn(it.mfr_number or ""):
+            mfr = None  # the same as the catalog's number: keep following the catalog
         clean.append({"distributor_id": p.distributor_id, "supplier_item_id": p.supplier_item_id, "part_number": number,
-                      "label": label or number, "description": desc, "unit_cost": cost, "quantity": p.quantity, "sort_order": i})
+                      "label": label or number, "description": desc, "unit_cost": cost, "quantity": p.quantity, "sort_order": i,
+                      "mfr_number": mfr})
     for c in clean:
         db.execute(
             text(
-                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order) "
-                "values (:p, :d, :si, :pn, :desc, :uc, :q, :so)"
+                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order, mfr_number) "
+                "values (:p, :d, :si, :pn, :desc, :uc, :q, :so, :mfr)"
             ),
             {"p": product_id, "d": c["distributor_id"], "si": c["supplier_item_id"], "pn": c["part_number"],
-             "desc": c["description"], "uc": c["unit_cost"], "q": c["quantity"], "so": c["sort_order"]},
+             "desc": c["description"], "uc": c["unit_cost"], "q": c["quantity"], "so": c["sort_order"], "mfr": c["mfr_number"]},
         )
+    sync_product_mpn(db, product_id)  # the product's Manufacturer part # follows its pieces
     existing = _product_cls(db, product_id)
     if existing:
         return {"cls": existing, "cls_changed": False, "duplicates": []}
@@ -415,6 +609,16 @@ def _product_cls(db: Session, product_id: int) -> Optional[str]:
     return (v or "").strip() or None
 
 
+@router.post("/mfr-numbers/backfill")
+@needs("products.edit_details")
+def run_mfr_backfill(db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Move the manufacturer numbers products already have onto their part lines (done once automatically at start-up;
+    this runs it again, e.g. after importing more products). Owner / admin only."""
+    if user.role not in ("owner", "admin"):
+        raise HTTPException(403, "Only an owner or admin can do this.")
+    return backfill_mfr_numbers(db)
+
+
 @router.get("/{product_id}")
 @needs("products.view", "products.edit_details", "products.create")
 def get_kit(product_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
@@ -430,6 +634,8 @@ def get_kit(product_id: int, db: Session = Depends(get_db), user: AuthUser = Dep
         "parts": _parts_of(db, product_id, see_cost=has_perm(user, "products.edit_price")),
         "listings": listings,
         "can_sync": user.role in ("owner", "admin"),
+        "mpn": _top_mpn(db, product_id) or None,
+        "mpn_locked": mpn_locked(db, product_id),
     }
 
 
@@ -447,6 +653,8 @@ def put_parts(product_id: int, body: PartsIn, db: Session = Depends(get_db)):
         "duplicates": res["duplicates"],
         # only a label that was just created needs sending; an unchanged one is already on the listings
         "listings_to_update": len(listings) if res["cls_changed"] else 0,
+        "mpn": _top_mpn(db, product_id) or None,
+        "mpn_locked": mpn_locked(db, product_id),
     }
 
 

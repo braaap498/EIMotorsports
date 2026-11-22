@@ -15,6 +15,8 @@ export type KitPart = {
   description: string;
   unit_cost: number | null;
   quantity: number;
+  // the manufacturer's own part number for this piece (a catalog piece shows the catalog's number until changed)
+  mfr_number?: string | null;
 };
 
 type Vendor = { id: number; name: string; has_catalog: boolean; supplier?: string | null };
@@ -76,6 +78,7 @@ export default function KitPartsPanel({
   currentCls,
   labelBy,
   onLabelByChange,
+  onMpn,
 }: {
   productId?: number;
   parts: KitPart[];
@@ -88,6 +91,8 @@ export default function KitPartsPanel({
   // how Automatic Distributors parts are written in a NEW label (it is only built when there is none yet)
   labelBy: LabelBy;
   onLabelByChange: (v: LabelBy) => void;
+  // the product's Manufacturer part # as the server has it (the pieces' numbers, joined), and whether it comes from the pieces
+  onMpn?: (mpn: string | null, locked: boolean) => void;
 }) {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [vendorId, setVendorId] = useState<number | "">("");
@@ -110,7 +115,7 @@ export default function KitPartsPanel({
   const [searching, setSearching] = useState(false);
   const [addQty, setAddQty] = useState<Record<number, string>>({});
   // typed-in piece (vendors without a catalog)
-  const [man, setMan] = useState({ part_number: "", description: "", unit_cost: "", quantity: "1" });
+  const [man, setMan] = useState({ part_number: "", mfr_number: "", description: "", unit_cost: "", quantity: "1" });
   // saving
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -147,7 +152,7 @@ export default function KitPartsPanel({
   // existing product: load what is saved
   useEffect(() => {
     if (!productId) return;
-    api<{ cls: string | null; parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[]; can_sync: boolean }>(`/kits/${productId}`)
+    api<{ cls: string | null; parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[]; can_sync: boolean; mpn?: string | null; mpn_locked?: boolean }>(`/kits/${productId}`)
       .then((r) => {
         const loaded = r.parts.map((p) => ({ ...p, key: `p${p.id}`, description: p.description ?? "" }));
         onChange(loaded);
@@ -156,6 +161,7 @@ export default function KitPartsPanel({
         setCanSync(r.can_sync);
         setSavedCls(r.cls);
         setDirty(false);
+        onMpn?.(r.mpn ?? null, !!r.mpn_locked);
       })
       .catch((e) => setMsg({ kind: "error", text: errMsg(e) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -227,6 +233,7 @@ export default function KitPartsPanel({
         supplier_item_id: it.id,
         part_number: it.sku,
         label_part: it.mfr_number || it.sku,
+        mfr_number: it.mfr_number ?? null,
         description: [it.manufacturer, it.name].filter(Boolean).join(" ").slice(0, 250),
         unit_cost: it.dealer_cost ?? null,
         quantity: qty,
@@ -240,7 +247,7 @@ export default function KitPartsPanel({
     onChange(savedParts);
     setDirty(false);
     clearSearch();
-    setMan({ part_number: "", description: "", unit_cost: "", quantity: "1" });
+    setMan({ part_number: "", mfr_number: "", description: "", unit_cost: "", quantity: "1" });
     setMsg(null);
   }
 
@@ -257,12 +264,13 @@ export default function KitPartsPanel({
         vendor: vendor?.name,
         supplier_item_id: null,
         part_number: man.part_number.trim(),
+        mfr_number: man.mfr_number.trim() || null,
         description: man.description.trim(),
         unit_cost: cost,
         quantity: Math.max(1, Math.min(1000, Number(man.quantity) || 1)),
       },
     ]);
-    setMan({ part_number: "", description: "", unit_cost: "", quantity: "1" });
+    setMan({ part_number: "", mfr_number: "", description: "", unit_cost: "", quantity: "1" });
     setMsg(null);
   }
 
@@ -279,6 +287,7 @@ export default function KitPartsPanel({
       distributor_id: p.distributor_id,
       supplier_item_id: p.supplier_item_id,
       part_number: p.part_number,
+      mfr_number: (p.mfr_number ?? "").trim() || null,
       description: p.description || null,
       unit_cost: p.unit_cost,
       quantity: p.quantity,
@@ -322,13 +331,14 @@ export default function KitPartsPanel({
     setMsg(null);
     setResults2(null);
     try {
-      const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number }>(
+      const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number; mpn?: string | null; mpn_locked?: boolean }>(
         `/kits/${productId}/parts`,
         { method: "PUT", body: { parts: payloadParts(), label_by: labelBy } }
       );
       setDirty(false);
       setSavedCls(r.cls);
       onSaved?.(r.cls);
+      onMpn?.(r.mpn ?? null, !!r.mpn_locked);
       let text = !r.cls
         ? "Parts saved (no custom label yet)."
         : r.cls_changed
@@ -360,7 +370,7 @@ export default function KitPartsPanel({
     <section className={cardCls}>
       <h2 className="text-lg font-semibold">Distributor parts</h2>
       <p className="text-xs text-gray-500">
-        If this product is made of parts bought from a vendor, add them here. The custom label is automatically built from the part numbers.
+        If this product is made of parts bought from a vendor, add them here. The custom label is automatically built from the part numbers. Each part also has its own manufacturer number; the product's Manufacturer part # shows them all.
       </p>
 
       {/* the pieces */}
@@ -377,6 +387,15 @@ export default function KitPartsPanel({
                       {vendorName && <span className="text-xs text-gray-500">{vendorName}</span>}
                     </div>
                     {p.description && <div className="break-words text-xs text-gray-700">{p.description}</div>}
+                    <label className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+                      Manufacturer #
+                      <input
+                        type="text" maxLength={60} disabled={disabled} className={`${inputCls} font-mono`} style={{ width: 220 }}
+                        placeholder={p.supplier_item_id ? "from the catalog" : "the manufacturer's part number"}
+                        value={p.mfr_number ?? ""}
+                        onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, mfr_number: e.target.value } : x)))}
+                      />
+                    </label>
                   </div>
                   <div className="flex items-center gap-5 text-sm">
                     <div>
@@ -526,6 +545,7 @@ export default function KitPartsPanel({
               <p className="text-xs text-gray-500">{vendor.name} has no catalog loaded here, so type the piece in.</p>
               <div className="flex flex-wrap items-end gap-2">
                 <label className="text-xs">Vendor part #<input className={inputCls} value={man.part_number} onChange={(e) => setMan({ ...man, part_number: e.target.value })} /></label>
+                <label className="text-xs">Manufacturer #<input className={inputCls} value={man.mfr_number} onChange={(e) => setMan({ ...man, mfr_number: e.target.value })} /></label>
                 <label className="min-w-[12rem] flex-1 text-xs">Description<input className={inputCls} value={man.description} onChange={(e) => setMan({ ...man, description: e.target.value })} /></label>
                 <label className="text-xs">Cost<input type="number" step="0.01" className={`${inputCls} w-24`} value={man.unit_cost} onChange={(e) => setMan({ ...man, unit_cost: e.target.value })} /></label>
                 <label className="text-xs">Qty<input type="number" min={1} className={`${inputCls} w-20`} value={man.quantity} onChange={(e) => setMan({ ...man, quantity: e.target.value })} /></label>
