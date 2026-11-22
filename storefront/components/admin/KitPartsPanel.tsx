@@ -522,7 +522,7 @@ export default function KitPartsPanel({
                     <option value="contains">Contains</option><option value="starts">Starts with</option><option value="exact">Exactly</option>
                   </select>
                 </label>
-                <button type="button" className={btnCls} disabled={searching} onClick={() => void search(0)}>{searching ? "Searching…" : "Search"}</button>
+                <button type="button" className={`${btnCls} w-28 shrink-0 grow-0 whitespace-nowrap text-center`} disabled={searching} onClick={() => void search(0)}>{searching ? "Searching…" : "Search"}</button>
                 <button type="button" className="text-xs underline" onClick={() => setShowMore((s) => !s)}>{showMore ? "Fewer options" : "More ways to search"}</button>
               </div>
               {showMore && (
