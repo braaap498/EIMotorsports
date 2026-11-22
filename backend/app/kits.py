@@ -22,6 +22,8 @@ could not be sent is reported back per listing, never hidden.
   GET  /kits/catalog                    search the vendor catalog (many ways, see catalog_search)
   GET  /kits/catalog/brands             brands in the catalog, for the brand filter
   GET  /kits/manual-catalog             the saved parts of a distributor that has no catalog here (typed once, picked after that)
+  POST /kits/manual-catalog             save a part by hand;  PUT/DELETE /kits/manual-catalog/{id}  edit / remove one
+  POST /kits/manual-catalog/{id}/make-product   make a (not yet published) product from a saved part
   GET  /kits/{product_id}               the pieces, the CLS, and the linked eBay listings
   PUT  /kits/{product_id}/parts         replace the pieces; builds the CLS only if there is none yet (does NOT talk to eBay)
   POST /kits/{product_id}/sync          send the CLS to every linked eBay listing, then to their Selling Manager inventory
@@ -123,15 +125,19 @@ def vendors(db: Session = Depends(get_db)):
 def manual_catalog(
     distributor_id: int = Query(..., description="a distributor that has no catalog here"),
     q: Optional[str] = Query(None, max_length=200),
-    limit: int = Query(30, ge=1, le=100),
+    only: str = Query("all", pattern="^(all|no_product|has_product)$"),
+    limit: int = Query(30, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: AuthUser = Depends(current_user),
 ):
     """The parts already typed for this distributor, to pick from instead of typing them again. Words match the vendor part #,
-    the manufacturer # or the description (dashes and spaces in part numbers are ignored). Cost only for people who may see it."""
+    the manufacturer # or the description (dashes and spaces in part numbers are ignored). Each part also says which product
+    uses it (product_id, product_title, products = how many), and `only` limits the list to parts with / without a product.
+    Cost only for people who may see it."""
     see_cost = has_perm(user, "products.edit_price")
     where = ["m.distributor_id = :d"]
-    params: dict = {"d": distributor_id, "n": limit}
+    params: dict = {"d": distributor_id, "n": limit, "o": offset}
     for i, w in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:6]):
         params[f"w{i}"] = f"%{w}%"
         params[f"p{i}"] = f"%{_norm(w)}%"
@@ -139,18 +145,32 @@ def manual_catalog(
             f"(m.part_number ilike :w{i} or m.mfr_number ilike :w{i} or m.description ilike :w{i} "
             f"or m.part_norm like :p{i} or upper(regexp_replace(coalesce(m.mfr_number, ''), '[^A-Za-z0-9]', '', 'g')) like :p{i})"
         )
+    used = "exists (select 1 from product_kit_parts u where u.manual_item_id = m.id)"
+    if only == "no_product":
+        where.append(f"not {used}")
+    elif only == "has_product":
+        where.append(used)
+    clause = " and ".join(where)
     try:
+        total = db.execute(text(f"select count(*) from manual_catalog_items m where {clause}"), params).scalar()
         rows = db.execute(
             text(
-                "select m.id, m.part_number, m.mfr_number, m.description, m.unit_cost from manual_catalog_items m "
-                f"where {' and '.join(where)} order by lower(m.part_number), m.id limit :n"
+                "select m.id, m.part_number, m.mfr_number, m.description, m.unit_cost, "
+                "(select u.product_id from product_kit_parts u where u.manual_item_id = m.id order by u.product_id limit 1) as product_id, "
+                "(select count(distinct u.product_id) from product_kit_parts u where u.manual_item_id = m.id) as products "
+                f"from manual_catalog_items m where {clause} order by lower(m.part_number), m.id limit :n offset :o"
             ),
             params,
         ).all()
+        titles = {}
+        ids = [r.product_id for r in rows if r.product_id]
+        if ids:
+            titles = {t.id: t.title for t in db.execute(text("select id, title from products where id = any(cast(:i as bigint[]))"), {"i": ids}).all()}
     except Exception:
         db.rollback()
-        return {"items": []}
+        return {"items": [], "total": 0}
     return {
+        "total": int(total or 0),
         "items": [
             {
                 "id": r.id,
@@ -158,10 +178,54 @@ def manual_catalog(
                 "mfr_number": r.mfr_number,
                 "description": r.description,
                 "unit_cost": float(r.unit_cost) if r.unit_cost is not None and see_cost else None,
+                "product_id": r.product_id,
+                "product_title": titles.get(r.product_id),
+                "products": int(r.products or 0),
             }
             for r in rows
-        ]
+        ],
     }
+
+
+class ManualItemIn(BaseModel):
+    distributor_id: int
+    part_number: str = Field(..., min_length=1, max_length=60)
+    mfr_number: Optional[str] = Field(None, max_length=60)
+    description: Optional[str] = Field(None, max_length=250)
+    unit_cost: Optional[float] = Field(None, ge=0, le=1_000_000)
+
+
+@router.post("/manual-catalog", status_code=201)
+@needs("products.edit_details", "products.create")
+def add_manual_item(body: ManualItemIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Save a part of a distributor that has no catalog here (the same list the product screen picks from)."""
+    dist = db.execute(text("select id, name from po_distributors where id = :i"), {"i": body.distributor_id}).first()
+    if not dist:
+        raise HTTPException(404, "That distributor no longer exists.")
+    if supplier_for(dist.name) is not None:
+        raise HTTPException(400, f"{dist.name} has a catalog here; its parts come from the catalog.")
+    number = body.part_number.strip()
+    norm = _norm(number)
+    if not norm:
+        raise HTTPException(400, "Type the vendor's part number.")
+    dup = db.execute(
+        text("select part_number from manual_catalog_items where distributor_id = :d and part_norm = :n"), {"d": dist.id, "n": norm}
+    ).first()
+    if dup:
+        raise HTTPException(409, f"{dup.part_number} is already saved for {dist.name}.")
+    cost = body.unit_cost if has_perm(user, "products.edit_price") else None
+    row = db.execute(
+        text(
+            "insert into manual_catalog_items (distributor_id, part_number, part_norm, mfr_number, description, unit_cost) "
+            "values (:d, :pn, :pnorm, :mfr, :desc, :uc) returning id, part_number, mfr_number, description, unit_cost"
+        ),
+        {"d": dist.id, "pn": number, "pnorm": norm, "mfr": (body.mfr_number or "").strip() or None,
+         "desc": (body.description or "").strip() or None, "uc": cost},
+    ).first()
+    db.commit()
+    return {"id": row.id, "part_number": row.part_number, "mfr_number": row.mfr_number, "description": row.description,
+            "unit_cost": float(row.unit_cost) if row.unit_cost is not None and has_perm(user, "products.edit_price") else None,
+            "product_id": None, "product_title": None, "products": 0}
 
 
 class ManualItemEdit(BaseModel):
@@ -199,6 +263,84 @@ def edit_manual_item(item_id: int, body: ManualItemEdit, db: Session = Depends(g
     see_cost = has_perm(user, "products.edit_price")
     return {"id": row.id, "part_number": row.part_number, "mfr_number": row.mfr_number, "description": row.description,
             "unit_cost": float(row.unit_cost) if row.unit_cost is not None and see_cost else None}
+
+
+@router.delete("/manual-catalog/{item_id}")
+@needs("products.edit_details")
+def delete_manual_item(item_id: int, db: Session = Depends(get_db)):
+    """Remove a saved part. Refused while a product's distributor part points at it."""
+    n = db.execute(text("select count(distinct product_id) from product_kit_parts where manual_item_id = :i"), {"i": item_id}).scalar() or 0
+    if n:
+        raise HTTPException(409, f"{n} product{'' if n == 1 else 's'} use this part. Remove it from the product's distributor parts first.")
+    gone = db.execute(text("delete from manual_catalog_items where id = :i returning id"), {"i": item_id}).first()
+    if not gone:
+        db.rollback()
+        raise HTTPException(404, "That saved part no longer exists.")
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/manual-catalog/{item_id}/make-product", status_code=201)
+@needs("products.create")
+def make_manual_product(item_id: int, db: Session = Depends(get_db)):
+    """Make one product from a saved part, the way the Automatic Distributors page does from a catalog part: a new product
+    (NOT published: it has no price yet) with one distributor part (quantity 1) that follows the saved part, the saved part's
+    manufacturer # on the product, and the custom label set to the vendor part # when that is free. Photos, price, category
+    and the rest are set on the product afterwards."""
+    from app.admin_catalog import slugify  # late import: that module imports this one
+
+    m = db.execute(
+        text("select m.id, m.distributor_id, m.part_number, m.mfr_number, m.description, m.unit_cost from manual_catalog_items m where m.id = :i"),
+        {"i": item_id},
+    ).first()
+    if not m:
+        raise HTTPException(404, "That saved part no longer exists.")
+    used = db.execute(
+        text("select p.id, p.title from product_kit_parts k join products p on p.id = k.product_id where k.manual_item_id = :i order by p.id limit 1"),
+        {"i": item_id},
+    ).first()
+    if used:
+        raise HTTPException(409, f"{m.part_number} already has a product: #{used.id} {used.title}")
+    title = ((m.description or "").strip() or " ".join(x for x in ((m.mfr_number or "").strip(), m.part_number) if x))[:200]
+    base = slugify(title) or slugify(f"part {m.part_number}") or "part"
+    slug, k = base, 1
+    while db.execute(text("select 1 from products where slug = :s"), {"s": slug}).first():
+        k += 1
+        slug = f"{base}-{k}"
+    try:
+        pid = db.execute(
+            text(
+                "insert into products (title, slug, manufacturer_part_number, cost, quantity_on_hand, condition, is_published, is_active, is_universal, show_part_number) "
+                "values (:title, :slug, :mpn, :cost, 0, 'New', false, true, false, false) returning id"
+            ),
+            {"title": title, "slug": slug, "mpn": (m.mfr_number or "").strip() or None, "cost": m.unit_cost},
+        ).scalar()
+        db.execute(
+            text(
+                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order, manual_item_id) "
+                "values (:p, :d, null, :pn, :desc, :uc, 1, 0, :mi)"
+            ),
+            {"p": pid, "d": m.distributor_id, "pn": m.part_number, "desc": (m.description or "").strip() or None, "uc": m.unit_cost, "mi": m.id},
+        )
+        follow = parts_mpn(db, pid)
+        if follow:
+            db.execute(text("update products set manufacturer_part_number = :m where id = :p"), {"m": follow, "p": pid})
+        # the custom label is the vendor part #, unless it cannot be a label or another product already has it (left blank, never changed)
+        tok = label_token_for(m.part_number)
+        label = None
+        if tok and TOKEN_RE.fullmatch(tok) and CLS_JOIN not in tok.lower() and len(tok) <= CLS_MAX and not db.execute(
+            text("select 1 from products o where lower(o.custom_label_sku) = lower(:t)"), {"t": tok}
+        ).first():
+            db.execute(text("update products set custom_label_sku = :t, updated_at = now() where id = :p"), {"t": tok, "p": pid})
+            label = tok
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not make the product: {str(e)[:300]}")
+    return {"product_id": pid, "title": title, "custom_label": label, "published": False}
 
 
 @router.get("/catalog/brands")

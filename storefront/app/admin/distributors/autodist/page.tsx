@@ -11,6 +11,7 @@ import AutodistOrders from "../../../../components/admin/AutodistOrders";
 import AutodistInvoices from "../../../../components/admin/AutodistInvoices";
 import AutodistProducts from "../../../../components/admin/AutodistProducts";
 import RmatvInner from "../../../../components/admin/Rmatv";
+import ManualParts from "../../../../components/admin/ManualParts";
 
 // Automatic Distributors supplier data (owners and admins only). Licensed data: dealer cost and stock
 // are for this screen only and must never be shown on the public store.
@@ -976,6 +977,8 @@ function DistributorHub() {
         <AutodistInner />
       ) : showRmatv ? (
         <RmatvInner />
+      ) : row && !isAutodist(row.name) && !isRmatv(row.name) ? (
+        <ManualParts key={row.id} dist={row} />
       ) : row ? (
         <p className="text-sm text-gray-500">{row.name} has no catalog or feed here. Its details above print on its purchase orders.</p>
       ) : null}
