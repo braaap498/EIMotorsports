@@ -320,6 +320,27 @@ def _sync_listing_status(db: Session, item: dict) -> None:
         log.exception("could not refresh the stored status of %s", item.get("item_id"))
 
 
+def _sync_saved_label(db: Session, item: dict) -> None:
+    """The listing was just read from eBay itself, so refresh the saved copies of its custom label (uploaded report
+    row and eBay lookup row) that the Listings list shows in its Custom label column. Single-SKU listings only (a
+    listing with variations has no one label). Never raises."""
+    try:
+        label = (item.get("sku") or "").strip()
+        digits = re.sub(r"[^0-9]", "", str(item.get("item_id") or ""))
+        if not label or not digits or item.get("variations"):
+            return
+        with db.begin_nested():
+            for tbl in ("ebay_report_rows", "ebay_api_details"):
+                db.execute(
+                    text(f"update {tbl} set custom_label_sku = :c where item_id = :i and custom_label_sku is distinct from :c"),
+                    {"c": label, "i": digits},
+                )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.warning("could not refresh the saved label copy of %s", item.get("item_id"), exc_info=True)
+
+
 def _product_label_for(db: Session, store: str, item_id: str) -> Optional[str]:
     """The custom label of the product this listing is linked to (the website's label is the one that counts)."""
     try:
@@ -340,6 +361,7 @@ def _product_label_for(db: Session, store: str, item_id: str) -> Optional[str]:
 def get_item(store: str = Query(...), item_id: str = Query(...), db: Session = Depends(get_db)):
     item = _read_item(db, store, item_id.strip())
     _sync_listing_status(db, item)
+    _sync_saved_label(db, item)
     _note_zero_state(db, item)
     item["draft"] = _read_draft(db, item["store"], item["item_id"])
     item["product_label"] = _product_label_for(db, item["store"], item["item_id"])
