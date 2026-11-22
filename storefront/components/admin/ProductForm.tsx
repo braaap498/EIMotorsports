@@ -602,7 +602,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
 
         <section className={card}>
           <h2 className="text-lg font-semibold">Price &amp; stock</h2>
-          <div className={grid}>{renderFields(PRICING)}</div>
+          <div className={grid}>{renderFields(productId ? PRICING.filter((f) => f.key !== "quantity_on_hand") : PRICING)}</div>
           {productId && (
             <QuantitiesPanel
               productId={productId}
