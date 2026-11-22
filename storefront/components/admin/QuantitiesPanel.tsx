@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 
 type Q = {
@@ -42,11 +42,11 @@ export default function QuantitiesPanel({
   const [busy, setBusy] = useState<number | null>(null);
   const [saveErr, setSaveErr] = useState("");
 
-  const timers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
-  const latest = useRef<Record<number, number>>({});
-
-  async function saveWarehouse(id: number, n: number) {
-    if (!Number.isInteger(n) || n < 0) {
+  async function saveWarehouse(id: number) {
+    const raw = drafts[id];
+    if (raw === undefined) return;
+    const n = Number(raw);
+    if (raw.trim() === "" || !Number.isInteger(n) || n < 0) {
       setSaveErr("Enter a whole number, 0 or more.");
       return;
     }
@@ -57,34 +57,17 @@ export default function QuantitiesPanel({
         method: "PUT",
         body: { quantity: n },
       });
-      // only clear the box when nothing newer was typed or clicked while this was saving
-      if (latest.current[id] === n) {
-        setDrafts((d) => {
-          const { [id]: _gone, ...rest } = d;
-          return rest;
-        });
-        delete latest.current[id];
-      }
+      setDrafts((d) => {
+        const { [id]: _gone, ...rest } = d;
+        return rest;
+      });
       await load();
       onSaved?.(r.total);
     } catch (e) {
       setSaveErr(errMsg(e));
     } finally {
-      setBusy((b) => (b === id ? null : b));
+      setBusy(null);
     }
-  }
-
-  /** Show the new number at once and save it a moment later, so several clicks on + or - make one save. */
-  function change(id: number, current: number, n: number, wait = 600) {
-    const v = Math.max(0, Math.floor(n));
-    latest.current[id] = v;
-    setDrafts((d) => ({ ...d, [id]: String(v) }));
-    clearTimeout(timers.current[id]);
-    if (v === current) {
-      delete latest.current[id];
-      return;
-    }
-    timers.current[id] = setTimeout(() => void saveWarehouse(id, v), wait);
   }
 
   const load = useCallback(async () => {
@@ -124,46 +107,32 @@ export default function QuantitiesPanel({
                   <div key={w.id} className={`${row} items-center ${w.main ? "font-medium" : "text-xs text-gray-700"}`}>
                     <span>{w.main ? "E&I warehouse quantity" : w.name}</span>
                     {canEdit ? (
-                      <span className="flex items-center gap-1">
-                        <span className="w-14 text-right text-xs font-normal text-gray-500">{busy === w.id ? "Saving…" : changed ? "Unsaved" : ""}</span>
-                        <button
-                          type="button"
-                          aria-label="One less"
-                          className="h-7 w-7 rounded border border-gray-300 bg-white text-base leading-none disabled:opacity-40"
-                          disabled={Number(shown) <= 0}
-                          onClick={() => change(w.id, w.quantity, (Number(shown) || 0) - 1)}
-                        >
-                          −
-                        </button>
+                      <span className="relative inline-block">
                         <input
                           type="number"
                           min={0}
                           step={1}
-                          className="w-16 rounded border border-gray-300 px-1 py-0.5 text-center text-sm"
+                          className={`w-28 rounded border border-gray-300 py-0.5 pl-2 text-sm ${changed ? "pr-16" : "pr-1"}`}
                           value={shown}
-                          onChange={(e) => {
-                            setDrafts((d) => ({ ...d, [w.id]: e.target.value }));
-                            latest.current[w.id] = Number(e.target.value);
-                            clearTimeout(timers.current[w.id]);
-                          }}
-                          onBlur={() => {
-                            if (drafts[w.id] !== undefined && drafts[w.id] !== "") change(w.id, w.quantity, Number(drafts[w.id]), 0);
-                          }}
+                          disabled={busy === w.id}
+                          onChange={(e) => setDrafts((d) => ({ ...d, [w.id]: e.target.value }))}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
-                              e.preventDefault();
-                              change(w.id, w.quantity, Number(shown), 0);
+                              e.preventDefault(); // inside the product form: Enter must not save the product
+                              void saveWarehouse(w.id);
                             }
                           }}
                         />
-                        <button
-                          type="button"
-                          aria-label="One more"
-                          className="h-7 w-7 rounded border border-gray-300 bg-white text-base leading-none"
-                          onClick={() => change(w.id, w.quantity, (Number(shown) || 0) + 1)}
-                        >
-                          +
-                        </button>
+                        {changed && (
+                          <button
+                            type="button"
+                            className="absolute right-1 top-1/2 -translate-y-1/2 rounded bg-gray-800 px-2 py-0.5 text-xs text-white disabled:opacity-50"
+                            disabled={busy === w.id}
+                            onClick={() => void saveWarehouse(w.id)}
+                          >
+                            {busy === w.id ? "Saving…" : "Save"}
+                          </button>
+                        )}
                       </span>
                     ) : (
                       <span>{w.quantity}</span>
