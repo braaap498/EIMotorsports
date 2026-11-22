@@ -406,7 +406,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
           />
         </Field>
       ) : (
-      <Field key={f.key} label={f.key === "quantity_on_hand" && kitCount === null ? (productId ? "Total quantity on hand" : "E&I Warehouse Quantity") : f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
+      <Field key={f.key} label={f.key === "quantity_on_hand" && kitCount === null ? (productId ? "Available" : "E&I Warehouse Quantity") : f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
         <input
           className={inputCls}
           disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts) || (f.key === "quantity_on_hand" && (kitCount !== null || !!productId))}
