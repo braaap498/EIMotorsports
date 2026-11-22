@@ -423,7 +423,6 @@ export default function ProductForm({ productId }: { productId?: number }) {
         {f.key === "quantity_on_hand" && kitCount !== null && (
           <span className="mt-1 block text-xs font-normal text-gray-500">
             How many kits the distributor parts below can make (the part with the fewest decides). Not editable.
-            {Number(vals.quantity_on_hand ?? 0) > 0 ? ` Kits counted on our own shelf: ${vals.quantity_on_hand}.` : ""}
           </span>
         )}
         {f.key === "manufacturer_part_number" && mpnFromParts && (

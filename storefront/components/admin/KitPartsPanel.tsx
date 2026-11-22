@@ -419,7 +419,6 @@ export default function KitPartsPanel({
                           {a.matched
                             ? `Distributor stock ${a.stock.toLocaleString()}${a.need > 1 ? `, ${a.need} per kit` : ""}: enough for ${a.can_make.toLocaleString()}`
                             : "Not matched to a distributor catalog part, so it counts as 0"}
-                          {a.limiting ? " (the fewest, so it sets the count)" : ""}
                         </div>
                       );
                     })()}
