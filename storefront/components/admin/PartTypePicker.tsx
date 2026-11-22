@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { btn2Cls, inputCls } from "./ui";
 
@@ -34,10 +34,24 @@ export default function PartTypePicker({
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
 
+  // The type that was selected (by id), so that when it is renamed on the Rename types page (another tab) the selection follows it
+  // to its new name. The product stores the type's NAME, so without this the product kept the old name and showed "not on the list".
+  const selectedId = useRef<number | null>(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
   async function load() {
     try {
       const r = await api<{ items: Item[] }>(`/part-types${categoryId ? `?category_id=${categoryId}` : ""}`);
       setItems(r.items);
+      const cur = valueRef.current.trim().toLowerCase();
+      const still = r.items.find((i) => i.name.toLowerCase() === cur);
+      if (still) {
+        selectedId.current = still.id;
+      } else if (cur && selectedId.current !== null) {
+        const renamed = r.items.find((i) => i.id === selectedId.current);
+        if (renamed) onChange(renamed.name); // it was renamed: select it under its new name
+      }
     } catch (e) {
       setMsg(errMsg(e));
     } finally {
@@ -46,6 +60,20 @@ export default function PartTypePicker({
   }
   useEffect(() => {
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categoryId]);
+
+  // coming back from the Rename types tab: read the list again
+  useEffect(() => {
+    const again = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", again);
+    window.addEventListener("focus", again);
+    return () => {
+      document.removeEventListener("visibilitychange", again);
+      window.removeEventListener("focus", again);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [categoryId]);
 
