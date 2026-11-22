@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, needs, require_admin, require_route_access
 from app.database import _session_factory, get_db
-from app.stock import available_sql
+from app.stock import available_sql, set_aside_sql, shelf_sql
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/availability", tags=["admin-availability"], dependencies=[Depends(require_route_access)])
@@ -211,7 +211,7 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
     set to drop ship)."""
     r = db.execute(
         text(
-            f"select p.id, coalesce(p.quantity_on_hand, 0) as qoh, {available_sql('p')} as own, {parts_count_sql('p')} as parts, "
+            f"select p.id, {shelf_sql('p')} as qoh, {available_sql('p')} as own, {parts_count_sql('p')} as parts, "
             f"{dist_sql('p')} as dist, {wh_sql('p', 'qty_indiana')} as indiana, {wh_sql('p', 'qty_nevada')} as nevada, "
             "coalesce(p.dropship_ok, false) as ds, "
             "(select count(*) from channel_listings cl where cl.product_id = p.id and coalesce(cl.dropship_ok, false)) as ds_listings "
@@ -223,7 +223,7 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Product not found")
     whs: list[dict] = []
     try:
-        rows = db.execute(
+        rows = [] if int(r.parts or 0) > 1 else db.execute(
             text(
                 "select w.id, w.name, w.is_default, coalesce(ws.quantity, 0) as q from warehouses w "
                 "left join warehouse_stock ws on ws.warehouse_id = w.id and ws.product_id = :i "
@@ -234,11 +234,29 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
         others = sum(int(x.q) for x in rows if not x.is_default)
         for x in rows:
             q = max(0, int(r.qoh) - others) if x.is_default else int(x.q)
-            whs.append({"name": x.name, "quantity": q, "main": bool(x.is_default)})
+            whs.append({"id": x.id, "name": x.name, "quantity": q, "main": bool(x.is_default)})
     except Exception:
         db.rollback()
     dist = int(r.dist or 0)
+    kit_parts: list[dict] = []
+    if int(r.parts or 0) > 1:
+        try:
+            for k in db.execute(
+                text(
+                    "select k.part_number, greatest(coalesce(k.quantity, 1), 1) as need, coalesce(("
+                    "  select sum(greatest(0, coalesce(p2.quantity_on_hand, 0) - " + set_aside_sql("p2") + ") * greatest(coalesce(k2.quantity, 1), 1)) "
+                    "  from product_kit_parts k2 join products p2 on p2.id = k2.product_id "
+                    "  where k.supplier_item_id is not null and k2.supplier_item_id = k.supplier_item_id and p2.id <> :i "
+                    "    and (select count(*) from product_kit_parts k3 where k3.product_id = p2.id) = 1), 0) as units "
+                    "from product_kit_parts k where k.product_id = :i order by k.sort_order, k.id"
+                ),
+                {"i": product_id},
+            ).all():
+                kit_parts.append({"part_number": k.part_number, "need": int(k.need), "on_our_shelf": int(k.units), "kits": int(k.units) // int(k.need)})
+        except Exception:
+            db.rollback()
     return {
+        "kit_parts": kit_parts,
         "ei_total": int(r.qoh),
         "own_available": int(r.own),
         "warehouses": whs,
@@ -373,7 +391,7 @@ def api_zero(
     total = int(db.execute(text(f"select count(*) from products p where {cond}"), params).scalar() or 0)
     rows = db.execute(
         text(
-            f"select p.id, p.sku_display as sku, p.title, p.custom_label_sku, coalesce(p.quantity_on_hand, 0) as on_hand, "
+            f"select p.id, p.sku_display as sku, p.title, p.custom_label_sku, {shelf_sql('p')} as on_hand, "
             f"{available_sql('p')} as own, {parts_count_sql('p')} as parts, {dist_sql('p')} as distributor, "
             f"p.dropship_ok, coalesce(p.is_published, false) as published "
             f"from products p where {cond} order by p.title, p.id limit :lim offset :off"
@@ -539,7 +557,7 @@ def api_products(
     total = int(db.execute(text(f"select count(*) from products p where {cond}"), params).scalar() or 0)
     rows = db.execute(
         text(
-            f"select p.id, p.sku_display as sku, p.title, p.custom_label_sku, coalesce(p.quantity_on_hand, 0) as on_hand, "
+            f"select p.id, p.sku_display as sku, p.title, p.custom_label_sku, {shelf_sql('p')} as on_hand, "
             f"{available_sql('p')} as own, {parts_count_sql('p')} as parts, {dist_sql('p')} as distributor, "
             f"coalesce(p.dropship_ok, false) as dropship_ok, (p.dropship_prev is not null) as has_prev, coalesce({linked_sql('p')}, false) as linked "
             f"from products p where {cond} order by p.title, p.id limit :lim offset :off"

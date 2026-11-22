@@ -46,9 +46,38 @@ def reserved_paid_sql(p: str = "p") -> str:
     )
 
 
+def kit_shelf_sql(p: str = "p") -> str:
+    """SQL: how many complete kits OUR OWN shelf can make for a kit (a product with two or more distributor parts). The number saved
+    on the kit itself is NOT used. For each distributor part, the pieces on our shelf are counted from our own SINGLE-part products
+    that are that same distributor part (their available count x pieces per product); the part with the fewest kits decides.
+    A part that no single-part product of ours matches counts as 0."""
+    return (
+        "(select coalesce(min(cast(floor(cast(coalesce(sh.units, 0) as numeric) / greatest(coalesce(k.quantity, 1), 1)) as integer)), 0) "
+        "from product_kit_parts k "
+        "left join lateral ("
+        "  select sum(greatest(0, coalesce(p2.quantity_on_hand, 0) - " + set_aside_sql("p2") + ") * greatest(coalesce(k2.quantity, 1), 1)) as units "
+        "  from product_kit_parts k2 join products p2 on p2.id = k2.product_id "
+        "  where k.supplier_item_id is not null and k2.supplier_item_id = k.supplier_item_id "
+        f"    and p2.id <> {p}.id "
+        "    and (select count(*) from product_kit_parts k3 where k3.product_id = p2.id) = 1"
+        ") sh on true "
+        f"where k.product_id = {p}.id)"
+    )
+
+
+def _is_kit_sql(p: str = "p") -> str:
+    return f"(select count(*) from product_kit_parts kk where kk.product_id = {p}.id) >= 2"
+
+
+def shelf_sql(p: str = "p") -> str:
+    """SQL: what is on OUR shelf for product `p`: its saved quantity, or for a kit the kits our single-part products can make."""
+    return f"(case when {_is_kit_sql(p)} then {kit_shelf_sql(p)} else coalesce({p}.quantity_on_hand, 0) end)"
+
+
 def available_sql(p: str = "p") -> str:
-    """SQL: what customers can still buy. Never negative."""
-    return f"greatest(0, coalesce({p}.quantity_on_hand, 0) - {set_aside_sql(p)})"
+    """SQL: what customers can still buy from our shelf. Never negative. For a kit this comes from the single-part products that
+    make it up (kit_shelf_sql), not from the number saved on the kit."""
+    return f"greatest(0, {shelf_sql(p)} - {set_aside_sql(p)})"
 
 
 def lock_products(db: Session, ids) -> dict:
@@ -97,7 +126,8 @@ def place_holds(db: Session, order_id: int, wanted: dict[int, int]) -> None:
             ),
             {"p": pid},
         ).scalar()
-        if qty > max(0, (row.quantity_on_hand or 0) - int(taken)) + extra.get(pid, 0):
+        shelf = db.execute(text(f"select {shelf_sql('p')} from products p where p.id = :p"), {"p": pid}).scalar()
+        if qty > max(0, int(shelf or 0) - int(taken)) + extra.get(pid, 0):
             unavailable = True
             break
     if unavailable:
@@ -164,7 +194,7 @@ def order_shortfalls(db: Session, order_ids) -> list:
         return []
     return db.execute(
         text(
-            """
+            f"""
             with r as (
               select s.order_id, s.product_id, s.quantity,
                      sum(s.quantity) over (partition by s.product_id order by o.paid_at nulls last, o.id) as running
@@ -172,13 +202,13 @@ def order_shortfalls(db: Session, order_ids) -> list:
               where s.status = 'reserved'
             )
             select r.order_id, r.product_id,
-                   greatest(0, least(r.quantity, r.running - coalesce(p.quantity_on_hand, 0)))::int as short,
+                   greatest(0, least(r.quantity, r.running - {shelf_sql('p')}))::int as short,
                    coalesce(p.on_order, false) as on_order,
                    p.expected_date,
                    case when p.expected_date is null then null else (p.expected_date - current_date) end as days_until
             from r join products p on p.id = r.product_id
             where r.order_id = any(cast(:ids as bigint[]))
-              and r.running - coalesce(p.quantity_on_hand, 0) > 0
+              and r.running - {shelf_sql('p')} > 0
             """
         ),
         {"ids": ids},

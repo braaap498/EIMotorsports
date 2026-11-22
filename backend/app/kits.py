@@ -529,7 +529,32 @@ def availability_of(db: Session, product_id: int) -> Optional[dict]:
     low = min(p["can_make"] for p in parts)
     for p in parts:
         p["limiting"] = p["can_make"] == low and len(parts) > 1
-    return {"available": low, "is_kit": len(parts) > 1, "parts": parts}
+    # OUR OWN shelf: for each piece, what our single-part products that are that same distributor part hold (available, not set
+    # aside), counted in pieces. This is what a kit's E&I warehouse quantity is made from (app/stock.py kit_shelf_sql).
+    ours = {}
+    if len(parts) > 1:
+        from app.stock import set_aside_sql
+
+        for r in db.execute(
+            text(
+                "select k.id, coalesce(("
+                "  select sum(greatest(0, coalesce(p2.quantity_on_hand, 0) - " + set_aside_sql("p2") + ") * greatest(coalesce(k2.quantity, 1), 1)) "
+                "  from product_kit_parts k2 join products p2 on p2.id = k2.product_id "
+                "  where k.supplier_item_id is not null and k2.supplier_item_id = k.supplier_item_id and p2.id <> :p "
+                "    and (select count(*) from product_kit_parts k3 where k3.product_id = p2.id) = 1), 0) as units "
+                "from product_kit_parts k where k.product_id = :p"
+            ),
+            {"p": product_id},
+        ).all():
+            ours[r.id] = int(r.units or 0)
+    for p in parts:
+        units = ours.get(p["id"], 0)
+        p["on_our_shelf"] = units
+        p["ours_can_make"] = units // p["need"]
+    ours_low = min(p["ours_can_make"] for p in parts) if len(parts) > 1 else None
+    for p in parts:
+        p["ours_limiting"] = ours_low is not None and p["ours_can_make"] == ours_low
+    return {"available": low, "is_kit": len(parts) > 1, "parts": parts, "ours_available": ours_low}
 
 
 def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]:

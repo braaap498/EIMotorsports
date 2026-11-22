@@ -152,7 +152,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [mpnLocked, setMpnLocked] = useState(false);
   // a product made of several distributor parts shows how many the distributor's stock can make, not an editable count
   const [kitAvail, setKitAvail] = useState<Availability | null>(null);
-  const kitCount = productId && kitAvail?.is_kit ? kitAvail.available : null;
+  const kitCount = productId && kitAvail?.is_kit ? (kitAvail.ours_available ?? 0) : null;
   const partMpns = Array.from(new Set(kitParts.map((p) => (p.mfr_number ?? "").trim()).filter(Boolean)));
   const mpnFromParts = productId ? mpnLocked : partMpns.length > 0;
   const mpnShown = !productId && partMpns.length > 0 ? partMpns.join(" / ") : null;
@@ -406,10 +406,10 @@ export default function ProductForm({ productId }: { productId?: number }) {
           />
         </Field>
       ) : (
-      <Field key={f.key} label={f.key === "quantity_on_hand" && kitCount === null ? "E&I Warehouse Quantity" : f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
+      <Field key={f.key} label={f.key === "quantity_on_hand" && kitCount === null ? (productId ? "Total quantity on hand" : "E&I Warehouse Quantity") : f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
         <input
           className={inputCls}
-          disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts) || (f.key === "quantity_on_hand" && kitCount !== null)}
+          disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts) || (f.key === "quantity_on_hand" && (kitCount !== null || !!productId))}
           type={f.kind === "text" ? "text" : "number"}
           step={f.kind === "number" ? f.step : f.kind === "int" ? "1" : undefined}
           value={
@@ -423,7 +423,12 @@ export default function ProductForm({ productId }: { productId?: number }) {
         />
         {f.key === "quantity_on_hand" && kitCount !== null && (
           <span className="mt-1 block text-xs font-normal text-gray-500">
-            How many kits the distributor parts below can make (the part with the fewest decides). Not editable.
+            How many kits our own single-part products can make from the parts below (the part with the fewest decides). Not editable: change the E&amp;I warehouse quantity on those single-part products.
+          </span>
+        )}
+        {f.key === "quantity_on_hand" && kitCount === null && !!productId && (
+          <span className="mt-1 block text-xs font-normal text-gray-500">
+            Calculated from the warehouse counts. Change the E&amp;I warehouse quantity in the Quantities box below.
           </span>
         )}
         {f.key === "manufacturer_part_number" && mpnFromParts && (
@@ -598,7 +603,18 @@ export default function ProductForm({ productId }: { productId?: number }) {
         <section className={card}>
           <h2 className="text-lg font-semibold">Price &amp; stock</h2>
           <div className={grid}>{renderFields(PRICING)}</div>
-          {productId && <QuantitiesPanel productId={productId} refreshKey={kitAvail} />}
+          {productId && (
+            <QuantitiesPanel
+              productId={productId}
+              refreshKey={kitAvail}
+              canEdit={kitCount === null && fieldAllowed("quantity_on_hand")}
+              onSaved={(total) => {
+                // the server has just changed the total on hand: show it, and do not count it as an unsaved change
+                set("quantity_on_hand", String(total));
+                setBaseline((b) => (b ? { ...b, quantity_on_hand: total } : b));
+              }}
+            />
+          )}
         </section>
 
         <section className={card}>

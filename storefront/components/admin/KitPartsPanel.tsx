@@ -23,7 +23,12 @@ export type KitPart = {
 export type Availability = {
   available: number;
   is_kit: boolean;
-  parts: { id: number; part_number: string; need: number; matched: boolean; stock: number; can_make: number; limiting: boolean }[];
+  // kits only: the kits OUR OWN single-part products can make (the E&I warehouse quantity of the kit); null for a single part
+  ours_available?: number | null;
+  parts: {
+    id: number; part_number: string; need: number; matched: boolean; stock: number; can_make: number; limiting: boolean;
+    on_our_shelf?: number; ours_can_make?: number; ours_limiting?: boolean;
+  }[];
 };
 
 type Vendor = { id: number; name: string; has_catalog: boolean; supplier?: string | null };
@@ -415,11 +420,18 @@ export default function KitPartsPanel({
                       const a = avail?.parts.find((x) => `p${x.id}` === p.key);
                       if (!a) return null;
                       return (
-                        <div className={`mt-1 text-xs ${a.limiting ? "font-semibold text-amber-800" : "text-gray-600"}`}>
-                          {a.matched
-                            ? `Distributor stock ${a.stock.toLocaleString()}${a.need > 1 ? `, ${a.need} per kit` : ""}: enough for ${a.can_make.toLocaleString()}`
-                            : "Not matched to a distributor catalog part, so it counts as 0"}
-                        </div>
+                        <>
+                          <div className={`mt-1 text-xs ${a.limiting ? "font-semibold text-amber-800" : "text-gray-600"}`}>
+                            {a.matched
+                              ? `Distributor stock ${a.stock.toLocaleString()}${a.need > 1 ? `, ${a.need} per kit` : ""}: enough for ${a.can_make.toLocaleString()}`
+                              : "Not matched to a distributor catalog part, so it counts as 0"}
+                          </div>
+                          {avail?.is_kit && a.on_our_shelf !== undefined && (
+                            <div className={`text-xs ${a.ours_limiting ? "font-semibold text-amber-800" : "text-gray-600"}`}>
+                              {`On our shelf (our single-part products with this part): ${a.on_our_shelf.toLocaleString()}${a.need > 1 ? `, ${a.need} per kit` : ""}: enough for ${(a.ours_can_make ?? 0).toLocaleString()}`}
+                            </div>
+                          )}
+                        </>
                       );
                     })()}
                   </div>
@@ -457,6 +469,12 @@ export default function KitPartsPanel({
         <div className="rounded bg-gray-50 p-2 text-sm">
           <span className="text-xs text-gray-500">{avail.is_kit ? "Kit available from distributor stock: " : "Available from distributor stock: "}</span>
           <span className="font-semibold">{avail.available.toLocaleString()}</span>
+          {avail.is_kit && avail.ours_available != null && (
+            <>
+              <span className="ml-4 text-xs text-gray-500">Kit on our own shelf (E&amp;I warehouse quantity): </span>
+              <span className="font-semibold">{avail.ours_available.toLocaleString()}</span>
+            </>
+          )}
           {dirty && <span className="ml-2 text-xs text-gray-500">(as last saved; save the parts to update)</span>}
         </div>
       )}
