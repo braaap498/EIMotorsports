@@ -21,6 +21,7 @@ could not be sent is reported back per listing, never hidden.
   GET  /kits/vendors                    distributors, and which of them has a searchable catalog
   GET  /kits/catalog                    search the vendor catalog (many ways, see catalog_search)
   GET  /kits/catalog/brands             brands in the catalog, for the brand filter
+  GET  /kits/manual-catalog             the saved parts of a distributor that has no catalog here (typed once, picked after that)
   GET  /kits/{product_id}               the pieces, the CLS, and the linked eBay listings
   PUT  /kits/{product_id}/parts         replace the pieces; builds the CLS only if there is none yet (does NOT talk to eBay)
   POST /kits/{product_id}/sync          send the CLS to every linked eBay listing, then to their Selling Manager inventory
@@ -115,6 +116,52 @@ _STOCK = "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qt
 def vendors(db: Session = Depends(get_db)):
     rows = db.execute(text("select id, name from po_distributors order by lower(name), id")).all()
     return {"items": [{"id": r.id, "name": r.name, "has_catalog": is_catalog_vendor(r.name), "supplier": supplier_for(r.name)} for r in rows]}
+
+
+@router.get("/manual-catalog")
+@needs("products.edit_details", "products.create")
+def manual_catalog(
+    distributor_id: int = Query(..., description="a distributor that has no catalog here"),
+    q: Optional[str] = Query(None, max_length=200),
+    limit: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: AuthUser = Depends(current_user),
+):
+    """The parts already typed for this distributor, to pick from instead of typing them again. Words match the vendor part #,
+    the manufacturer # or the description (dashes and spaces in part numbers are ignored). Cost only for people who may see it."""
+    see_cost = has_perm(user, "products.edit_price")
+    where = ["m.distributor_id = :d"]
+    params: dict = {"d": distributor_id, "n": limit}
+    for i, w in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:6]):
+        params[f"w{i}"] = f"%{w}%"
+        params[f"p{i}"] = f"%{_norm(w)}%"
+        where.append(
+            f"(m.part_number ilike :w{i} or m.mfr_number ilike :w{i} or m.description ilike :w{i} "
+            f"or m.part_norm like :p{i} or upper(regexp_replace(coalesce(m.mfr_number, ''), '[^A-Za-z0-9]', '', 'g')) like :p{i})"
+        )
+    try:
+        rows = db.execute(
+            text(
+                "select m.id, m.part_number, m.mfr_number, m.description, m.unit_cost from manual_catalog_items m "
+                f"where {' and '.join(where)} order by lower(m.part_number), m.id limit :n"
+            ),
+            params,
+        ).all()
+    except Exception:
+        db.rollback()
+        return {"items": []}
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "part_number": r.part_number,
+                "mfr_number": r.mfr_number,
+                "description": r.description,
+                "unit_cost": float(r.unit_cost) if r.unit_cost is not None and see_cost else None,
+            }
+            for r in rows
+        ]
+    }
 
 
 @router.get("/catalog/brands")
@@ -322,6 +369,22 @@ def ensure_mfr_column() -> None:
     except Exception:
         db.rollback()
         log.exception("could not add product_kit_parts.mfr_number; saving distributor parts will fail until it exists")
+    try:
+        # the saved parts of distributors that have no catalog here: type a part once, pick it on every other product
+        db.execute(
+            text(
+                "create table if not exists manual_catalog_items ("
+                "id bigserial primary key, "
+                "distributor_id integer not null references po_distributors(id) on delete cascade, "
+                "part_number text not null, part_norm text not null, mfr_number text, description text, unit_cost numeric, "
+                "created_at timestamptz not null default now(), updated_at timestamptz not null default now(), "
+                "unique (distributor_id, part_norm))"
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("could not create manual_catalog_items; the saved-parts list will be empty until it exists")
     finally:
         db.close()
 
@@ -624,6 +687,27 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
             {"p": product_id, "d": c["distributor_id"], "si": c["supplier_item_id"], "pn": c["part_number"],
              "desc": c["description"], "uc": c["unit_cost"], "q": c["quantity"], "so": c["sort_order"], "mfr": c["mfr_number"]},
         )
+    # Remember typed pieces of distributors with no catalog, so the next product can pick them instead of typing them again.
+    # A part already saved keeps its details (only blanks are filled), and a failure here never stops the parts from saving.
+    for c in clean:
+        if c["supplier_item_id"] or supplier_for(dists[c["distributor_id"]]) is not None:
+            continue
+        try:
+            with db.begin_nested():
+                db.execute(
+                    text(
+                        "insert into manual_catalog_items (distributor_id, part_number, part_norm, mfr_number, description, unit_cost) "
+                        "values (:d, :pn, :pnorm, :mfr, :desc, :uc) "
+                        "on conflict (distributor_id, part_norm) do update set "
+                        "mfr_number = coalesce(nullif(btrim(manual_catalog_items.mfr_number), ''), excluded.mfr_number), "
+                        "description = coalesce(nullif(btrim(manual_catalog_items.description), ''), excluded.description), "
+                        "unit_cost = coalesce(manual_catalog_items.unit_cost, excluded.unit_cost), updated_at = now()"
+                    ),
+                    {"d": c["distributor_id"], "pn": c["part_number"], "pnorm": _norm(c["part_number"]), "mfr": c["mfr_number"],
+                     "desc": c["description"], "uc": c["unit_cost"]},
+                )
+        except Exception:
+            log.exception("could not remember a typed distributor part")
     # The product's Manufacturer part # follows its pieces. What was just saved on the pieces wins: the number still stored on the
     # product is the OLD one, and moving it back onto a piece (sync_product_mpn -> place_existing_mpn) is what undid every change
     # to a piece's Manufacturer # (a one-piece product always got its old number put back). That move is only for pieces that

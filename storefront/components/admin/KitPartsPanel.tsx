@@ -131,6 +131,10 @@ export default function KitPartsPanel({
   const [addQty, setAddQty] = useState<Record<number, string>>({});
   // typed-in piece (vendors without a catalog)
   const [man, setMan] = useState({ part_number: "", mfr_number: "", same: false, description: "", unit_cost: "", quantity: "1" });
+  // parts already typed for this vendor (vendors without a catalog), to pick instead of typing again
+  type SavedPart = { id: number; part_number: string; mfr_number: string | null; description: string | null; unit_cost: number | null };
+  const [savedQ, setSavedQ] = useState("");
+  const [savedRes, setSavedRes] = useState<SavedPart[]>([]);
   // saving
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -164,6 +168,18 @@ export default function KitPartsPanel({
     if (!supplier) return setBrands([]);
     api<{ items: Brand[] }>(`/kits/catalog/brands?supplier=${encodeURIComponent(supplier)}`).then((r) => setBrands(r.items)).catch(() => setBrands([]));
   }, [supplier]);
+
+  // the saved parts of a vendor that has no catalog: refreshed when the vendor, the search, or the saved pieces change
+  const manualVendorId = vendor && !vendor.has_catalog ? vendor.id : null;
+  useEffect(() => {
+    if (manualVendorId === null) return setSavedRes([]);
+    const t = setTimeout(() => {
+      api<{ items: SavedPart[] }>(`/kits/manual-catalog?distributor_id=${manualVendorId}&q=${encodeURIComponent(savedQ.trim())}`)
+        .then((r) => setSavedRes(r.items))
+        .catch(() => setSavedRes([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [manualVendorId, savedQ, savedParts]);
 
   // existing product: load what is saved
   useEffect(() => {
@@ -266,6 +282,26 @@ export default function KitPartsPanel({
     setDirty(false);
     clearSearch();
     setMan({ part_number: "", mfr_number: "", same: false, description: "", unit_cost: "", quantity: "1" });
+    setMsg(null);
+  }
+
+  // add a part that was typed before: nothing to type again
+  function addSaved(it: SavedPart) {
+    if (!vendorId) return setMsg({ kind: "error", text: "Pick the vendor first." });
+    edit([
+      ...parts,
+      {
+        key: newKey(),
+        distributor_id: Number(vendorId),
+        vendor: vendor?.name,
+        supplier_item_id: null,
+        part_number: it.part_number,
+        mfr_number: it.mfr_number || null,
+        description: it.description ?? "",
+        unit_cost: it.unit_cost,
+        quantity: Math.max(1, Math.min(1000, Number(man.quantity) || 1)),
+      },
+    ]);
     setMsg(null);
   }
 
@@ -594,7 +630,32 @@ export default function KitPartsPanel({
 
           {vendor && !vendor.has_catalog && (
             <div className="space-y-2">
-              <p className="text-xs text-gray-500">{vendor.name} has no catalog loaded here, so type the piece in.</p>
+              <p className="text-xs text-gray-500">{vendor.name} has no catalog loaded here. Pick a part you already typed, or add a new one below.</p>
+              <div className="space-y-1 rounded border border-gray-200 p-2">
+                <label className="block text-xs">
+                  Saved parts
+                  <input className={inputCls} value={savedQ} placeholder="search vendor part #, manufacturer # or description" onChange={(e) => setSavedQ(e.target.value)} />
+                </label>
+                {savedRes.length === 0 ? (
+                  <p className="text-xs text-gray-500">{savedQ.trim() ? "Nothing saved matches. Add it as a new part below." : `No parts saved for ${vendor.name} yet. Parts you add below are saved here when you save the distributor parts.`}</p>
+                ) : (
+                  <ul className="max-h-48 divide-y divide-gray-100 overflow-auto text-sm">
+                    {savedRes.map((it) => (
+                      <li key={it.id} className="flex items-center justify-between gap-2 py-1">
+                        <span className="min-w-0 flex-1 truncate">
+                          <span className="font-medium">{it.part_number}</span>
+                          {it.mfr_number && <span className="ml-2 text-gray-600">mfr {it.mfr_number}</span>}
+                          {it.description && <span className="ml-2 text-gray-500">{it.description}</span>}
+                          {it.unit_cost !== null && <span className="ml-2 text-gray-600">${it.unit_cost.toFixed(2)}</span>}
+                        </span>
+                        <button type="button" className={btn2Cls} onClick={() => addSaved(it)}>Add</button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="text-xs text-gray-500">The Qty below is used for the part you add.</p>
+              </div>
+              <p className="text-xs font-medium text-gray-700">Not in the list? Add a new part</p>
               <div className="flex flex-wrap items-end gap-2">
                 <label className="text-xs">Vendor part #<input className={inputCls} value={man.part_number} onChange={(e) => setMan({ ...man, part_number: e.target.value })} /></label>
                 <label className="text-xs">Manufacturer #<input className={inputCls} value={man.same ? man.part_number : man.mfr_number} disabled={man.same} onChange={(e) => setMan({ ...man, mfr_number: e.target.value })} /></label>
