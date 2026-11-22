@@ -510,10 +510,12 @@ def sync(product_id: int, db: Session = Depends(get_db), user: AuthUser = Depend
         inventory = sync_inventory(db, user, product_id, True)
     except HTTPException as e:
         inventory = [{"store": "", "sm_product_id": "", "name": "", "before": "", "after": "", "status": "error", "detail": str(e.detail)}]
-    except Exception:
+    except Exception as e:
         db.rollback()
         log.exception("inventory label sync failed for product %s", product_id)
-        inventory = [{"store": "", "sm_product_id": "", "name": "", "before": "", "after": "", "status": "error", "detail": "Something unexpected went wrong with the inventory records."}]
+        # name the real error (class and first line) so the screen shows what to fix, not just "unexpected"
+        why = f"{type(e).__name__}: {str(e).strip().splitlines()[0][:240]}" if str(e).strip() else type(e).__name__
+        inventory = [{"store": "", "sm_product_id": "", "name": "", "before": "", "after": "", "status": "error", "detail": f"The eBay inventory records could not be checked ({why})."}]
     return {"cls": _product_cls(db, product_id), "results": results, "inventory": inventory}
 
 

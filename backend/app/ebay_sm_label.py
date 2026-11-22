@@ -20,6 +20,7 @@ SellingManagerProductDetails worked on the first live records. Register in main.
     from app.ebay_sm_label import router as ebay_sm_label_router
     admin_router.include_router(ebay_sm_label_router)
 """
+import logging
 import re
 from typing import Optional
 from xml.sax.saxutils import escape
@@ -33,6 +34,8 @@ from app.auth import AuthUser, require_admin
 from app.database import get_db
 from app.ebay_edit import NS, _errors, _failed, _first_message, _log, _store_row, _trading
 from app.kits import _DIGITS, _linked_listings, _product_cls
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ebay-edit", tags=["ebay-edit"], dependencies=[Depends(require_admin)])
 
@@ -165,9 +168,10 @@ def sync_inventory(db: Session, user: AuthUser, product_id: int, apply: bool) ->
         except HTTPException as e:
             db.rollback()
             res["status"], res["detail"] = "error", str(e.detail)
-        except Exception:
+        except Exception as e:
             db.rollback()
-            res["status"], res["detail"] = "error", "Something unexpected went wrong with this record."
+            log.exception("inventory record %s label update failed", r.sm_product_id)
+            res["status"], res["detail"] = "error", f"Something unexpected went wrong with this record ({type(e).__name__}: {str(e).strip().splitlines()[0][:200] if str(e).strip() else ''})."
     return out
 
 
