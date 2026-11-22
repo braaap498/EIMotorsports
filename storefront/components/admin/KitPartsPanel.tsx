@@ -130,7 +130,7 @@ export default function KitPartsPanel({
   const [searching, setSearching] = useState(false);
   const [addQty, setAddQty] = useState<Record<number, string>>({});
   // typed-in piece (vendors without a catalog)
-  const [man, setMan] = useState({ part_number: "", mfr_number: "", description: "", unit_cost: "", quantity: "1" });
+  const [man, setMan] = useState({ part_number: "", mfr_number: "", same: false, description: "", unit_cost: "", quantity: "1" });
   // saving
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -265,7 +265,7 @@ export default function KitPartsPanel({
     onChange(savedParts);
     setDirty(false);
     clearSearch();
-    setMan({ part_number: "", mfr_number: "", description: "", unit_cost: "", quantity: "1" });
+    setMan({ part_number: "", mfr_number: "", same: false, description: "", unit_cost: "", quantity: "1" });
     setMsg(null);
   }
 
@@ -282,13 +282,13 @@ export default function KitPartsPanel({
         vendor: vendor?.name,
         supplier_item_id: null,
         part_number: man.part_number.trim(),
-        mfr_number: man.mfr_number.trim() || null,
+        mfr_number: (man.same ? man.part_number.trim() : man.mfr_number.trim()) || null,
         description: man.description.trim(),
         unit_cost: cost,
         quantity: Math.max(1, Math.min(1000, Number(man.quantity) || 1)),
       },
     ]);
-    setMan({ part_number: "", mfr_number: "", description: "", unit_cost: "", quantity: "1" });
+    setMan({ part_number: "", mfr_number: "", same: false, description: "", unit_cost: "", quantity: "1" });
     setMsg(null);
   }
 
@@ -597,7 +597,8 @@ export default function KitPartsPanel({
               <p className="text-xs text-gray-500">{vendor.name} has no catalog loaded here, so type the piece in.</p>
               <div className="flex flex-wrap items-end gap-2">
                 <label className="text-xs">Vendor part #<input className={inputCls} value={man.part_number} onChange={(e) => setMan({ ...man, part_number: e.target.value })} /></label>
-                <label className="text-xs">Manufacturer #<input className={inputCls} value={man.mfr_number} onChange={(e) => setMan({ ...man, mfr_number: e.target.value })} /></label>
+                <label className="text-xs">Manufacturer #<input className={inputCls} value={man.same ? man.part_number : man.mfr_number} disabled={man.same} onChange={(e) => setMan({ ...man, mfr_number: e.target.value })} /></label>
+                <label className="flex items-center gap-1 pb-2 text-xs" title="Use the vendor part # as the manufacturer # too"><input type="checkbox" checked={man.same} onChange={(e) => setMan({ ...man, same: e.target.checked })} />Same as vendor part #</label>
                 <label className="min-w-[12rem] flex-1 text-xs">Description<input className={inputCls} value={man.description} onChange={(e) => setMan({ ...man, description: e.target.value })} /></label>
                 <label className="text-xs">Cost<input type="number" step="0.01" className={`${inputCls} w-24`} value={man.unit_cost} onChange={(e) => setMan({ ...man, unit_cost: e.target.value })} /></label>
                 <label className="text-xs">Qty<input type="number" min={1} className={`${inputCls} w-20`} value={man.quantity} onChange={(e) => setMan({ ...man, quantity: e.target.value })} /></label>
