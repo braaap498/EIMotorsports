@@ -126,6 +126,7 @@ export default function EbayLiveListingsPage() {
   const [relink, setRelink] = useState<RepoItem | null>(null); // the listing whose product is being changed
   const [relinkTo, setRelinkTo] = useState<PickRow | null>(null); // the product chosen, waiting for the confirm
   const [relinkBusy, setRelinkBusy] = useState(false);
+  const [afterRelink, setAfterRelink] = useState<{ product_id: number; sku: string | null; label: string } | null>(null); // offered right after a product change
   const [mainStore, setMainStore] = useState(""); // the store opened first on a first visit
   const [statusF, setStatusF] = useState<string>("all");
   const [repo, setRepo] = useState<RepoResp | null>(null);
@@ -759,8 +760,36 @@ export default function EbayLiveListingsPage() {
             }
           : cur,
       );
+      setAfterRelink(r.new.label ? { product_id: relinkTo.id, sku: r.new.sku, label: r.new.label } : null);
       setRelink(null);
       setRelinkTo(null);
+    } catch (e) {
+      setActMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setRelinkBusy(false);
+    }
+  }
+
+  // Send the product's custom label to every eBay listing linked to it (the same send the product page does), then
+  // show the label on the rows that now match.
+  async function sendLabelNow() {
+    if (!afterRelink) return;
+    setRelinkBusy(true);
+    try {
+      const s = await api<{ cls: string; results: { item_id: string; status: string; detail: string }[] }>(
+        `/kits/${afterRelink.product_id}/sync`,
+        { method: "POST" },
+      );
+      const good = new Set(s.results.filter((x) => x.status === "updated" || x.status === "already_current").map((x) => x.item_id.replace(/[^0-9]/g, "")));
+      const bad = s.results.filter((x) => x.status === "error" || x.status === "not_sent" || x.status === "skipped");
+      setRepo((cur) =>
+        cur ? { ...cur, items: cur.items.map((x) => (good.has(x.item_id) ? { ...x, custom_label: s.cls } : x)) } : cur,
+      );
+      setActMsg({
+        kind: bad.length ? "error" : "success",
+        text: `Custom label ${s.cls} on eBay: ${good.size} of ${s.results.length} listing(s) correct${bad.length ? `. Problems: ${bad.map((b) => b.detail).join(" | ")}` : ""}`,
+      });
+      setAfterRelink(null);
     } catch (e) {
       setActMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -1083,6 +1112,20 @@ export default function EbayLiveListingsPage() {
             </p>
           )}
           {actMsg && <Notice kind={actMsg.kind}>{actMsg.text}</Notice>}
+          {afterRelink && !relink && (
+            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
+              <span>
+                The Custom label column still shows the label last read from eBay. To make eBay match <b>{afterRelink.sku ?? `product ${afterRelink.product_id}`}</b>, send its
+                label <b>{afterRelink.label}</b> now. This goes to every eBay listing linked to that product.
+              </span>
+              <button type="button" className={btnCls} disabled={relinkBusy} onClick={() => void sendLabelNow()}>
+                {relinkBusy ? "Sending…" : "Send label to eBay"}
+              </button>
+              <button type="button" className={btn2Cls} disabled={relinkBusy} onClick={() => setAfterRelink(null)}>
+                Not now
+              </button>
+            </div>
+          )}
           {relink && (
             <div className="space-y-2 rounded-lg border-2 border-amber-300 bg-amber-50 p-3">
               <div className="flex items-start justify-between gap-3">
