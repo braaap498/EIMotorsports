@@ -74,6 +74,7 @@ DROP_TABLES = {
     "product_item_specifics",
     "fitment_parse_review",
     "category_assignment_review",
+    "product_kit_parts",       # what a part is made of / sourced from; handled in the merge (see "kit parts" step)
 }
 
 # Where the part number lives (it is not in products.manufacturer_part_number).
@@ -748,6 +749,8 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
                                   from product_photos pp where pp.product_id = any(cast(:ids as bigint[]))),
                   'specifics', (select coalesce(jsonb_agg(to_jsonb(s)), jsonb_build_array())
                                   from product_item_specifics s where s.product_id = any(cast(:ids as bigint[]))),
+                  'kitparts',  (select coalesce(jsonb_agg(to_jsonb(k)), jsonb_build_array())
+                                  from product_kit_parts k where k.product_id = any(cast(:ids as bigint[]))),
                   'listings',  (select coalesce(jsonb_agg(jsonb_build_object(
                                     'id', cl.id, 'product_id', cl.product_id,
                                     'channel_id', cl.channel_id, 'external_id', cl.external_id)),
@@ -919,6 +922,23 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
                     ),
                     {"d": donor_desc, "s": sid},
                 )
+
+        # ---- kit parts: the kept part's own list stays as it is --------------------------
+        # The duplicates have the same custom label, so the same parts; adding their rows would count each part twice
+        # (stock = scarcest part / quantity). They are saved in the snapshot above, so an unmerge puts them back.
+        # If the kept part has no kit parts at all, it takes the list of the duplicate that has the most.
+        kept_kit = db.execute(text("select count(*) from product_kit_parts where product_id = :s"), {"s": sid}).scalar()
+        if not kept_kit:
+            donor_kit = db.execute(
+                text(
+                    "select product_id from product_kit_parts where product_id = any(cast(:m as bigint[])) "
+                    "group by product_id order by count(*) desc, product_id limit 1"
+                ),
+                {"m": merged},
+            ).scalar()
+            if donor_kit:
+                db.execute(text("update product_kit_parts set product_id = :s where product_id = :d"), {"s": sid, "d": donor_kit})
+        db.execute(text("delete from product_kit_parts where product_id = any(cast(:m as bigint[]))"), {"m": merged})
 
         # ---- delete the duplicates (descriptive child rows cascade) ---------------------
         db.execute(text("delete from products where id = any(cast(:m as bigint[]))"), {"m": merged})
@@ -1326,6 +1346,18 @@ def unmerge(log_id: int, body: UnmergeIn, db: Session = Depends(get_db), user: A
             _restore_rows(db, "product_photos", [r for r in photos if r.get("id") in taken], skip_id=True)
         specs = [r for r in (snap.get("specifics") or []) if r.get("product_id") in rs]
         _restore_rows(db, "product_item_specifics", specs)
+        # kit parts of the restored products; a row whose id is taken (it moved to the kept part) comes back as a new row
+        kit = [r for r in (snap.get("kitparts") or []) if r.get("product_id") in rs]
+        if kit:
+            taken = {
+                x[0]
+                for x in db.execute(
+                    text("select id from product_kit_parts where id = any(cast(:i as bigint[]))"),
+                    {"i": [int(r["id"]) for r in kit if r.get("id") is not None]},
+                )
+            }
+            _restore_rows(db, "product_kit_parts", [r for r in kit if r.get("id") not in taken])
+            _restore_rows(db, "product_kit_parts", [r for r in kit if r.get("id") in taken], skip_id=True)
 
         # ---- 3. eBay links go back to their own product ----------------------------------
         cl_pairs = plan["cl_pairs"]
