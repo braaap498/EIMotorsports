@@ -624,7 +624,21 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
             {"p": product_id, "d": c["distributor_id"], "si": c["supplier_item_id"], "pn": c["part_number"],
              "desc": c["description"], "uc": c["unit_cost"], "q": c["quantity"], "so": c["sort_order"], "mfr": c["mfr_number"]},
         )
-    sync_product_mpn(db, product_id)  # the product's Manufacturer part # follows its pieces
+    # The product's Manufacturer part # follows its pieces. What was just saved on the pieces wins: the number still stored on the
+    # product is the OLD one, and moving it back onto a piece (sync_product_mpn -> place_existing_mpn) is what undid every change
+    # to a piece's Manufacturer # (a one-piece product always got its old number put back). That move is only for pieces that
+    # have no number at all, to carry over a number that was typed on the product before it had pieces.
+    follow = parts_mpn(db, product_id)
+    if follow:
+        db.execute(
+            text(
+                "update products set manufacturer_part_number = :m, updated_at = now() "
+                "where id = :p and manufacturer_part_number is distinct from :m"
+            ),
+            {"m": follow, "p": product_id},
+        )
+    else:
+        sync_product_mpn(db, product_id)
     existing = _product_cls(db, product_id)
     if existing:
         return {"cls": existing, "cls_changed": False, "duplicates": []}
