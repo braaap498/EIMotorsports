@@ -266,10 +266,20 @@ export default function ProductForm({ productId }: { productId?: number }) {
         if (r.cls_changed) {
           // the custom label is the same on every linked eBay listing, so send it to all of them
           try {
-            const s = await api<{ results: { status: string; detail: string }[] }>(`/kits/${productId}/sync`, { method: "POST" });
+            type SyncRow = { status: string; detail: string };
+            const s = await api<{ results: SyncRow[]; inventory?: SyncRow[] }>(`/kits/${productId}/sync`, { method: "POST" });
             const bad = s.results.filter((x) => x.status === "error" || x.status === "not_sent");
             const ok = s.results.filter((x) => x.status === "updated" || x.status === "already_current").length;
             text += `. Custom label on eBay: ${ok} of ${s.results.length} listing(s) correct${bad.length ? `. Problems: ${bad.map((b) => b.detail).join(" | ")}` : ""}`;
+            // Seller Hub > Listings > Inventory keeps its own custom label; the server updates those too, so say what happened
+            const inv = s.inventory ?? [];
+            const found = inv.filter((x) => x.status !== "none");
+            const invBad = inv.filter((x) => x.status === "error" || x.status === "not_sent" || x.status === "none");
+            if (found.length) {
+              const invOk = found.filter((x) => x.status === "updated" || x.status === "already_current").length;
+              text += `. eBay inventory records: ${invOk} of ${found.length} correct`;
+            }
+            if (invBad.length) text += `${found.length ? ". " : ". eBay inventory records NOT updated: "}${invBad.map((b) => b.detail).join(" | ")}`;
           } catch (err) {
             text += `. The label is saved here but was not sent to eBay: ${errMsg(err)}`;
           }
