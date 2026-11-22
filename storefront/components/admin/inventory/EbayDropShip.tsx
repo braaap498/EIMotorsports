@@ -9,6 +9,8 @@ type Line = {
   sku: string | null;
   title: string | null;
   quantity: number;
+  packs?: number;
+  pieces_per_sale?: number;
   on_hand: number;
   available: number;
   short: boolean;
@@ -131,6 +133,7 @@ export default function EbayDropShip({ initialOrder = "" }: { initialOrder?: str
                   />
                   <span>
                     {l.sku ?? l.title ?? "unknown part"} × {l.quantity}
+                    {(l.pieces_per_sale ?? 1) > 1 ? <span className="text-amber-700"> ({l.packs} sold × {l.pieces_per_sale} pieces each)</span> : null}
                     {l.matched ? <span className="text-gray-500"> · shelf count {l.on_hand}</span> : null}
                     {!l.matched && <span className="text-red-700"> · listing not linked to a product</span>}
                   </span>

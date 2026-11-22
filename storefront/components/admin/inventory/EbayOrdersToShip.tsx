@@ -16,6 +16,8 @@ type Line = OrderLike & {
   custom_label: string | null;
   title: string | null;
   quantity: number;
+  pieces_per_sale?: number;
+  units?: number;
   sku: string | null;
   product_id: number | null;
   sale_date: string | null;
@@ -148,7 +150,14 @@ export default function EbayOrdersToShip({
                     {l.sku ? ` · ${l.sku}` : ""}
                   </div>
                 </td>
-                <td className="px-3 py-2">{l.quantity}</td>
+                <td className="px-3 py-2">
+                  {l.quantity}
+                  {(l.pieces_per_sale ?? 1) > 1 && (
+                    <div className="whitespace-nowrap text-xs font-medium text-amber-700">
+                      × {l.pieces_per_sale} = {l.units ?? l.quantity * (l.pieces_per_sale ?? 1)} pieces to pick
+                    </div>
+                  )}
+                </td>
                 <td className="px-3 py-2">
                   <div className="space-y-1.5">
                     <OrderShipControls o={l} onPatch={(p) => patchOrder(l.order_pk, p)} onError={setMsg} />

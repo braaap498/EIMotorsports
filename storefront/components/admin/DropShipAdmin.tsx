@@ -16,7 +16,7 @@ import DropShipActivity from "./DropShipActivity";
 type Health = { ticked: number; warnings: string[] };
 type Settings = { manual_checks: boolean; last_scan_at: string | null; last_scan_note: string | null };
 type Avail = { use_distributor_stock: boolean; auto_raise: boolean; display_default: string };
-type Listing = { listing_id: number; store: string; item_id: string; dropship_ok: boolean };
+type Listing = { listing_id: number; store: string; item_id: string; dropship_ok: boolean; pieces_per_sale: number; listing_qty?: number };
 type Item = {
   product_id: number;
   sku: string | null;
@@ -265,6 +265,18 @@ function ProductsTab({ avail, setMsg }: { avail: Avail | null; setMsg: (m: { kin
 
   const tickListing = (l: Listing, on: boolean) =>
     post(`/availability/listings/${l.listing_id}/dropship`, { on }, (r) => `Drop ship ${on ? "on" : "off"} for ${l.store} ${l.item_id}.${queuedText(r)}`);
+  const setPieces = (l: Listing, n: number) =>
+    post(`/availability/listings/${l.listing_id}/pieces`, { pieces: n }, (r) =>
+      `${l.store} ${l.item_id}: ${n} piece${n === 1 ? "" : "s"} per sale.${queuedText(r)}`
+    );
+  const commitPieces = (l: Listing, raw: string) => {
+    const n = Math.floor(Number(raw));
+    if (!Number.isFinite(n) || n < 1 || n > 999) {
+      setMsg({ kind: "error", text: "Pieces per sale must be a whole number from 1 to 999." });
+      return;
+    }
+    if (n !== l.pieces_per_sale) void setPieces(l, n);
+  };
   const productOn = (it: Item) => {
     if (it.ticked > 0 && it.ticked < it.listings.length && !window.confirm("This ticks EVERY listing of the product and overwrites the ones set one by one. Their earlier ticks are remembered so you can put them back. Continue?")) return;
     void post(`/availability/products/${it.product_id}/dropship`, { on: true }, (r) => `Every listing of this product is now drop shipped.${queuedText(r)}`);
@@ -331,12 +343,32 @@ function ProductsTab({ avail, setMsg }: { avail: Avail | null; setMsg: (m: { kin
               {isOpen && (
                 <div className="space-y-2 border-t border-gray-100 p-3">
                   {it.listings.map((l) => (
-                    <label key={l.listing_id} className="flex items-center gap-2">
-                      <input type="checkbox" checked={l.dropship_ok} disabled={busy || (!it.has_distributor && !l.dropship_ok)} title={!it.has_distributor && !l.dropship_ok ? "No Automatic Distributors part is linked to this product" : ""} onChange={(e) => void tickListing(l, e.target.checked)} />
-                      <span>
-                        Drop ship <span className="text-gray-600">{l.store} · item {l.item_id}</span>
-                      </span>
-                    </label>
+                    <div key={l.listing_id} className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                      <label className="flex items-center gap-2">
+                        <input type="checkbox" checked={l.dropship_ok} disabled={busy || (!it.has_distributor && !l.dropship_ok)} title={!it.has_distributor && !l.dropship_ok ? "No Automatic Distributors part is linked to this product" : ""} onChange={(e) => void tickListing(l, e.target.checked)} />
+                        <span>
+                          Drop ship <span className="text-gray-600">{l.store} · item {l.item_id}</span>
+                        </span>
+                      </label>
+                      <label className="flex items-center gap-1 text-gray-700" title="How many units of this product one sale of this listing uses. A 3-pack of a one-part product = 3. The listing shows units available divided by this, and each order sets aside quantity x this.">
+                        Pieces per sale
+                        <input
+                          key={`${l.listing_id}-${l.pieces_per_sale}`}
+                          type="number"
+                          min={1}
+                          max={999}
+                          step={1}
+                          defaultValue={l.pieces_per_sale}
+                          disabled={busy}
+                          className={`${inputCls} w-16`}
+                          onBlur={(e) => commitPieces(l, e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                        />
+                      </label>
+                      {typeof l.listing_qty === "number" && (
+                        <span className="text-xs text-gray-500">shows {l.listing_qty} on eBay</span>
+                      )}
+                    </div>
                   ))}
                   <div className="flex flex-wrap items-center gap-2 border-t border-gray-100 pt-2">
                     {!it.dropship_ok ? (

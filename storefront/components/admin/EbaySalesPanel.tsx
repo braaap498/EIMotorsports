@@ -23,6 +23,8 @@ type Line = {
   custom_label: string | null;
   title: string | null;
   quantity: number;
+  pieces_per_sale?: number;
+  units?: number;
   unit_price: string | null;
   state: string;
   product_id: number | null;
@@ -275,7 +277,10 @@ export default function EbaySalesPanel() {
                         {l.sku ? ` · ${l.sku}` : ""}
                       </div>
                     </td>
-                    <td className="whitespace-nowrap px-2 py-2">{l.quantity}</td>
+                    <td className="whitespace-nowrap px-2 py-2">
+                      {l.quantity}
+                      {(l.pieces_per_sale ?? 1) > 1 && <span className="block text-xs text-amber-700">× {l.pieces_per_sale} = {l.units} pcs</span>}
+                    </td>
                     <td className="whitespace-nowrap px-2 py-2">{l.unit_price ? `$${Number(l.unit_price).toFixed(2)}` : "—"}</td>
                     <td className="whitespace-nowrap px-2 py-2">
                       {l.state === "dropship" && l.shipped_at_ebay && !l.cancelled ? (
