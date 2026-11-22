@@ -319,6 +319,7 @@ def stores(db: Session = Depends(get_db)):
 # --------------------------------------------------------------------------
 class CreateIn(BaseModel):
     product_id: int
+    show_mpn: bool = True   # False: the draft carries no manufacturer part number (not as MPN, and not as an item specific)
 
 
 def _photos_of(db: Session, product_id: int) -> list[str]:
@@ -392,7 +393,14 @@ def _remember_brand(db: Session, product_id: int, brand: str) -> None:
         log.exception("could not save the brand on product %s", product_id)
 
 
-def _specifics_of(db: Session, product_id: int, brand: str, mpn: str) -> list[dict]:
+_MPN_NAMES = {"manufacturer part number", "mpn", "mfr part number", "manufacturer part no", "manufacturer part #"}
+
+
+def _is_mpn_name(name: str) -> bool:
+    return " ".join(str(name or "").lower().split()) in _MPN_NAMES
+
+
+def _specifics_of(db: Session, product_id: int, brand: str, mpn: str, show_mpn: bool = True) -> list[dict]:
     specs: list[dict] = []
     try:
         rows = db.execute(text("select name, value from product_item_specifics where product_id = :p order by sort_order, id"), {"p": product_id}).all()
@@ -402,6 +410,8 @@ def _specifics_of(db: Session, product_id: int, brand: str, mpn: str) -> list[di
     for r in rows:
         n, v = " ".join(str(r.name or "").split()), " ".join(str(r.value or "").split())
         if not n or not v or len(n) > 65 or len(v) > 65:
+            continue
+        if not show_mpn and _is_mpn_name(n):
             continue
         for s in specs:
             if s["name"].lower() == n.lower():
@@ -413,7 +423,7 @@ def _specifics_of(db: Session, product_id: int, brand: str, mpn: str) -> list[di
     have = {s["name"].lower() for s in specs}
     if brand and "brand" not in have and len(brand) <= 65:
         specs.insert(0, {"name": "Brand", "values": [brand]})   # Brand is always the first row
-    if mpn and "manufacturer part number" not in have and len(mpn) <= 65:
+    if show_mpn and mpn and "manufacturer part number" not in have and len(mpn) <= 65:
         specs.append({"name": "Manufacturer Part Number", "values": [mpn]})
     return specs[:100]
 
@@ -440,7 +450,7 @@ def create(body: CreateIn, db: Session = Depends(get_db), user: AuthUser = Depen
 
     brand = _brand_for(db, body.product_id)
     _remember_brand(db, body.product_id, brand)
-    mpn = (j.get("manufacturer_part_number") or "").strip()
+    mpn = (j.get("manufacturer_part_number") or "").strip() if body.show_mpn else ""
     description = (j.get("description") or "").strip() or f"<p>{title}</p>"
     price = ""
     if j.get("list_price") is not None:
@@ -464,11 +474,11 @@ def create(body: CreateIn, db: Session = Depends(get_db), user: AuthUser = Depen
         "title": title, "description": description, "price": price,
         "sku": (j.get("custom_label_sku") or "").strip(),
         "photos": photos, "original_photos": photos,
-        "item_specifics": _specifics_of(db, body.product_id, brand, mpn),
+        "item_specifics": _specifics_of(db, body.product_id, brand, mpn, body.show_mpn),
         "currency": "USD", "category_id": "", "category_name": "",
         "condition_id": condition_id(j.get("condition")), "condition_note": "",
         "compat": compat, "compat_notes": compat_notes,
-        "brand": brand, "mpn": mpn,
+        "brand": brand, "mpn": mpn, "show_mpn": bool(body.show_mpn),
         # drop ship is on by default for a product that has a distributor part: the quantity then counts their warehouses
         "dropship": bool(db.execute(text("select exists (select 1 from product_kit_parts k where k.product_id = :p and k.supplier_item_id is not null)"), {"p": body.product_id}).scalar()),
         "product_category_id": j.get("category_id"),
@@ -635,7 +645,8 @@ def choose_store(copy_id: int, body: StoreIn, db: Session = Depends(get_db), use
     have = {s["name"].lower() for s in d.get("item_specifics", [])}
     hint_src = cat_src if (cat_item and cat_store and cat_store.lower() != row.store.lower()) else src
     hints = [{"name": s["name"], "value": "; ".join(s["values"])} for s in hint_src["item_specifics"]
-             if s.get("name") and s.get("values") and s["name"].lower() not in have]
+             if s.get("name") and s.get("values") and s["name"].lower() not in have
+             and not (d.get("show_mpn") is False and _is_mpn_name(s["name"]))]
     db.execute(
         text("update ebay_listing_copies set store = :s, data = cast(:d as jsonb), updated_at = now() where id = :i"),
         {"s": row.store, "d": json.dumps(d), "i": copy_id},

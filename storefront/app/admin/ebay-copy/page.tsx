@@ -712,6 +712,7 @@ function NewFromProduct() {
   const [found, setFound] = useState<FoundProduct[] | null>(null);
   const [checked, setChecked] = useState<Checked | null>(null);
   const [drafts, setDrafts] = useState<DraftRow[]>([]);
+  const [askMpn, setAskMpn] = useState(false); // asking whether the draft should show the manufacturer part number
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
@@ -739,6 +740,7 @@ function NewFromProduct() {
     setBusy("check");
     setMsg(null);
     try {
+      setAskMpn(false);
       setChecked(await api<Checked>(`/ebay-draft/check/${id}`));
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
@@ -758,11 +760,12 @@ function NewFromProduct() {
     }
   }
 
-  async function makeDraft(productId: number) {
+  async function makeDraft(productId: number, showMpn: boolean) {
+    setAskMpn(false);
     setBusy("create");
     setMsg(null);
     try {
-      go((await api<{ id: number }>("/ebay-draft/create", { method: "POST", body: { product_id: productId } })).id);
+      go((await api<{ id: number }>("/ebay-draft/create", { method: "POST", body: { product_id: productId, show_mpn: showMpn } })).id);
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
       setBusy("");
@@ -848,11 +851,24 @@ function NewFromProduct() {
               </ul>
             </>
           ) : (
-            <div className="flex flex-wrap items-center gap-3">
-              <p>This product has no eBay listing yet.</p>
-              <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => void makeDraft(checked.product.id)}>
-                {busy === "create" ? "Making the draft…" : "Make a draft from this product"}
-              </button>
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <p>This product has no eBay listing yet.</p>
+                <button type="button" className={btnCls} disabled={busy !== "" || askMpn} onClick={() => setAskMpn(true)}>
+                  {busy === "create" ? "Making the draft…" : "Make a draft from this product"}
+                </button>
+              </div>
+              {askMpn && (
+                <div className="rounded border border-gray-300 bg-gray-50 p-3">
+                  <p className="font-medium">Show the manufacturer part number on this listing?</p>
+                  <p className="mb-2 text-xs text-gray-600">If you say no, the draft has no MPN and no Manufacturer Part Number item specific.</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => void makeDraft(checked.product.id, true)}>Yes, show it</button>
+                    <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={() => void makeDraft(checked.product.id, false)}>No, leave it off</button>
+                    <button type="button" className="text-xs underline" onClick={() => setAskMpn(false)}>Cancel</button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
