@@ -22,6 +22,9 @@ from app.admin_ebay_fitment import router as admin_ebay_fitment_router
 from app.admin_ebay_import import router as admin_ebay_import_router
 from app.admin_ebay_new import router as admin_ebay_new_router
 from app.manufacturers import router as manufacturers_router
+from app.part_types import ensure_tables as ensure_part_type_tables
+from app.part_types import router as part_types_router
+from app.part_types import start_standardize_once as start_part_type_standardize
 from app.dropship_auto import router as dropship_router
 from app.admin_ebay_listings import router as admin_ebay_listings_router
 from app.admin_ebay_listings import start_status_sync_daily
@@ -117,6 +120,7 @@ def ping_db(db: Session = Depends(get_db)):
 admin_router.include_router(admin_catalog_router)
 admin_router.include_router(admin_cleanup_router)
 admin_router.include_router(manufacturers_router)
+admin_router.include_router(part_types_router)
 admin_router.include_router(dropship_router)
 admin_router.include_router(admin_ebay_new_router)
 admin_router.include_router(admin_ebay_listings_router)
@@ -202,6 +206,13 @@ def _availability():
 def _po_types():
     """Allow the 'stock_drop_ship' (inventory drop ship) purchase order type if the database restricts po_type."""
     ensure_po_types()
+
+
+@app.on_event("startup")
+def _part_types():
+    """The Part type list (its tables), and the one-time move of existing products to the standard wording."""
+    ensure_part_type_tables()
+    start_part_type_standardize()
 
 
 @app.on_event("startup")

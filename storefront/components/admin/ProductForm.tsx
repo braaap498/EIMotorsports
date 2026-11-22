@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import DescriptionEditor from "./DescriptionEditor";
 import FitmentPanel from "./FitmentPanel";
+import PartTypePicker from "./PartTypePicker";
 import KitPartsPanel, { type Availability, type KitPart, type LabelBy } from "./KitPartsPanel";
 import PhotosPanel, { type Photo } from "./PhotosPanel";
 import { Field, Notice, btnCls, inputCls } from "./ui";
@@ -392,7 +393,18 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const renderFields = (defs: FieldDef[]) =>
     defs
       .filter((f) => f.key !== "cost" || mayPrice) // what the shop paid is only shown to people who can change prices
-      .map((f) => (
+      .map((f) =>
+      f.key === "part_type" ? (
+        <Field key={f.key} label={f.label}>
+          <PartTypePicker
+            value={vals.part_type ?? ""}
+            onChange={(v) => set("part_type", v)}
+            categoryId={vals.category_id ? Number(vals.category_id) : null}
+            categoryName={cats.find((c) => String(c.id) === (vals.category_id ?? ""))?.name}
+            disabled={!fieldAllowed("part_type")}
+          />
+        </Field>
+      ) : (
       <Field key={f.key} label={f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
         <input
           className={inputCls}

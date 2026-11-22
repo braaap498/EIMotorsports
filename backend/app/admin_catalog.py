@@ -32,6 +32,7 @@ from app.database import get_db
 from app.images import thumb_url
 from app.permissions import FIELD_PERMS, label_for
 from app.kits import KitPartIn, mpn_locked, parts_mpn, replace_parts
+from app.part_types import canonical_part_type
 from app.skus import PLACEHOLDER_SKU, SKU_PREFIX, clean_ebay_item_id, shelf_code_for
 from app.sanitize import clean_description
 
@@ -1158,6 +1159,8 @@ def create_product(body: ProductCreate, db: Session = Depends(get_db), user: Aut
     _require_field_perms(user, fields, _NEW_PRODUCT_DEFAULTS, covered=("products.edit_details",))
     if "description" in fields:
         fields["description"] = clean_description(fields["description"])
+    if "part_type" in fields:
+        fields["part_type"] = canonical_part_type(db, fields["part_type"])  # only a type on the list (blank allowed)
     fields["slug"] = _unique_slug(db, slugify(fields.get("slug") or fields["title"]))
     cols = ", ".join(fields)  # keys come from the model, not the client
     vals = ", ".join(f":{k}" for k in fields)
@@ -1198,6 +1201,9 @@ def update_product(
         raise HTTPException(400, "title cannot be empty")
     if "ebay_item_id" in fields:
         fields["ebay_item_id"] = clean_ebay_item_id(fields["ebay_item_id"])
+    # A changed Part type must be on the Part type list (an unchanged old value is left alone).
+    if "part_type" in fields and not _same(current._mapping.get("part_type"), fields["part_type"]):
+        fields["part_type"] = canonical_part_type(db, fields["part_type"])
     # A product made of parts takes its Manufacturer part # from the part lines (edit it there); a stale value from the form is ignored.
     if "manufacturer_part_number" in fields and mpn_locked(db, product_id):
         fields["manufacturer_part_number"] = parts_mpn(db, product_id)
