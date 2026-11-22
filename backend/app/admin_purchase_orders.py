@@ -217,7 +217,7 @@ _PARTS_SORTS = {
 # Our cost from the distributor: what the product's distributor parts (Edit product > Distributor parts) cost, at the
 # catalog's current dealer cost when it has one, otherwise the cost typed on the part. Same rule as expand_rows() in
 # kits.py, so the price here is the price that lands on the PO. A product with no distributor parts keeps its own cost.
-_PIECE_COST = "coalesce(si.effective_cost, si.dealer_cost, k.unit_cost)"
+_PIECE_COST = "coalesce(si.effective_cost, si.dealer_cost, mi.unit_cost, k.unit_cost)"
 
 
 @router.get("/parts")
@@ -286,12 +286,14 @@ def parts(
                                  from product_kit_parts k where k.product_id = p.id{dist_k}), {_MPN}) as part_number,
                      coalesce((select sum({_PIECE_COST} * k.quantity)
                                  from product_kit_parts k left join supplier_items si on si.id = k.supplier_item_id
+                                 left join manual_catalog_items mi on mi.id = k.manual_item_id
                                 where k.product_id = p.id{dist_k}), p.cost) as cost,
                      (select jsonb_agg(jsonb_build_object('part_number', k.part_number, 'quantity', k.quantity,
                                                           'vendor', d.name, 'distributor_id', k.distributor_id,
                                                           'cost', {_PIECE_COST}) order by k.sort_order, k.id)
                         from product_kit_parts k
                         left join supplier_items si on si.id = k.supplier_item_id
+                        left join manual_catalog_items mi on mi.id = k.manual_item_id
                         left join po_distributors d on d.id = k.distributor_id
                        where k.product_id = p.id) as pieces,
                      coalesce(p.quantity_on_hand, 0) as on_hand, {set_aside_sql('p')} as reserved,

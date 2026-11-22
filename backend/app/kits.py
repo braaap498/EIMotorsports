@@ -164,6 +164,43 @@ def manual_catalog(
     }
 
 
+class ManualItemEdit(BaseModel):
+    mfr_number: Optional[str] = Field(None, max_length=60)
+    description: Optional[str] = Field(None, max_length=250)
+    unit_cost: Optional[float] = Field(None, ge=0, le=1_000_000)
+
+
+@router.put("/manual-catalog/{item_id}")
+@needs("products.edit_details")
+def edit_manual_item(item_id: int, body: ManualItemEdit, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Change a saved part. Every piece that points at it follows (cost and description on the next PO, manufacturer # now).
+    The vendor part # cannot be changed here: it is what the custom label and the PO use. Cost only for people who may set prices."""
+    sets = ["mfr_number = :mfr", "description = :desc", "updated_at = now()"]
+    params: dict = {"i": item_id, "mfr": (body.mfr_number or "").strip() or None, "desc": (body.description or "").strip() or None}
+    if has_perm(user, "products.edit_price"):
+        sets.append("unit_cost = :uc")
+        params["uc"] = body.unit_cost
+    row = db.execute(
+        text(f"update manual_catalog_items set {', '.join(sets)} where id = :i returning id, part_number, mfr_number, description, unit_cost"),
+        params,
+    ).first()
+    if not row:
+        db.rollback()
+        raise HTTPException(404, "That saved part no longer exists.")
+    # the product's Manufacturer part # is the pieces' numbers joined: refresh it for the products that use this part
+    for pid in [r.product_id for r in db.execute(text("select distinct product_id from product_kit_parts where manual_item_id = :i"), {"i": item_id}).all()]:
+        follow = parts_mpn(db, pid)
+        if follow:
+            db.execute(
+                text("update products set manufacturer_part_number = :m, updated_at = now() where id = :p and manufacturer_part_number is distinct from :m"),
+                {"m": follow, "p": pid},
+            )
+    db.commit()
+    see_cost = has_perm(user, "products.edit_price")
+    return {"id": row.id, "part_number": row.part_number, "mfr_number": row.mfr_number, "description": row.description,
+            "unit_cost": float(row.unit_cost) if row.unit_cost is not None and see_cost else None}
+
+
 @router.get("/catalog/brands")
 @needs("products.edit_details", "products.create")
 def catalog_brands(supplier: str = Query(SUPPLIER, pattern=SUPPLIER_RE), db: Session = Depends(get_db)):
@@ -381,6 +418,8 @@ def ensure_mfr_column() -> None:
                 "unique (distributor_id, part_norm))"
             )
         )
+        # a piece can point at a saved part: its cost, description and manufacturer # then come from the saved part
+        db.execute(text("alter table product_kit_parts add column if not exists manual_item_id bigint references manual_catalog_items(id) on delete set null"))
         db.commit()
     except Exception:
         db.rollback()
@@ -393,8 +432,9 @@ def _line_numbers(db: Session, product_id: int) -> list[tuple[int, str]]:
     """(line id, the number of that piece: its own, else the catalog's, else '') in order."""
     rows = db.execute(
         text(
-            "select k.id, coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), ''), '') as m "
+            "select k.id, coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), ''), nullif(btrim(mi.mfr_number), ''), '') as m "
             "from product_kit_parts k left join supplier_items si on si.id = k.supplier_item_id "
+            "left join manual_catalog_items mi on mi.id = k.manual_item_id "
             "where k.product_id = :p order by k.sort_order, k.id"
         ),
         {"p": product_id},
@@ -556,6 +596,8 @@ class KitPartIn(BaseModel):
     quantity: int = Field(1, ge=1, le=1000)
     # the manufacturer's own part number for THIS piece. Blank on a catalog part = follow the catalog's number.
     mfr_number: Optional[str] = Field(None, max_length=60)
+    # a part saved in the vendor's saved-parts list (vendors with no catalog): the piece follows it instead of holding a copy
+    manual_item_id: Optional[int] = None
 
 
 LABEL_BY = "^(mfr|sku)$"  # what an Automatic Distributors part is written as in a NEW label: manufacturer number or vendor SKU
@@ -623,11 +665,13 @@ def availability_of(db: Session, product_id: int) -> Optional[dict]:
 def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]:
     rows = db.execute(
         text(
-            "select k.id, k.distributor_id, d.name as vendor, k.supplier_item_id, k.part_number, k.description, "
-            "k.unit_cost, k.quantity, k.sort_order, "
+            "select k.id, k.distributor_id, d.name as vendor, k.supplier_item_id, k.manual_item_id, k.part_number, "
+            "coalesce(nullif(btrim(mi.description), ''), k.description) as description, "
+            "coalesce(mi.unit_cost, k.unit_cost) as unit_cost, k.quantity, k.sort_order, "
             "coalesce(nullif(btrim(si.mfr_number), ''), k.part_number) as label_part, "
-            "coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), '')) as mfr_number from product_kit_parts k "
+            "coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), ''), nullif(btrim(mi.mfr_number), '')) as mfr_number from product_kit_parts k "
             "left join supplier_items si on si.id = k.supplier_item_id "
+            "left join manual_catalog_items mi on mi.id = k.manual_item_id "
             "left join po_distributors d on d.id = k.distributor_id where k.product_id = :p order by k.sort_order, k.id"
         ),
         {"p": product_id},
@@ -670,27 +714,41 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
             label = label_token_for(it.mfr_number or "") if label_by != "sku" else ""
             desc = desc or " ".join(x for x in (it.manufacturer, it.name) if x)[:250]
             cost = float(it.dealer_cost) if it.dealer_cost is not None else cost
+        saved = None
+        if p.manual_item_id and not p.supplier_item_id:
+            saved = db.execute(
+                text("select id, part_number, mfr_number, description, unit_cost from manual_catalog_items where id = :i and distributor_id = :d"),
+                {"i": p.manual_item_id, "d": p.distributor_id},
+            ).first()
+            if not saved:
+                raise HTTPException(400, "A piece points at a saved part that is no longer in this vendor's saved parts. Pick it again.")
+            number = saved.part_number
+            desc = (saved.description or "").strip() or desc
+            cost = float(saved.unit_cost) if saved.unit_cost is not None else cost
         if not number:
             raise HTTPException(400, "Every piece needs a part number.")
         mfr = (p.mfr_number or "").strip() or None
         if mfr and p.supplier_item_id and _norm_mpn(mfr) == _norm_mpn(it.mfr_number or ""):
             mfr = None  # the same as the catalog's number: keep following the catalog
+        if mfr and saved is not None and _norm_mpn(mfr) == _norm_mpn(saved.mfr_number or ""):
+            mfr = None  # the same as the saved part's number: keep following the saved part
         clean.append({"distributor_id": p.distributor_id, "supplier_item_id": p.supplier_item_id, "part_number": number,
                       "label": label or number, "description": desc, "unit_cost": cost, "quantity": p.quantity, "sort_order": i,
-                      "mfr_number": mfr})
+                      "mfr_number": mfr, "manual_item_id": saved.id if saved is not None else None})
     for c in clean:
         db.execute(
             text(
-                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order, mfr_number) "
-                "values (:p, :d, :si, :pn, :desc, :uc, :q, :so, :mfr)"
+                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order, mfr_number, manual_item_id) "
+                "values (:p, :d, :si, :pn, :desc, :uc, :q, :so, :mfr, :mi)"
             ),
             {"p": product_id, "d": c["distributor_id"], "si": c["supplier_item_id"], "pn": c["part_number"],
-             "desc": c["description"], "uc": c["unit_cost"], "q": c["quantity"], "so": c["sort_order"], "mfr": c["mfr_number"]},
+             "desc": c["description"], "uc": c["unit_cost"], "q": c["quantity"], "so": c["sort_order"], "mfr": c["mfr_number"],
+             "mi": c["manual_item_id"]},
         )
     # Remember typed pieces of distributors with no catalog, so the next product can pick them instead of typing them again.
     # A part already saved keeps its details (only blanks are filled), and a failure here never stops the parts from saving.
     for c in clean:
-        if c["supplier_item_id"] or supplier_for(dists[c["distributor_id"]]) is not None:
+        if c["supplier_item_id"] or c["manual_item_id"] or supplier_for(dists[c["distributor_id"]]) is not None:
             continue
         try:
             with db.begin_nested():
@@ -904,9 +962,10 @@ def expand_rows(db: Session, rows: list[dict], distributor_id: int) -> tuple[lis
     for r in rows:
         parts = db.execute(
             text(
-                "select k.id, k.distributor_id, k.part_number, k.description, k.unit_cost, k.quantity, k.supplier_item_id, "
-                "       coalesce(si.effective_cost, si.dealer_cost) as live_cost, si.name as live_name, d.name as vendor "
+                "select k.id, k.distributor_id, k.part_number, coalesce(nullif(btrim(mi.description), ''), k.description) as description, k.unit_cost, k.quantity, k.supplier_item_id, "
+                "       coalesce(si.effective_cost, si.dealer_cost, mi.unit_cost) as live_cost, si.name as live_name, d.name as vendor "
                 "from product_kit_parts k left join supplier_items si on si.id = k.supplier_item_id "
+                "left join manual_catalog_items mi on mi.id = k.manual_item_id "
                 "left join po_distributors d on d.id = k.distributor_id "
                 "where k.product_id = :p order by k.sort_order, k.id"
             ),

@@ -9,6 +9,8 @@ export type KitPart = {
   distributor_id: number;
   vendor?: string;
   supplier_item_id: number | null;
+  // set when the piece follows a part saved in the vendor's saved-parts list: its cost, description and manufacturer # come from there
+  manual_item_id?: number | null;
   part_number: string;
   // what goes in the custom label: the manufacturer number for Autodist parts (part_number stays the vendor SKU, which the PO needs)
   label_part?: string | null;
@@ -135,6 +137,8 @@ export default function KitPartsPanel({
   type SavedPart = { id: number; part_number: string; mfr_number: string | null; description: string | null; unit_cost: number | null };
   const [savedQ, setSavedQ] = useState("");
   const [savedRes, setSavedRes] = useState<SavedPart[]>([]);
+  const [savedTick, setSavedTick] = useState(0);
+  const [editSaved, setEditSaved] = useState<{ id: number; mfr: string; desc: string; cost: string } | null>(null);
   // saving
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -179,7 +183,7 @@ export default function KitPartsPanel({
         .catch(() => setSavedRes([]));
     }, 250);
     return () => clearTimeout(t);
-  }, [manualVendorId, savedQ, savedParts]);
+  }, [manualVendorId, savedQ, savedParts, savedTick]);
 
   // existing product: load what is saved
   useEffect(() => {
@@ -295,6 +299,7 @@ export default function KitPartsPanel({
         distributor_id: Number(vendorId),
         vendor: vendor?.name,
         supplier_item_id: null,
+        manual_item_id: it.id,
         part_number: it.part_number,
         mfr_number: it.mfr_number || null,
         description: it.description ?? "",
@@ -303,6 +308,20 @@ export default function KitPartsPanel({
       },
     ]);
     setMsg(null);
+  }
+
+  async function saveSavedEdit() {
+    if (!editSaved) return;
+    const cost = editSaved.cost.trim() === "" ? null : Number(editSaved.cost);
+    if (cost !== null && Number.isNaN(cost)) return setMsg({ kind: "error", text: "Cost must be a number." });
+    try {
+      await api(`/kits/manual-catalog/${editSaved.id}`, { method: "PUT", body: { mfr_number: editSaved.mfr.trim() || null, description: editSaved.desc.trim() || null, unit_cost: cost } });
+      setEditSaved(null);
+      setSavedTick((n) => n + 1);
+      setMsg({ kind: "success", text: "Saved part updated. Products that use it follow the change; reopen a product to see it there." });
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    }
   }
 
   function addManual() {
@@ -340,6 +359,7 @@ export default function KitPartsPanel({
     parts.map((p) => ({
       distributor_id: p.distributor_id,
       supplier_item_id: p.supplier_item_id,
+      manual_item_id: p.manual_item_id ?? null,
       part_number: p.part_number,
       mfr_number: (p.mfr_number ?? "").trim() || null,
       description: p.description || null,
@@ -441,13 +461,14 @@ export default function KitPartsPanel({
                     <div className="flex flex-wrap items-baseline gap-x-2">
                       <span className="break-all font-mono text-sm font-semibold">{p.part_number}</span>
                       {vendorName && <span className="text-xs text-gray-500">{vendorName}</span>}
+                      {p.manual_item_id ? <span className="text-xs text-gray-500" title="Cost, description and manufacturer # come from the vendor's saved part">(saved part)</span> : null}
                     </div>
                     {p.description && <div className="break-words text-xs text-gray-700">{p.description}</div>}
                     <label className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-600">
                       Manufacturer #
                       <input
                         type="text" maxLength={60} disabled={disabled} className={`${inputCls} font-mono`} style={{ width: 220 }}
-                        placeholder={p.supplier_item_id ? "from the catalog" : "the manufacturer's part number"}
+                        placeholder={p.supplier_item_id ? "from the catalog" : p.manual_item_id ? "from the saved part" : "the manufacturer's part number"}
                         value={p.mfr_number ?? ""}
                         onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, mfr_number: e.target.value } : x)))}
                       />
@@ -649,11 +670,22 @@ export default function KitPartsPanel({
                           {it.unit_cost !== null && <span className="ml-2 text-gray-600">${it.unit_cost.toFixed(2)}</span>}
                         </span>
                         <button type="button" className={btn2Cls} onClick={() => addSaved(it)}>Add</button>
+                        <button type="button" className="px-1 text-xs text-gray-600 underline" onClick={() => setEditSaved({ id: it.id, mfr: it.mfr_number ?? "", desc: it.description ?? "", cost: it.unit_cost != null ? String(it.unit_cost) : "" })}>Edit</button>
                       </li>
                     ))}
                   </ul>
                 )}
-                <p className="text-xs text-gray-500">The Qty below is used for the part you add.</p>
+                {editSaved && (
+                  <div className="flex flex-wrap items-end gap-2 rounded bg-gray-50 p-2">
+                    <span className="text-xs text-gray-600">Editing the saved part: every product that uses it follows.</span>
+                    <label className="text-xs">Manufacturer #<input className={inputCls} value={editSaved.mfr} onChange={(e) => setEditSaved({ ...editSaved, mfr: e.target.value })} /></label>
+                    <label className="min-w-[10rem] flex-1 text-xs">Description<input className={inputCls} value={editSaved.desc} onChange={(e) => setEditSaved({ ...editSaved, desc: e.target.value })} /></label>
+                    <label className="text-xs">Cost<input type="number" step="0.01" className={`${inputCls} w-24`} value={editSaved.cost} onChange={(e) => setEditSaved({ ...editSaved, cost: e.target.value })} /></label>
+                    <button type="button" className={btnCls} onClick={() => void saveSavedEdit()}>Save</button>
+                    <button type="button" className={btn2Cls} onClick={() => setEditSaved(null)}>Cancel</button>
+                  </div>
+                )}
+                <p className="text-xs text-gray-500">The Qty below is used for the part you add. A part added from this list follows it: change it here and every product that uses it follows.</p>
               </div>
               <p className="text-xs font-medium text-gray-700">Not in the list? Add a new part</p>
               <div className="flex flex-wrap items-end gap-2">
