@@ -571,11 +571,13 @@ export default function ProductForm({ productId }: { productId?: number }) {
               />
             </Field>
             <Field label="Manufacturer">
-              {partMfrs.length > 1 ? (
+              {partMfrs.length >= 1 ? (
                 <>
                   <input className={inputCls} disabled value={partMfrs.join(", ")} readOnly />
                   <span className="mt-1 block text-xs font-normal text-gray-500">
-                    The distributor parts below have different manufacturers. To change one, change it on that part.
+                    {partMfrs.length > 1
+                      ? "The distributor parts below have different manufacturers. To change one, change it on that part."
+                      : "This is the manufacturer of the distributor part below. To change it, change it on that part."}
                   </span>
                 </>
               ) : (

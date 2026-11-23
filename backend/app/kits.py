@@ -1060,6 +1060,25 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
         )
     else:
         sync_product_mpn(db, product_id)
+    # The product's Manufacturer follows its pieces too (the product screen shows it read only): when every piece that has a
+    # brand has the same one, that brand is the product's Manufacturer. Different brands leave the stored one alone.
+    try:
+        brands: dict[str, str] = {}
+        for pc in _parts_of(db, product_id, see_cost=False):
+            b = (pc.get("manufacturer") or "").strip()
+            if b:
+                brands.setdefault(b.lower(), b)
+        if len(brands) == 1:
+            from app.manufacturers import find_or_create
+
+            mid = find_or_create(db, next(iter(brands.values())))
+            if mid:
+                db.execute(
+                    text("update products set part_manufacturer_id = :m, updated_at = now() where id = :p and part_manufacturer_id is distinct from :m"),
+                    {"m": mid, "p": product_id},
+                )
+    except Exception:
+        log.exception("could not set the product's manufacturer from its parts")
     existing = _product_cls(db, product_id)
     if existing:
         return {"cls": existing, "cls_changed": False, "duplicates": []}
