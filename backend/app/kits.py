@@ -1172,6 +1172,8 @@ def put_parts(product_id: int, body: PartsIn, db: Session = Depends(get_db)):
         "mpn": _top_mpn(db, product_id) or None,
         "mpn_locked": mpn_locked(db, product_id),
         "availability": availability_of(db, product_id),
+        # how many pieces are saved with "use the manu. part # for the custom label" ticked; the screen compares it with what it sent
+        "label_use_mfr_count": int(db.execute(text("select count(*) from product_kit_parts where product_id = :p and coalesce(label_use_mfr, false)"), {"p": product_id}).scalar() or 0),
     }
 
 

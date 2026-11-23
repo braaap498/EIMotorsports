@@ -424,7 +424,7 @@ export default function KitPartsPanel({
     setMsg(null);
     setResults2(null);
     try {
-      const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number; mpn?: string | null; mpn_locked?: boolean; availability?: Availability | null }>(
+      const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number; mpn?: string | null; mpn_locked?: boolean; availability?: Availability | null; label_use_mfr_count?: number }>(
         `/kits/${productId}/parts`,
         { method: "PUT", body: { parts: payloadParts(), label_by: labelBy } }
       );
@@ -439,9 +439,16 @@ export default function KitPartsPanel({
         : r.cls_changed
           ? `Parts saved. Custom label created: ${r.cls}.`
           : `Parts saved. The custom label stays ${r.cls} (it was not changed; edit the label box above to change it).`;
+      // the tick must come back as saved; a server that does not know the field (an old kits.py) drops it without an error
+      const sentTicks = parts.filter((p) => !!p.supplier_item_id && !!p.label_use_mfr).length;
+      const tickLost = r.label_use_mfr_count !== sentTicks;
       if (r.duplicates.length) text += ` Warning: ${r.duplicates.map((d) => d.sku).join(", ")} already use the same label.`;
       if (r.cls && r.listings_to_update > 0 && !canSync) text += ` ${r.listings_to_update} eBay listing(s) still need the new label; an admin must send it.`;
-      setMsg({ kind: "success", text });
+      setMsg(
+        tickLost
+          ? { kind: "error", text: `The parts were saved, but the "use the manu. part #" tick was NOT (${sentTicks} ticked, ${r.label_use_mfr_count ?? "unknown"} saved). The server is probably running an old kits.py: deploy the new one, restart the backend, then tick and save again.` }
+          : { kind: "success", text }
+      );
       // read it again: the Send button decides from the listings' state, and the server may have refreshed the costs
       const fresh = await api<{ parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[] }>(`/kits/${productId}`);
       const loaded = fresh.parts.map((p) => ({ ...p, key: `p${p.id}`, description: p.description ?? "" }));
