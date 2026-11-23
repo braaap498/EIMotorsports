@@ -56,7 +56,7 @@ export function previewCls(parts: KitPart[], _labelBy?: LabelBy): string {
   const seen = new Set<string>();
   const tokens: string[] = [];
   parts.forEach((p) => {
-    const t = (p.label_use_mfr ? p.label_part || p.part_number : p.part_number).trim().replace(/[^A-Za-z0-9\-_.]/g, "");
+    const t = (p.label_use_mfr ? (p.mfr_number ?? "").trim() || p.label_part || p.part_number : p.part_number).trim().replace(/[^A-Za-z0-9\-_.]/g, "");
     if (t && !seen.has(t.toLowerCase())) {
       seen.add(t.toLowerCase());
       tokens.push(t);
