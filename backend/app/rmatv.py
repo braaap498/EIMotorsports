@@ -463,6 +463,8 @@ _SORTS = {
     "list": "s.list_price",
     "stock": "s.qty_other",
     "updated": "s.updated_at",
+    "uom": "s.unit_of_measure",
+    "margin": "((s.list_price - s.dealer_cost) / nullif(s.list_price, 0))",
 }
 
 
@@ -478,7 +480,7 @@ def items(
     in_stock: bool = False,
     status: str = Query("active", pattern="^(active|inactive|all)$"),
     only: str = Query("all", pattern="^(all|no_product|has_product)$", description="parts with / without their single product"),
-    sort: str = Query("sku", pattern="^(sku|name|brand|mfr|cost|list|stock|updated)$"),
+    sort: str = Query("sku", pattern="^(sku|name|brand|mfr|cost|list|stock|updated|uom|margin)$"),
     desc: bool = False,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -536,13 +538,13 @@ def items(
     ids = [r.product_id for r in rows if r.product_id]
     titles = {}
     if ids:
-        titles = {t.id: t.title for t in db.execute(text("select id, title from products where id = any(cast(:i as bigint[]))"), {"i": ids}).all()}
+        titles = {t.id: (t.title, t.sku_display) for t in db.execute(text("select id, title, sku_display from products where id = any(cast(:i as bigint[]))"), {"i": ids}).all()}
     out = []
     for r in rows:
         d = dict(r._mapping)
         for k in ("list_price", "dealer_cost"):
             d[k] = float(d[k]) if d[k] is not None else None
-        d["product_title"] = titles.get(d["product_id"])
+        d["product_title"], d["product_sku"] = titles.get(d["product_id"]) or (None, None)
         d["products"] = int(d["products"] or 0)
         out.append(d)
     return {"total": total, "items": out}

@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { useAccess } from "./AdminAccess";
 import { shrink } from "./PhotosPanel";
 import { Badge, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "./ui";
 import type { Dist } from "./Distributors";
+import CatalogTh from "./CatalogTh";
 
 /* The parts of a distributor that has no catalog here: the same list the product screen picks from (Edit product > Distributor
    parts > Saved parts). Add a part by hand, edit it, or make a product from it, like the Automatic Distributors page does for its
@@ -24,13 +25,15 @@ type Part = {
   unit_cost: number | null;
   product_id: number | null;
   product_title: string | null;
+  product_sku: string | null; // the EI- number
   products: number;
 };
 type Flash = { kind: "success" | "error" | "info"; text: string } | null;
 
 const PAGE = 50;
 const blank = { part_number: "", mfr_number: "", manufacturer: "", same: false, description: "", unit_cost: "" };
-const money = (v: number | null) => (v == null ? "—" : `$${Number(v).toFixed(2)}`);
+const money = (v: number | null) =>
+  v == null ? "—" : `$${Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 export default function ManualParts({ dist }: { dist: Dist }) {
   const { can } = useAccess();
@@ -47,6 +50,8 @@ export default function ManualParts({ dist }: { dist: Dist }) {
   const [offset, setOffset] = useState(0);
   const [q, setQ] = useState("");
   const [only, setOnly] = useState<"all" | "no_product" | "has_product">("all");
+  const [sort, setSort] = useState<"brand" | "sku" | "mfr" | "name" | "cost">("sku");
+  const [dir, setDir] = useState<"asc" | "desc">("asc");
   const [loading, setLoading] = useState(true);
   const [flash, setFlash] = useState<Flash>(null);
   const [form, setForm] = useState(blank);
@@ -58,7 +63,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
   const load = useCallback(() => {
     setLoading(true);
     api<{ items: Part[]; total: number }>(
-      `/kits/manual-catalog?distributor_id=${dist.id}&q=${encodeURIComponent(q.trim())}&only=${only}&limit=${PAGE}&offset=${offset}`
+      `/kits/manual-catalog?distributor_id=${dist.id}&q=${encodeURIComponent(q.trim())}&only=${only}&sort=${sort}&dir=${dir}&limit=${PAGE}&offset=${offset}`
     )
       .then((r) => {
         setItems(r.items);
@@ -66,7 +71,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
       })
       .catch((e) => setFlash({ kind: "error", text: errMsg(e) }))
       .finally(() => setLoading(false));
-  }, [dist.id, q, only, offset]);
+  }, [dist.id, q, only, sort, dir, offset]);
 
   // reload when the vendor, the search, the filter or the page changes (the search waits a moment while typing)
   useEffect(() => {
@@ -182,6 +187,20 @@ export default function ManualParts({ dist }: { dist: Dist }) {
     }
   }
 
+  const clickSort = (k: typeof sort) => {
+    if (k === sort) setDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSort(k);
+      setDir(k === "cost" ? "desc" : "asc");
+    }
+    setOffset(0);
+  };
+  const Th = ({ k, children, right }: { k: typeof sort; children: ReactNode; right?: boolean }) => (
+    <CatalogTh active={sort === k} dir={dir} onClick={() => clickSort(k)} right={right}>
+      {children}
+    </CatalogTh>
+  );
+
   if (hasCatalog) return null;
   return (
     <div className="space-y-4">
@@ -284,23 +303,28 @@ export default function ManualParts({ dist }: { dist: Dist }) {
           </p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead className="bg-gray-50 text-xs uppercase text-gray-500">
+            <table className="w-full min-w-[60rem] table-fixed text-left text-xs">
+              <colgroup>
+                {["5.5rem", "9rem", "8rem", "9rem", "", "5rem", "6rem", "11rem"].map((w, i) => (
+                  <col key={i} style={w ? { width: w } : undefined} />
+                ))}
+              </colgroup>
+              <thead className="text-gray-500">
                 <tr>
-                  <th className="px-2 py-2">Picture</th>
-                  <th className="px-2 py-2">Brand</th>
-                  <th className="px-2 py-2">SKU</th>
-                  <th className="px-2 py-2">Mfr no.</th>
-                  <th className="px-2 py-2">Name</th>
-                  <th className="px-2 py-2">Cost</th>
-                  <th className="px-2 py-2">Ours</th>
-                  <th className="px-2 py-2"></th>
+                  <th className="py-1 pr-2"></th>
+                  <Th k="brand">Brand</Th>
+                  <Th k="sku">SKU</Th>
+                  <Th k="mfr">Mfr no.</Th>
+                  <Th k="name">Name</Th>
+                  <Th k="cost" right>Cost</Th>
+                  <th className="whitespace-nowrap py-1 pr-3">Ours</th>
+                  <th className="py-1 pr-3"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {items.map((p) => (
                   <tr key={p.id} className="align-top">
-                    <td className="px-2 py-2">
+                    <td className="py-1 pr-2">
                       {p.image ? (
                         <a href={p.image_full ?? p.image} target="_blank" rel="noreferrer" title="Open the full-size picture">
                           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -317,24 +341,24 @@ export default function ManualParts({ dist }: { dist: Dist }) {
                         <button type="button" className="text-xs text-gray-500 underline" disabled={busyId === p.id} onClick={() => void clearPhoto(p)}>Remove</button>
                       )}
                     </td>
-                    <td className="px-2 py-2">{p.manufacturer ?? "—"}</td>
-                    <td className="whitespace-nowrap px-2 py-2 font-mono">{p.part_number}</td>
-                    <td className="whitespace-nowrap px-2 py-2 font-mono">{p.mfr_number ?? "—"}</td>
-                    <td className="px-2 py-2">{p.description ?? "—"}</td>
-                    <td className="whitespace-nowrap px-2 py-2">{money(p.unit_cost)}</td>
-                    <td className="px-2 py-2">
+                    <td className="truncate py-1 pr-3" title={p.manufacturer ?? ""}>{p.manufacturer ?? "—"}</td>
+                    <td className="truncate py-1 pr-3 font-medium" title={p.part_number}>{p.part_number}</td>
+                    <td className="truncate py-1 pr-3" title={p.mfr_number ?? ""}>{p.mfr_number ?? "—"}</td>
+                    <td className="break-words py-1 pr-3">{p.description ?? "—"}</td>
+                    <td className="whitespace-nowrap py-1 pr-3 text-right">{money(p.unit_cost)}</td>
+                    <td className="py-1 pr-3">
                       {p.product_id ? (
                         <>
-                          <Link href={`/admin/products/${p.product_id}`} className="text-blue-700 hover:underline">
-                            #{p.product_id} {p.product_title}
+                          <Link href={`/admin/products/${p.product_id}`} title={p.product_title ?? ""}>
+                            <Badge tone="green">{p.product_sku ?? `#${p.product_id}`}</Badge>
                           </Link>
                           {p.products > 1 && <span className="ml-2"><Badge tone="gray">+{p.products - 1} more</Badge></span>}
                         </>
                       ) : (
-                        <span className="text-gray-500">No product yet</span>
+                        <span className="text-gray-400">—</span>
                       )}
                     </td>
-                    <td className="whitespace-nowrap px-2 py-2 text-right">
+                    <td className="whitespace-nowrap py-1 pr-3 text-right">
                       {canMake && !p.product_id && (
                         <button type="button" className={btn2Cls} disabled={busyId === p.id} onClick={() => void makeProduct(p)}>
                           Make product

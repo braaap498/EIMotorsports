@@ -192,6 +192,8 @@ def manual_catalog(
     distributor_id: int = Query(..., description="a distributor that has no catalog here"),
     q: Optional[str] = Query(None, max_length=200),
     only: str = Query("all", pattern="^(all|no_product|has_product)$"),
+    sort: str = Query("sku", pattern="^(brand|sku|mfr|name|cost)$"),
+    dir: str = Query("asc", pattern="^(asc|desc)$"),
     limit: int = Query(30, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -217,6 +219,15 @@ def manual_catalog(
     elif only == "has_product":
         where.append(used)
     clause = " and ".join(where)
+    d = "desc" if dir == "desc" else "asc"
+    key = sort if (sort != "cost" or see_cost) else "sku"
+    order_by = {
+        "brand": f"lower(m.manufacturer) {d} nulls last, lower(m.part_number)",
+        "sku": f"lower(m.part_number) {d}, m.id",
+        "mfr": f"lower(m.mfr_number) {d} nulls last, lower(m.part_number)",
+        "name": f"lower(m.description) {d} nulls last, lower(m.part_number)",
+        "cost": f"m.unit_cost {d} nulls last, lower(m.part_number)",
+    }[key]
     try:
         total = db.execute(text(f"with {SINGLES_CTE} select count(*) from manual_catalog_items m where {clause}"), params).scalar()
         rows = db.execute(
@@ -225,14 +236,14 @@ def manual_catalog(
                 "select m.id, m.part_number, m.mfr_number, m.manufacturer, m.image_key, m.description, m.unit_cost, "
                 f"{single_pick('manual')} as product_id, "
                 f"{single_count('manual')} as products "
-                f"from manual_catalog_items m where {clause} order by lower(m.part_number), m.id limit :n offset :o"
+                f"from manual_catalog_items m where {clause} order by {order_by} limit :n offset :o"
             ),
             params,
         ).all()
         titles = {}
         ids = [r.product_id for r in rows if r.product_id]
         if ids:
-            titles = {t.id: t.title for t in db.execute(text("select id, title from products where id = any(cast(:i as bigint[]))"), {"i": ids}).all()}
+            titles = {t.id: (t.title, t.sku_display) for t in db.execute(text("select id, title, sku_display from products where id = any(cast(:i as bigint[]))"), {"i": ids}).all()}
     except Exception:
         db.rollback()
         return {"items": [], "total": 0}
@@ -250,7 +261,8 @@ def manual_catalog(
                 "description": r.description,
                 "unit_cost": float(r.unit_cost) if r.unit_cost is not None and see_cost else None,
                 "product_id": r.product_id,
-                "product_title": titles.get(r.product_id),
+                "product_title": (titles.get(r.product_id) or (None, None))[0],
+                "product_sku": (titles.get(r.product_id) or (None, None))[1],
                 "products": int(r.products or 0),
             }
             for r in rows

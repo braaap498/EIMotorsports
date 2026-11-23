@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Modal, Notice, Pager, btn2Cls, inputCls } from "./ui";
@@ -690,7 +691,15 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                       <td className="whitespace-nowrap py-1 pr-3 text-right font-medium">{n(r.qty_total)}</td>
                       <td className="truncate py-1 pr-3" title={r.upc ?? ""}>{r.upc ?? "—"}</td>
                       <td className="truncate py-1 pr-3">
-                        {r.ours.length > 0 ? <Badge tone="green">{r.ours.length === 1 ? r.ours[0].sku : `${r.ours.length} products`}</Badge> : ""}
+                        {r.ours.length === 1 ? (
+                          <Link href={`/admin/products/${r.ours[0].id}`} title={r.ours[0].title} onClick={(e) => e.stopPropagation()}>
+                            <Badge tone="green">{r.ours[0].sku}</Badge>
+                          </Link>
+                        ) : r.ours.length > 1 ? (
+                          <Badge tone="green">{`${r.ours.length} products`}</Badge>
+                        ) : (
+                          ""
+                        )}
                       </td>
                       <td className="py-1 pr-3 whitespace-nowrap text-gray-500">{r.updated_at ? new Date(r.updated_at).toLocaleDateString() : "—"}</td>
                     </tr>

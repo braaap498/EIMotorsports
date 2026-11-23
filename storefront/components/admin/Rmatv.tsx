@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "./ui";
 import { parseDelimited } from "./rmatvCsv";
+import CatalogTh from "./CatalogTh";
 
 // Rocky Mountain ATV/MC: its catalog (read from a file you upload) and the tools around it. Owners and admins only.
 // This is the distributor's licensed data: dealer cost and stock stay on this screen and are never shown on the public store.
@@ -35,9 +36,11 @@ type Item = {
   qty_other: number;
   upc: string | null;
   unit_of_measure: string | null;
+  updated_at: string | null;
   active: boolean;
   product_id: number | null; // the SINGLE product of this part (never a kit that contains it)
   product_title: string | null;
+  product_sku: string | null; // the EI- number
   products: number;
 };
 type FieldDef = { key: string; label: string; required: boolean };
@@ -46,7 +49,9 @@ type Staged = { fileName: string; header: string[]; data: string[][]; fields: Fi
 
 const PIECE = 3000; // data lines per request
 const n = (x: number) => x.toLocaleString("en-US");
-const money = (v: number | null) => (v == null ? "—" : `$${v.toFixed(2)}`);
+const money = (v: number | string | null | undefined) =>
+  v == null || v === "" ? "—" : `$${Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const pct = (v: number | null) => (v == null ? "—" : `${v.toFixed(0)}%`);
 const tone = (s: string) => (s === "done" ? "green" : s === "running" ? "blue" : "amber");
 
 function runLabel(r: Run) {
@@ -127,14 +132,12 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
     setOffset(0);
     setF((x) => ({ ...x, ...patch }));
   };
-  const sortBy = (key: string) => change({ sort: key, desc: f.sort === key ? !f.desc : false });
-  const th = (k: string, label: string, right?: boolean) => (
-    <th className={`px-3 py-2 ${right ? "text-right" : ""}`}>
-      <button type="button" className="font-medium hover:text-gray-900" onClick={() => sortBy(k)}>
-        {label}
-        {f.sort === k ? (f.desc ? " ▼" : " ▲") : ""}
-      </button>
-    </th>
+  const sortBy = (key: string) =>
+    change({ sort: key, desc: f.sort === key ? !f.desc : ["list", "cost", "margin", "stock", "updated"].includes(key) });
+  const Th = ({ k, children, right, title }: { k: string; children: ReactNode; right?: boolean; title?: string }) => (
+    <CatalogTh active={f.sort === k} dir={f.desc ? "desc" : "asc"} onClick={() => sortBy(k)} right={right} title={title}>
+      {children}
+    </CatalogTh>
   );
 
   if (!hasData) {
@@ -196,45 +199,56 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
       {error && <Notice kind="error">{error}</Notice>}
       {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
 
-      <div className="overflow-x-auto rounded border border-gray-200 bg-white">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-gray-50 text-xs text-gray-600">
+      <div className="overflow-x-auto rounded border border-gray-200 bg-white p-3">
+        {/* the same table as the Automatic Distributors catalog: fixed layout, small text, sortable headings */}
+        <table className="w-full min-w-[80rem] table-fixed text-left text-xs">
+          <colgroup>
+            {["9rem", "8rem", "9rem", "", "3.5rem", "5rem", "5rem", "4.5rem", "4rem", "7.5rem", "7rem", "6rem"].map((w, i) => (
+              <col key={i} style={w ? { width: w } : undefined} />
+            ))}
+          </colgroup>
+          <thead className="text-gray-500">
             <tr>
-              {th("brand", "Brand")}
-              {th("sku", "SKU")}
-              {th("mfr", "Mfr no.")}
-              {th("name", "Name")}
-              <th className="px-3 py-2">Unit</th>
-              {th("list", "List", true)}
-              {th("cost", "Cost", true)}
-              {th("stock", "Total", true)}
-              <th className="px-3 py-2">Barcode</th>
-              <th className="px-3 py-2">Ours</th>
+              <Th k="brand">Brand</Th>
+              <Th k="sku">SKU</Th>
+              <Th k="mfr">Mfr no.</Th>
+              <Th k="name">Name</Th>
+              <Th k="uom">Unit</Th>
+              <Th k="list" right>List</Th>
+              <Th k="cost" right>Cost</Th>
+              <Th k="margin" right title="(list − cost) / list">Margin</Th>
+              <Th k="stock" right>Total</Th>
+              <th className="whitespace-nowrap py-1 pr-3">Barcode</th>
+              <th className="whitespace-nowrap py-1 pr-3">Ours</th>
+              <Th k="updated">Changed</Th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {(items ?? []).map((it) => (
-              <tr key={it.id} className={it.active ? "" : "bg-gray-50 text-gray-500"}>
-                <td className="px-3 py-2">{it.manufacturer}</td>
-                <td className="px-3 py-2 font-mono">
+              <tr key={it.id} className={`align-top ${it.active ? "" : "text-gray-400"}`}>
+                <td className="truncate py-1 pr-3" title={it.manufacturer ?? ""}>{it.manufacturer ?? "—"}</td>
+                <td className="truncate py-1 pr-3 font-medium" title={it.sku}>
                   {it.sku}
-                  {!it.active && (
-                    <span className="ml-2">
-                      <Badge tone="amber">dropped</Badge>
-                    </span>
+                  {!it.active && <span className="ml-1"><Badge tone="gray">retired</Badge></span>}
+                </td>
+                <td className="truncate py-1 pr-3" title={it.mfr_number ?? ""}>{it.mfr_number ?? "—"}</td>
+                <td className="break-words py-1 pr-3">{it.name ?? "—"}</td>
+                <td className="whitespace-nowrap py-1 pr-3">{it.unit_of_measure ?? ""}</td>
+                <td className="whitespace-nowrap py-1 pr-3 text-right">{money(it.list_price)}</td>
+                <td className="whitespace-nowrap py-1 pr-3 text-right">{money(it.dealer_cost)}</td>
+                <td className="whitespace-nowrap py-1 pr-3 text-right">
+                  {it.list_price == null || it.dealer_cost == null || !it.list_price ? (
+                    "—"
+                  ) : (
+                    <span className={it.list_price - it.dealer_cost < 0 ? "text-red-700" : ""}>{pct(((it.list_price - it.dealer_cost) / it.list_price) * 100)}</span>
                   )}
                 </td>
-                <td className="px-3 py-2">{it.mfr_number}</td>
-                <td className="px-3 py-2">{it.name}</td>
-                <td className="px-3 py-2">{it.unit_of_measure}</td>
-                <td className="px-3 py-2 text-right">{money(it.list_price)}</td>
-                <td className="px-3 py-2 text-right">{money(it.dealer_cost)}</td>
-                <td className="px-3 py-2 text-right">{n(it.qty_other)}</td>
-                <td className="px-3 py-2 font-mono">{it.upc}</td>
-                <td className="whitespace-nowrap px-3 py-2">
+                <td className="whitespace-nowrap py-1 pr-3 text-right font-medium">{n(it.qty_other)}</td>
+                <td className="truncate py-1 pr-3" title={it.upc ?? ""}>{it.upc ?? "—"}</td>
+                <td className="truncate py-1 pr-3">
                   {it.product_id ? (
-                    <Link href={`/admin/products/${it.product_id}`} className="text-blue-700 hover:underline" title={it.product_title ?? ""}>
-                      #{it.product_id}
+                    <Link href={`/admin/products/${it.product_id}`} title={it.product_title ?? ""}>
+                      <Badge tone="green">{it.product_sku ?? `#${it.product_id}`}</Badge>
                     </Link>
                   ) : (
                     <button type="button" className={btn2Cls} disabled={busyId === it.id || !it.active} onClick={() => void makeProduct(it)}>
@@ -242,11 +256,12 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
                     </button>
                   )}
                 </td>
+                <td className="whitespace-nowrap py-1 pr-3 text-gray-500">{it.updated_at ? new Date(it.updated_at).toLocaleDateString() : "—"}</td>
               </tr>
             ))}
             {items && items.length === 0 && (
               <tr>
-                <td colSpan={10} className="p-6 text-center text-gray-500">
+                <td colSpan={12} className="p-6 text-center text-gray-500">
                   Nothing found. Try fewer words.
                 </td>
               </tr>
