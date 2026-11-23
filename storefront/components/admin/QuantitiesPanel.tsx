@@ -7,7 +7,8 @@ type Q = {
   ei_total: number;
   own_available: number;
   warehouses: { id: number; name: string; quantity: number; main: boolean }[];
-  kit_parts?: { part_number: string; need: number; on_our_shelf: number; kits: number }[];
+  // use_mfr_number: the part is set to "use the manu. part # for the custom label", so show its manufacturer number (when the server sends one)
+  kit_parts?: { part_number: string; need: number; on_our_shelf: number; kits: number; use_mfr_number?: boolean; mfr_number?: string | null }[];
   indiana: number;
   nevada: number;
   distributor: number;
@@ -159,7 +160,7 @@ export default function QuantitiesPanel({
               {(q.kit_parts ?? []).map((k) => (
                 <div key={k.part_number} className={`${row} pl-3 text-xs text-gray-600`}>
                   <span>
-                    {k.part_number}
+                    {k.use_mfr_number && k.mfr_number ? k.mfr_number : k.part_number}
                     {k.need > 1 ? ` (${k.need} per kit)` : ""}: {k.on_our_shelf} on our shelf
                   </span>
                   <span>{k.kits} kit{k.kits === 1 ? "" : "s"}</span>
