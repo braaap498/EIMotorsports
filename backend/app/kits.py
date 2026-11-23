@@ -550,7 +550,7 @@ def catalog_search(
 # A catalog piece with no number of its own follows the catalog's manufacturer number. The product's own Manufacturer
 # part # (products.manufacturer_part_number) then shows every piece's number, " / " between them, so everything that
 # already reads or searches that one field keeps working and a search for any one of them finds the product.
-MPN_JOIN = " / "
+MPN_JOIN = ", "
 
 
 def _norm_mpn(v: Optional[str]) -> str:

@@ -136,6 +136,7 @@ export default function KitPartsPanel({
   // parts already typed for this vendor (vendors without a catalog), to pick instead of typing again
   type SavedPart = { id: number; part_number: string; mfr_number: string | null; description: string | null; unit_cost: number | null };
   const [savedQ, setSavedQ] = useState("");
+  const [savedQty, setSavedQty] = useState<Record<number, string>>({});
   const [savedRes, setSavedRes] = useState<SavedPart[]>([]);
   const [savedTick, setSavedTick] = useState(0);
   const [editSaved, setEditSaved] = useState<{ id: number; mfr: string; desc: string; cost: string } | null>(null);
@@ -291,6 +292,7 @@ export default function KitPartsPanel({
 
   // add a part that was typed before: nothing to type again
   function addSaved(it: SavedPart) {
+    const qty = Math.max(1, Math.min(1000, Number(savedQty[it.id] || 1) || 1));
     if (!vendorId) return setMsg({ kind: "error", text: "Pick the vendor first." });
     edit([
       ...parts,
@@ -304,9 +306,10 @@ export default function KitPartsPanel({
         mfr_number: it.mfr_number || null,
         description: it.description ?? "",
         unit_cost: it.unit_cost,
-        quantity: Math.max(1, Math.min(1000, Number(man.quantity) || 1)),
+        quantity: qty,
       },
     ]);
+    setSavedQty({});
     setMsg(null);
   }
 
@@ -555,7 +558,7 @@ export default function KitPartsPanel({
               Vendor
               <select className={`${inputCls} block`} value={vendorId} onChange={(e) => { setVendorId(e.target.value ? Number(e.target.value) : ""); setResults(null); }}>
                 <option value="">(choose)</option>
-                {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}{v.has_catalog ? "" : " (no catalog)"}</option>)}
+                {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
               </select>
             </label>
           </div>
@@ -651,29 +654,37 @@ export default function KitPartsPanel({
 
           {vendor && !vendor.has_catalog && (
             <div className="space-y-2">
-              <p className="text-xs text-gray-500">{vendor.name} has no catalog loaded here. Pick a part you already typed, or add a new one below.</p>
+              <p className="text-xs text-gray-500">Pick a part you already added for {vendor.name}, or add a new one below.</p>
               <div className="space-y-1 rounded border border-gray-200 p-2">
                 <label className="block text-xs">
-                  Saved parts
+                  Search parts
                   <input className={inputCls} value={savedQ} placeholder="search vendor part #, manufacturer # or description" onChange={(e) => setSavedQ(e.target.value)} />
                 </label>
                 {savedRes.length === 0 ? (
                   <p className="text-xs text-gray-500">{savedQ.trim() ? "Nothing saved matches. Add it as a new part below." : `No parts saved for ${vendor.name} yet. Parts you add below are saved here when you save the distributor parts.`}</p>
                 ) : (
-                  <ul className="max-h-48 divide-y divide-gray-100 overflow-auto text-sm">
-                    {savedRes.map((it) => (
-                      <li key={it.id} className="flex items-center justify-between gap-2 py-1">
-                        <span className="min-w-0 flex-1 truncate">
-                          <span className="font-medium">{it.part_number}</span>
-                          {it.mfr_number && <span className="ml-2 text-gray-600">mfr {it.mfr_number}</span>}
-                          {it.description && <span className="ml-2 text-gray-500">{it.description}</span>}
-                          {it.unit_cost !== null && <span className="ml-2 text-gray-600">${it.unit_cost.toFixed(2)}</span>}
-                        </span>
-                        <button type="button" className={btn2Cls} onClick={() => addSaved(it)}>Add</button>
-                        <button type="button" className="px-1 text-xs text-gray-600 underline" onClick={() => setEditSaved({ id: it.id, mfr: it.mfr_number ?? "", desc: it.description ?? "", cost: it.unit_cost != null ? String(it.unit_cost) : "" })}>Edit</button>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="max-h-96 overflow-auto rounded border">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-gray-50 text-left text-gray-500">
+                        <tr><th className="p-1">SKU</th><th className="p-1">Mfr #</th><th className="p-1">Name</th><th className="p-1">Your cost</th><th className="p-1">Qty</th><th className="p-1" /></tr>
+                      </thead>
+                      <tbody>
+                        {savedRes.map((it) => (
+                          <tr key={it.id} className="border-t align-middle">
+                            <td className="p-1 font-mono">{highlight(it.part_number, savedQ)}</td>
+                            <td className="p-1">{highlight(it.mfr_number, savedQ)}</td>
+                            <td className="p-1">{highlight(it.description, savedQ)}</td>
+                            <td className="p-1">{it.unit_cost !== null ? `$${it.unit_cost.toFixed(2)}` : ""}</td>
+                            <td className="p-1"><input type="number" min={1} className="w-14 rounded border px-1 py-1" value={savedQty[it.id] ?? "1"} onChange={(e) => setSavedQty((a) => ({ ...a, [it.id]: e.target.value }))} /></td>
+                            <td className="whitespace-nowrap p-1">
+                              <button type="button" className="rounded bg-gray-900 px-2 py-1 text-white" onClick={() => addSaved(it)}>Add</button>
+                              <button type="button" className="px-1 text-xs text-gray-600 underline" onClick={() => setEditSaved({ id: it.id, mfr: it.mfr_number ?? "", desc: it.description ?? "", cost: it.unit_cost != null ? String(it.unit_cost) : "" })}>Edit</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
                 {editSaved && (
                   <div className="flex flex-wrap items-end gap-2 rounded bg-gray-50 p-2">
@@ -685,7 +696,7 @@ export default function KitPartsPanel({
                     <button type="button" className={btn2Cls} onClick={() => setEditSaved(null)}>Cancel</button>
                   </div>
                 )}
-                <p className="text-xs text-gray-500">The Qty below is used for the part you add. A part added from this list follows it: change it here and every product that uses it follows.</p>
+                <p className="text-xs text-gray-500">A part added from this list follows it: change it here and every product that uses it follows.</p>
               </div>
               <p className="text-xs font-medium text-gray-700">Not in the list? Add a new part</p>
               <div className="flex flex-wrap items-end gap-2">
