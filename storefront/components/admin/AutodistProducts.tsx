@@ -27,6 +27,7 @@ type Preview = {
   state: State;
   photos: PhotoState;
 };
+type WrongLabel = { id: number; sku: string; title: string; label: string; automatic_sku: string; mfr_number: string | null; has_listings: boolean; has_part: boolean };
 type OnePart = {
   sku: string; manufacturer: string | null; mfr_number: string | null; name: string | null; title: string;
   price: number | null; cost: number | null; qty: number; active: boolean; photos: number;
@@ -47,6 +48,7 @@ export default function AutodistProducts() {
   const [oneParts, setOneParts] = useState<OnePart[] | null>(null);
   const [oneMsg, setOneMsg] = useState<{ kind: "info" | "error"; text: string } | null>(null);
   const [oneBusy, setOneBusy] = useState(false);
+  const [wrong, setWrong] = useState<WrongLabel[] | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   async function loadPreview() {
@@ -218,6 +220,30 @@ export default function AutodistProducts() {
     }
   }
 
+  async function showWrongLabels() {
+    setErr(null);
+    try {
+      setWrong((await api<{ items: WrongLabel[] }>("/autodist/api/website-products/wrong-labels")).items);
+    } catch (e) {
+      setErr(errMsg(e));
+    }
+  }
+
+  async function keepMfr(ids: number[]) {
+    setErr(null);
+    setNote(null);
+    setBusy(true);
+    try {
+      const r = await api<{ kept: number }>("/autodist/api/website-products/keep-mfr-label", { method: "POST", body: { product_ids: ids } });
+      setNote(`Kept the manufacturer number as the custom label on ${n(r.kept)} product${r.kept === 1 ? "" : "s"}.`);
+      await loadPreview();
+      await showWrongLabels();
+    } catch (e) {
+      setErr(errMsg(e));
+      setBusy(false);
+    }
+  }
+
   async function cleanDescriptions() {
     setErr(null);
     setNote(null);
@@ -355,6 +381,36 @@ export default function AutodistProducts() {
           <button type="button" className={btnCls} disabled={running || busy} onClick={() => void fixLabels()}>
             Change to Automatic SKU
           </button>
+        </div>
+      )}
+      {pv && pv.wrong_labels > 0 && (
+        <div className="max-w-3xl space-y-2 rounded border border-amber-300 bg-amber-50 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm">Which products? Keep the manufacturer number as the label on the ones that should stay that way.</span>
+            <button type="button" className={btnCls} disabled={busy} onClick={() => void showWrongLabels()}>
+              {wrong ? "Refresh list" : "Show the products"}
+            </button>
+          </div>
+          {wrong && wrong.length === 0 && <div className="text-sm text-gray-700">None left.</div>}
+          {wrong && wrong.length > 0 && (
+            <ul className="space-y-1 text-sm">
+              {wrong.map((w) => (
+                <li key={w.id} className="flex flex-wrap items-center justify-between gap-2 rounded border border-amber-200 bg-white p-2">
+                  <span className="min-w-0">
+                    <a className="font-mono font-semibold underline" href={`/admin/products/${w.id}`}>{w.sku}</a>{" "}
+                    <span className="text-gray-600">label </span><span className="font-mono">{w.label}</span>
+                    <span className="text-gray-600"> · Automatic SKU </span><span className="font-mono">{w.automatic_sku}</span>
+                    {w.has_listings && <span className="text-gray-600"> · has eBay listings</span>}
+                    {!w.has_part && <span className="text-red-700"> · no catalog part on the product</span>}
+                    <span className="block truncate text-xs text-gray-600">{w.title}</span>
+                  </span>
+                  <button type="button" className={btnCls} disabled={busy || !w.has_part} onClick={() => void keepMfr([w.id])}>
+                    Keep the manufacturer number
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
       {pv && pv.old_description_lines > 0 && (

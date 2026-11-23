@@ -3532,6 +3532,53 @@ def api_website_products_fix_labels(db: Session = Depends(get_db), user: AuthUse
     return res
 
 
+@router.get("/api/website-products/wrong-labels")
+def api_website_products_wrong_labels(db: Session = Depends(get_db)):
+    """The products the "manufacturer number as the custom label" warning counts, so each one can be named and decided."""
+    rows = db.execute(
+        text(
+            f"""
+            select p.id, p.sku_display as sku, p.title, p.custom_label_sku as label, s.sku as automatic_sku, s.mfr_number,
+                   exists (select 1 from channel_listings cl where cl.product_id = p.id) as has_listings,
+                   exists (select 1 from product_kit_parts kp where kp.product_id = p.id and kp.supplier_item_id = s.id) as has_part
+            {_LABEL_FIX_FROM}
+            order by p.id limit 200
+            """
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    return {"items": [dict(r._mapping) for r in rows]}
+
+
+class KeepMfrIn(BaseModel):
+    product_ids: list[int] = Field(min_length=1, max_length=500)
+
+
+@router.post("/api/website-products/keep-mfr-label")
+def api_website_products_keep_mfr_label(body: KeepMfrIn, db: Session = Depends(get_db)):
+    """Tick "use the manu. part # for the custom label" on the catalog part of each product given, so its label stays the
+    manufacturer number and the warning stops counting it. Only the part that points at the product's own catalog item is
+    ticked; the label itself is not changed and nothing is sent to eBay."""
+    try:
+        n = db.execute(
+            text(
+                """
+                update product_kit_parts kp set label_use_mfr = true
+                from supplier_product_links l
+                join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku
+                where l.supplier = :s and l.product_id = kp.product_id and kp.supplier_item_id = s.id
+                  and kp.product_id = any(cast(:ids as bigint[])) and not coalesce(kp.label_use_mfr, false)
+                """
+            ),
+            {"s": SUPPLIER, "ids": body.product_ids},
+        ).rowcount
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not keep the labels: {str(e)[:300]}")
+    return {"kept": int(n or 0)}
+
+
 # ---------------------------------------------------------------- photos into storage
 # New products start with only the distributor's photo LINKS (product_photos.source_url, no image_key). This downloads each
 # one into our own storage (same bucket, same resizing, same keys as an uploaded photo) and fills in image_key, so the
