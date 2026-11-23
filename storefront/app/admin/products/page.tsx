@@ -50,7 +50,7 @@ const LIMIT = 50;
 type SortKey = "sku" | "custom_label_sku" | "title" | "list_price" | "quantity_on_hand" | "fitment_count" | "is_published";
 const COLUMNS: { key: SortKey; label: string; width: string }[] = [
   { key: "sku", label: "SKU", width: "w-40" },
-  { key: "custom_label_sku", label: "Custom label", width: "w-[14rem]" },
+  { key: "custom_label_sku", label: "Custom label", width: "w-[24rem]" },
   { key: "title", label: "Title", width: "" }, // takes the rest of the width
   { key: "list_price", label: "Price", width: "w-24" },
   { key: "quantity_on_hand", label: "Qty", width: "w-20" },
@@ -435,7 +435,7 @@ export default function ProductsPage() {
       <Pager total={data.total} limit={LIMIT} offset={offset} onChange={setOffset} />
 
       <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
-        <table className="w-full min-w-[76rem] table-fixed text-left text-sm">
+        <table className="w-full min-w-[86rem] table-fixed text-left text-sm">
           <colgroup>
             {mayChangeFitment && <col className="w-10" />}
             {COLUMNS.map((c) => (
@@ -490,7 +490,7 @@ export default function ProductsPage() {
                   </td>
                 )}
                 <td className="truncate px-3 py-2 text-gray-600" title={p.sku}>{p.sku}</td>
-                <td className="truncate px-3 py-2 text-gray-600" title={p.custom_label_sku ?? ""}>{p.custom_label_sku ?? "—"}</td>
+                <td className="break-all px-3 py-2 text-gray-600" title={p.custom_label_sku ?? ""}>{p.custom_label_sku ?? "—"}</td>
                 <td className="px-3 py-2 font-medium">
                   <Link href={`/admin/products/${p.id}`} className="hover:underline">{p.title}</Link>
                 </td>
