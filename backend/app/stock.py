@@ -46,6 +46,18 @@ def reserved_paid_sql(p: str = "p") -> str:
     )
 
 
+def same_part_sql(k: str = "k", k2: str = "k2") -> str:
+    """SQL: true when distributor part line `k2` is the same distributor part as line `k`. A catalog part is the same when both
+    point at the same catalog item. A part with no catalog item (typed in, or saved in a distributor's saved parts) is the same
+    when it is the same distributor and the vendor part # matches, ignoring case, spaces and dashes."""
+    norm = "regexp_replace(upper({}.part_number), '[^A-Z0-9]', '', 'g')"
+    return (
+        f"(({k}.supplier_item_id is not null and {k2}.supplier_item_id = {k}.supplier_item_id) "
+        f"or ({k}.supplier_item_id is null and {k2}.supplier_item_id is null and {k2}.distributor_id = {k}.distributor_id "
+        f"and {norm.format(k)} <> '' and {norm.format(k2)} = {norm.format(k)}))"
+    )
+
+
 def kit_shelf_sql(p: str = "p") -> str:
     """SQL: how many complete kits OUR OWN shelf can make for a kit (a product with two or more distributor parts). The number saved
     on the kit itself is NOT used. For each distributor part, the pieces on our shelf are counted from our own SINGLE-part products
@@ -57,7 +69,7 @@ def kit_shelf_sql(p: str = "p") -> str:
         "left join lateral ("
         "  select sum(greatest(0, coalesce(p2.quantity_on_hand, 0) - " + set_aside_sql("p2") + ") * greatest(coalesce(k2.quantity, 1), 1)) as units "
         "  from product_kit_parts k2 join products p2 on p2.id = k2.product_id "
-        "  where k.supplier_item_id is not null and k2.supplier_item_id = k.supplier_item_id "
+        f"  where {same_part_sql('k', 'k2')} "
         f"    and p2.id <> {p}.id "
         "    and (select count(*) from product_kit_parts k3 where k3.product_id = p2.id) = 1"
         ") sh on true "

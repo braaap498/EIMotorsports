@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, needs, require_admin, require_route_access
 from app.database import _session_factory, get_db
-from app.stock import available_sql, set_aside_sql, shelf_sql
+from app.stock import available_sql, same_part_sql, set_aside_sql, shelf_sql
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/availability", tags=["admin-availability"], dependencies=[Depends(require_route_access)])
@@ -270,7 +270,7 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
                     "select k.part_number, greatest(coalesce(k.quantity, 1), 1) as need, coalesce(("
                     "  select sum(greatest(0, coalesce(p2.quantity_on_hand, 0) - " + set_aside_sql("p2") + ") * greatest(coalesce(k2.quantity, 1), 1)) "
                     "  from product_kit_parts k2 join products p2 on p2.id = k2.product_id "
-                    "  where k.supplier_item_id is not null and k2.supplier_item_id = k.supplier_item_id and p2.id <> :i "
+                    f"  where {same_part_sql('k', 'k2')} and p2.id <> :i "
                     "    and (select count(*) from product_kit_parts k3 where k3.product_id = p2.id) = 1), 0) as units "
                     "from product_kit_parts k where k.product_id = :i order by k.sort_order, k.id"
                 ),
