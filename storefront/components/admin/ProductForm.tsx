@@ -154,6 +154,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [photosDirty, setPhotosDirty] = useState(false); // unsaved main-photo / order changes in the photos panel
   const [similar, setSimilar] = useState<SimilarMatch[]>([]);
   const [labelBy, setLabelBy] = useState<LabelBy>("mfr"); // Autodist parts in a new label: manufacturer # or vendor SKU
+  const [partsDirty, setPartsDirty] = useState(false); // distributor parts changed but not saved (their own button saves them)
   const [kitParts, setKitParts] = useState<KitPart[]>([]); // pieces bought from a vendor that make up this product
   // the Manufacturer part # comes from the pieces' own numbers (their list), so it is shown but edited on the pieces
   const [mpnLocked, setMpnLocked] = useState(false);
@@ -267,6 +268,9 @@ export default function ProductForm({ productId }: { productId?: number }) {
     }
     if (productId && !/^EI-\d{1,10}$/i.test((vals.sku ?? "").trim())) {
       return setMsg({ kind: "error", text: "The SKU has to start with EI- followed by digits only, like EI-0000123." });
+    }
+    if (productId && partsDirty) {
+      return setMsg({ kind: "error", text: "The distributor parts have changes that are not saved (a ticked box counts). Click \"Save distributor parts\" under the parts list first; this Save does not save them." });
     }
     const built = buildPayload(vals, flags);
     if ("error" in built) return setMsg({ kind: "error", text: built.error });
@@ -653,6 +657,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
             if (baseline) setBaseline({ ...baseline, custom_label_sku: c });
           }}
           onAvail={setKitAvail}
+          onDirty={setPartsDirty}
           onMpn={(m, locked) => {
             setMpnLocked(locked);
             if (productId && locked) {

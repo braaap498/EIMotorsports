@@ -98,6 +98,7 @@ export default function KitPartsPanel({
   onLabelByChange,
   onMpn,
   onAvail,
+  onDirty,
 }: {
   productId?: number;
   parts: KitPart[];
@@ -114,6 +115,8 @@ export default function KitPartsPanel({
   onMpn?: (mpn: string | null, locked: boolean) => void;
   // the kit's available count from the distributor stock (null when there are no parts), for the product's quantity field
   onAvail?: (a: Availability | null) => void;
+  // tells the product form whether the distributor parts have changes that are not saved yet (the product's own Save does not save them)
+  onDirty?: (dirty: boolean) => void;
 }) {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [vendorId, setVendorId] = useState<number | "">("");
@@ -153,6 +156,10 @@ export default function KitPartsPanel({
   const [smRes, setSmRes] = useState<SmResult[] | null>(null);
   const [avail, setAvail] = useState<Availability | null>(null);
   const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    onDirty?.(dirty);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
   const [savedCls, setSavedCls] = useState<string | null>(null);
   // the parts as last saved, so Cancel changes can put them back
   const [savedParts, setSavedParts] = useState<KitPart[]>([]);
@@ -484,15 +491,18 @@ export default function KitPartsPanel({
                         value={p.mfr_number ?? ""}
                         onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, mfr_number: e.target.value } : x)))}
                       />
-                      {p.supplier_item_id ? (
-                        <span className="flex items-center gap-1 font-normal" title="The custom label is written with this part's manufacturer number instead of the distributor SKU, and the distributor screens show the manufacturer number for this product.">
-                          <input
-                            type="checkbox" disabled={disabled} checked={!!p.label_use_mfr}
-                            onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, label_use_mfr: e.target.checked } : x)))}
-                          />
-                          Use the manu. part # for the custom label
-                        </span>
-                      ) : null}
+                      <span
+                        className="flex items-center gap-1 font-normal"
+                        title={p.supplier_item_id
+                          ? "The custom label is written with this part's manufacturer number instead of the distributor SKU, and the distributor screens show the manufacturer number for this product."
+                          : "Only a part picked from a distributor's catalog can use the catalog's manufacturer number for the label."}
+                      >
+                        <input
+                          type="checkbox" disabled={disabled || !p.supplier_item_id} checked={!!p.supplier_item_id && !!p.label_use_mfr}
+                          onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, label_use_mfr: e.target.checked } : x)))}
+                        />
+                        Use the manu. part # for the custom label
+                      </span>
                     </label>
                     {(() => {
                       const a = avail?.parts.find((x) => `p${x.id}` === p.key);
