@@ -168,6 +168,11 @@ export default function ProductForm({ productId }: { productId?: number }) {
     if (m && !acc.some((x) => x.toLowerCase() === m.toLowerCase())) acc.push(m);
     return acc;
   }, []);
+  // Edit page: when the product has distributor parts, its cost is what those parts cost us (each part's distributor cost x its quantity),
+  // shown read only. Never the list price. Parts with no cost on file count as 0 and are called out under the box.
+  const partsCost =
+    productId && kitParts.length > 0 ? kitParts.reduce((sum, p) => sum + (Number(p.unit_cost) || 0) * (p.quantity || 1), 0) : null;
+  const partsMissingCost = kitParts.filter((p) => p.unit_cost == null).length;
   const mpnFromParts = productId ? mpnLocked : partMpns.length > 0;
   const mpnShown = !productId && partMpns.length > 0 ? partMpns.join(" / ") : null;
   const [loading, setLoading] = useState(!!productId);
@@ -440,7 +445,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
       <Field key={f.key} label={f.key === "quantity_on_hand" && kitCount === null ? (productId ? "Available" : "E&I Warehouse Quantity") : f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
         <input
           className={inputCls}
-          disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts) || (f.key === "quantity_on_hand" && (kitCount !== null || !!productId))}
+          disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts) || (f.key === "cost" && partsCost !== null) || (f.key === "quantity_on_hand" && (kitCount !== null || !!productId))}
           type={f.kind === "text" ? "text" : "number"}
           step={f.kind === "number" ? f.step : f.kind === "int" ? "1" : undefined}
           value={
@@ -448,7 +453,9 @@ export default function ProductForm({ productId }: { productId?: number }) {
               ? mpnShown
               : f.key === "quantity_on_hand" && kitCount !== null
                 ? String(kitCount)
-                : vals[f.key] ?? ""
+                : f.key === "cost" && partsCost !== null
+                  ? partsCost.toFixed(2)
+                  : vals[f.key] ?? ""
           }
           onChange={(e) => set(f.key, e.target.value)}
           onBlur={MONEY_KEYS.includes(f.key) ? (e) => set(f.key, money2(e.target.value)) : undefined}
@@ -468,9 +475,19 @@ export default function ProductForm({ productId }: { productId?: number }) {
             This shows the manufacturer numbers of the distributor parts below. To change one, change it on that part.
           </span>
         )}
-        {f.key === "cost" && (
+        {f.key === "cost" && partsCost === null && (
           <span className="mt-1 block text-xs font-normal text-gray-500">
             What you pay for this part. Admin only: customers never see it anywhere on the website. It is the starting cost on purchase orders.
+          </span>
+        )}
+        {f.key === "cost" && partsCost !== null && (
+          <span className="mt-1 block text-xs font-normal text-gray-500">
+            Calculated: the distributor cost of each part below times its quantity, added up. Not editable here: change a part&apos;s cost on that part. Admin only.
+            {partsMissingCost > 0 && (
+              <span className="block text-amber-700">
+                {partsMissingCost} part{partsMissingCost === 1 ? " has" : "s have"} no cost on file and count as $0.00, so this total is too low.
+              </span>
+            )}
           </span>
         )}
         {f.key === "manufacturer_part_number" && (
