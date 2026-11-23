@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { useAccess } from "./AdminAccess";
+import { shrink } from "./PhotosPanel";
 import { Badge, Notice, Pager, btnCls, btn2Cls, dangerCls, inputCls } from "./ui";
 import type { Dist } from "./Distributors";
 
@@ -16,6 +17,9 @@ type Part = {
   id: number;
   part_number: string;
   mfr_number: string | null;
+  manufacturer: string | null; // the brand (Wiseco, Tusk, ...): this is what goes in the product's Manufacturer, never the distributor
+  image: string | null; // thumbnail
+  image_full: string | null;
   description: string | null;
   unit_cost: number | null;
   product_id: number | null;
@@ -25,7 +29,7 @@ type Part = {
 type Flash = { kind: "success" | "error" | "info"; text: string } | null;
 
 const PAGE = 50;
-const blank = { part_number: "", mfr_number: "", same: false, description: "", unit_cost: "" };
+const blank = { part_number: "", mfr_number: "", manufacturer: "", same: false, description: "", unit_cost: "" };
 const money = (v: number | null) => (v == null ? "—" : `$${Number(v).toFixed(2)}`);
 
 export default function ManualParts({ dist }: { dist: Dist }) {
@@ -47,7 +51,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
   const [flash, setFlash] = useState<Flash>(null);
   const [form, setForm] = useState(blank);
   const [adding, setAdding] = useState(false);
-  const [edit, setEdit] = useState<{ id: number; part: string; mfr: string; desc: string; cost: string } | null>(null);
+  const [edit, setEdit] = useState<{ id: number; part: string; mfr: string; brand: string; desc: string; cost: string } | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [tick, setTick] = useState(0);
 
@@ -84,6 +88,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
           distributor_id: dist.id,
           part_number: form.part_number.trim(),
           mfr_number: (form.same ? form.part_number.trim() : form.mfr_number.trim()) || null,
+          manufacturer: form.manufacturer.trim() || null,
           description: form.description.trim() || null,
           unit_cost: cost,
         },
@@ -106,10 +111,37 @@ export default function ManualParts({ dist }: { dist: Dist }) {
     try {
       await api(`/kits/manual-catalog/${edit.id}`, {
         method: "PUT",
-        body: { mfr_number: edit.mfr.trim() || null, description: edit.desc.trim() || null, unit_cost: cost },
+        body: { mfr_number: edit.mfr.trim() || null, manufacturer: edit.brand.trim() || null, description: edit.desc.trim() || null, unit_cost: cost },
       });
       setEdit(null);
       setFlash({ kind: "success", text: "Part updated. Products that use it follow the change." });
+      setTick((n) => n + 1);
+    } catch (e) {
+      setFlash({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function uploadPhoto(p: Part, file: File | undefined) {
+    if (!file) return;
+    setBusyId(p.id);
+    setFlash(null);
+    try {
+      await api(`/kits/manual-catalog/${p.id}/photo`, { method: "POST", body: { data: await shrink(file) } });
+      setFlash({ kind: "success", text: `Picture saved for ${p.part_number}.` });
+      setTick((n) => n + 1);
+    } catch (e) {
+      setFlash({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function clearPhoto(p: Part) {
+    setBusyId(p.id);
+    try {
+      await api(`/kits/manual-catalog/${p.id}/photo`, { method: "DELETE" });
       setTick((n) => n + 1);
     } catch (e) {
       setFlash({ kind: "error", text: errMsg(e) });
@@ -179,6 +211,10 @@ export default function ManualParts({ dist }: { dist: Dist }) {
             <input type="checkbox" checked={form.same} onChange={(e) => setForm({ ...form, same: e.target.checked })} />
             Same as vendor part #
           </label>
+          <label className="text-xs">
+            Brand
+            <input className={inputCls} value={form.manufacturer} placeholder="e.g. Tusk, Wiseco" onChange={(e) => setForm({ ...form, manufacturer: e.target.value })} />
+          </label>
           <label className="min-w-[12rem] flex-1 text-xs">
             Description
             <input className={inputCls} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
@@ -199,7 +235,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
         <div className="flex flex-wrap items-end gap-3">
           <label className="min-w-[14rem] flex-1 text-xs">
             Search
-            <input className={inputCls} value={q} placeholder="vendor part #, manufacturer # or description" onChange={(e) => setQ(e.target.value)} />
+            <input className={inputCls} value={q} placeholder="vendor part #, manufacturer #, brand or description" onChange={(e) => setQ(e.target.value)} />
           </label>
           <label className="text-xs">
             Show
@@ -220,6 +256,10 @@ export default function ManualParts({ dist }: { dist: Dist }) {
             <label className="text-xs">
               Manufacturer #
               <input className={inputCls} value={edit.mfr} onChange={(e) => setEdit({ ...edit, mfr: e.target.value })} />
+            </label>
+            <label className="text-xs">
+              Brand
+              <input className={inputCls} value={edit.brand} placeholder="e.g. Tusk, Wiseco" onChange={(e) => setEdit({ ...edit, brand: e.target.value })} />
             </label>
             <label className="min-w-[10rem] flex-1 text-xs">
               Description
@@ -247,6 +287,8 @@ export default function ManualParts({ dist }: { dist: Dist }) {
             <table className="w-full text-left text-sm">
               <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                 <tr>
+                  <th className="px-2 py-2">Picture</th>
+                  <th className="px-2 py-2">Brand</th>
                   <th className="px-2 py-2">Vendor part #</th>
                   <th className="px-2 py-2">Manufacturer #</th>
                   <th className="px-2 py-2">Description</th>
@@ -258,6 +300,24 @@ export default function ManualParts({ dist }: { dist: Dist }) {
               <tbody className="divide-y divide-gray-100">
                 {items.map((p) => (
                   <tr key={p.id} className="align-top">
+                    <td className="px-2 py-2">
+                      {p.image ? (
+                        <a href={p.image_full ?? p.image} target="_blank" rel="noreferrer" title="Open the full-size picture">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={p.image} alt="" loading="lazy" className="h-9 w-9 rounded border border-gray-100 bg-white object-contain" />
+                        </a>
+                      ) : (
+                        <div className="h-9 w-9" />
+                      )}
+                      <label className="block cursor-pointer text-xs text-gray-600 underline">
+                        {p.image ? "Replace" : "Add picture"}
+                        <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" disabled={busyId === p.id} onChange={(e) => { void uploadPhoto(p, e.target.files?.[0]); e.target.value = ""; }} />
+                      </label>
+                      {p.image && (
+                        <button type="button" className="text-xs text-gray-500 underline" disabled={busyId === p.id} onClick={() => void clearPhoto(p)}>Remove</button>
+                      )}
+                    </td>
+                    <td className="px-2 py-2">{p.manufacturer ?? "—"}</td>
                     <td className="whitespace-nowrap px-2 py-2 font-mono">{p.part_number}</td>
                     <td className="whitespace-nowrap px-2 py-2 font-mono">{p.mfr_number ?? "—"}</td>
                     <td className="px-2 py-2">{p.description ?? "—"}</td>
@@ -283,7 +343,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
                       <button
                         type="button"
                         className="ml-2 px-1 text-xs text-gray-600 underline"
-                        onClick={() => setEdit({ id: p.id, part: p.part_number, mfr: p.mfr_number ?? "", desc: p.description ?? "", cost: p.unit_cost != null ? String(p.unit_cost) : "" })}
+                        onClick={() => setEdit({ id: p.id, part: p.part_number, mfr: p.mfr_number ?? "", brand: p.manufacturer ?? "", desc: p.description ?? "", cost: p.unit_cost != null ? String(p.unit_cost) : "" })}
                       >
                         Edit
                       </button>

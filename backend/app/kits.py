@@ -47,6 +47,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import AuthUser, current_user, has_perm, needs, require_route_access
 from app.database import get_db
+from app.images import full_url, thumb_url
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/kits", tags=["admin-kits"], dependencies=[Depends(require_route_access)])
@@ -176,7 +177,7 @@ def manual_catalog(
         total = db.execute(text(f"select count(*) from manual_catalog_items m where {clause}"), params).scalar()
         rows = db.execute(
             text(
-                "select m.id, m.part_number, m.mfr_number, m.manufacturer, m.description, m.unit_cost, "
+                "select m.id, m.part_number, m.mfr_number, m.manufacturer, m.image_key, m.description, m.unit_cost, "
                 "(select u.product_id from product_kit_parts u where u.manual_item_id = m.id order by u.product_id limit 1) as product_id, "
                 "(select count(distinct u.product_id) from product_kit_parts u where u.manual_item_id = m.id) as products "
                 f"from manual_catalog_items m where {clause} order by lower(m.part_number), m.id limit :n offset :o"
@@ -198,6 +199,8 @@ def manual_catalog(
                 "part_number": r.part_number,
                 "mfr_number": r.mfr_number,
                 "manufacturer": r.manufacturer,
+                "image": thumb_url(r.image_key),
+                "image_full": full_url(r.image_key),
                 "description": r.description,
                 "unit_cost": float(r.unit_cost) if r.unit_cost is not None and see_cost else None,
                 "product_id": r.product_id,
@@ -304,6 +307,34 @@ def delete_manual_item(item_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+class PartPhotoIn(BaseModel):
+    data: str = Field(..., max_length=21 * 1024 * 1024, description="the picture, base64 encoded")
+
+
+@router.post("/manual-catalog/{item_id}/photo")
+@needs("products.edit_details")
+def set_manual_photo(item_id: int, body: PartPhotoIn, db: Session = Depends(get_db)):
+    """Give a saved part its picture (the same storage and shrinking as product photos). A product made from the part gets it."""
+    from app.admin_photos import _process, _upload  # late import: keeps the two modules independent at start-up
+
+    if not db.execute(text("select 1 from manual_catalog_items where id = :i"), {"i": item_id}).first():
+        raise HTTPException(404, "That saved part no longer exists.")
+    p = _process(body.data)
+    _upload(p)
+    db.execute(text("update manual_catalog_items set image_key = :k, updated_at = now() where id = :i"), {"k": p.key, "i": item_id})
+    db.commit()
+    return {"image": thumb_url(p.key), "image_full": full_url(p.key)}
+
+
+@router.delete("/manual-catalog/{item_id}/photo")
+@needs("products.edit_details")
+def clear_manual_photo(item_id: int, db: Session = Depends(get_db)):
+    """Take the picture off a saved part (the stored file is left alone: products may use it)."""
+    db.execute(text("update manual_catalog_items set image_key = null, updated_at = now() where id = :i"), {"i": item_id})
+    db.commit()
+    return {"ok": True}
+
+
 @router.post("/manual-catalog/{item_id}/make-product", status_code=201)
 @needs("products.create")
 def make_manual_product(item_id: int, db: Session = Depends(get_db)):
@@ -314,7 +345,7 @@ def make_manual_product(item_id: int, db: Session = Depends(get_db)):
     from app.admin_catalog import slugify  # late import: that module imports this one
 
     m = db.execute(
-        text("select m.id, m.distributor_id, m.part_number, m.mfr_number, m.description, m.unit_cost from manual_catalog_items m where m.id = :i"),
+        text("select m.id, m.distributor_id, m.part_number, m.mfr_number, m.manufacturer, m.image_key, m.description, m.unit_cost from manual_catalog_items m where m.id = :i"),
         {"i": item_id},
     ).first()
     if not m:
@@ -349,6 +380,21 @@ def make_manual_product(item_id: int, db: Session = Depends(get_db)):
         follow = parts_mpn(db, pid)
         if follow:
             db.execute(text("update products set manufacturer_part_number = :m where id = :p"), {"m": follow, "p": pid})
+        # the product's Manufacturer is the part's brand (never the distributor)
+        if (m.manufacturer or "").strip():
+            from app.manufacturers import find_or_create
+
+            mid = find_or_create(db, m.manufacturer)
+            if mid:
+                db.execute(text("update products set part_manufacturer_id = :m where id = :p"), {"m": mid, "p": pid})
+        # the part's picture becomes the product's main photo
+        if m.image_key:
+            from app import photo_store
+
+            db.execute(
+                text("insert into product_photos (product_id, image_key, storage_path, is_primary, sort_order) values (:p, :k, :sp, true, 0)"),
+                {"p": pid, "k": m.image_key, "sp": photo_store.full_path(m.image_key)},
+            )
         # the custom label is the vendor part #, unless it cannot be a label or another product already has it (left blank, never changed)
         tok = label_token_for(m.part_number)
         label = None
@@ -588,6 +634,7 @@ def ensure_mfr_column() -> None:
         # a piece can point at a saved part: its cost, description and manufacturer # then come from the saved part
         db.execute(text("alter table product_kit_parts add column if not exists manual_item_id bigint references manual_catalog_items(id) on delete set null"))
         db.execute(text("alter table manual_catalog_items add column if not exists manufacturer text"))  # the brand (Wiseco, Tusk, ...)
+        db.execute(text("alter table manual_catalog_items add column if not exists image_key text"))  # the part's picture (same storage as product photos)
         db.commit()
     except Exception:
         db.rollback()
@@ -840,10 +887,8 @@ def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]
             "coalesce(mi.unit_cost, k.unit_cost) as unit_cost, k.quantity, k.sort_order, "
             "coalesce(nullif(btrim(si.mfr_number), ''), k.part_number) as label_part, "
             "coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), ''), nullif(btrim(mi.mfr_number), '')) as mfr_number, "
-            # the brand of the piece: the catalog's, the saved part's or the typed one; a part with no brand of its own and no catalog
-            # shows its vendor's name
-            "coalesce(nullif(btrim(si.manufacturer), ''), nullif(btrim(mi.manufacturer), ''), nullif(btrim(k.manufacturer), ''), "
-            "case when k.supplier_item_id is null then nullif(btrim(d.name), '') end) as manufacturer from product_kit_parts k "
+            # the brand of the piece: the catalog's, the saved part's or the typed one. Never the distributor's name.
+            "coalesce(nullif(btrim(si.manufacturer), ''), nullif(btrim(mi.manufacturer), ''), nullif(btrim(k.manufacturer), '')) as manufacturer from product_kit_parts k "
             "left join supplier_items si on si.id = k.supplier_item_id "
             "left join manual_catalog_items mi on mi.id = k.manual_item_id "
             "left join po_distributors d on d.id = k.distributor_id where k.product_id = :p order by k.sort_order, k.id"

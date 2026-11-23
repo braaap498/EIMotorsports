@@ -19,7 +19,7 @@ export type KitPart = {
   quantity: number;
   // the manufacturer's own part number for this piece (a catalog piece shows the catalog's number until changed)
   mfr_number?: string | null;
-  // the brand of this piece (Wiseco, Tusk, ...): the catalog's, the saved part's, or the vendor's name when it has none
+  // the brand of this piece (Wiseco, Tusk, ...): the catalog's or the saved part's; never the distributor
   manufacturer?: string | null;
 };
 
@@ -136,7 +136,7 @@ export default function KitPartsPanel({
   // typed-in piece (vendors without a catalog)
   const [man, setMan] = useState({ part_number: "", mfr_number: "", manufacturer: "", same: false, description: "", unit_cost: "", quantity: "1" });
   // parts already typed for this vendor (vendors without a catalog), to pick instead of typing again
-  type SavedPart = { id: number; part_number: string; mfr_number: string | null; manufacturer?: string | null; description: string | null; unit_cost: number | null };
+  type SavedPart = { id: number; part_number: string; mfr_number: string | null; manufacturer?: string | null; image?: string | null; description: string | null; unit_cost: number | null };
   const [savedQ, setSavedQ] = useState("");
   const [savedQty, setSavedQty] = useState<Record<number, string>>({});
   const [savedRes, setSavedRes] = useState<SavedPart[]>([]);
@@ -307,7 +307,7 @@ export default function KitPartsPanel({
         manual_item_id: it.id,
         part_number: it.part_number,
         mfr_number: it.mfr_number || null,
-        manufacturer: it.manufacturer || vendor?.name || null,
+        manufacturer: it.manufacturer || null,
         description: it.description ?? "",
         unit_cost: it.unit_cost,
         quantity: qty,
@@ -345,7 +345,7 @@ export default function KitPartsPanel({
         supplier_item_id: null,
         part_number: man.part_number.trim(),
         mfr_number: (man.same ? man.part_number.trim() : man.mfr_number.trim()) || null,
-        manufacturer: man.manufacturer.trim() || vendor?.name || null,
+        manufacturer: man.manufacturer.trim() || null,
         description: man.description.trim(),
         unit_cost: cost,
         quantity: Math.max(1, Math.min(1000, Number(man.quantity) || 1)),
@@ -370,7 +370,7 @@ export default function KitPartsPanel({
       manual_item_id: p.manual_item_id ?? null,
       part_number: p.part_number,
       mfr_number: (p.mfr_number ?? "").trim() || null,
-      manufacturer: !p.supplier_item_id && !p.manual_item_id && p.manufacturer && p.manufacturer !== p.vendor ? p.manufacturer : null,
+      manufacturer: !p.supplier_item_id && !p.manual_item_id ? (p.manufacturer ?? "").trim() || null : null,
       description: p.description || null,
       unit_cost: p.unit_cost,
       quantity: p.quantity,
@@ -672,11 +672,12 @@ export default function KitPartsPanel({
                   <div className="max-h-96 overflow-auto rounded border">
                     <table className="w-full text-xs">
                       <thead className="sticky top-0 bg-gray-50 text-left text-gray-500">
-                        <tr><th className="p-1">SKU</th><th className="p-1">Mfr #</th><th className="p-1">Manufacturer</th><th className="p-1">Name</th><th className="p-1">Your cost</th><th className="p-1">Qty</th><th className="p-1" /></tr>
+                        <tr><th className="p-1" /><th className="p-1">SKU</th><th className="p-1">Mfr #</th><th className="p-1">Brand</th><th className="p-1">Name</th><th className="p-1">Your cost</th><th className="p-1">Qty</th><th className="p-1" /></tr>
                       </thead>
                       <tbody>
                         {savedRes.map((it) => (
                           <tr key={it.id} className="border-t align-middle">
+                            <td className="p-1">{it.image ? /* eslint-disable-next-line @next/next/no-img-element */ <img src={it.image} alt="" loading="lazy" className="h-8 w-8 rounded border border-gray-100 bg-white object-contain" /> : <div className="h-8 w-8" />}</td>
                             <td className="p-1 font-mono">{highlight(it.part_number, savedQ)}</td>
                             <td className="p-1">{highlight(it.mfr_number, savedQ)}</td>
                             <td className="p-1">{highlight(it.manufacturer, savedQ)}</td>
@@ -697,7 +698,7 @@ export default function KitPartsPanel({
                   <div className="flex flex-wrap items-end gap-2 rounded bg-gray-50 p-2">
                     <span className="text-xs text-gray-600">Editing the saved part: every product that uses it follows.</span>
                     <label className="text-xs">Manufacturer #<input className={inputCls} value={editSaved.mfr} onChange={(e) => setEditSaved({ ...editSaved, mfr: e.target.value })} /></label>
-                    <label className="text-xs">Manufacturer<input className={inputCls} value={editSaved.brand} placeholder="brand, e.g. Tusk" onChange={(e) => setEditSaved({ ...editSaved, brand: e.target.value })} /></label>
+                    <label className="text-xs">Brand<input className={inputCls} value={editSaved.brand} placeholder="brand, e.g. Tusk" onChange={(e) => setEditSaved({ ...editSaved, brand: e.target.value })} /></label>
                     <label className="min-w-[10rem] flex-1 text-xs">Description<input className={inputCls} value={editSaved.desc} onChange={(e) => setEditSaved({ ...editSaved, desc: e.target.value })} /></label>
                     <label className="text-xs">Cost<input type="number" step="0.01" className={`${inputCls} w-24`} value={editSaved.cost} onChange={(e) => setEditSaved({ ...editSaved, cost: e.target.value })} /></label>
                     <button type="button" className={btnCls} onClick={() => void saveSavedEdit()}>Save</button>
@@ -710,7 +711,7 @@ export default function KitPartsPanel({
               <div className="flex flex-wrap items-end gap-2">
                 <label className="text-xs">Vendor part #<input className={inputCls} value={man.part_number} onChange={(e) => setMan({ ...man, part_number: e.target.value })} /></label>
                 <label className="text-xs">Manufacturer #<input className={inputCls} value={man.same ? man.part_number : man.mfr_number} disabled={man.same} onChange={(e) => setMan({ ...man, mfr_number: e.target.value })} /></label>
-                <label className="text-xs">Manufacturer<input className={inputCls} value={man.manufacturer} placeholder="brand, e.g. Tusk" onChange={(e) => setMan({ ...man, manufacturer: e.target.value })} /></label>
+                <label className="text-xs">Brand<input className={inputCls} value={man.manufacturer} placeholder="brand, e.g. Tusk" onChange={(e) => setMan({ ...man, manufacturer: e.target.value })} /></label>
                 <label className="flex items-center gap-1 pb-2 text-xs" title="Use the vendor part # as the manufacturer # too"><input type="checkbox" checked={man.same} onChange={(e) => setMan({ ...man, same: e.target.checked })} />Same as vendor part #</label>
                 <label className="min-w-[12rem] flex-1 text-xs">Description<input className={inputCls} value={man.description} onChange={(e) => setMan({ ...man, description: e.target.value })} /></label>
                 <label className="text-xs">Cost<input type="number" step="0.01" className={`${inputCls} w-24`} value={man.unit_cost} onChange={(e) => setMan({ ...man, unit_cost: e.target.value })} /></label>
