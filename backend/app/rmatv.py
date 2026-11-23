@@ -610,7 +610,7 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
             if mid:
                 db.execute(text("update products set part_manufacturer_id = :m where id = :p"), {"m": mid, "p": pid})
         label = None
-        for cand in (it.mfr_number, it.sku):
+        for cand in (it.sku,):  # the vendor SKU; a manufacturer number is only used where the person ticks it on the part
             tok = label_token_for(cand or "")
             if tok and TOKEN_RE.fullmatch(tok) and CLS_JOIN not in tok.lower() and len(tok) <= CLS_MAX and not db.execute(
                 text("select 1 from products o where lower(o.custom_label_sku) = lower(:t)"), {"t": tok}

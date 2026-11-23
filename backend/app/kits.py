@@ -992,9 +992,10 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
             if not it:
                 raise HTTPException(400, "A piece points at a catalog part that is no longer in the catalog. Pick it again.")
             number = it.sku  # the distributor's own part number (Autodist SKU, Rocky Mountain part #) is what goes on the purchase order
-            # the label uses the manufacturer number (default) or the vendor SKU, as chosen; no manufacturer number -> the SKU
-            # (a piece marked "use the manufacturer part # for the custom label" always uses it, whatever label_by says)
-            label = label_token_for(it.mfr_number or "") if (label_by != "sku" or p.label_use_mfr) else ""
+            # each piece is written in the label as the vendor's SKU, unless THAT piece is ticked "use the manufacturer part #
+            # for the custom label": then it is written as its manufacturer number (no manufacturer number -> the SKU).
+            # label_by is no longer used; it is still accepted so an older screen can still save.
+            label = label_token_for(it.mfr_number or "") if p.label_use_mfr else ""
             desc = desc or " ".join(x for x in (it.manufacturer, it.name) if x)[:250]
             cost = float(it.dealer_cost) if it.dealer_cost is not None else cost
         saved = None

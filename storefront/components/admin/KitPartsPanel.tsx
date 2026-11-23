@@ -52,11 +52,11 @@ const JOIN = "xx";
 // Same rule as the server (app/kits.py build_cls); the server is the one that decides.
 // Each part once, in the order added, however many are in the kit.
 export type LabelBy = "mfr" | "sku";
-export function previewCls(parts: KitPart[], labelBy: LabelBy = "mfr"): string {
+export function previewCls(parts: KitPart[], _labelBy?: LabelBy): string {
   const seen = new Set<string>();
   const tokens: string[] = [];
   parts.forEach((p) => {
-    const t = (labelBy === "sku" && !p.label_use_mfr ? p.part_number : p.label_part || p.part_number).trim().replace(/[^A-Za-z0-9\-_.]/g, "");
+    const t = (p.label_use_mfr ? p.label_part || p.part_number : p.part_number).trim().replace(/[^A-Za-z0-9\-_.]/g, "");
     if (t && !seen.has(t.toLowerCase())) {
       seen.add(t.toLowerCase());
       tokens.push(t);
@@ -109,8 +109,8 @@ export default function KitPartsPanel({
   // the product's label as it is now (typed or saved). While there is one, adding parts never changes it.
   currentCls?: string | null;
   // how Automatic Distributors parts are written in a NEW label (it is only built when there is none yet)
-  labelBy: LabelBy;
-  onLabelByChange: (v: LabelBy) => void;
+  labelBy?: LabelBy; // no longer used: each part is written as its vendor SKU unless its own box is ticked
+  onLabelByChange?: (v: LabelBy) => void;
   // the product's Manufacturer part # as the server has it (the pieces' numbers, joined), and whether it comes from the pieces
   onMpn?: (mpn: string | null, locked: boolean) => void;
   // the kit's available count from the distributor stock (null when there are no parts), for the product's quantity field
@@ -424,7 +424,7 @@ export default function KitPartsPanel({
     setMsg(null);
     setResults2(null);
     try {
-      const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number; mpn?: string | null; mpn_locked?: boolean; availability?: Availability | null; label_use_mfr_count?: number }>(
+      const r = await api<{ cls: string | null; cls_changed: boolean; duplicates: { sku: string; title: string }[]; listings_to_update: number; mpn?: string | null; mpn_locked?: boolean; availability?: Availability | null }>(
         `/kits/${productId}/parts`,
         { method: "PUT", body: { parts: payloadParts(), label_by: labelBy } }
       );
@@ -439,16 +439,9 @@ export default function KitPartsPanel({
         : r.cls_changed
           ? `Parts saved. Custom label created: ${r.cls}.`
           : `Parts saved. The custom label stays ${r.cls} (it was not changed; edit the label box above to change it).`;
-      // the tick must come back as saved; a server that does not know the field (an old kits.py) drops it without an error
-      const sentTicks = parts.filter((p) => !!p.supplier_item_id && !!p.label_use_mfr).length;
-      const tickLost = r.label_use_mfr_count !== sentTicks;
       if (r.duplicates.length) text += ` Warning: ${r.duplicates.map((d) => d.sku).join(", ")} already use the same label.`;
       if (r.cls && r.listings_to_update > 0 && !canSync) text += ` ${r.listings_to_update} eBay listing(s) still need the new label; an admin must send it.`;
-      setMsg(
-        tickLost
-          ? { kind: "error", text: `The parts were saved, but the "use the manu. part #" tick was NOT (${sentTicks} ticked, ${r.label_use_mfr_count ?? "unknown"} saved). The server is probably running an old kits.py: deploy the new one, restart the backend, then tick and save again.` }
-          : { kind: "success", text }
-      );
+      setMsg({ kind: "success", text });
       // read it again: the Send button decides from the listings' state, and the server may have refreshed the costs
       const fresh = await api<{ parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[] }>(`/kits/${productId}`);
       const loaded = fresh.parts.map((p) => ({ ...p, key: `p${p.id}`, description: p.description ?? "" }));
@@ -575,14 +568,9 @@ export default function KitPartsPanel({
       )}
 
       {parts.some((p) => p.supplier_item_id) && (
-        <label className="flex flex-wrap items-center gap-2 text-xs">
-          Write catalog parts in the label as
-          <select className={inputCls} style={{ width: "auto" }} value={labelBy} disabled={disabled || !!keptCls} onChange={(e) => onLabelByChange(e.target.value as LabelBy)}>
-            <option value="mfr">Manufacturer # (default)</option>
-            <option value="sku">Vendor SKU</option>
-          </select>
-          {keptCls && <span className="text-gray-500">(this product already has a label, so this is not used)</span>}
-        </label>
+        <p className="text-xs text-gray-600">
+          In a new custom label each part is written as its vendor SKU. Tick &quot;Use the manu. part # for the custom label&quot; on a part to write that one as its manufacturer number instead (like SKUxxMANU).
+        </p>
       )}
 
       {/* adding pieces */}
