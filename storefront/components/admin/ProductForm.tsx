@@ -417,15 +417,15 @@ export default function ProductForm({ productId }: { productId?: number }) {
         <Field key={f.key} label={f.label}>
           {(() => {
             const cur = (vals.condition ?? "").trim();
-            const up = cur.toUpperCase();
-            const shown = up === "NEW" || up === "USED" ? up : cur; // "New" saved earlier shows as NEW
+            const low = cur.toLowerCase();
+            const shown = low === "new" ? "New" : low === "used" ? "Used" : cur; // "NEW" or "new" saved earlier shows as New
             return (
               <select className={inputCls} disabled={!fieldAllowed("condition")} value={shown} onChange={(e) => set("condition", e.target.value)}>
                 <option value=""></option>
-                <option value="NEW">NEW</option>
-                <option value="USED">USED</option>
+                <option value="New">New</option>
+                <option value="Used">Used</option>
                 {/* a value saved earlier that is neither (for example from an eBay import) stays selectable instead of being lost */}
-                {shown && shown !== "NEW" && shown !== "USED" && <option value={shown}>{shown}</option>}
+                {shown && shown !== "New" && shown !== "Used" && <option value={shown}>{shown}</option>}
               </select>
             );
           })()}
