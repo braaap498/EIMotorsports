@@ -105,7 +105,7 @@ def _product_titles(db: Session, product_id: int) -> set[str]:
     ltitle = "coalesce(nullif(btrim(lr.title), ''), nullif(btrim(la.title), ''), nullif(btrim(lc.title), ''))"
     rows = db.execute(
         text(
-            f"select p.title as t from products p where p.id = :p union all "
+            f"select p.title as listing_title from products p where p.id = :p union all "
             f"select {ltitle} from channel_listings cl "
             f"left join ebay_report_rows lr on lr.item_id = {_DIGITS} "
             f"left join ebay_api_details la on la.item_id = {_DIGITS} "
@@ -113,7 +113,7 @@ def _product_titles(db: Session, product_id: int) -> set[str]:
         ),
         {"p": product_id},
     ).all()
-    keys = {_norm_title(r.t) for r in rows if r.t and _norm_title(r.t)}
+    keys = {_norm_title(r[0]) for r in rows if r[0] and _norm_title(r[0])}
     if not keys:
         return set()
     owners = _title_owners(db, list(keys))
