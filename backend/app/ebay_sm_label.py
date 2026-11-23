@@ -99,9 +99,10 @@ def _save_copy(db: Session, store: str, recs: list[dict]) -> None:
     db.commit()
 
 
-def _product_titles(db: Session, product_id: int) -> set[str]:
-    """Normalised titles that belong to this product: its own and its linked eBay listings'. A title that another
-    product also has is left out, so one product's label never lands on another product's inventory record."""
+def _product_titles(db: Session, product_id: int) -> tuple[set[str], dict[str, set]]:
+    """(titles that belong to this product, titles left out -> the other product ids that also have them).
+    Normalised titles: the product's own and its linked eBay listings'. A title that another product also has is left
+    out, so one product's label never lands on another product's inventory record."""
     ltitle = "coalesce(nullif(btrim(lr.title), ''), nullif(btrim(la.title), ''), nullif(btrim(lc.title), ''))"
     rows = db.execute(
         text(
@@ -115,9 +116,11 @@ def _product_titles(db: Session, product_id: int) -> set[str]:
     ).all()
     keys = {_norm_title(r[0]) for r in rows if r[0] and _norm_title(r[0])}
     if not keys:
-        return set()
+        return set(), {}
     owners = _title_owners(db, list(keys))
-    return {k for k in keys if owners.get(k, set()) <= {product_id}}
+    kept = {k for k in keys if owners.get(k, set()) <= {product_id}}
+    shared = {k: owners[k] - {product_id} for k in keys - kept}
+    return kept, shared
 
 
 def sync_inventory(db: Session, user: AuthUser, product_id: int, apply: bool) -> list[dict]:
@@ -127,11 +130,20 @@ def sync_inventory(db: Session, user: AuthUser, product_id: int, apply: bool) ->
         raise HTTPException(400, "This product has no custom label.")
     _ensure_table(db)
     stores = [r[0] for r in db.execute(text("select distinct store from channel_listings where product_id = :p"), {"p": product_id}).all() if r[0]]
-    keys = list(_product_titles(db, product_id))
+    kept, shared = _product_titles(db, product_id)
+    keys = list(kept)
     out: list[dict] = []
     if not stores or not keys:
-        return [{"store": "", "sm_product_id": "", "name": "", "before": "", "after": cls, "status": "none",
-                 "detail": "Nothing to match: this product has no linked eBay listing or title."}]
+        if not stores:
+            why = "Nothing to match: none of this product's linked listings has a store name, so there is no store to search."
+        elif shared:
+            ids = sorted({i for v in shared.values() for i in v})
+            why = ("Not matched: every title this product has (its own and its listings') is also the title of product "
+                   + ", ".join(f"#{i}" for i in ids[:5])
+                   + ". The label is only sent to an inventory record when the title belongs to this product alone, so give the products different titles.")
+        else:
+            why = "Nothing to match: this product and its linked listings have no title to look up."
+        return [{"store": stores[0] if stores else "", "sm_product_id": "", "name": "", "before": "", "after": cls, "status": "none", "detail": why}]
     recs = db.execute(
         text("select store, sm_product_id, name, label from ebay_sm_inventory where lower(store) = any(:s) and norm_name = any(:k) order by store, name"),
         {"s": [x.lower() for x in stores], "k": keys},

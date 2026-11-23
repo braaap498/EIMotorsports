@@ -1148,6 +1148,12 @@ def sync_listings(db: Session, user: AuthUser, product_id: int) -> list[dict]:
         except HTTPException as e:
             db.rollback()
             res["status"], res["detail"] = "error", str(e.detail)
+            if "eBay 17" in str(e.detail):
+                res["detail"] += (
+                    f" Item {l['item_id']} was looked up in store '{l['store'] or '(none saved)'}'. eBay 17 means that item is ended/deleted, "
+                    "or it belongs to a different eBay account than that store: check the listing's store on the Live listings tab, "
+                    "or unlink the listing from this product if it is gone."
+                )
         except Exception:
             db.rollback()
             log.exception("CLS sync failed for listing %s", l["item_id"])
