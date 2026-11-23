@@ -801,14 +801,14 @@ def availability_of(db: Session, product_id: int) -> Optional[dict]:
     # aside), counted in pieces. This is what a kit's E&I warehouse quantity is made from (app/stock.py kit_shelf_sql).
     ours = {}
     if len(parts) > 1:
-        from app.stock import set_aside_sql
+        from app.stock import same_part_sql, set_aside_sql
 
         for r in db.execute(
             text(
                 "select k.id, coalesce(("
                 "  select sum(greatest(0, coalesce(p2.quantity_on_hand, 0) - " + set_aside_sql("p2") + ") * greatest(coalesce(k2.quantity, 1), 1)) "
                 "  from product_kit_parts k2 join products p2 on p2.id = k2.product_id "
-                "  where k.supplier_item_id is not null and k2.supplier_item_id = k.supplier_item_id and p2.id <> :p "
+                f"  where {same_part_sql('k', 'k2')} and p2.id <> :p "
                 "    and (select count(*) from product_kit_parts k3 where k3.product_id = p2.id) = 1), 0) as units "
                 "from product_kit_parts k where k.product_id = :p"
             ),
