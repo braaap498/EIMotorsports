@@ -76,7 +76,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
   useEffect(() => setOffset(0), [dist.id, q, only]);
 
   async function add() {
-    if (!form.part_number.trim()) return setFlash({ kind: "error", text: "Type the vendor's part number." });
+    if (!form.part_number.trim()) return setFlash({ kind: "error", text: "Type the SKU." });
     const cost = form.unit_cost.trim() === "" ? null : Number(form.unit_cost);
     if (cost !== null && Number.isNaN(cost)) return setFlash({ kind: "error", text: "Cost must be a number." });
     setAdding(true);
@@ -165,7 +165,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
   }
 
   async function makeProduct(p: Part) {
-    if (!window.confirm(`Make a product from ${p.part_number}?\n\nIt is created unpublished, with this part as its distributor part and the custom label set to the vendor part # when that is free.`)) return;
+    if (!window.confirm(`Make a product from ${p.part_number}?\n\nIt is created unpublished, with this part as its distributor part and the custom label set to the SKU when that is free.`)) return;
     setBusyId(p.id);
     setFlash(null);
     try {
@@ -195,11 +195,11 @@ export default function ManualParts({ dist }: { dist: Dist }) {
 
         <div className="flex flex-wrap items-end gap-2">
           <label className="text-xs">
-            Vendor part #
+            SKU
             <input className={inputCls} value={form.part_number} onChange={(e) => setForm({ ...form, part_number: e.target.value })} />
           </label>
           <label className="text-xs">
-            Manufacturer #
+            Mfr no.
             <input
               className={inputCls}
               value={form.same ? form.part_number : form.mfr_number}
@@ -207,9 +207,9 @@ export default function ManualParts({ dist }: { dist: Dist }) {
               onChange={(e) => setForm({ ...form, mfr_number: e.target.value })}
             />
           </label>
-          <label className="flex items-center gap-1 pb-2 text-xs" title="Use the vendor part # as the manufacturer # too">
+          <label className="flex items-center gap-1 pb-2 text-xs" title="Use the SKU as the Mfr no. too">
             <input type="checkbox" checked={form.same} onChange={(e) => setForm({ ...form, same: e.target.checked })} />
-            Same as vendor part #
+            Same as SKU
           </label>
           <label className="text-xs">
             Brand
@@ -235,7 +235,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
         <div className="flex flex-wrap items-end gap-3">
           <label className="min-w-[14rem] flex-1 text-xs">
             Search
-            <input className={inputCls} value={q} placeholder="vendor part #, manufacturer #, brand or description" onChange={(e) => setQ(e.target.value)} />
+            <input className={inputCls} value={q} placeholder="SKU, Mfr no., brand or name" onChange={(e) => setQ(e.target.value)} />
           </label>
           <label className="text-xs">
             Show
@@ -254,7 +254,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
               Editing <span className="font-mono font-semibold">{edit.part}</span>. Every product that uses it follows.
             </span>
             <label className="text-xs">
-              Manufacturer #
+              Mfr no.
               <input className={inputCls} value={edit.mfr} onChange={(e) => setEdit({ ...edit, mfr: e.target.value })} />
             </label>
             <label className="text-xs">
@@ -289,11 +289,11 @@ export default function ManualParts({ dist }: { dist: Dist }) {
                 <tr>
                   <th className="px-2 py-2">Picture</th>
                   <th className="px-2 py-2">Brand</th>
-                  <th className="px-2 py-2">Vendor part #</th>
-                  <th className="px-2 py-2">Manufacturer #</th>
-                  <th className="px-2 py-2">Description</th>
+                  <th className="px-2 py-2">SKU</th>
+                  <th className="px-2 py-2">Mfr no.</th>
+                  <th className="px-2 py-2">Name</th>
                   <th className="px-2 py-2">Cost</th>
-                  <th className="px-2 py-2">Product</th>
+                  <th className="px-2 py-2">Ours</th>
                   <th className="px-2 py-2"></th>
                 </tr>
               </thead>

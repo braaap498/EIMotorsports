@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "./ui";
@@ -33,7 +34,11 @@ type Item = {
   dealer_cost: number | null;
   qty_other: number;
   upc: string | null;
+  unit_of_measure: string | null;
   active: boolean;
+  product_id: number | null; // the SINGLE product of this part (never a kit that contains it)
+  product_title: string | null;
+  products: number;
 };
 type FieldDef = { key: string; label: string; required: boolean };
 type Finish = { ok: boolean; needs_review: boolean; missing?: number; held?: number; stored: number; new: number; skipped?: number; retired?: number };
@@ -56,11 +61,11 @@ type Msg = { kind: "error" | "success" | "info"; text: string } | null;
 
 /* ------------------------------------------------------------------ catalog */
 
-type Filters = { q: string; brand: string; inStock: boolean; status: "active" | "inactive" | "all"; sort: string; desc: boolean };
+type Filters = { q: string; brand: string; inStock: boolean; status: "active" | "inactive" | "all"; only: "all" | "no_product" | "has_product"; sort: string; desc: boolean };
 const LIMIT = 50;
 
 function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number }) {
-  const [f, setF] = useState<Filters>({ q: "", brand: "", inStock: false, status: "active", sort: "sku", desc: false });
+  const [f, setF] = useState<Filters>({ q: "", brand: "", inStock: false, status: "active", only: "all", sort: "sku", desc: false });
   const [qDraft, setQDraft] = useState("");
   const [offset, setOffset] = useState(0);
   const [items, setItems] = useState<Item[] | null>(null);
@@ -68,6 +73,27 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
   const [brands, setBrands] = useState<{ name: string; count: number }[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [flash, setFlash] = useState<Msg>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [tick, setTick] = useState(0);
+
+  async function makeProduct(it: Item) {
+    if (!window.confirm(`Make a product from ${it.sku}?\n\nIt is created unpublished, with this part as its distributor part and the custom label set to the Mfr no. (or the SKU) when that is free.`)) return;
+    setBusyId(it.id);
+    setFlash(null);
+    try {
+      const r = await api<{ product_id: number; title: string; custom_label: string | null }>(`/rmatv/items/${it.id}/make-product`, { method: "POST" });
+      setFlash({
+        kind: "info",
+        text: `Made product #${r.product_id}: ${r.title}${r.custom_label ? ` (custom label ${r.custom_label})` : ". Its custom label was left blank: that number is already a label or cannot be one"}. It is NOT published; set a price, photos and category on the product.`,
+      });
+      setTick((x) => x + 1);
+    } catch (e) {
+      setFlash({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   useEffect(() => {
     api<{ items: { name: string; count: number }[] }>("/rmatv/brands").then((r) => setBrands(r.items)).catch(() => setBrands([]));
@@ -81,6 +107,7 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
       if (f.q) p.set("q", f.q);
       if (f.brand) p.set("brand", f.brand);
       if (f.inStock) p.set("in_stock", "true");
+      if (f.only !== "all") p.set("only", f.only);
       if (f.desc) p.set("desc", "true");
       const r = await api<{ total: number; items: Item[] }>(`/rmatv/items?${p}`);
       setItems(r.items);
@@ -90,7 +117,7 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
     } finally {
       setLoading(false);
     }
-  }, [f, offset, version]);
+  }, [f, offset, version, tick]);
 
   useEffect(() => {
     if (hasData) void load();
@@ -122,7 +149,7 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
     <div className="space-y-3">
       <div className="flex flex-wrap items-end gap-3 rounded border border-gray-200 bg-white p-3 text-sm">
         <label className="min-w-[16rem] flex-1">
-          <span className="mb-1 block text-xs text-gray-500">Search part number, manufacturer number, name, brand or UPC</span>
+          <span className="mb-1 block text-xs text-gray-500">Search SKU, Mfr no., name, brand or barcode</span>
           <input
             className={inputCls}
             value={qDraft}
@@ -149,6 +176,14 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
             <option value="all">Both</option>
           </select>
         </label>
+        <label>
+          <span className="mb-1 block text-xs text-gray-500">Ours</span>
+          <select className={`${inputCls} !w-40`} value={f.only} onChange={(e) => change({ only: e.target.value as Filters["only"] })}>
+            <option value="all">(any)</option>
+            <option value="no_product">No product yet</option>
+            <option value="has_product">Has a product</option>
+          </select>
+        </label>
         <label className="flex items-center gap-2 pb-2">
           <input type="checkbox" checked={f.inStock} onChange={(e) => change({ inStock: e.target.checked })} />
           In stock only
@@ -159,24 +194,28 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
       </div>
 
       {error && <Notice kind="error">{error}</Notice>}
+      {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
 
       <div className="overflow-x-auto rounded border border-gray-200 bg-white">
         <table className="w-full text-left text-sm">
           <thead className="bg-gray-50 text-xs text-gray-600">
             <tr>
-              {th("sku", "Part #")}
-              {th("mfr", "Mfr #")}
               {th("brand", "Brand")}
+              {th("sku", "SKU")}
+              {th("mfr", "Mfr no.")}
               {th("name", "Name")}
-              <th className="px-3 py-2">UPC</th>
+              <th className="px-3 py-2">Unit</th>
               {th("list", "List", true)}
-              {th("cost", "Your cost", true)}
-              {th("stock", "Stock", true)}
+              {th("cost", "Cost", true)}
+              {th("stock", "Total", true)}
+              <th className="px-3 py-2">Barcode</th>
+              <th className="px-3 py-2">Ours</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {(items ?? []).map((it) => (
               <tr key={it.id} className={it.active ? "" : "bg-gray-50 text-gray-500"}>
+                <td className="px-3 py-2">{it.manufacturer}</td>
                 <td className="px-3 py-2 font-mono">
                   {it.sku}
                   {!it.active && (
@@ -186,17 +225,28 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
                   )}
                 </td>
                 <td className="px-3 py-2">{it.mfr_number}</td>
-                <td className="px-3 py-2">{it.manufacturer}</td>
                 <td className="px-3 py-2">{it.name}</td>
-                <td className="px-3 py-2 font-mono">{it.upc}</td>
+                <td className="px-3 py-2">{it.unit_of_measure}</td>
                 <td className="px-3 py-2 text-right">{money(it.list_price)}</td>
                 <td className="px-3 py-2 text-right">{money(it.dealer_cost)}</td>
                 <td className="px-3 py-2 text-right">{n(it.qty_other)}</td>
+                <td className="px-3 py-2 font-mono">{it.upc}</td>
+                <td className="whitespace-nowrap px-3 py-2">
+                  {it.product_id ? (
+                    <Link href={`/admin/products/${it.product_id}`} className="text-blue-700 hover:underline" title={it.product_title ?? ""}>
+                      #{it.product_id}
+                    </Link>
+                  ) : (
+                    <button type="button" className={btn2Cls} disabled={busyId === it.id || !it.active} onClick={() => void makeProduct(it)}>
+                      Make product
+                    </button>
+                  )}
+                </td>
               </tr>
             ))}
             {items && items.length === 0 && (
               <tr>
-                <td colSpan={8} className="p-6 text-center text-gray-500">
+                <td colSpan={10} className="p-6 text-center text-gray-500">
                   Nothing found. Try fewer words.
                 </td>
               </tr>
@@ -354,7 +404,7 @@ function RmatvImport({ runs, onChanged }: { runs: Run[]; onChanged: () => void }
             ))}
           </div>
           {columnsReused && <Notice kind="error">Two fields use the same column. Each field needs its own column.</Notice>}
-          {staged.mapping.sku === "" && <Notice kind="error">Choose the column that holds the Rocky Mountain part number. It is what goes on the purchase order.</Notice>}
+          {staged.mapping.sku === "" && <Notice kind="error">Choose the column that holds the SKU (the Rocky Mountain part number). It is what goes on the purchase order.</Notice>}
           {staged.mapping.dealer_cost === "" && staged.mapping.sku !== "" && (
             <Notice kind="info">No cost column chosen. Parts will be stored without a cost, so purchase orders would start at $0.00. Pick your dealer price column if the file has one.</Notice>
           )}
