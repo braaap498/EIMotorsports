@@ -117,6 +117,9 @@ def catalog_loaded(db: Session, name: Optional[str]) -> bool:
 
 
 SUPPLIER_RE = "^(autodist|rmatv)$"
+# "The product of a catalog part" means the SINGLE product: exactly one distributor-part line, quantity 1. A kit that
+# merely contains the part is not it. (u = the product_kit_parts row that points at the part)
+SINGLE_USE = "(u.quantity = 1 and (select count(*) from product_kit_parts z where z.product_id = u.product_id) = 1)"
 # a part's stock across every warehouse column (Rocky Mountain has just the one, qty_other)
 _STOCK = "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0) + coalesce(s.qty_other, 0))"
 
@@ -154,8 +157,8 @@ def manual_catalog(
     user: AuthUser = Depends(current_user),
 ):
     """The parts already typed for this distributor, to pick from instead of typing them again. Words match the vendor part #,
-    the manufacturer # or the description (dashes and spaces in part numbers are ignored). Each part also says which product
-    uses it (product_id, product_title, products = how many), and `only` limits the list to parts with / without a product.
+    the manufacturer # or the description (dashes and spaces in part numbers are ignored). Each part also says which SINGLE product points at it
+    (product_id, product_title, products = how many; a kit that contains the part does not count), and `only` limits the list to parts with / without a product.
     Cost only for people who may see it."""
     see_cost = has_perm(user, "products.edit_price")
     where = ["m.distributor_id = :d"]
@@ -167,7 +170,7 @@ def manual_catalog(
             f"(m.part_number ilike :w{i} or m.mfr_number ilike :w{i} or m.description ilike :w{i} or m.manufacturer ilike :w{i} "
             f"or m.part_norm like :p{i} or upper(regexp_replace(coalesce(m.mfr_number, ''), '[^A-Za-z0-9]', '', 'g')) like :p{i})"
         )
-    used = "exists (select 1 from product_kit_parts u where u.manual_item_id = m.id)"
+    used = f"exists (select 1 from product_kit_parts u where u.manual_item_id = m.id and {SINGLE_USE})"
     if only == "no_product":
         where.append(f"not {used}")
     elif only == "has_product":
@@ -178,8 +181,8 @@ def manual_catalog(
         rows = db.execute(
             text(
                 "select m.id, m.part_number, m.mfr_number, m.manufacturer, m.image_key, m.description, m.unit_cost, "
-                "(select u.product_id from product_kit_parts u where u.manual_item_id = m.id order by u.product_id limit 1) as product_id, "
-                "(select count(distinct u.product_id) from product_kit_parts u where u.manual_item_id = m.id) as products "
+                f"(select u.product_id from product_kit_parts u where u.manual_item_id = m.id and {SINGLE_USE} order by u.product_id limit 1) as product_id, "
+                f"(select count(distinct u.product_id) from product_kit_parts u where u.manual_item_id = m.id and {SINGLE_USE}) as products "
                 f"from manual_catalog_items m where {clause} order by lower(m.part_number), m.id limit :n offset :o"
             ),
             params,
@@ -196,6 +199,7 @@ def manual_catalog(
         "items": [
             {
                 "id": r.id,
+                "sku": r.part_number,  # the column is called SKU, as in the Automatic Distributors catalog
                 "part_number": r.part_number,
                 "mfr_number": r.mfr_number,
                 "manufacturer": r.manufacturer,
@@ -351,11 +355,14 @@ def make_manual_product(item_id: int, db: Session = Depends(get_db)):
     if not m:
         raise HTTPException(404, "That saved part no longer exists.")
     used = db.execute(
-        text("select p.id, p.title from product_kit_parts k join products p on p.id = k.product_id where k.manual_item_id = :i order by p.id limit 1"),
+        text(
+            "select p.id, p.title from product_kit_parts u join products p on p.id = u.product_id "
+            f"where u.manual_item_id = :i and {SINGLE_USE} order by p.id limit 1"
+        ),
         {"i": item_id},
     ).first()
     if used:
-        raise HTTPException(409, f"{m.part_number} already has a product: #{used.id} {used.title}")
+        raise HTTPException(409, f"{m.part_number} already has its single product: #{used.id} {used.title}")
     title = ((m.description or "").strip() or " ".join(x for x in ((m.mfr_number or "").strip(), m.part_number) if x))[:200]
     base = slugify(title) or slugify(f"part {m.part_number}") or "part"
     slug, k = base, 1

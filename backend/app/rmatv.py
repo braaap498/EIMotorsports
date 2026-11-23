@@ -76,10 +76,10 @@ def ensure_columns() -> None:
 # --------------------------------------------------------------------------
 # key, label shown on the page, what it is for
 FIELDS: list[tuple[str, str, bool]] = [
-    ("sku", "Rocky Mountain part number", True),
+    ("sku", "SKU", True),
     ("name", "Name / description", False),
     ("manufacturer", "Brand", False),
-    ("mfr_number", "Manufacturer part number", False),
+    ("mfr_number", "Mfr #", False),
     ("dealer_cost", "Your cost (dealer price)", False),
     ("list_price", "List / retail price", False),
     ("qty", "Quantity in stock", False),
@@ -129,7 +129,7 @@ def _check_mapping(mapping: dict[str, int]) -> dict[str, int]:
         if not isinstance(i, int) or i < 0 or i >= MAX_COLUMNS:
             raise HTTPException(400, "A chosen column is out of range.")
     if "sku" not in mapping:
-        raise HTTPException(400, "Choose which column holds the Rocky Mountain part number.")
+        raise HTTPException(400, "Choose which column holds the SKU.")
     if len(set(mapping.values())) != len(mapping):
         raise HTTPException(400, "Two fields are set to the same column. Each field needs its own column.")
     return mapping
@@ -477,6 +477,7 @@ def items(
     brand: Optional[str] = Query(None, max_length=100),
     in_stock: bool = False,
     status: str = Query("active", pattern="^(active|inactive|all)$"),
+    only: str = Query("all", pattern="^(all|no_product|has_product)$", description="parts with / without their single product"),
     sort: str = Query("sku", pattern="^(sku|name|brand|mfr|cost|list|stock|updated)$"),
     desc: bool = False,
     limit: int = Query(50, ge=1, le=200),
@@ -510,20 +511,118 @@ def items(
             params[f"u{i}"] = f"%{digits}%"
             cond += f" or s.upc_norm like :u{i}"
         where.append(f"({cond})")
+    from app.kits import SINGLE_USE  # late import: kits does not import this module, but keep start-up order simple
+
+    used = f"exists (select 1 from product_kit_parts u where u.supplier_item_id = s.id and {SINGLE_USE})"
+    if only == "no_product":
+        where.append(f"not {used}")
+    elif only == "has_product":
+        where.append(used)
     clause = " and ".join(where)
     total = db.execute(text(f"select count(*) from supplier_items s where {clause}"), params).scalar()
     order = f"{_SORTS[sort]} {'desc' if desc else 'asc'} nulls last, s.sku"
     rows = db.execute(
         text(
             "select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, s.dealer_cost, "
-            f"s.qty_other, s.upc, s.active, s.updated_at from supplier_items s where {clause} order by {order} limit :n offset :o"
+            "s.qty_other, s.upc, s.active, s.updated_at, "
+            # only the SINGLE product that points at this part; a kit that contains it is not shown
+            f"(select u.product_id from product_kit_parts u where u.supplier_item_id = s.id and {SINGLE_USE} order by u.product_id limit 1) as product_id, "
+            f"(select count(distinct u.product_id) from product_kit_parts u where u.supplier_item_id = s.id and {SINGLE_USE}) as products "
+            f"from supplier_items s where {clause} order by {order} limit :n offset :o"
         ),
         params,
     ).all()
+    ids = [r.product_id for r in rows if r.product_id]
+    titles = {}
+    if ids:
+        titles = {t.id: t.title for t in db.execute(text("select id, title from products where id = any(cast(:i as bigint[]))"), {"i": ids}).all()}
     out = []
     for r in rows:
         d = dict(r._mapping)
         for k in ("list_price", "dealer_cost"):
             d[k] = float(d[k]) if d[k] is not None else None
+        d["product_title"] = titles.get(d["product_id"])
+        d["products"] = int(d["products"] or 0)
         out.append(d)
     return {"total": total, "items": out}
+
+
+@router.post("/items/{item_id}/make-product", status_code=201)
+def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Make the single product for one Rocky Mountain part, the way the Automatic Distributors page does: a new product (not
+    published: no price yet) with one distributor part (quantity 1) that follows the catalog part, the part's manufacturer
+    number on the product, and the custom label set to the manufacturer number (else the SKU) when that is free. Refused only when
+    the part's SINGLE product already exists; a kit that contains the part does not stop it."""
+    from app.admin_catalog import slugify  # late imports: those modules import this one's helpers
+    from app.autodist import _product_title
+    from app.kits import CLS_JOIN, CLS_MAX, SINGLE_USE, TOKEN_RE, label_token_for, parts_mpn
+
+    it = db.execute(
+        text("select id, sku, mfr_number, manufacturer, name, dealer_cost, upc from supplier_items where id = :i and supplier = :s"),
+        {"i": item_id, "s": SUPPLIER},
+    ).first()
+    if not it:
+        raise HTTPException(404, "That part is not in the Rocky Mountain catalog.")
+    used = db.execute(
+        text(
+            "select p.id, p.title from product_kit_parts u join products p on p.id = u.product_id "
+            f"where u.supplier_item_id = :i and {SINGLE_USE} order by p.id limit 1"
+        ),
+        {"i": item_id},
+    ).first()
+    if used:
+        raise HTTPException(409, f"{it.sku} already has its single product: #{used.id} {used.title}")
+    dist = db.execute(
+        text("select id from po_distributors where name ~* 'rocky\\s*mountain\\s*atv|rmatv' order by id limit 1")
+    ).scalar()
+    if dist is None:
+        raise HTTPException(400, "Add Rocky Mountain ATV under Distributors first; the part entry needs it.")
+    title = (_product_title(it.manufacturer, it.name, it.mfr_number) or it.sku)[:200]
+    base = slugify(title) or slugify(f"part {it.sku}") or "part"
+    slug, k = base, 1
+    while db.execute(text("select 1 from products where slug = :s"), {"s": slug}).first():
+        k += 1
+        slug = f"{base}-{k}"
+    try:
+        pid = db.execute(
+            text(
+                "insert into products (title, slug, manufacturer_part_number, barcode, cost, quantity_on_hand, condition, is_published, is_active, is_universal, show_part_number) "
+                "values (:title, :slug, :mpn, :bc, :cost, 0, 'New', false, true, false, false) returning id"
+            ),
+            {"title": title, "slug": slug, "mpn": (it.mfr_number or "").strip() or None,
+             "bc": re.sub(r"\D", "", it.upc or "") or None, "cost": it.dealer_cost},
+        ).scalar()
+        db.execute(
+            text(
+                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order) "
+                "values (:p, :d, :si, :pn, :desc, :uc, 1, 0)"
+            ),
+            {"p": pid, "d": dist, "si": it.id, "pn": it.sku,
+             "desc": (" ".join(x for x in (it.manufacturer, it.name) if x))[:250] or None, "uc": it.dealer_cost},
+        )
+        follow = parts_mpn(db, pid)
+        if follow:
+            db.execute(text("update products set manufacturer_part_number = :m where id = :p"), {"m": follow, "p": pid})
+        if (it.manufacturer or "").strip():
+            from app.manufacturers import find_or_create
+
+            mid = find_or_create(db, it.manufacturer)
+            if mid:
+                db.execute(text("update products set part_manufacturer_id = :m where id = :p"), {"m": mid, "p": pid})
+        label = None
+        for cand in (it.mfr_number, it.sku):
+            tok = label_token_for(cand or "")
+            if tok and TOKEN_RE.fullmatch(tok) and CLS_JOIN not in tok.lower() and len(tok) <= CLS_MAX and not db.execute(
+                text("select 1 from products o where lower(o.custom_label_sku) = lower(:t)"), {"t": tok}
+            ).first():
+                db.execute(text("update products set custom_label_sku = :t, updated_at = now() where id = :p"), {"t": tok, "p": pid})
+                label = tok
+                break
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not make the product: {str(e)[:300]}")
+    return {"product_id": pid, "title": title, "custom_label": label, "published": False}
