@@ -511,23 +511,24 @@ def items(
             params[f"u{i}"] = f"%{digits}%"
             cond += f" or s.upc_norm like :u{i}"
         where.append(f"({cond})")
-    from app.kits import SINGLE_USE  # late import: kits does not import this module, but keep start-up order simple
+    from app.kits import SINGLES_CTE, single_count, single_exists, single_pick  # late import, like the other modules here
 
-    used = f"exists (select 1 from product_kit_parts u where u.supplier_item_id = s.id and {SINGLE_USE})"
+    used = single_exists("supplier")
     if only == "no_product":
         where.append(f"not {used}")
     elif only == "has_product":
         where.append(used)
     clause = " and ".join(where)
-    total = db.execute(text(f"select count(*) from supplier_items s where {clause}"), params).scalar()
+    total = db.execute(text(f"with {SINGLES_CTE} select count(*) from supplier_items s where {clause}"), params).scalar()
     order = f"{_SORTS[sort]} {'desc' if desc else 'asc'} nulls last, s.sku"
     rows = db.execute(
         text(
+            f"with {SINGLES_CTE} "
             "select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, s.dealer_cost, "
             "s.qty_other, s.upc, s.active, s.updated_at, "
-            # only the SINGLE product that points at this part; a kit that contains it is not shown
-            f"(select u.product_id from product_kit_parts u where u.supplier_item_id = s.id and {SINGLE_USE} order by u.product_id limit 1) as product_id, "
-            f"(select count(distinct u.product_id) from product_kit_parts u where u.supplier_item_id = s.id and {SINGLE_USE}) as products "
+            # only the SINGLE product of this part (linked, or the same barcode / manufacturer #); a kit that contains it is not shown
+            f"{single_pick('supplier')} as product_id, "
+            f"{single_count('supplier')} as products "
             f"from supplier_items s where {clause} order by {order} limit :n offset :o"
         ),
         params,
@@ -555,7 +556,7 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
     the part's SINGLE product already exists; a kit that contains the part does not stop it."""
     from app.admin_catalog import slugify  # late imports: those modules import this one's helpers
     from app.autodist import _product_title
-    from app.kits import CLS_JOIN, CLS_MAX, SINGLE_USE, TOKEN_RE, label_token_for, parts_mpn
+    from app.kits import CLS_JOIN, CLS_MAX, SINGLES_CTE, TOKEN_RE, label_token_for, parts_mpn, single_pick
 
     it = db.execute(
         text("select id, sku, mfr_number, manufacturer, name, dealer_cost, upc from supplier_items where id = :i and supplier = :s"),
@@ -564,10 +565,7 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
     if not it:
         raise HTTPException(404, "That part is not in the Rocky Mountain catalog.")
     used = db.execute(
-        text(
-            "select p.id, p.title from product_kit_parts u join products p on p.id = u.product_id "
-            f"where u.supplier_item_id = :i and {SINGLE_USE} order by p.id limit 1"
-        ),
+        text(f"with {SINGLES_CTE} select p.id, p.title from supplier_items s join products p on p.id = {single_pick('supplier')} where s.id = :i"),
         {"i": item_id},
     ).first()
     if used:

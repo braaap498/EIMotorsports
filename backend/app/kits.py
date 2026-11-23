@@ -117,9 +117,50 @@ def catalog_loaded(db: Session, name: Optional[str]) -> bool:
 
 
 SUPPLIER_RE = "^(autodist|rmatv)$"
-# "The product of a catalog part" means the SINGLE product: exactly one distributor-part line, quantity 1. A kit that
-# merely contains the part is not it. (u = the product_kit_parts row that points at the part)
-SINGLE_USE = "(u.quantity = 1 and (select count(*) from product_kit_parts z where z.product_id = u.product_id) = 1)"
+# "The product of a catalog part" means the SINGLE product, never a kit that merely contains the part. A single product is
+# one with no distributor-part line or exactly one (quantity 1). It belongs to a catalog part when
+#   * its one part line points at the part (link), or
+#   * it has no pointer to a different part and its barcode (UPC) or manufacturer part # equals the part's
+#     (how products that were made before the part lines existed, or by hand, are recognised; same rule as Automatic's "ours").
+SINGLES_CTE = (
+    "singles as ("
+    " select p.id,"
+    " nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') as upc_n,"
+    " nullif(upper(regexp_replace(coalesce(p.manufacturer_part_number, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n,"
+    " (select z.supplier_item_id from product_kit_parts z where z.product_id = p.id limit 1) as si_id,"
+    " (select z.manual_item_id from product_kit_parts z where z.product_id = p.id limit 1) as mi_id"
+    " from products p"
+    " where (select count(*) from product_kit_parts z where z.product_id = p.id) <= 1"
+    " and not exists (select 1 from product_kit_parts z where z.product_id = p.id and coalesce(z.quantity, 1) <> 1))"
+)
+_M_NORM = "upper(regexp_replace(coalesce(m.mfr_number, ''), '[^A-Za-z0-9]', '', 'g'))"
+
+
+def single_conds(kind: str) -> list[str]:
+    """Conditions (on a row x of the singles CTE) under which x is the single product of a catalog part.
+    kind 'supplier': the part is supplier_items s; kind 'manual': the part is manual_catalog_items m."""
+    if kind == "supplier":
+        return [
+            "x.si_id = s.id",
+            "(length(coalesce(s.upc_norm, '')) >= 8 and x.upc_n = s.upc_norm and x.mi_id is null and (x.si_id is null or x.si_id = s.id))",
+            "(coalesce(s.mfr_number_norm, '') <> '' and x.mpn_n = s.mfr_number_norm and x.mi_id is null and (x.si_id is null or x.si_id = s.id))",
+        ]
+    return [
+        "x.mi_id = m.id",
+        f"({_M_NORM} <> '' and x.mpn_n = {_M_NORM} and x.si_id is null and (x.mi_id is null or x.mi_id = m.id))",
+    ]
+
+
+def single_exists(kind: str) -> str:
+    return "(" + " or ".join(f"exists (select 1 from singles x where {c})" for c in single_conds(kind)) + ")"
+
+
+def single_pick(kind: str) -> str:
+    return "(select min(x.id) from singles x where " + " or ".join(single_conds(kind)) + ")"
+
+
+def single_count(kind: str) -> str:
+    return "(select count(*) from singles x where " + " or ".join(single_conds(kind)) + ")"
 # a part's stock across every warehouse column (Rocky Mountain has just the one, qty_other)
 _STOCK = "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0) + coalesce(s.qty_other, 0))"
 
@@ -170,19 +211,20 @@ def manual_catalog(
             f"(m.part_number ilike :w{i} or m.mfr_number ilike :w{i} or m.description ilike :w{i} or m.manufacturer ilike :w{i} "
             f"or m.part_norm like :p{i} or upper(regexp_replace(coalesce(m.mfr_number, ''), '[^A-Za-z0-9]', '', 'g')) like :p{i})"
         )
-    used = f"exists (select 1 from product_kit_parts u where u.manual_item_id = m.id and {SINGLE_USE})"
+    used = single_exists("manual")
     if only == "no_product":
         where.append(f"not {used}")
     elif only == "has_product":
         where.append(used)
     clause = " and ".join(where)
     try:
-        total = db.execute(text(f"select count(*) from manual_catalog_items m where {clause}"), params).scalar()
+        total = db.execute(text(f"with {SINGLES_CTE} select count(*) from manual_catalog_items m where {clause}"), params).scalar()
         rows = db.execute(
             text(
+                f"with {SINGLES_CTE} "
                 "select m.id, m.part_number, m.mfr_number, m.manufacturer, m.image_key, m.description, m.unit_cost, "
-                f"(select u.product_id from product_kit_parts u where u.manual_item_id = m.id and {SINGLE_USE} order by u.product_id limit 1) as product_id, "
-                f"(select count(distinct u.product_id) from product_kit_parts u where u.manual_item_id = m.id and {SINGLE_USE}) as products "
+                f"{single_pick('manual')} as product_id, "
+                f"{single_count('manual')} as products "
                 f"from manual_catalog_items m where {clause} order by lower(m.part_number), m.id limit :n offset :o"
             ),
             params,
@@ -355,10 +397,7 @@ def make_manual_product(item_id: int, db: Session = Depends(get_db)):
     if not m:
         raise HTTPException(404, "That saved part no longer exists.")
     used = db.execute(
-        text(
-            "select p.id, p.title from product_kit_parts u join products p on p.id = u.product_id "
-            f"where u.manual_item_id = :i and {SINGLE_USE} order by p.id limit 1"
-        ),
+        text(f"with {SINGLES_CTE} select p.id, p.title from manual_catalog_items m join products p on p.id = {single_pick('manual')} where m.id = :i"),
         {"i": item_id},
     ).first()
     if used:
