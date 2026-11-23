@@ -672,6 +672,9 @@ def ensure_mfr_column() -> None:
     try:
         db.execute(text("alter table product_kit_parts add column if not exists mfr_number text"))
         db.execute(text("alter table product_kit_parts add column if not exists manufacturer text"))  # brand of a typed piece (catalog / saved parts have their own)
+        # "Use the manufacturer part # for the custom label": the person's own choice for this piece. Such a piece is written
+        # in the label as its manufacturer number, and the distributor screens do not treat that as a wrong label.
+        db.execute(text("alter table product_kit_parts add column if not exists label_use_mfr boolean not null default false"))
         db.execute(text("create table if not exists kit_mfr_backfill (id int primary key default 1, done_at timestamptz not null default now(), summary text)"))
         db.commit()
     except Exception:
@@ -873,6 +876,8 @@ class KitPartIn(BaseModel):
     manual_item_id: Optional[int] = None
     # the brand of a typed piece (a catalog or saved part has its own)
     manufacturer: Optional[str] = Field(None, max_length=80)
+    # catalog pieces only: write this piece in the custom label (and show it on the distributor screens) as its manufacturer number
+    label_use_mfr: bool = False
 
 
 LABEL_BY = "^(mfr|sku)$"  # what an Automatic Distributors part is written as in a NEW label: manufacturer number or vendor SKU
@@ -943,7 +948,7 @@ def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]
             "select k.id, k.distributor_id, d.name as vendor, k.supplier_item_id, k.manual_item_id, k.part_number, "
             "coalesce(nullif(btrim(mi.description), ''), k.description) as description, "
             "coalesce(mi.unit_cost, k.unit_cost) as unit_cost, k.quantity, k.sort_order, "
-            "coalesce(nullif(btrim(si.mfr_number), ''), k.part_number) as label_part, "
+            "coalesce(nullif(btrim(si.mfr_number), ''), k.part_number) as label_part, coalesce(k.label_use_mfr, false) as label_use_mfr, "
             "coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), ''), nullif(btrim(mi.mfr_number), '')) as mfr_number, "
             # the brand of the piece: the catalog's, the saved part's or the typed one. Never the distributor's name.
             "coalesce(nullif(btrim(si.manufacturer), ''), nullif(btrim(mi.manufacturer), ''), nullif(btrim(k.manufacturer), '')) as manufacturer from product_kit_parts k "
@@ -988,7 +993,8 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
                 raise HTTPException(400, "A piece points at a catalog part that is no longer in the catalog. Pick it again.")
             number = it.sku  # the distributor's own part number (Autodist SKU, Rocky Mountain part #) is what goes on the purchase order
             # the label uses the manufacturer number (default) or the vendor SKU, as chosen; no manufacturer number -> the SKU
-            label = label_token_for(it.mfr_number or "") if label_by != "sku" else ""
+            # (a piece marked "use the manufacturer part # for the custom label" always uses it, whatever label_by says)
+            label = label_token_for(it.mfr_number or "") if (label_by != "sku" or p.label_use_mfr) else ""
             desc = desc or " ".join(x for x in (it.manufacturer, it.name) if x)[:250]
             cost = float(it.dealer_cost) if it.dealer_cost is not None else cost
         saved = None
@@ -1012,16 +1018,17 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
         clean.append({"distributor_id": p.distributor_id, "supplier_item_id": p.supplier_item_id, "part_number": number,
                       "label": label or number, "description": desc, "unit_cost": cost, "quantity": p.quantity, "sort_order": i,
                       "mfr_number": mfr, "manual_item_id": saved.id if saved is not None else None,
+                      "label_use_mfr": bool(p.label_use_mfr and p.supplier_item_id),
                       "manufacturer": ((p.manufacturer or "").strip() or None) if (not p.supplier_item_id and saved is None) else None})
     for c in clean:
         db.execute(
             text(
-                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order, mfr_number, manual_item_id, manufacturer) "
-                "values (:p, :d, :si, :pn, :desc, :uc, :q, :so, :mfr, :mi, :brand)"
+                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order, mfr_number, manual_item_id, manufacturer, label_use_mfr) "
+                "values (:p, :d, :si, :pn, :desc, :uc, :q, :so, :mfr, :mi, :brand, :lum)"
             ),
             {"p": product_id, "d": c["distributor_id"], "si": c["supplier_item_id"], "pn": c["part_number"],
              "desc": c["description"], "uc": c["unit_cost"], "q": c["quantity"], "so": c["sort_order"], "mfr": c["mfr_number"],
-             "mi": c["manual_item_id"], "brand": c["manufacturer"]},
+             "mi": c["manual_item_id"], "brand": c["manufacturer"], "lum": c["label_use_mfr"]},
         )
     # Remember typed pieces of distributors with no catalog, so the next product can pick them instead of typing them again.
     # A part already saved keeps its details (only blanks are filled), and a failure here never stops the parts from saving.

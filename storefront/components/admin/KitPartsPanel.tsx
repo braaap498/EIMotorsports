@@ -14,6 +14,8 @@ export type KitPart = {
   part_number: string;
   // what goes in the custom label: the manufacturer number for Autodist parts (part_number stays the vendor SKU, which the PO needs)
   label_part?: string | null;
+  // catalog parts: the person ticked "Use the manufacturer part # for the custom label" (the label and the distributor screens use the Mfr #)
+  label_use_mfr?: boolean;
   description: string;
   unit_cost: number | null;
   quantity: number;
@@ -54,7 +56,7 @@ export function previewCls(parts: KitPart[], labelBy: LabelBy = "mfr"): string {
   const seen = new Set<string>();
   const tokens: string[] = [];
   parts.forEach((p) => {
-    const t = (labelBy === "sku" ? p.part_number : p.label_part || p.part_number).trim().replace(/[^A-Za-z0-9\-_.]/g, "");
+    const t = (labelBy === "sku" && !p.label_use_mfr ? p.part_number : p.label_part || p.part_number).trim().replace(/[^A-Za-z0-9\-_.]/g, "");
     if (t && !seen.has(t.toLowerCase())) {
       seen.add(t.toLowerCase());
       tokens.push(t);
@@ -370,6 +372,7 @@ export default function KitPartsPanel({
       manual_item_id: p.manual_item_id ?? null,
       part_number: p.part_number,
       mfr_number: (p.mfr_number ?? "").trim() || null,
+      label_use_mfr: !!p.supplier_item_id && !!p.label_use_mfr,
       manufacturer: !p.supplier_item_id && !p.manual_item_id ? (p.manufacturer ?? "").trim() || null : null,
       description: p.description || null,
       unit_cost: p.unit_cost,
@@ -481,6 +484,15 @@ export default function KitPartsPanel({
                         value={p.mfr_number ?? ""}
                         onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, mfr_number: e.target.value } : x)))}
                       />
+                      {p.supplier_item_id ? (
+                        <span className="flex items-center gap-1 font-normal" title="The custom label is written with this part's manufacturer number instead of the distributor SKU, and the distributor screens show the manufacturer number for this product.">
+                          <input
+                            type="checkbox" disabled={disabled} checked={!!p.label_use_mfr}
+                            onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, label_use_mfr: e.target.checked } : x)))}
+                          />
+                          Use the manu. part # for the custom label
+                        </span>
+                      ) : null}
                     </label>
                     {(() => {
                       const a = avail?.parts.find((x) => `p${x.id}` === p.key);

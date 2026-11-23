@@ -336,6 +336,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
                 supplier_item_id: p.supplier_item_id,
                 part_number: p.part_number,
                 mfr_number: (p.mfr_number ?? "").trim() || null,
+                label_use_mfr: !!p.supplier_item_id && !!p.label_use_mfr,
                 description: p.description || null,
                 unit_cost: p.unit_cost,
                 quantity: p.quantity,

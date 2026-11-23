@@ -1655,6 +1655,8 @@ def items(
                 f"""
                 select * from (
                   select p.id, p.sku_display as sku, p.title, coalesce(p.quantity_on_hand, 0) as on_hand,
+                         exists (select 1 from product_kit_parts kp where kp.product_id = p.id and coalesce(kp.label_use_mfr, false)) as use_mfr,
+                         nullif(btrim({_MPN}), '') as mfr_no,
                          nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') as upc_n,
                          nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n
                   from products p
@@ -1671,9 +1673,9 @@ def items(
     for r in rows:
         mine: dict[int, dict] = {}
         for f in ours_by_upc.get(r["upc_norm"] or "", []) if r["upc_norm"] and len(r["upc_norm"]) >= 8 else []:
-            mine[f.id] = {"id": f.id, "sku": f.sku, "title": f.title, "on_hand": f.on_hand, "by": "barcode"}
+            mine[f.id] = {"id": f.id, "sku": f.sku, "title": f.title, "on_hand": f.on_hand, "by": "barcode", "use_mfr": f.use_mfr, "mfr_no": f.mfr_no}
         for f in ours_by_mpn.get(r["mfr_number_norm"] or "", []):
-            mine.setdefault(f.id, {"id": f.id, "sku": f.sku, "title": f.title, "on_hand": f.on_hand, "by": "part number"})
+            mine.setdefault(f.id, {"id": f.id, "sku": f.sku, "title": f.title, "on_hand": f.on_hand, "by": "part number", "use_mfr": f.use_mfr, "mfr_no": f.mfr_no})
         r["ours"] = list(mine.values())
         r.pop("upc_norm", None)
         r.pop("mfr_number_norm", None)
@@ -1712,6 +1714,8 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
                 f"""
                 select * from (
                   select p.id, p.sku_display as sku, p.title, coalesce(p.quantity_on_hand, 0) as on_hand,
+                         exists (select 1 from product_kit_parts kp where kp.product_id = p.id and coalesce(kp.label_use_mfr, false)) as use_mfr,
+                         nullif(btrim({_MPN}), '') as mfr_no,
                          p.list_price, p.cost, coalesce(p.is_active, true) as is_active,
                          nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') as upc_n,
                          nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n
@@ -3483,6 +3487,8 @@ _LABEL_FIX_FROM = """
     where l.supplier = :s and x.m <> '' and x.k <> '' and lower(x.m) <> lower(x.k)
       and lower(btrim(p.custom_label_sku)) = lower(x.m)
       and x.k !~* 'xx' and length(x.k) <= 50
+      and not exists (select 1 from product_kit_parts kp where kp.product_id = p.id and kp.supplier_item_id = s.id
+                      and coalesce(kp.label_use_mfr, false))
 """
 
 

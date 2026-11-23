@@ -31,7 +31,9 @@ type Overview = {
   price_bands: { band: string; parts: number }[];
   units_of_measure: { uom: string; unset: boolean; parts: number }[];
 };
-type Mine = { id: number; sku: string; title: string; on_hand: number; by: string };
+// use_mfr: the product's part is set to "use the manu. part # for the custom label", so its manufacturer number is shown instead of our SKU
+type Mine = { id: number; sku: string; title: string; on_hand: number; by: string; use_mfr?: boolean; mfr_no?: string | null };
+const mineName = (m: { sku: string; use_mfr?: boolean; mfr_no?: string | null }) => (m.use_mfr && m.mfr_no ? m.mfr_no : m.sku);
 type Row = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
   unit_of_measure: string | null; list_price: string | null; dealer_cost: string | null;
@@ -51,7 +53,7 @@ type Mini = {
 type Detail = {
   item: Record<string, unknown>;
   last_run: { id: number; source: string; status: string; started_at: string; finished_at: string | null; rows_seen: number } | null;
-  ours: { id: number; sku: string; title: string; on_hand: number; list_price: string | null; cost: string | null; is_active: boolean; by: string }[];
+  ours: { id: number; sku: string; title: string; on_hand: number; list_price: string | null; cost: string | null; is_active: boolean; by: string; use_mfr?: boolean; mfr_no?: string | null }[];
   same_barcode: Mini[];
   same_part_number: Mini[];
   brand_part_count: number;
@@ -693,7 +695,7 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                       <td className="truncate py-1 pr-3">
                         {r.ours.length === 1 ? (
                           <Link href={`/admin/products/${r.ours[0].id}`} title={r.ours[0].title} onClick={(e) => e.stopPropagation()}>
-                            <Badge tone="green">{r.ours[0].sku}</Badge>
+                            <Badge tone="green">{mineName(r.ours[0])}</Badge>
                           </Link>
                         ) : r.ours.length > 1 ? (
                           <Badge tone="green">{`${r.ours.length} products`}</Badge>
@@ -853,7 +855,7 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
               <tbody className="divide-y divide-gray-100">
                 {d.ours.map((p) => (
                   <tr key={p.id} className={p.is_active ? "" : "text-gray-400"}>
-                    <td className="py-1 pr-2 font-medium">{p.sku}</td>
+                    <td className="py-1 pr-2 font-medium">{mineName(p)}</td>
                     <td className="py-1 pr-2">{p.title}</td>
                     <td className="py-1 pr-2">{p.by === "barcode" ? <Badge tone="green">barcode</Badge> : <Badge tone="amber">part number — check the brand</Badge>}</td>
                     <td className="py-1 pr-2 text-right">{n(p.on_hand)}</td>
