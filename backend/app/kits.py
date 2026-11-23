@@ -163,7 +163,7 @@ def manual_catalog(
         params[f"w{i}"] = f"%{w}%"
         params[f"p{i}"] = f"%{_norm(w)}%"
         where.append(
-            f"(m.part_number ilike :w{i} or m.mfr_number ilike :w{i} or m.description ilike :w{i} "
+            f"(m.part_number ilike :w{i} or m.mfr_number ilike :w{i} or m.description ilike :w{i} or m.manufacturer ilike :w{i} "
             f"or m.part_norm like :p{i} or upper(regexp_replace(coalesce(m.mfr_number, ''), '[^A-Za-z0-9]', '', 'g')) like :p{i})"
         )
     used = "exists (select 1 from product_kit_parts u where u.manual_item_id = m.id)"
@@ -176,7 +176,7 @@ def manual_catalog(
         total = db.execute(text(f"select count(*) from manual_catalog_items m where {clause}"), params).scalar()
         rows = db.execute(
             text(
-                "select m.id, m.part_number, m.mfr_number, m.description, m.unit_cost, "
+                "select m.id, m.part_number, m.mfr_number, m.manufacturer, m.description, m.unit_cost, "
                 "(select u.product_id from product_kit_parts u where u.manual_item_id = m.id order by u.product_id limit 1) as product_id, "
                 "(select count(distinct u.product_id) from product_kit_parts u where u.manual_item_id = m.id) as products "
                 f"from manual_catalog_items m where {clause} order by lower(m.part_number), m.id limit :n offset :o"
@@ -197,6 +197,7 @@ def manual_catalog(
                 "id": r.id,
                 "part_number": r.part_number,
                 "mfr_number": r.mfr_number,
+                "manufacturer": r.manufacturer,
                 "description": r.description,
                 "unit_cost": float(r.unit_cost) if r.unit_cost is not None and see_cost else None,
                 "product_id": r.product_id,
@@ -212,6 +213,7 @@ class ManualItemIn(BaseModel):
     distributor_id: int
     part_number: str = Field(..., min_length=1, max_length=60)
     mfr_number: Optional[str] = Field(None, max_length=60)
+    manufacturer: Optional[str] = Field(None, max_length=80)
     description: Optional[str] = Field(None, max_length=250)
     unit_cost: Optional[float] = Field(None, ge=0, le=1_000_000)
 
@@ -237,20 +239,21 @@ def add_manual_item(body: ManualItemIn, db: Session = Depends(get_db), user: Aut
     cost = body.unit_cost if has_perm(user, "products.edit_price") else None
     row = db.execute(
         text(
-            "insert into manual_catalog_items (distributor_id, part_number, part_norm, mfr_number, description, unit_cost) "
-            "values (:d, :pn, :pnorm, :mfr, :desc, :uc) returning id, part_number, mfr_number, description, unit_cost"
+            "insert into manual_catalog_items (distributor_id, part_number, part_norm, mfr_number, manufacturer, description, unit_cost) "
+            "values (:d, :pn, :pnorm, :mfr, :brand, :desc, :uc) returning id, part_number, mfr_number, manufacturer, description, unit_cost"
         ),
         {"d": dist.id, "pn": number, "pnorm": norm, "mfr": (body.mfr_number or "").strip() or None,
-         "desc": (body.description or "").strip() or None, "uc": cost},
+         "brand": (body.manufacturer or "").strip() or None, "desc": (body.description or "").strip() or None, "uc": cost},
     ).first()
     db.commit()
-    return {"id": row.id, "part_number": row.part_number, "mfr_number": row.mfr_number, "description": row.description,
+    return {"id": row.id, "part_number": row.part_number, "mfr_number": row.mfr_number, "manufacturer": row.manufacturer, "description": row.description,
             "unit_cost": float(row.unit_cost) if row.unit_cost is not None and has_perm(user, "products.edit_price") else None,
             "product_id": None, "product_title": None, "products": 0}
 
 
 class ManualItemEdit(BaseModel):
     mfr_number: Optional[str] = Field(None, max_length=60)
+    manufacturer: Optional[str] = Field(None, max_length=80)
     description: Optional[str] = Field(None, max_length=250)
     unit_cost: Optional[float] = Field(None, ge=0, le=1_000_000)
 
@@ -260,13 +263,13 @@ class ManualItemEdit(BaseModel):
 def edit_manual_item(item_id: int, body: ManualItemEdit, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     """Change a saved part. Every piece that points at it follows (cost and description on the next PO, manufacturer # now).
     The vendor part # cannot be changed here: it is what the custom label and the PO use. Cost only for people who may set prices."""
-    sets = ["mfr_number = :mfr", "description = :desc", "updated_at = now()"]
-    params: dict = {"i": item_id, "mfr": (body.mfr_number or "").strip() or None, "desc": (body.description or "").strip() or None}
+    sets = ["mfr_number = :mfr", "manufacturer = :brand", "description = :desc", "updated_at = now()"]
+    params: dict = {"i": item_id, "mfr": (body.mfr_number or "").strip() or None, "brand": (body.manufacturer or "").strip() or None, "desc": (body.description or "").strip() or None}
     if has_perm(user, "products.edit_price"):
         sets.append("unit_cost = :uc")
         params["uc"] = body.unit_cost
     row = db.execute(
-        text(f"update manual_catalog_items set {', '.join(sets)} where id = :i returning id, part_number, mfr_number, description, unit_cost"),
+        text(f"update manual_catalog_items set {', '.join(sets)} where id = :i returning id, part_number, mfr_number, manufacturer, description, unit_cost"),
         params,
     ).first()
     if not row:
@@ -282,7 +285,7 @@ def edit_manual_item(item_id: int, body: ManualItemEdit, db: Session = Depends(g
             )
     db.commit()
     see_cost = has_perm(user, "products.edit_price")
-    return {"id": row.id, "part_number": row.part_number, "mfr_number": row.mfr_number, "description": row.description,
+    return {"id": row.id, "part_number": row.part_number, "mfr_number": row.mfr_number, "manufacturer": row.manufacturer, "description": row.description,
             "unit_cost": float(row.unit_cost) if row.unit_cost is not None and see_cost else None}
 
 
@@ -550,7 +553,7 @@ def catalog_search(
 # A catalog piece with no number of its own follows the catalog's manufacturer number. The product's own Manufacturer
 # part # (products.manufacturer_part_number) then shows every piece's number, " / " between them, so everything that
 # already reads or searches that one field keeps working and a search for any one of them finds the product.
-MPN_JOIN = ", "
+MPN_JOIN = " / "
 
 
 def _norm_mpn(v: Optional[str]) -> str:
@@ -564,6 +567,7 @@ def ensure_mfr_column() -> None:
     db = _session_factory()()
     try:
         db.execute(text("alter table product_kit_parts add column if not exists mfr_number text"))
+        db.execute(text("alter table product_kit_parts add column if not exists manufacturer text"))  # brand of a typed piece (catalog / saved parts have their own)
         db.execute(text("create table if not exists kit_mfr_backfill (id int primary key default 1, done_at timestamptz not null default now(), summary text)"))
         db.commit()
     except Exception:
@@ -583,6 +587,7 @@ def ensure_mfr_column() -> None:
         )
         # a piece can point at a saved part: its cost, description and manufacturer # then come from the saved part
         db.execute(text("alter table product_kit_parts add column if not exists manual_item_id bigint references manual_catalog_items(id) on delete set null"))
+        db.execute(text("alter table manual_catalog_items add column if not exists manufacturer text"))  # the brand (Wiseco, Tusk, ...)
         db.commit()
     except Exception:
         db.rollback()
@@ -761,6 +766,8 @@ class KitPartIn(BaseModel):
     mfr_number: Optional[str] = Field(None, max_length=60)
     # a part saved in the vendor's saved-parts list (vendors with no catalog): the piece follows it instead of holding a copy
     manual_item_id: Optional[int] = None
+    # the brand of a typed piece (a catalog or saved part has its own)
+    manufacturer: Optional[str] = Field(None, max_length=80)
 
 
 LABEL_BY = "^(mfr|sku)$"  # what an Automatic Distributors part is written as in a NEW label: manufacturer number or vendor SKU
@@ -832,7 +839,11 @@ def _parts_of(db: Session, product_id: int, see_cost: bool = True) -> list[dict]
             "coalesce(nullif(btrim(mi.description), ''), k.description) as description, "
             "coalesce(mi.unit_cost, k.unit_cost) as unit_cost, k.quantity, k.sort_order, "
             "coalesce(nullif(btrim(si.mfr_number), ''), k.part_number) as label_part, "
-            "coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), ''), nullif(btrim(mi.mfr_number), '')) as mfr_number from product_kit_parts k "
+            "coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si.mfr_number), ''), nullif(btrim(mi.mfr_number), '')) as mfr_number, "
+            # the brand of the piece: the catalog's, the saved part's or the typed one; a part with no brand of its own and no catalog
+            # shows its vendor's name
+            "coalesce(nullif(btrim(si.manufacturer), ''), nullif(btrim(mi.manufacturer), ''), nullif(btrim(k.manufacturer), ''), "
+            "case when k.supplier_item_id is null then nullif(btrim(d.name), '') end) as manufacturer from product_kit_parts k "
             "left join supplier_items si on si.id = k.supplier_item_id "
             "left join manual_catalog_items mi on mi.id = k.manual_item_id "
             "left join po_distributors d on d.id = k.distributor_id where k.product_id = :p order by k.sort_order, k.id"
@@ -897,16 +908,17 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
             mfr = None  # the same as the saved part's number: keep following the saved part
         clean.append({"distributor_id": p.distributor_id, "supplier_item_id": p.supplier_item_id, "part_number": number,
                       "label": label or number, "description": desc, "unit_cost": cost, "quantity": p.quantity, "sort_order": i,
-                      "mfr_number": mfr, "manual_item_id": saved.id if saved is not None else None})
+                      "mfr_number": mfr, "manual_item_id": saved.id if saved is not None else None,
+                      "manufacturer": ((p.manufacturer or "").strip() or None) if (not p.supplier_item_id and saved is None) else None})
     for c in clean:
         db.execute(
             text(
-                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order, mfr_number, manual_item_id) "
-                "values (:p, :d, :si, :pn, :desc, :uc, :q, :so, :mfr, :mi)"
+                "insert into product_kit_parts (product_id, distributor_id, supplier_item_id, part_number, description, unit_cost, quantity, sort_order, mfr_number, manual_item_id, manufacturer) "
+                "values (:p, :d, :si, :pn, :desc, :uc, :q, :so, :mfr, :mi, :brand)"
             ),
             {"p": product_id, "d": c["distributor_id"], "si": c["supplier_item_id"], "pn": c["part_number"],
              "desc": c["description"], "uc": c["unit_cost"], "q": c["quantity"], "so": c["sort_order"], "mfr": c["mfr_number"],
-             "mi": c["manual_item_id"]},
+             "mi": c["manual_item_id"], "brand": c["manufacturer"]},
         )
     # Remember typed pieces of distributors with no catalog, so the next product can pick them instead of typing them again.
     # A part already saved keeps its details (only blanks are filled), and a failure here never stops the parts from saving.
@@ -917,15 +929,16 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
             with db.begin_nested():
                 db.execute(
                     text(
-                        "insert into manual_catalog_items (distributor_id, part_number, part_norm, mfr_number, description, unit_cost) "
-                        "values (:d, :pn, :pnorm, :mfr, :desc, :uc) "
+                        "insert into manual_catalog_items (distributor_id, part_number, part_norm, mfr_number, manufacturer, description, unit_cost) "
+                        "values (:d, :pn, :pnorm, :mfr, :brand, :desc, :uc) "
                         "on conflict (distributor_id, part_norm) do update set "
                         "mfr_number = coalesce(nullif(btrim(manual_catalog_items.mfr_number), ''), excluded.mfr_number), "
+                        "manufacturer = coalesce(nullif(btrim(manual_catalog_items.manufacturer), ''), excluded.manufacturer), "
                         "description = coalesce(nullif(btrim(manual_catalog_items.description), ''), excluded.description), "
                         "unit_cost = coalesce(manual_catalog_items.unit_cost, excluded.unit_cost), updated_at = now()"
                     ),
                     {"d": c["distributor_id"], "pn": c["part_number"], "pnorm": _norm(c["part_number"]), "mfr": c["mfr_number"],
-                     "desc": c["description"], "uc": c["unit_cost"]},
+                     "brand": c["manufacturer"], "desc": c["description"], "uc": c["unit_cost"]},
                 )
         except Exception:
             log.exception("could not remember a typed distributor part")

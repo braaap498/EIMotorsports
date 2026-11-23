@@ -161,9 +161,15 @@ export default function ProductForm({ productId }: { productId?: number }) {
   const [kitAvail, setKitAvail] = useState<Availability | null>(null);
   const kitCount = productId && kitAvail?.is_kit ? (kitAvail.ours_available ?? 0) : null;
   const partMpns = Array.from(new Set(kitParts.map((p) => (p.mfr_number ?? "").trim()).filter(Boolean)));
-  const mpnFromParts = productId ? mpnLocked || partMpns.length > 0 : partMpns.length > 0;
-  // always the pieces' numbers, comma separated, in the order of the distributor parts below
-  const mpnShown = partMpns.length > 0 ? partMpns.join(", ") : null;
+  // the brands of the distributor parts, in the order of the parts, each once; when they are not all the same the Manufacturer
+  // box shows them all (read only) instead of one pick
+  const partMfrs = kitParts.reduce<string[]>((acc, p) => {
+    const m = (p.manufacturer ?? "").trim();
+    if (m && !acc.some((x) => x.toLowerCase() === m.toLowerCase())) acc.push(m);
+    return acc;
+  }, []);
+  const mpnFromParts = productId ? mpnLocked : partMpns.length > 0;
+  const mpnShown = !productId && partMpns.length > 0 ? partMpns.join(" / ") : null;
   const [loading, setLoading] = useState(!!productId);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
@@ -434,7 +440,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
       <Field key={f.key} label={f.key === "quantity_on_hand" && kitCount === null ? (productId ? "Available" : "E&I Warehouse Quantity") : f.label} className={f.wide ? "sm:col-span-2 lg:col-span-3" : ""}>
         <input
           className={inputCls}
-          disabled={!fieldAllowed(f.key) || f.key === "manufacturer_part_number" || (f.key === "quantity_on_hand" && (kitCount !== null || !!productId))}
+          disabled={!fieldAllowed(f.key) || (f.key === "manufacturer_part_number" && mpnFromParts) || (f.key === "quantity_on_hand" && (kitCount !== null || !!productId))}
           type={f.kind === "text" ? "text" : "number"}
           step={f.kind === "number" ? f.step : f.kind === "int" ? "1" : undefined}
           value={
@@ -457,9 +463,9 @@ export default function ProductForm({ productId }: { productId?: number }) {
             Calculated from the warehouse counts. Change the E&amp;I warehouse quantity in the Quantities box below.
           </span>
         )}
-        {f.key === "manufacturer_part_number" && (
+        {f.key === "manufacturer_part_number" && mpnFromParts && (
           <span className="mt-1 block text-xs font-normal text-gray-500">
-            This shows the manufacturer numbers of the distributor parts below, in their order. To change one, change it on that part.
+            This shows the manufacturer numbers of the distributor parts below. To change one, change it on that part.
           </span>
         )}
         {f.key === "cost" && (
@@ -548,16 +554,27 @@ export default function ProductForm({ productId }: { productId?: number }) {
               />
             </Field>
             <Field label="Manufacturer">
+              {partMfrs.length > 1 ? (
+                <>
+                  <input className={inputCls} disabled value={partMfrs.join(", ")} readOnly />
+                  <span className="mt-1 block text-xs font-normal text-gray-500">
+                    The distributor parts below have different manufacturers. To change one, change it on that part.
+                  </span>
+                </>
+              ) : (
+                <>
               <select className={inputCls} disabled={!mayDetails} value={vals.part_manufacturer_id ?? ""} onChange={(e) => set("part_manufacturer_id", e.target.value)}>
-                <option value="">(none)</option>
-                {mfrs.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))}
-              </select>
-              {mayDetails && (
-                <button type="button" className="mt-1 block text-xs font-normal text-gray-500 underline" onClick={() => void addManufacturer()}>
-                  Add a manufacturer
-                </button>
+                  <option value="">(none)</option>
+                  {mfrs.map((m) => (
+                    <option key={m.id} value={m.id}>{m.name}</option>
+                  ))}
+                </select>
+                {mayDetails && (
+                  <button type="button" className="mt-1 block text-xs font-normal text-gray-500 underline" onClick={() => void addManufacturer()}>
+                    Add a manufacturer
+                  </button>
+                )}
+                </>
               )}
             </Field>
             {renderFields(BASIC.filter((f) => f.key !== "title"))}
