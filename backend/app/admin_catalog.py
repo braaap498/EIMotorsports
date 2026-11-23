@@ -811,7 +811,7 @@ _PRODUCT_SORTS = {
     "title": "lower(p.title)",
     "list_price": "p.list_price",
     "quantity_on_hand": "p.quantity_on_hand",
-    "fitment_count": "(select count(*) from product_fitment pf2 where pf2.product_id = p.id)",
+    "fitment_count": "(select count(distinct v2.model_id) from product_fitment pf2 join vehicles v2 on v2.id = pf2.vehicle_id where pf2.product_id = p.id)",
     "is_published": "p.is_published",
 }
 
@@ -962,7 +962,8 @@ def list_products(
             select p.id, p.sku as sku, p.custom_label_sku, p.ebay_item_id, p.title, p.slug, p.list_price, p.quantity_on_hand,
                    p.category_id, p.is_published, p.is_active, p.is_universal,
                    p.universal_in_vehicle_search, p.fitment_exempt,
-                   (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
+                   (select count(distinct v.model_id) from product_fitment pf join vehicles v on v.id = pf.vehicle_id where pf.product_id = p.id) as fitment_count,
+                   (select count(*) from product_fitment pfy where pfy.product_id = p.id) as fitment_years,
                    {_STATUS_SQL} as fitment_status
             from products p {where}
             order by {order_by} limit :limit offset :offset

@@ -23,6 +23,7 @@ type Row = {
   is_active: boolean;
   is_universal: boolean;
   fitment_count: number;
+  fitment_years?: number; // model-year rows; fitment_count is the machines (models) they belong to
   fitment_status: FitmentStatus;
 };
 type Resp = { total: number; items: Row[] };
@@ -100,7 +101,7 @@ function FitmentCell({ p }: { p: Row }) {
     case "not_vehicle":
       return <Badge tone="gray">Not vehicle-based</Badge>;
     case "has_fitment":
-      return <Badge tone="green">{p.fitment_count} machine{p.fitment_count === 1 ? "" : "s"}</Badge>;
+      return <Badge tone="green">{p.fitment_count} machine{p.fitment_count === 1 ? "" : "s"}{p.fitment_years != null && p.fitment_years !== p.fitment_count ? ` · ${p.fitment_years} years` : ""}</Badge>;
     default:
       return <Badge tone="amber">Needs fitment</Badge>;
   }
