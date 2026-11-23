@@ -302,16 +302,16 @@ export default function ManualParts({ dist }: { dist: Dist }) {
             {q.trim() || only !== "all" ? "No saved parts match." : `No parts saved for ${dist.name} yet. Add one above, or type parts on a product under Distributor parts and they are saved here.`}
           </p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[60rem] table-fixed text-left text-xs">
+          <div>
+            <table className="w-full table-fixed text-left text-xs">
               <colgroup>
-                {["5.5rem", "9rem", "8rem", "9rem", "", "5rem", "6rem", "11rem"].map((w, i) => (
+                {["2.75rem", "7rem", "7rem", "7rem", "", "4.5rem", "5rem", "10.5rem"].map((w, i) => (
                   <col key={i} style={w ? { width: w } : undefined} />
                 ))}
               </colgroup>
               <thead className="text-gray-500">
                 <tr>
-                  <th className="py-1 pr-2"></th>
+                  <th className="py-0.5 pr-2"></th>
                   <Th k="brand">Brand</Th>
                   <Th k="sku">SKU</Th>
                   <Th k="mfr">Mfr no.</Th>
@@ -323,30 +323,42 @@ export default function ManualParts({ dist }: { dist: Dist }) {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {items.map((p) => (
-                  <tr key={p.id} className="align-top">
-                    <td className="py-1 pr-2">
+                  <tr key={p.id} className="align-middle">
+                    <td className="py-0.5 pr-2 align-middle">
+                      {/* one 36px box, the same size as the thumbnails: a picture (click = full size; hover for the replace / remove corners),
+                          or an empty box with an image icon and a plus (click = pick a file) */}
                       {p.image ? (
-                        <a href={p.image_full ?? p.image} target="_blank" rel="noreferrer" title="Open the full-size picture">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={p.image} alt="" loading="lazy" className="h-9 w-9 rounded border border-gray-100 bg-white object-contain" />
-                        </a>
+                        <div className="group relative h-9 w-9">
+                          <a href={p.image_full ?? p.image} target="_blank" rel="noreferrer" title="Open the full-size picture">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={p.image} alt="" loading="lazy" className="h-9 w-9 rounded border border-gray-100 bg-white object-contain" />
+                          </a>
+                          <label title="Replace the picture" className="absolute -bottom-1 -right-1 hidden h-4 w-4 cursor-pointer items-center justify-center rounded-full bg-gray-700 text-[10px] leading-none text-white group-hover:flex">
+                            ↻
+                            <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" disabled={busyId === p.id} onChange={(e) => { void uploadPhoto(p, e.target.files?.[0]); e.target.value = ""; }} />
+                          </label>
+                          <button type="button" title="Remove the picture" className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-red-700 text-[10px] leading-none text-white group-hover:flex" disabled={busyId === p.id} onClick={() => void clearPhoto(p)}>
+                            ×
+                          </button>
+                        </div>
                       ) : (
-                        <div className="h-9 w-9" />
-                      )}
-                      <label className="block cursor-pointer text-xs text-gray-600 underline">
-                        {p.image ? "Replace" : "Add picture"}
-                        <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" disabled={busyId === p.id} onChange={(e) => { void uploadPhoto(p, e.target.files?.[0]); e.target.value = ""; }} />
-                      </label>
-                      {p.image && (
-                        <button type="button" className="text-xs text-gray-500 underline" disabled={busyId === p.id} onClick={() => void clearPhoto(p)}>Remove</button>
+                        <label title="Add a picture" className="relative flex h-9 w-9 cursor-pointer items-center justify-center rounded border border-dashed border-gray-300 bg-gray-50 text-gray-400 hover:border-gray-500 hover:text-gray-600">
+                          <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <rect x="3" y="4" width="14" height="14" rx="2" />
+                            <circle cx="8" cy="9" r="1.2" />
+                            <path d="M3 15l4-4 4 4 2-2 4 4" />
+                            <path d="M19 3v6M16 6h6" strokeWidth="2" />
+                          </svg>
+                          <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" disabled={busyId === p.id} onChange={(e) => { void uploadPhoto(p, e.target.files?.[0]); e.target.value = ""; }} />
+                        </label>
                       )}
                     </td>
-                    <td className="truncate py-1 pr-3" title={p.manufacturer ?? ""}>{p.manufacturer ?? "—"}</td>
-                    <td className="truncate py-1 pr-3 font-medium" title={p.part_number}>{p.part_number}</td>
-                    <td className="truncate py-1 pr-3" title={p.mfr_number ?? ""}>{p.mfr_number ?? "—"}</td>
-                    <td className="break-words py-1 pr-3">{p.description ?? "—"}</td>
-                    <td className="whitespace-nowrap py-1 pr-3 text-right">{money(p.unit_cost)}</td>
-                    <td className="py-1 pr-3">
+                    <td className="truncate py-0.5 pr-2" title={p.manufacturer ?? ""}>{p.manufacturer ?? "—"}</td>
+                    <td className="truncate py-0.5 pr-2 font-medium" title={p.part_number}>{p.part_number}</td>
+                    <td className="truncate py-0.5 pr-2" title={p.mfr_number ?? ""}>{p.mfr_number ?? "—"}</td>
+                    <td className="truncate py-0.5 pr-2" title={p.description ?? ""}>{p.description ?? "—"}</td>
+                    <td className="whitespace-nowrap py-0.5 pr-2 text-right">{money(p.unit_cost)}</td>
+                    <td className="truncate py-0.5 pr-2">
                       {p.product_id ? (
                         <>
                           <Link href={`/admin/products/${p.product_id}`} title={p.product_title ?? ""}>
@@ -358,21 +370,21 @@ export default function ManualParts({ dist }: { dist: Dist }) {
                         <span className="text-gray-400">—</span>
                       )}
                     </td>
-                    <td className="whitespace-nowrap py-1 pr-3 text-right">
+                    <td className="whitespace-nowrap py-0.5 text-right">
                       {canMake && !p.product_id && (
-                        <button type="button" className={btn2Cls} disabled={busyId === p.id} onClick={() => void makeProduct(p)}>
+                        <button type="button" className="rounded border border-gray-300 px-2 py-0.5 text-xs hover:bg-gray-50 disabled:opacity-50" disabled={busyId === p.id} onClick={() => void makeProduct(p)}>
                           Make product
                         </button>
                       )}
                       <button
                         type="button"
-                        className="ml-2 px-1 text-xs text-gray-600 underline"
+                        className="ml-2 text-xs text-gray-600 underline"
                         onClick={() => setEdit({ id: p.id, part: p.part_number, mfr: p.mfr_number ?? "", brand: p.manufacturer ?? "", desc: p.description ?? "", cost: p.unit_cost != null ? String(p.unit_cost) : "" })}
                       >
                         Edit
                       </button>
                       {!p.product_id && (
-                        <button type="button" className={`${dangerCls} ml-2`} disabled={busyId === p.id} onClick={() => void remove(p)}>
+                        <button type="button" className={`${dangerCls} ml-2 !px-1 !py-0 text-xs`} disabled={busyId === p.id} onClick={() => void remove(p)}>
                           Remove
                         </button>
                       )}

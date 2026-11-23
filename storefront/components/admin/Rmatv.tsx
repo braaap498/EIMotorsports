@@ -199,11 +199,11 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
       {error && <Notice kind="error">{error}</Notice>}
       {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
 
-      <div className="overflow-x-auto rounded border border-gray-200 bg-white p-3">
+      <div className="rounded border border-gray-200 bg-white p-2">
         {/* the same table as the Automatic Distributors catalog: fixed layout, small text, sortable headings */}
-        <table className="w-full min-w-[80rem] table-fixed text-left text-xs">
+        <table className="w-full table-fixed text-left text-xs">
           <colgroup>
-            {["9rem", "8rem", "9rem", "", "3.5rem", "5rem", "5rem", "4.5rem", "4rem", "7.5rem", "7rem", "6rem"].map((w, i) => (
+            {["6.5rem", "6.5rem", "6.5rem", "", "2.5rem", "4.5rem", "4.5rem", "3.75rem", "3rem", "6.5rem", "5.5rem", "5rem"].map((w, i) => (
               <col key={i} style={w ? { width: w } : undefined} />
             ))}
           </colgroup>
@@ -225,38 +225,38 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
           </thead>
           <tbody className="divide-y divide-gray-100">
             {(items ?? []).map((it) => (
-              <tr key={it.id} className={`align-top ${it.active ? "" : "text-gray-400"}`}>
-                <td className="truncate py-1 pr-3" title={it.manufacturer ?? ""}>{it.manufacturer ?? "—"}</td>
-                <td className="truncate py-1 pr-3 font-medium" title={it.sku}>
+              <tr key={it.id} className={`align-middle ${it.active ? "" : "text-gray-400"}`}>
+                <td className="truncate py-0.5 pr-2" title={it.manufacturer ?? ""}>{it.manufacturer ?? "—"}</td>
+                <td className="truncate py-0.5 pr-2 font-medium" title={it.sku}>
                   {it.sku}
                   {!it.active && <span className="ml-1"><Badge tone="gray">retired</Badge></span>}
                 </td>
-                <td className="truncate py-1 pr-3" title={it.mfr_number ?? ""}>{it.mfr_number ?? "—"}</td>
-                <td className="break-words py-1 pr-3">{it.name ?? "—"}</td>
-                <td className="whitespace-nowrap py-1 pr-3">{it.unit_of_measure ?? ""}</td>
-                <td className="whitespace-nowrap py-1 pr-3 text-right">{money(it.list_price)}</td>
-                <td className="whitespace-nowrap py-1 pr-3 text-right">{money(it.dealer_cost)}</td>
-                <td className="whitespace-nowrap py-1 pr-3 text-right">
+                <td className="truncate py-0.5 pr-2" title={it.mfr_number ?? ""}>{it.mfr_number ?? "—"}</td>
+                <td className="truncate py-0.5 pr-2" title={it.name ?? ""}>{it.name ?? "—"}</td>
+                <td className="whitespace-nowrap py-0.5 pr-2">{it.unit_of_measure ?? ""}</td>
+                <td className="whitespace-nowrap py-0.5 pr-2 text-right">{money(it.list_price)}</td>
+                <td className="whitespace-nowrap py-0.5 pr-2 text-right">{money(it.dealer_cost)}</td>
+                <td className="whitespace-nowrap py-0.5 pr-2 text-right">
                   {it.list_price == null || it.dealer_cost == null || !it.list_price ? (
                     "—"
                   ) : (
                     <span className={it.list_price - it.dealer_cost < 0 ? "text-red-700" : ""}>{pct(((it.list_price - it.dealer_cost) / it.list_price) * 100)}</span>
                   )}
                 </td>
-                <td className="whitespace-nowrap py-1 pr-3 text-right font-medium">{n(it.qty_other)}</td>
-                <td className="truncate py-1 pr-3" title={it.upc ?? ""}>{it.upc ?? "—"}</td>
-                <td className="truncate py-1 pr-3">
+                <td className="whitespace-nowrap py-0.5 pr-2 text-right font-medium">{n(it.qty_other)}</td>
+                <td className="truncate py-0.5 pr-2" title={it.upc ?? ""}>{it.upc ?? "—"}</td>
+                <td className="truncate py-0.5 pr-2">
                   {it.product_id ? (
                     <Link href={`/admin/products/${it.product_id}`} title={it.product_title ?? ""}>
                       <Badge tone="green">{it.product_sku ?? `#${it.product_id}`}</Badge>
                     </Link>
                   ) : (
-                    <button type="button" className={btn2Cls} disabled={busyId === it.id || !it.active} onClick={() => void makeProduct(it)}>
+                    <button type="button" className="rounded border border-gray-300 px-1.5 py-0 text-xs hover:bg-gray-50 disabled:opacity-50" disabled={busyId === it.id || !it.active} onClick={() => void makeProduct(it)}>
                       Make product
                     </button>
                   )}
                 </td>
-                <td className="whitespace-nowrap py-1 pr-3 text-gray-500">{it.updated_at ? new Date(it.updated_at).toLocaleDateString() : "—"}</td>
+                <td className="whitespace-nowrap py-0.5 pr-2 text-gray-500">{it.updated_at ? new Date(it.updated_at).toLocaleDateString() : "—"}</td>
               </tr>
             ))}
             {items && items.length === 0 && (
