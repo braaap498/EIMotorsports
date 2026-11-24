@@ -26,7 +26,7 @@ const NAV: { href: string; label: string; exact?: boolean; any?: string[]; match
   { href: "/admin/purchase-orders", label: "Purchase orders", any: ["inventory.purchase"] },
   { href: "/admin/distributors", label: "Distributors", any: ["inventory.purchase"], match: ["/admin/distributors", "/admin/supplier"] },
   { href: "/admin/models", label: "Fitment", match: ["/admin/models", "/admin/fitment"] },
-  { href: "/admin/ebay-listings", label: "Sales channels", match: ["/admin/ebay-listings", "/admin/ebay-edit", "/admin/ebay-sales", "/admin/ebay-stores", "/admin/ebay-connect", "/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/availability", "/admin/ebay-copy", "/admin/dropship", "/admin/ebay-inventory-labels"] },
+  { href: "/admin/ebay-listings", label: "Sales channels", match: ["/admin/ebay-listings", "/admin/ebay-edit", "/admin/ebay-sales", "/admin/ebay-stores", "/admin/ebay-connect", "/admin/ebay-photos", "/admin/ebay-compat", "/admin/ebay-import", "/admin/merge-link", "/admin/cleanup", "/admin/ebay-new", "/admin/availability", "/admin/ebay-copy", "/admin/dropship", "/admin/ebay-inventory-labels", "/admin/amazon-"] },
   { href: "/admin/analytics", label: "Analytics" },
   { href: "/admin/quickbooks", label: "QuickBooks" },
   { href: "/admin/users", label: "Team" },
@@ -68,7 +68,19 @@ const EBAY_TABS: Tab[] = [
 
 // Sales channels: one tab per channel, each with its own sub-pages beneath. Add Amazon (or any other channel) here
 // with its own list of tabs, and it shows up next to eBay.
-const CHANNELS: { label: string; href: string; tabs: Tab[] }[] = [{ label: "eBay", href: "/admin/ebay-listings", tabs: EBAY_TABS }];
+const AMAZON_TABS: Tab[] = [
+  { href: "/admin/amazon-listings", label: "Listings" },
+  { href: "/admin/amazon-new", label: "New listing" },
+  { href: "/admin/amazon-orders", label: "Orders" },
+  { href: "/admin/amazon-buybox", label: "Buy Box" },
+  { href: "/admin/amazon-analytics", label: "Analytics" },
+  { href: "/admin/amazon-stores", label: "Store API" },
+];
+
+const CHANNELS: { label: string; href: string; tabs: Tab[] }[] = [
+  { label: "eBay", href: "/admin/ebay-listings", tabs: EBAY_TABS },
+  { label: "Amazon", href: "/admin/amazon-listings", tabs: AMAZON_TABS },
+];
 
 // ---- "Back" link: remembers the admin pages visited in this tab, so a page you opened from a list
 // (a product, say) can take you straight back to that list. Clicking the menu starts a fresh trail.
@@ -77,11 +89,11 @@ const MENU_KEY = "adminFromMenu";
 
 function pageName(full: string): string {
   const path = full.split("?")[0].replace(/\/+$/, "");
-  const exact = [...NAV, ...EBAY_TABS, ...STORE_API_TABS, ...FITMENT_TABS].find((n) => n.href === path);
+  const exact = [...NAV, ...EBAY_TABS, ...AMAZON_TABS, ...STORE_API_TABS, ...FITMENT_TABS].find((n) => n.href === path);
   if (exact) return exact.label;
   if (/^\/admin\/products\/new$/.test(path)) return "New product";
   if (/^\/admin\/products\/[^/]+$/.test(path)) return "Product";
-  const parent = [...NAV, ...EBAY_TABS, ...STORE_API_TABS, ...FITMENT_TABS]
+  const parent = [...NAV, ...EBAY_TABS, ...AMAZON_TABS, ...STORE_API_TABS, ...FITMENT_TABS]
     .filter((n) => n.href !== "/admin" && path.startsWith(n.href + "/"))
     .sort((a, b) => b.href.length - a.href.length)[0];
   return parent ? parent.label : "the previous page";

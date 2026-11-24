@@ -38,6 +38,7 @@ export type DsJob = {
   supplier_mode?: string | null;
   tracking_number?: string | null;
   tracking_carrier?: string | null;
+  channel?: string;
   note?: string | null;
   po?: DsPo | null;
 };
@@ -49,6 +50,7 @@ export function PoReview({ job, onDone, onClose }: { job: DsJob; onDone: () => v
   const [err, setErr] = useState<string | null>(null);
   const po = job.po;
   const stage = job.stage;
+  const dest = job.channel === "amazon" ? "Amazon" : job.channel === "web" ? "the website" : "eBay"; // where the tracking goes
   const q = job.quote;
 
   async function act(kind: "confirm" | "hold" | "place" | "send-tracking") {
@@ -80,12 +82,12 @@ export function PoReview({ job, onDone, onClose }: { job: DsJob; onDone: () => v
   return (
     <div className="space-y-3 text-sm">
       <p className="text-gray-600">
-        eBay order <span className="font-mono">{job.ebay_order_id}</span>
+        {job.channel === "amazon" ? "Amazon" : job.channel === "web" ? "Website" : "eBay"} order <span className="font-mono">{job.ebay_order_id}</span>
         {job.store ? ` (${job.store})` : ""} made PO {job.po_number}.{" "}
         {stage === "review_po" && "Check it against the order before anything is sent to the distributor."}
         {stage === "po_confirmed" && "The PO is confirmed, but the quote could not be fetched."}
         {stage === "review_quote" && "Check the quote. The next button places the order for real."}
-        {stage === "review_tracking" && "Tracking came back. The next button tells eBay the order shipped and eBay notifies the buyer."}
+        {stage === "review_tracking" && `Tracking came back. The next button tells ${dest} the order shipped.`}
       </p>
       {job.problem && <Notice kind="error">{job.problem}</Notice>}
       {stage === "review_quote" && q && (
@@ -193,7 +195,7 @@ export function PoReview({ job, onDone, onClose }: { job: DsJob; onDone: () => v
         )}
         {stage === "review_tracking" && (
           <button type="button" className={btnCls} disabled={busy !== ""} onClick={() => void act("send-tracking")}>
-            {busy === "send-tracking" ? "Telling eBay…" : "Tracking is correct. Tell eBay it shipped"}
+            {busy === "send-tracking" ? `Telling ${dest}…` : `Tracking is correct. Tell ${dest} it shipped`}
           </button>
         )}
         <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={() => void act("hold")}>
@@ -235,7 +237,7 @@ export default function DropShipReview() {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-lg bg-white p-5 shadow-xl">
         <h2 className="mb-2 text-lg font-semibold">
-          {job.stage === "review_po" ? "Check this drop ship PO" : job.stage === "review_quote" ? "Check the quote and place the order" : job.stage === "review_tracking" ? "Check the tracking before eBay is told" : "Drop ship order needs you"}
+          {job.stage === "review_po" ? "Check this drop ship PO" : job.stage === "review_quote" ? "Check the quote and place the order" : job.stage === "review_tracking" ? `Check the tracking before ${dest} is told` : "Drop ship order needs you"}
         </h2>
         <PoReview job={job} onDone={() => void load()} onClose={() => setLater(job.id)} />
         {jobs.length > 1 && <p className="mt-3 text-xs text-gray-500">{jobs.length - 1} more waiting after this one.</p>}
