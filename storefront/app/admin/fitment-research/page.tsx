@@ -57,6 +57,12 @@ export default function FitmentResearchPage() {
   const [skipMakes, setSkipMakes] = useState<Record<string, boolean>>({});
   const [skipModels, setSkipModels] = useState<Record<string, boolean>>({});
 
+  useEffect(() => {
+    if (!msg || msg.kind === "error") return;
+    const t = setTimeout(() => setMsg(null), 6000);
+    return () => clearTimeout(t);
+  }, [msg]);
+
   const load = useCallback(() => {
     api<Row[]>("/fitment-research/queue").then(setRows).catch((e) => setMsg({ kind: "error", text: errMsg(e) }));
     api<Pdf[]>("/fitment-research/pdfs").then(setPdfs).catch(() => {});
@@ -138,7 +144,12 @@ export default function FitmentResearchPage() {
 
   return (
     <div className="space-y-6">
-      {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+      {/* Floats over the page (top right) so a message never pushes the page down. Click it to close; success and info close themselves. */}
+      {msg && (
+        <div className="fixed right-4 top-4 z-50 w-[28rem] max-w-[calc(100vw-2rem)] cursor-pointer shadow-lg" title="Click to close" onClick={() => setMsg(null)}>
+          <Notice kind={msg.kind}>{msg.text}</Notice>
+        </div>
+      )}
 
       <section className="space-y-3 rounded border border-gray-200 p-4">
         <h2 className="font-semibold">Find suggestions</h2>
