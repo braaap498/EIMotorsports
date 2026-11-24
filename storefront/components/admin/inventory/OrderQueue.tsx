@@ -10,6 +10,7 @@ import ScanSession from "./ScanSession";
 import WebOrderShip from "./WebOrderShip";
 import EbayOrdersToShip from "./EbayOrdersToShip";
 import AmazonOrdersToShip from "./AmazonOrdersToShip";
+import AmazonAddressForm, { needsAddress } from "../AmazonAddressForm";
 import { beep } from "./shared";
 
 /* Inventory > Pick & ship: ONE list of every order waiting to be picked or shipped, from every sales channel,
@@ -31,7 +32,7 @@ type Row = {
   summary: string | null;
   sub: string | null;
   status: "pick" | "ship" | "shipped" | "dropship";
-  drop_ship: { stage: string; label: string; po_number: number | null; problem: string | null } | null; // where its drop ship order is
+  drop_ship: { job_id?: number; stage: string; label: string; po_number: number | null; problem: string | null } | null; // where its drop ship order is
   attention: string[];
   claimed_by: string | null; // the person's name
   claimed_by_email: string | null; // shown under the name
@@ -530,6 +531,9 @@ export default function OrderQueue({ active }: { active: boolean }) {
                             {r.drop_ship.label}
                             {r.drop_ship.problem ? `: ${r.drop_ship.problem}` : ""}
                           </div>
+                        )}
+                        {r.drop_ship?.stage === "problem" && r.drop_ship.job_id && needsAddress(r.drop_ship.problem) && (
+                          <AmazonAddressForm jobId={r.drop_ship.job_id} orderRef={r.order_ref} onDone={() => void load()} />
                         )}
                         {r.decision && (
                           <div>
