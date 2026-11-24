@@ -513,7 +513,7 @@ def items(
             params[f"u{i}"] = f"%{digits}%"
             cond += f" or s.upc_norm like :u{i}"
         where.append(f"({cond})")
-    from app.kits import SINGLES_CTE, single_count, single_exists, single_pick  # late import, like the other modules here
+    from app.kits import SINGLES_CTE, product_main_photos, single_count, single_exists, single_pick  # late import, like the other modules here
 
     used = single_exists("supplier")
     if only == "no_product":
@@ -539,12 +539,14 @@ def items(
     titles = {}
     if ids:
         titles = {t.id: (t.title, t.sku_display) for t in db.execute(text("select id, title, sku_display from products where id = any(cast(:i as bigint[]))"), {"i": ids}).all()}
+    photos = product_main_photos(db, ids)
     out = []
     for r in rows:
         d = dict(r._mapping)
         for k in ("list_price", "dealer_cost"):
             d[k] = float(d[k]) if d[k] is not None else None
         d["product_title"], d["product_sku"] = titles.get(d["product_id"]) or (None, None)
+        d["product_image"], d["product_image_full"] = photos.get(d["product_id"]) or (None, None)
         d["products"] = int(d["products"] or 0)
         out.append(d)
     return {"total": total, "items": out}

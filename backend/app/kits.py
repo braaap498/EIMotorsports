@@ -186,6 +186,36 @@ def vendors(db: Session = Depends(get_db)):
     }
 
 
+def product_main_photos(db: Session, product_ids: list[int]) -> dict[int, tuple[Optional[str], Optional[str]]]:
+    """The main photo of each product, as (thumbnail, full size) addresses: its primary photo (else its first one) that is
+    not turned off. A photo not yet copied into our storage (only the distributor's link) is shown from that link.
+    Products with no usable photo are left out. Never raises: a catalog list must still load if photos cannot be read."""
+    ids = sorted({int(i) for i in product_ids if i})
+    if not ids:
+        return {}
+    base = (
+        "select distinct on (pp.product_id) pp.product_id, pp.image_key, pp.source_url from product_photos pp "
+        "where pp.product_id = any(cast(:i as bigint[])) {hid} and (nullif(btrim(coalesce(pp.image_key, '')), '') is not null "
+        "or nullif(btrim(coalesce(pp.source_url, '')), '') is not null) "
+        "order by pp.product_id, pp.is_primary desc nulls last, pp.sort_order nulls last, pp.id"
+    )
+    rows = None
+    for hid in ("and not coalesce(pp.hidden, false)", ""):  # the second form is for a database that has no hidden column yet
+        try:
+            rows = db.execute(text(base.format(hid=hid)), {"i": ids}).all()
+            break
+        except Exception:
+            db.rollback()
+    out: dict[int, tuple[Optional[str], Optional[str]]] = {}
+    for r in rows or []:
+        if (r.image_key or "").strip():
+            out[r.product_id] = (thumb_url(r.image_key), full_url(r.image_key))
+        else:
+            link = (r.source_url or "").strip()
+            out[r.product_id] = (link, link)
+    return out
+
+
 @router.get("/manual-catalog")
 @needs("products.edit_details", "products.create")
 def manual_catalog(
@@ -247,6 +277,7 @@ def manual_catalog(
     except Exception:
         db.rollback()
         return {"items": [], "total": 0}
+    photos = product_main_photos(db, ids)
     return {
         "total": int(total or 0),
         "items": [
@@ -263,6 +294,8 @@ def manual_catalog(
                 "product_id": r.product_id,
                 "product_title": (titles.get(r.product_id) or (None, None))[0],
                 "product_sku": (titles.get(r.product_id) or (None, None))[1],
+                "product_image": (photos.get(r.product_id) or (None, None))[0],  # the linked product's main photo
+                "product_image_full": (photos.get(r.product_id) or (None, None))[1],
                 "products": int(r.products or 0),
             }
             for r in rows
@@ -313,6 +346,7 @@ def add_manual_item(body: ManualItemIn, db: Session = Depends(get_db), user: Aut
 
 
 class ManualItemEdit(BaseModel):
+    part_number: Optional[str] = Field(None, min_length=1, max_length=60, description="a new vendor part # (SKU); leave out to keep it")
     mfr_number: Optional[str] = Field(None, max_length=60)
     manufacturer: Optional[str] = Field(None, max_length=80)
     description: Optional[str] = Field(None, max_length=250)
@@ -323,12 +357,34 @@ class ManualItemEdit(BaseModel):
 @needs("products.edit_details")
 def edit_manual_item(item_id: int, body: ManualItemEdit, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     """Change a saved part. Every piece that points at it follows (cost and description on the next PO, manufacturer # now).
-    The vendor part # cannot be changed here: it is what the custom label and the PO use. Cost only for people who may set prices."""
+    The vendor part # (SKU) can be changed too: it must not be empty or already used by another saved part of the same distributor, and
+    the pieces that point at the part carry the new number. A product's custom label is NOT touched (it may already be on eBay listings).
+    Cost only for people who may set prices."""
     sets = ["mfr_number = :mfr", "manufacturer = :brand", "description = :desc", "updated_at = now()"]
     params: dict = {"i": item_id, "mfr": (body.mfr_number or "").strip() or None, "brand": (body.manufacturer or "").strip() or None, "desc": (body.description or "").strip() or None}
     if has_perm(user, "products.edit_price"):
         sets.append("unit_cost = :uc")
         params["uc"] = body.unit_cost
+    new_sku = None
+    if body.part_number is not None:
+        new_sku = body.part_number.strip()
+        norm = _norm(new_sku)
+        if not norm:
+            raise HTTPException(400, "Type the vendor's part number.")
+        cur = db.execute(text("select distributor_id, part_number, part_norm from manual_catalog_items where id = :i"), {"i": item_id}).first()
+        if not cur:
+            raise HTTPException(404, "That saved part no longer exists.")
+        if new_sku == cur.part_number:
+            new_sku = None  # unchanged
+        else:
+            dup = db.execute(
+                text("select part_number from manual_catalog_items where distributor_id = :d and part_norm = :n and id <> :i"),
+                {"d": cur.distributor_id, "n": norm, "i": item_id},
+            ).first()
+            if dup:
+                raise HTTPException(409, f"{dup.part_number} is already saved for this distributor.")
+            sets += ["part_number = :pn", "part_norm = :pnorm"]
+            params["pn"], params["pnorm"] = new_sku, norm
     row = db.execute(
         text(f"update manual_catalog_items set {', '.join(sets)} where id = :i returning id, part_number, mfr_number, manufacturer, description, unit_cost"),
         params,
@@ -336,6 +392,8 @@ def edit_manual_item(item_id: int, body: ManualItemEdit, db: Session = Depends(g
     if not row:
         db.rollback()
         raise HTTPException(404, "That saved part no longer exists.")
+    if new_sku:  # the pieces keep their own copy of the vendor part #: carry the change to them
+        db.execute(text("update product_kit_parts set part_number = :pn where manual_item_id = :i"), {"pn": new_sku, "i": item_id})
     # the product's Manufacturer part # is the pieces' numbers joined: refresh it for the products that use this part
     for pid in [r.product_id for r in db.execute(text("select distinct product_id from product_kit_parts where manual_item_id = :i"), {"i": item_id}).all()]:
         follow = parts_mpn(db, pid)
