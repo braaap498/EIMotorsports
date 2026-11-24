@@ -32,6 +32,7 @@ type FilterOptions = { distributors: { id: number; name: string; count: number }
 type Cat = { id: number; parent_id: number | null; name: string; sort_order: number };
 type Saved = {
   q: string;
+  exact?: boolean; // "Exact match" ticked
   published: string;
   fitment?: string;
   category?: string;
@@ -111,6 +112,7 @@ export default function ProductsPage() {
   const { can } = useAccess();
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
+  const [exact, setExact] = useState(false); // search text must equal a whole title / item number / label / SKU / part #
   const [published, setPublished] = useState("");
   const [fitment, setFitment] = useState("");
   const [category, setCategory] = useState("");
@@ -144,6 +146,7 @@ export default function ProductsPage() {
     if (saved) {
       setQInput(saved.q);
       setQ(saved.q);
+      setExact(!!saved.exact);
       setPublished(saved.published);
       setFitment(saved.fitment ?? (saved.noFitment ? "needs_fitment" : ""));
       setCategory(saved.category ?? "");
@@ -167,8 +170,8 @@ export default function ProductsPage() {
   }, []);
 
   useEffect(() => {
-    if (ready) saveSaved("products", { q, published, fitment, category, distributor, brand, stock, offset, sort, dir });
-  }, [ready, q, published, fitment, category, distributor, brand, stock, offset, sort, dir]);
+    if (ready) saveSaved("products", { q, exact, published, fitment, category, distributor, brand, stock, offset, sort, dir });
+  }, [ready, q, exact, published, fitment, category, distributor, brand, stock, offset, sort, dir]);
 
   // The Distributor and Brand choices. Brands follow the chosen distributor; a chosen brand that distributor does not carry is cleared.
   useEffect(() => {
@@ -186,6 +189,7 @@ export default function ProductsPage() {
     (withStatus: boolean) => {
       const f = new URLSearchParams();
       if (q) f.set("q", q);
+      if (q && exact) f.set("exact", "true");
       if (published) f.set("published", published);
       if (category) f.set("category_id", category);
       if (distributor) f.set("distributor_id", distributor);
@@ -194,7 +198,7 @@ export default function ProductsPage() {
       if (withStatus && fitment) f.set("fitment", fitment);
       return f;
     },
-    [q, published, category, distributor, brand, stock, fitment]
+    [q, exact, published, category, distributor, brand, stock, fitment]
   );
 
   const load = useCallback(() => {
@@ -228,7 +232,7 @@ export default function ProductsPage() {
   // A different list means the ticks no longer match what is on screen.
   useEffect(() => {
     setSel(new Set());
-  }, [q, published, fitment, category, distributor, brand, stock, offset, sort, dir]);
+  }, [q, exact, published, fitment, category, distributor, brand, stock, offset, sort, dir]);
 
   // Click a heading: ascending, click again: descending, a third click goes back to the default order.
   function clickSort(key: SortKey) {
@@ -279,6 +283,7 @@ export default function ProductsPage() {
       if (scope === "selected") body.ids = [...sel];
       else {
         if (q) body.q = q;
+        if (q && exact) body.exact = true;
         if (published) body.published = published === "true";
         if (category) body.category_id = Number(category);
         if (fitment) body.fitment = fitment;
@@ -317,6 +322,13 @@ export default function ProductsPage() {
         <Field label="Search">
           <ClearableInput className="w-[36rem] max-w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900" value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="Search title, item number, custom label or SKU" onClear={() => { setQInput(""); filterChange(() => setQ("")); }} />
         </Field>
+        <label
+          className="flex items-center gap-1.5 pb-2 text-sm text-gray-700"
+          title="Only products where a whole title, item number, custom label, SKU or manufacturer part # is exactly what you typed. Longer ones that merely contain it are left out."
+        >
+          <input type="checkbox" checked={exact} onChange={(e) => filterChange(() => setExact(e.target.checked))} />
+          Exact match
+        </label>
         <Field label="Category">
           <select className={`${inputCls} max-w-[16rem]`} value={category} onChange={(e) => filterChange(() => setCategory(e.target.value))}>
             <option value="">All categories</option>

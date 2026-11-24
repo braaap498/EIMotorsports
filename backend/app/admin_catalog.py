@@ -880,6 +880,7 @@ def _product_where(
     distributor_id: Optional[str] = None,
     brand_id: Optional[int] = None,
     stock: Optional[str] = None,
+    exact: bool = False,
 ) -> tuple[str, dict]:
     """The WHERE clause and parameters shared by the products list, the fitment summary and the bulk change."""
     if fitment and fitment not in FITMENT_FILTERS:
@@ -895,8 +896,11 @@ def _product_where(
             dist_id = int(distributor_id)
         except ValueError:
             raise HTTPException(400, "Unknown distributor.")
+    term = (q or "").strip()
+    exact = bool(exact and term)
     params = {
-        "like": like(q),
+        "like": None if exact else like(q),
+        "exact": term.upper() if exact else None,
         "category_id": category_id,
         "published": published,
         "universal": universal,
@@ -910,6 +914,12 @@ def _product_where(
                or p.sku ilike cast(:like as text)
                or p.manufacturer_part_number ilike cast(:like as text)
                or p.custom_label_sku ilike cast(:like as text))
+          and (cast(:exact as text) is null
+               or upper(btrim(coalesce(p.title, ''))) = cast(:exact as text)
+               or upper(btrim(coalesce(p.ebay_item_id, ''))) in (cast(:exact as text), 'EBAY-' || cast(:exact as text))
+               or upper(btrim(coalesce(p.sku, ''))) = cast(:exact as text)
+               or upper(btrim(coalesce(p.manufacturer_part_number, ''))) = cast(:exact as text)
+               or upper(btrim(coalesce(p.custom_label_sku, ''))) = cast(:exact as text))
           and (cast(:category_id as bigint) is null or p.category_id in (select id from tree))
           and (cast(:published as boolean) is null or p.is_published = cast(:published as boolean))
           and (cast(:universal as boolean) is null or p.is_universal = cast(:universal as boolean))
@@ -946,6 +956,7 @@ def list_products(
     distributor_id: Optional[str] = None,
     brand_id: Optional[int] = None,
     stock: Optional[str] = None,
+    exact: bool = False,
     sort: Optional[str] = None,
     dir: str = "asc",
     limit: int = Query(50, le=200),
@@ -957,7 +968,7 @@ def list_products(
         raise HTTPException(400, "Unknown sort column.")
     direction = "desc" if dir == "desc" else "asc"
     order_by = f"{sort_expr} {direction} nulls last, p.id desc" if sort_expr else "p.id desc"
-    where, params = _product_where(q, category_id, published, universal, no_fitment, fitment, source, distributor_id, brand_id, stock)
+    where, params = _product_where(q, category_id, published, universal, no_fitment, fitment, source, distributor_id, brand_id, stock, exact)
     params.update({"limit": limit, "offset": offset})
     total = db.execute(text(f"{_CATEGORY_TREE} select count(*) from products p {where}"), params).scalar()
     rows = db.execute(
@@ -1027,10 +1038,11 @@ def fitment_summary(
     distributor_id: Optional[str] = None,
     brand_id: Optional[int] = None,
     stock: Optional[str] = None,
+    exact: bool = False,
     db: Session = Depends(get_db),
 ):
     """How many products are in each fitment status, for the current search and category (the status filter itself is not applied)."""
-    where, params = _product_where(q, category_id, published, universal, False, None, source, distributor_id, brand_id, stock)
+    where, params = _product_where(q, category_id, published, universal, False, None, source, distributor_id, brand_id, stock, exact)
     row = db.execute(
         text(
             f"""
@@ -1063,6 +1075,7 @@ class FitmentModeIn(BaseModel):
     distributor_id: Optional[str] = None
     brand_id: Optional[int] = None
     stock: Optional[str] = None
+    exact: bool = False  # the search text must match a whole field, not part of one
     expected_count: Optional[int] = None
 
 
@@ -1089,7 +1102,7 @@ def set_fitment_mode(body: FitmentModeIn, db: Session = Depends(get_db)):
             raise HTTPException(400, "Pick a category, search or filter first. This will not change the whole catalog at once.")
         where, params = _product_where(
             body.q, body.category_id, body.published, body.universal, False, body.fitment, body.source,
-            body.distributor_id, body.brand_id, body.stock,
+            body.distributor_id, body.brand_id, body.stock, body.exact,
         )
         matched = db.execute(text(f"{_CATEGORY_TREE} select count(*) from products p {where}"), params).scalar() or 0
         if body.expected_count is None or matched != body.expected_count:
