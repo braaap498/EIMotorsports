@@ -55,7 +55,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/store", tags=["checkout"])
 
 _bearer = HTTPBearer(auto_error=False)
-_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$")
 
 
 # --------------------------------------------------------------------------
