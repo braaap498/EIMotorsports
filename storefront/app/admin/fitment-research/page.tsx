@@ -161,7 +161,7 @@ export default function FitmentResearchPage() {
   return (
     <div className="space-y-6">
       <section className="space-y-3 rounded border border-gray-200 p-4">
-        <h2 className="flex items-center gap-3 font-semibold">Find suggestions{inlineMsg("suggest")}</h2>
+        <h2 className="flex h-8 items-center gap-3 font-semibold">Find suggestions{inlineMsg("suggest")}</h2>
         <div className="flex flex-wrap items-center gap-2">
           <button className={btnCls} disabled={busy} onClick={() => runIn("suggest", async () => {
             const r = await api<{ looked_at: number; suggestions_made: number }>("/fitment-research/names/run", { method: "POST", body: { limit: 500 } });
@@ -178,7 +178,7 @@ export default function FitmentResearchPage() {
       </section>
 
       <section className="space-y-3 rounded border border-gray-200 p-4">
-        <h2 className="flex items-center gap-3 font-semibold">Paste fitment from the catalog{inlineMsg("paste")}</h2>
+        <h2 className="flex h-8 items-center gap-3 font-semibold">Paste fitment from the catalog{inlineMsg("paste")}</h2>
         <p className="text-xs text-gray-500">
           On the distributor catalog page open the Fitment tab, click Expand All, copy everything and paste it here. Missing makes and models are
           added, years are added, and the part is linked to every pasted model-year (this also feeds its eBay compatible vehicles).
