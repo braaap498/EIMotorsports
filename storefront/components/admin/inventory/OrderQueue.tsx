@@ -9,6 +9,7 @@ import ScanBox from "./ScanBox";
 import ScanSession from "./ScanSession";
 import WebOrderShip from "./WebOrderShip";
 import EbayOrdersToShip from "./EbayOrdersToShip";
+import AmazonOrdersToShip from "./AmazonOrdersToShip";
 import { beep } from "./shared";
 
 /* Inventory > Pick & ship: ONE list of every order waiting to be picked or shipped, from every sales channel,
@@ -16,7 +17,7 @@ import { beep } from "./shared";
    - Filter by sales channel, or search by order #, customer, item, label, title or tracking number.
    - Open an order by clicking it or by scanning its order number. That marks it "being picked by <you>" for
      everyone else (kept alive while it is open, dropped when you go back, or after 10 minutes of silence).
-   - Website orders open the website pick screen; eBay orders open the scan-out screen plus the label / tracking
+   - Website orders open the website pick screen; eBay and Amazon orders open the scan-out screen plus the label / tracking
      controls. Orders that need a human look (short pick, oversold) are marked in red but stay in date order.
    - URGENT orders (too big for our shelf and a big share of the distributor's stock, or nothing can fill them) are pinned
      above the list in red until a person approves a drop ship or chooses our own stock. Recording the choice does not
@@ -52,7 +53,7 @@ const STATUS: Record<Row["status"], { label: string; tone: "amber" | "blue" | "g
 export default function OrderQueue({ active }: { active: boolean }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [total, setTotal] = useState(0);
-  const [channels, setChannels] = useState<string[]>(["Website", "eBay"]);
+  const [channels, setChannels] = useState<string[]>(["Website", "eBay", "Amazon"]);
   const [offset, setOffset] = useState(0);
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
@@ -207,7 +208,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
   async function openRow(r: Row, takeOver = false) {
     setMsg(null);
     if (r.status === "dropship") {
-      setMsg(`eBay order ${r.order_ref} is being drop shipped, so there is nothing to pick. Follow it on the Drop ship page, Activity tab. It leaves this list once eBay is told it shipped.`);
+      setMsg(`${r.channel} order ${r.order_ref} is being drop shipped, so there is nothing to pick. Follow it on the Drop ship page, Activity tab. It leaves this list once ${r.channel} is told it shipped.`);
       return;
     }
     if (r.urgent && !takeOver && !window.confirm(`This order is URGENT and still waiting for a decision (drop ship or our own stock).\n\nOpen it anyway?`)) return;
@@ -274,7 +275,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
             ← Back to all orders
           </button>
           <span className="flex items-center gap-2 text-sm text-gray-700">
-            <Badge tone={open.channel === "Website" ? "blue" : "amber"}>{open.channel}</Badge>
+            <Badge tone={open.channel === "Website" ? "blue" : open.channel === "Amazon" ? "green" : "amber"}>{open.channel}</Badge>
             order <strong>{open.order_ref}</strong>
           </span>
           {!takenBy && <Badge tone="amber">Being picked by you{me ? ` (${me})` : ""}</Badge>}
@@ -294,7 +295,11 @@ export default function OrderQueue({ active }: { active: boolean }) {
               initialReference={open.order_ref}
               onCommitted={() => setReloadKey((k) => k + 1)}
             />
-            <EbayOrdersToShip active={active} embedded initialQ={open.order_ref} reloadKey={reloadKey} onEmpty={closeOrder} />
+            {open.channel === "Amazon" ? (
+              <AmazonOrdersToShip active={active} embedded initialQ={open.order_ref} reloadKey={reloadKey} onEmpty={closeOrder} />
+            ) : (
+              <EbayOrdersToShip active={active} embedded initialQ={open.order_ref} reloadKey={reloadKey} onEmpty={closeOrder} />
+            )}
           </div>
         )}
       </div>
@@ -457,7 +462,7 @@ export default function OrderQueue({ active }: { active: boolean }) {
                     )}
                   </td>
                   <td className="px-3 py-2">
-                    <Badge tone={r.channel === "Website" ? "blue" : "amber"}>{r.channel}</Badge>
+                    <Badge tone={r.channel === "Website" ? "blue" : r.channel === "Amazon" ? "green" : "amber"}>{r.channel}</Badge>
                   </td>
                   <td className="truncate px-3 py-2 font-medium" title={r.order_ref}>
                     {r.order_ref}
