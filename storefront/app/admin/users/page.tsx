@@ -689,7 +689,7 @@ function SortHeader({
         type="button"
         className={`inline-flex items-center gap-1 uppercase hover:text-gray-900 ${active ? "text-gray-900" : ""}`}
         onClick={() => onSort(k)}
-        title={`Sort by ${label.replace("\n", " ").toLowerCase()}`}
+        title={`Sort by ${label.replaceAll("\n", " ").toLowerCase()}`}
       >
         <span className="whitespace-nowrap text-left">{label}</span>
         <span className={`text-[10px] ${active ? "" : "text-gray-300"}`}>{active ? (dir === "asc" ? "▲" : "▼") : "▲▼"}</span>
