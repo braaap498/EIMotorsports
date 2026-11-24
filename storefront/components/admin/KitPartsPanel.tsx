@@ -379,7 +379,7 @@ export default function KitPartsPanel({
       manual_item_id: p.manual_item_id ?? null,
       part_number: p.part_number,
       mfr_number: (p.mfr_number ?? "").trim() || null,
-      label_use_mfr: !!p.supplier_item_id && !!p.label_use_mfr,
+      label_use_mfr: !!p.label_use_mfr,
       manufacturer: !p.supplier_item_id && !p.manual_item_id ? (p.manufacturer ?? "").trim() || null : null,
       description: p.description || null,
       unit_cost: p.unit_cost,
@@ -493,12 +493,10 @@ export default function KitPartsPanel({
                       />
                       <span
                         className="flex items-center gap-1 font-normal"
-                        title={p.supplier_item_id
-                          ? "The custom label is written with this part's manufacturer number instead of the distributor SKU, and the distributor screens show the manufacturer number for this product."
-                          : "Only a part picked from a distributor's catalog can use the catalog's manufacturer number for the label."}
+                        title="The custom label is written with this part's manufacturer number instead of the distributor part number, and the distributor screens show the manufacturer number for this product."
                       >
                         <input
-                          type="checkbox" disabled={disabled || !p.supplier_item_id} checked={!!p.supplier_item_id && !!p.label_use_mfr}
+                          type="checkbox" disabled={disabled} checked={!!p.label_use_mfr}
                           onChange={(e) => edit(parts.map((x) => (x === p ? { ...x, label_use_mfr: e.target.checked } : x)))}
                         />
                         Use the manu. part # for the custom label
