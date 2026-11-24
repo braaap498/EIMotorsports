@@ -201,6 +201,12 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
       {error && <Notice kind="error">{error}</Notice>}
       {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
 
+      {total > LIMIT && (
+        <div className={loading ? "opacity-50" : ""}>
+          <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
+        </div>
+      )}
+
       <div className="rounded border border-gray-200 bg-white p-2">
         {/* the same table as the Automatic Distributors catalog: fixed layout, small text, sortable headings */}
         <table className="w-full table-fixed text-left text-xs">

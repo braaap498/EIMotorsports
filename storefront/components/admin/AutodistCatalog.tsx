@@ -624,6 +624,7 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
 
         {data && (
           <>
+            {data.total > limit && <Pager total={data.total} limit={limit} offset={offset} onChange={setOffset} />}
             <div className="overflow-x-auto">
               {/* fixed layout: every column keeps the same width on every page and filter; the name takes what is left */}
               <table className="w-full min-w-[90rem] table-fixed text-left text-xs">
