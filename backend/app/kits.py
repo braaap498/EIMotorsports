@@ -876,7 +876,7 @@ class KitPartIn(BaseModel):
     manual_item_id: Optional[int] = None
     # the brand of a typed piece (a catalog or saved part has its own)
     manufacturer: Optional[str] = Field(None, max_length=80)
-    # catalog pieces only: write this piece in the custom label (and show it on the distributor screens) as its manufacturer number
+    # any piece (catalog, saved or typed): write this piece in the custom label (and show it on the distributor screens) as its manufacturer number
     label_use_mfr: bool = False
 
 
@@ -1009,6 +1009,10 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
             number = saved.part_number
             desc = (saved.description or "").strip() or desc
             cost = float(saved.unit_cost) if saved.unit_cost is not None else cost
+        if p.label_use_mfr and not p.supplier_item_id:
+            # a saved part or a typed piece (any vendor without a catalog): written as the number in its Manufacturer # box,
+            # else the saved part's own number, else (no number at all) the part number - same rule as a catalog piece.
+            label = label_token_for((p.mfr_number or "").strip() or ((saved.mfr_number or "") if saved is not None else ""))
         if not number:
             raise HTTPException(400, "Every piece needs a part number.")
         mfr = (p.mfr_number or "").strip() or None
@@ -1019,7 +1023,7 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
         clean.append({"distributor_id": p.distributor_id, "supplier_item_id": p.supplier_item_id, "part_number": number,
                       "label": label or number, "description": desc, "unit_cost": cost, "quantity": p.quantity, "sort_order": i,
                       "mfr_number": mfr, "manual_item_id": saved.id if saved is not None else None,
-                      "label_use_mfr": bool(p.label_use_mfr and p.supplier_item_id),
+                      "label_use_mfr": bool(p.label_use_mfr),
                       "manufacturer": ((p.manufacturer or "").strip() or None) if (not p.supplier_item_id and saved is None) else None})
     for c in clean:
         db.execute(

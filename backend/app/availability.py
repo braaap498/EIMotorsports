@@ -268,13 +268,14 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
             for k in db.execute(
                 text(
                     "select k.part_number, greatest(coalesce(k.quantity, 1), 1) as need, "
-                    "(coalesce(k.label_use_mfr, false) and k.supplier_item_id is not null) as use_mfr, "
-                    "coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si0.mfr_number), '')) as mfr_no, coalesce(("
+                    "coalesce(k.label_use_mfr, false) as use_mfr, "
+                    "coalesce(nullif(btrim(k.mfr_number), ''), nullif(btrim(si0.mfr_number), ''), nullif(btrim(mi0.mfr_number), '')) as mfr_no, coalesce(("
                     "  select sum(greatest(0, coalesce(p2.quantity_on_hand, 0) - " + set_aside_sql("p2") + ") * greatest(coalesce(k2.quantity, 1), 1)) "
                     "  from product_kit_parts k2 join products p2 on p2.id = k2.product_id "
                     f"  where {same_part_sql('k', 'k2')} and p2.id <> :i "
                     "    and (select count(*) from product_kit_parts k3 where k3.product_id = p2.id) = 1), 0) as units "
                     "from product_kit_parts k left join supplier_items si0 on si0.id = k.supplier_item_id "
+                    "left join manual_catalog_items mi0 on mi0.id = k.manual_item_id "
                     "where k.product_id = :i order by k.sort_order, k.id"
                 ),
                 {"i": product_id},
