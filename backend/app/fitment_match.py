@@ -184,9 +184,72 @@ def _is_year_line(s: str) -> Optional[int]:
     return None
 
 
+# One line per model with its year range:   "HONDA Rancher 420 4x4 EPS 2020 - 2024"
+_RANGE_LINE = re.compile(r"^(?P<head>.+?)\s+(?P<a>(?:19|20)\d{2})\s*(?:-|\u2013|\u2014|to)\s*(?P<b>(?:19|20)\d{2})$", re.I)
+
+
+def _split_make(head: str, known: set[str]) -> tuple[str, str]:
+    """Split 'HONDA Rancher 420 4x4' into ('HONDA', 'Rancher 420 4x4'). Prefers the longest leading run of words
+    that is a known make (so 'Harley Davidson' and 'Can-Am' stay whole); otherwise the first word."""
+    words = head.split(" ")
+    for n in range(min(3, len(words) - 1), 0, -1):
+        if _norm(" ".join(words[:n])) in known:
+            return " ".join(words[:n]), " ".join(words[n:])
+    return words[0], " ".join(words[1:])
+
+
+def _tidy_make(name: str, known_names: dict[str, str]) -> str:
+    """Use the spelling a known make already has; otherwise 'HONDA' -> 'Honda' (short all-caps names like BMW stay)."""
+    k = known_names.get(_norm(name))
+    if k:
+        return k
+    if name.isupper() and len(name) > 3:
+        return name.title()
+    return name
+
+
+def _parse_range_paste(lines: list[str], known: set[str], known_names: dict[str, str]) -> Optional[dict]:
+    """Parse the one-line-per-model format. Returns None when the text is not in that format."""
+    body = [ln for ln in lines if not re.match(r"(?i)^notes?\s*[:\-]", ln)]
+    hits = [_RANGE_LINE.match(ln) for ln in body]
+    if not body or sum(1 for h in hits if h) * 2 < len(body):
+        return None
+    makes: dict[str, dict] = {}
+    order: list[str] = []
+    warnings: list[str] = []
+    for ln, h in zip(body, hits):
+        if not h:
+            warnings.append(f"Ignored \"{ln}\": no year range at the end.")
+            continue
+        a, b = int(h.group("a")), int(h.group("b"))
+        if a > b:
+            a, b = b, a
+        if b > 2035 or b - a > 80:
+            warnings.append(f"Ignored \"{ln}\": the years look wrong.")
+            continue
+        make_raw, model = _split_make(h.group("head").strip(), known)
+        if not model:
+            warnings.append(f"Ignored \"{ln}\": no model after the make.")
+            continue
+        make = _tidy_make(make_raw, known_names)
+        mk = makes.setdefault(_norm(make), {"make": make, "models": {}})
+        if _norm(make) not in order:
+            order.append(_norm(make))
+        mk["models"].setdefault(model, set()).update(range(a, b + 1))
+    out = []
+    for key in order:
+        mk = makes[key]
+        models = [{"model": name, "years": sorted(ys)} for name, ys in mk["models"].items()]
+        models.sort(key=lambda m: m["model"].lower())
+        out.append({"make": mk["make"], "models": models})
+    return {"makes": out, "warnings": warnings[:50]}
+
+
+
 def parse_fitment_paste(text: str, extra_makes: Optional[list[str]] = None) -> dict:
     """
     Parse copied fitment text shaped like:   Make / year / model / model / year / model ... / Make / year ...
+    or one line per model with its year range:   HONDA Rancher 420 4x4 EPS 2020 - 2024
     A line is a MAKE when the next line is a year and either its name is a known make, or it is the first line,
     or the year jumps back up (years run newest to oldest inside a make, so the next make restarts higher).
     Returns {"makes": [{"make", "models": [{"model", "years": [..]}]}], "warnings": [..]}.
@@ -197,6 +260,10 @@ def parse_fitment_paste(text: str, extra_makes: Optional[list[str]] = None) -> d
     lines = [ln for ln in lines if not re.match(r"(?i)^notes?\s*[:\-]", ln)]
     known = {_norm(m) for m in KNOWN_MAKES} | {_norm(m) for m in (extra_makes or [])}
     known.discard("")
+    known_names = {_norm(m): m for m in list(KNOWN_MAKES) + list(extra_makes or [])}
+    by_range = _parse_range_paste(lines, known, known_names)
+    if by_range is not None:
+        return by_range
     years_at = [_is_year_line(ln) for ln in lines]
     # direction of the years inside a make: newest first (the usual) or oldest first
     down = up = 0
