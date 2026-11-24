@@ -755,10 +755,74 @@ def _finances_due() -> None:
     amazon_finances.run_due()   # fees and refunds, about once an hour per account
 
 
+# ---- buyer data cleanup ----------------------------------------------------------------------------
+# Amazon's Data Protection Policy: keep buyer PII (name, address, phone) only as long as needed to fulfill the order.
+# The full ship-to exists in two places: the drop ship PO (po_headers.ship_to) and the job's buyer_name (dropship_jobs).
+# Both are cleared AMAZON_PII_RETAIN_DAYS after the order shipped or was cancelled (default 14, never more than 28), and for any
+# order older than 30 days even if it never shipped. amazon_orders.raw_sample (a debugging copy of the API response) goes too.
+# amazon_orders keeps only state / ZIP / country, which the sales analytics need.
+PII_REMOVED = "[Amazon buyer address removed after the retention period]"
+_last_purge = 0.0
+
+
+def _pii_retain_days() -> int:
+    import os
+
+    try:
+        return max(1, min(28, int(os.environ.get("AMAZON_PII_RETAIN_DAYS", "14"))))
+    except ValueError:
+        return 14
+
+
+def purge_buyer_data(db: Session) -> dict:
+    """Clear expired Amazon buyer data. Safe to repeat. Returns how many rows each step changed."""
+    expired = (
+        "(o.shipped_at < now() - make_interval(days => :d) "
+        "or (o.cancelled and o.updated_at < now() - make_interval(days => :d)) "
+        "or coalesce(o.created_at_amazon, o.updated_at) < now() - interval '30 days')"
+    )
+    p = {"d": _pii_retain_days(), "ph": PII_REMOVED}
+    out = {}
+    steps = (
+        ("po_ship_to", f"update po_headers h set ship_to = :ph from amazon_orders o where h.source = 'amazon:' || o.amazon_order_id and h.ship_to is not null and h.ship_to <> :ph and {expired}"),
+        ("job_buyer_name", f"update dropship_jobs j set buyer_name = null from amazon_orders o where j.channel = 'amazon' and j.ebay_order_id = 'amazon:' || o.amazon_order_id and j.buyer_name is not null and {expired}"),
+        ("raw_sample", f"update amazon_orders o set raw_sample = null where o.raw_sample is not null and {expired}"),
+    )
+    for name, sql in steps:
+        try:
+            out[name] = db.execute(text(sql), p).rowcount or 0
+            db.commit()
+        except Exception:   # a table or column that does not exist yet must not stop the other steps
+            db.rollback()
+            out[name] = -1
+            log.exception("Amazon buyer data cleanup step %s failed", name)
+    if any(v > 0 for v in out.values()):
+        log.info("Amazon buyer data cleanup: %s", out)
+    return out
+
+
+def _purge_due() -> None:
+    global _last_purge
+    if time.time() - _last_purge < 3600:
+        return
+    _last_purge = time.time()
+    db = _session_factory()()
+    try:
+        purge_buyer_data(db)
+    finally:
+        db.close()
+
+
+@router.post("/purge-buyer-data")
+def purge_now(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Run the buyer data cleanup now (it also runs about once an hour by itself)."""
+    return {"ok": True, "retain_days": _pii_retain_days(), "cleared": purge_buyer_data(db)}
+
+
 def _loop() -> None:
     time.sleep(40)
     while True:
-        for fn in (run_due, _drop_ship_scan, _drain_queues, _finances_due):
+        for fn in (run_due, _drop_ship_scan, _drain_queues, _finances_due, _purge_due):
             try:
                 fn()
             except Exception:
