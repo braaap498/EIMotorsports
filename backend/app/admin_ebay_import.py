@@ -470,11 +470,19 @@ def _fetch_details(db: Session, stores: list, item_id: str) -> dict:
         qty_txt = (item.findtext(f"{NS}Quantity") or "").strip()
         sold_txt = (item.findtext(f"{NS}SellingStatus/{NS}QuantitySold") or "0").strip()
         qty = max(0, int(qty_txt) - (int(sold_txt) if sold_txt.isdigit() else 0)) if qty_txt.isdigit() else None
+        # A listing with variations keeps its custom label on each variation, not on the listing itself.
+        var_skus = sorted({
+            (v.findtext(f"{NS}SKU") or "").strip()
+            for v in item.findall(f"{NS}Variations/{NS}Variation")
+            if (v.findtext(f"{NS}SKU") or "").strip()
+        })
+        label = (item.findtext(f"{NS}SKU") or "").strip() or (var_skus[0] if len(var_skus) == 1 else "") or None
         return {
             "state": "ok",
             "store": row.store,
             "title": (item.findtext(f"{NS}Title") or "").strip()[:300] or None,
-            "label": (item.findtext(f"{NS}SKU") or "").strip() or None,
+            "label": label,
+            "variation_skus": var_skus,
             "price": _num(item.findtext(f"{NS}SellingStatus/{NS}CurrentPrice")) or _num(item.findtext(f"{NS}StartPrice")),
             "qty": qty,
             "category": (item.findtext(f"{NS}PrimaryCategory/{NS}CategoryName") or "").strip()[:200] or None,

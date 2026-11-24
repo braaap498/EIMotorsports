@@ -1529,7 +1529,11 @@ def _judge_product(product_label: str, items: dict) -> dict:
         why = ""
         if d["state"] == "ok":
             live = (d.get("ebay") or "").strip()
-            if saved_norm and (not live or _lab_norm(live) not in saved_norm or len(saved_norm) > 1):
+            varskus = d.get("variation_skus") or []
+            if not live and len(varskus) > 1:
+                # variation listing whose variations carry different labels: one product label cannot be picked
+                why = "listing has " + str(len(varskus)) + " different variation labels: " + ", ".join(varskus[:6])
+            elif saved_norm and (not live or _lab_norm(live) not in saved_norm or len(saved_norm) > 1):
                 why = "eBay and the saved label differ" if len(saved_norm) == 1 else "saved labels disagree with each other or eBay"
             final = live
         else:
@@ -1703,7 +1707,7 @@ def _inv_work(db: Session, job: _InvJob, mode: str, scope: str):
                         r = _fetch_details(db, use, item)  # RateLimited propagates: the run pauses
                         job.calls += len(use)
                         if r["state"] == "ok":
-                            d["state"], d["ebay"] = "ok", r["label"]
+                            d["state"], d["ebay"], d["variation_skus"] = "ok", r["label"], r.get("variation_skus") or []
                             consecutive_errors = 0
                         elif r["state"] == "error":
                             job.counts["errors"] += 1
