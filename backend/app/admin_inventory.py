@@ -75,6 +75,7 @@ from app.auth import AuthUser, current_user, needs, require_route_access
 from app import fulfillment, order_activity
 from app.database import get_db
 from app.images import thumb_url
+from app import amazon_sales
 from app.ebay_sales import _ensure_tracking_cols, lower_hold_marks, queue_stock_push, take_stock_for_reference
 from app.skus import PLACEHOLDER_SKU, shelf_code_for
 from app.stock import available_sql, lock_products, reserved_paid_sql, set_aside_sql
@@ -1317,9 +1318,14 @@ def _default_warehouse_name(db: Session) -> str:
         return DEFAULT_WAREHOUSE
 
 
+def _job_prefix(channel: str) -> str:
+    """The drop ship job / PO source prefix of an order's channel: 'web:' (website), 'amazon:' (Amazon), '' for eBay's own order ids."""
+    return "web:" if channel == "Website" else "amazon:" if channel == "Amazon" else ""
+
+
 def _drop_ship_pos(db: Session, rows) -> dict[str, int]:
     """{order key: PO number} for orders that have a live (not cancelled) drop ship purchase order."""
-    srcs = {("web:" if r.channel == "Website" else "ebay:") + str(r.order_ref): fulfillment.key_of(r.channel, r.order_ref) for r in rows}
+    srcs = {(_job_prefix(r.channel) or "ebay:") + str(r.order_ref): fulfillment.key_of(r.channel, r.order_ref) for r in rows}
     if not srcs:
         return {}
     try:
@@ -1368,6 +1374,19 @@ with q as (
     and (:q = '' or l.ebay_order_id ilike :like or l.ebay_item_id ilike :like or l.custom_label ilike :like
          or l.title ilike :like or o.tracking_number ilike :like)
   group by l.order_pk, l.ebay_order_id
+  union all
+  select 'Amazon'::text, l.amazon_order_id, min(coalesce(l.sale_date, l.created_at)),
+         sum(l.quantity * coalesce(l.pieces_per_sale, 1))::int, min(coalesce(l.title, '')), count(*)::int, min(l.account), null::bigint,
+         case when bool_or(o.shipped_at is not null) then 'shipped'
+              when bool_and(l.state = 'dropship') then 'dropship'
+              else 'pick' end
+  from amazon_order_lines l
+  join amazon_orders o on o.id = l.order_pk
+  where not o.cancelled
+    and (l.state = 'reserved' or (l.state = 'dropship' and o.shipped_at is null))
+    and (:q = '' or l.amazon_order_id ilike :like or l.sku ilike :like or l.asin ilike :like
+         or l.title ilike :like or o.tracking_number ilike :like)
+  group by l.order_pk, l.amazon_order_id
 )
 """
 
@@ -1389,7 +1408,7 @@ _DS_STAGE_LABEL = {
 def _drop_ship_stages(db: Session, rows) -> dict[str, dict]:
     """{job key: where its drop ship job is} for the orders on this page (an eBay order's key is its order number, a website order's is
     'web:<order number>'). The list must work without it."""
-    ids = [("web:" if r.channel == "Website" else "") + str(r.order_ref) for r in rows]
+    ids = [_job_prefix(r.channel) + str(r.order_ref) for r in rows]
     if not ids:
         return {}
     try:
@@ -1417,7 +1436,11 @@ def _held_for_shipping(db: Session) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for r in rows:
         ref = str(r.ebay_order_id)
-        key = fulfillment.key_of("Website", ref[len("web:"):]) if r.channel == "web" else fulfillment.key_of("eBay", ref)
+        key = (
+            fulfillment.key_of("Website", ref[len("web:"):]) if r.channel == "web"
+            else fulfillment.key_of("Amazon", ref[len("amazon:"):]) if r.channel == "amazon"
+            else fulfillment.key_of("eBay", ref)
+        )
         out[key] = [r.note or f"Buyer chose {r.ship_service or 'a shipping service'}. Choose our own stock, or drop ship and set the shipping."]
     return out
 
@@ -1519,13 +1542,13 @@ def order_queue(
                 "claimed_by": claimer,
                 "claimed_by_email": claimer_email,
                 "fulfillment": fulfil,
-                "drop_ship": ds_stage.get(("web:" if r.channel == "Website" else "") + str(r.order_ref)),
+                "drop_ship": ds_stage.get(_job_prefix(r.channel) + str(r.order_ref)),
                 "urgent": k in urgent,
                 "urgent_reasons": urgent.get(k, []),
                 "decision": decided.get(k),
             }
         )
-    return {"total": int(main_total or 0) + len(pinned), "channels": ["Website", "eBay"], "items": items}
+    return {"total": int(main_total or 0) + len(pinned), "channels": ["Website", "eBay", "Amazon"], "items": items}
 
 
 @router.get("/warehouses")
@@ -1616,7 +1639,7 @@ class DecisionIn(BaseModel):
 def fulfillment_decision(body: DecisionIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
     """A person decides an urgent order: approve a drop ship, or ship it from our own stock instead. Recorded with who and
     when; the order stops being urgent. THIS DOES NOT PLACE A DISTRIBUTOR ORDER. A decision already made can be changed."""
-    channel = "eBay" if body.channel.strip().lower() == "ebay" else "Website"
+    channel = {"ebay": "eBay", "amazon": "Amazon"}.get(body.channel.strip().lower(), "Website")
     ref = body.order_ref.strip()
     key = fulfillment.key_of(channel, ref)
     from app import dropship_auto
@@ -1909,14 +1932,18 @@ def ship(body: ShipIn, db: Session = Depends(get_db), user: AuthUser = Depends(c
         else:
             # eBay order: if its number matches a recorded eBay sale, the scanned parts leave the shelf and the
             # sale's reservation is released. Any other reference is only recorded, as before.
-            take_stock_for_reference(db, (body.reference or "").strip(), merged, user.email)
+            ref_amazon = amazon_sales.is_amazon_order(db, body.reference)
+            if ref_amazon:
+                amazon_sales.take_stock_for_reference(db, (body.reference or "").strip(), merged, user.email)
+            else:
+                take_stock_for_reference(db, (body.reference or "").strip(), merged, user.email)
         # Activity log: who picked what for which order (saved or rolled back together with the pick).
         picked_note = order_activity.parts_summary(db, {pid: m["qty"] for pid, m in merged.items()})
         if order:
             picked_note += " (order fully picked)" if fully_picked else " (partial pick)"
             order_activity.log_action(db, user, "picked", "Website", order.order_number, picked_note)
         else:
-            order_activity.log_action(db, user, "picked", "eBay", (body.reference or "").strip(), picked_note)
+            order_activity.log_action(db, user, "picked", "Amazon" if ref_amazon else "eBay", (body.reference or "").strip(), picked_note)
         db.commit()
         return {
             "batch_id": str(body.batch_id),

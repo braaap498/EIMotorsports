@@ -613,6 +613,12 @@ def enqueue_product(db: Session, product_id: int) -> int:
             ),
             {"s": r.store, "i": r.item, "p": product_id, "q": avail},
         )
+    try:   # a stock change on any channel also updates the Amazon listings of this product (never raises)
+        from app.amazon_listings import enqueue_product as _amazon_enqueue
+
+        _amazon_enqueue(db, product_id)
+    except Exception:
+        log.exception("could not queue Amazon quantities for product %s", product_id)
     return len(rows)
 
 
@@ -1391,7 +1397,13 @@ def ship_lines(
 def to_pick_count(db: Session = Depends(get_db)):
     """How many eBay orders still have parts set aside (the red badge on Inventory > Pick & ship)."""
     n = db.execute(text("select count(distinct ebay_order_id) from ebay_order_lines where state = 'reserved'")).scalar()
-    return {"orders": int(n or 0)}
+    total = int(n or 0)
+    try:  # Amazon orders waiting to be picked count on the same badge; never let a missing Amazon table break eBay's count
+        a = db.execute(text("select count(distinct amazon_order_id) from amazon_order_lines where state = 'reserved'")).scalar()
+        total += int(a or 0)
+    except Exception:
+        db.rollback()
+    return {"orders": total, "ebay": int(n or 0), "amazon": total - int(n or 0)}
 
 
 def _query_lines(

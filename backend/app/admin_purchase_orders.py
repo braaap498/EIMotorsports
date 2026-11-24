@@ -44,6 +44,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -925,6 +926,169 @@ def po_from_ebay_order(body: EbayDropIn, db: Session = Depends(get_db), user: Au
     except Exception:
         db.rollback()
         log.exception("drop ship PO made for eBay order %s, but its lines could not be moved to Drop ship", o.ebay_order_id)
+    return po
+
+
+# --------------------------------------------------------------------------
+# DROP SHIP FROM AN AMAZON ORDER
+# Like eBay: the amazon_orders table keeps only state / ZIP / country. The full ship-to is fetched from Amazon on demand for ONE order
+# and written onto the PO only. Amazon requires us to be the seller of record, so the account's drop ship policy acknowledgment is
+# checked here too. The address response shape (Orders API v2026-01-01, includedData=RECIPIENT) is UNVERIFIED: read defensively.
+# --------------------------------------------------------------------------
+class AmazonDropIn(BaseModel):
+    order: str = Field(..., min_length=3, max_length=40)           # the Amazon order number
+    product_ids: Optional[list[int]] = Field(None, max_length=200)  # the parts staff chose; empty = every matched line
+
+
+def _amazon_buyer_address(db: Session, account: str, order_id: str) -> dict:
+    from app.amazon_core import sp_get
+
+    data = sp_get(db, account, f"/orders/2026-01-01/orders/{urllib.parse.quote(order_id, safe='')}", {"includedData": "RECIPIENT"})
+    o = data.get("order") if isinstance(data.get("order"), dict) else data
+    rec = o.get("recipient") if isinstance(o.get("recipient"), dict) else {}
+    a = rec.get("deliveryAddress") if isinstance(rec.get("deliveryAddress"), dict) else rec
+
+    def g(*names):
+        for n in names:
+            v = a.get(n)
+            if v not in (None, ""):
+                return str(v).strip()
+        return ""
+
+    phone = g("phone", "phoneNumber")
+    if not any(c.isdigit() for c in phone):
+        phone = ""
+    line2 = " ".join(x for x in (g("addressLine2"), g("addressLine3")) if x)
+    return {
+        "full_name": g("name", "fullName") or str(rec.get("name") or "").strip(),
+        "line1": g("addressLine1", "street1"),
+        "line2": line2,
+        "city": g("city"),
+        "region": g("stateOrRegion", "state"),
+        "postal_code": g("postalCode", "zip"),
+        "country": g("countryCode", "country").upper(),
+        "phone": phone,
+    }
+
+
+def _amazon_order_and_lines(db: Session, order: str):
+    o = db.execute(
+        text(
+            "select id, account, marketplace, amazon_order_id, status, cancelled, shipped_at, fulfillment from amazon_orders "
+            "where lower(amazon_order_id) = lower(:o) order by id desc limit 1"
+        ),
+        {"o": order.strip()},
+    ).first()
+    if not o:
+        raise HTTPException(404, "That Amazon order isn't in the system yet. Press Poll now on the Amazon Orders page, then try again.")
+    lines = db.execute(
+        text(
+            """
+            select l.id, l.product_id, coalesce(l.title, p.title) as title, l.quantity * coalesce(l.pieces_per_sale, 1) as quantity,
+                   l.quantity as packs, coalesce(l.pieces_per_sale, 1) as pieces_per_sale, l.state,
+                   p.sku_display as sku, coalesce(p.quantity_on_hand, 0) as on_hand
+            from amazon_order_lines l left join products p on p.id = l.product_id
+            where l.order_pk = :o order by l.id
+            """
+        ),
+        {"o": o.id},
+    ).all()
+    return o, lines
+
+
+@router.get("/amazon-order")
+@needs("inventory.purchase", "inventory.ship")
+def amazon_order_lookup(order: str = Query(..., min_length=3, max_length=40), db: Session = Depends(get_db)):
+    """What staff see before making a drop ship PO from an Amazon order. The buyer's address is NOT fetched here."""
+    o, lines = _amazon_order_and_lines(db, order)
+    existing = db.execute(
+        text("select po_number from po_headers where source = :s and status <> 'cancelled' order by id desc limit 1"),
+        {"s": f"amazon:{o.amazon_order_id}"},
+    ).scalar() if "source" in _po_cols(db) else None
+    warnings = []
+    if o.cancelled:
+        warnings.append("This Amazon order is cancelled.")
+    elif o.shipped_at:
+        warnings.append("This Amazon order is already shipped.")
+    return {
+        "order": o.amazon_order_id, "account": o.account, "status": o.status,
+        "blocked": bool(o.cancelled or o.shipped_at), "existing_po": existing, "warnings": warnings,
+        "lines": [
+            {"product_id": l.product_id, "sku": l.sku, "title": l.title, "quantity": l.quantity, "packs": l.packs,
+             "pieces_per_sale": l.pieces_per_sale, "on_hand": l.on_hand,
+             "short": l.product_id is not None and int(l.on_hand or 0) < int(l.quantity or 0), "matched": l.product_id is not None}
+            for l in lines
+        ],
+    }
+
+
+@router.post("/from-amazon-order", status_code=201)
+@needs("inventory.purchase", "inventory.ship")
+def po_from_amazon_order(body: AmazonDropIn, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
+    """Make a DROP SHIP purchase order to Automatic Distributors from an Amazon order, shipping to the Amazon buyer.
+    The buyer's address is fetched from Amazon now and written onto the PO only."""
+    cols = _po_cols(db)
+    if not {"po_type", "source"} <= cols:
+        raise HTTPException(503, "Run sql/po_supplier_fields.sql in Supabase first (it adds the PO type and source).")
+    o, lines = _amazon_order_and_lines(db, body.order)
+    if o.cancelled:
+        raise HTTPException(409, f"Amazon order {o.amazon_order_id} is cancelled.")
+    if o.shipped_at:
+        raise HTTPException(409, f"Amazon order {o.amazon_order_id} is already shipped.")
+    ful = str(o.fulfillment or "").lower()
+    if "afn" in ful or "amazon" in ful or "fba" in ful:
+        raise HTTPException(409, "This order is fulfilled by Amazon (FBA). It cannot be drop shipped.")
+    acct = db.execute(text("select dropship_policy_ack from amazon_accounts where account = :a"), {"a": o.account}).first()
+    if not acct or not acct.dropship_policy_ack:
+        raise HTTPException(409, "Acknowledge Amazon's drop ship policy (seller of record, no distributor branding) on the Amazon account first.")
+    src = f"amazon:{o.amazon_order_id}"
+    dup = db.execute(
+        text("select po_number from po_headers where source = :s and status <> 'cancelled' order by id desc limit 1"), {"s": src}
+    ).scalar()
+    if dup:
+        raise HTTPException(409, f"PO {dup} was already made for Amazon order {o.amazon_order_id}. Cancel it first if you need a new one.")
+    dists = db.execute(
+        text("select id from po_distributors where name ilike '%automatic dist%' or name ilike '%autodist%' order by id")
+    ).all()
+    if len(dists) != 1:
+        raise HTTPException(
+            409,
+            "Add one distributor named Automatic Distributors on the Distributors page first." if not dists
+            else "More than one distributor looks like Automatic Distributors. Keep one, or rename the others.",
+        )
+    chosen = set(body.product_ids or [])
+    picked = [l for l in lines if l.product_id is not None and (not chosen or l.product_id in chosen)]
+    if not picked:
+        raise HTTPException(409, "None of the chosen lines are matched to a product. Link the listing to a product first.")
+    addr = _amazon_buyer_address(db, o.account, o.amazon_order_id)
+    if not all((addr.get(k) or "").strip() for k in ("full_name", "line1", "city", "region", "postal_code")):
+        raise HTTPException(409, "Amazon did not return a complete ship-to address for that order (the app may not have access to buyer addresses).")
+    if addr.get("country") not in ("US", ""):
+        raise HTTPException(409, f"This order ships to {addr['country']}. Drop shipping is set up for US addresses only: ship it from stock.")
+    merged: dict[int, int] = {}
+    for l in picked:
+        merged[l.product_id] = merged.get(l.product_id, 0) + int(l.quantity or 1)
+    po = create_po(
+        PoIn(
+            distributor_id=dists[0].id,
+            ship_to=_po_ship_to(addr),
+            note=f"Drop ship for Amazon order {o.amazon_order_id}. Plain packaging: no distributor branding or invoice in the box (Amazon seller of record).",
+            po_type="drop_ship",
+            source=src,
+            lines=[PoLineIn(product_id=pid, quantity=q) for pid, q in merged.items()],
+        ),
+        db=db,
+        user=user,
+    )
+    po["ship_service"] = None
+    po["buyer_name"] = (addr.get("full_name") or "").strip() or None
+    try:
+        from app import amazon_sales
+
+        amazon_sales.mark_lines_dropship(db, o.amazon_order_id, list(merged))
+    except Exception:
+        db.rollback()
+        log.exception("drop ship PO made for Amazon order %s, but its lines could not be moved to Drop ship", o.amazon_order_id)
     return po
 
 

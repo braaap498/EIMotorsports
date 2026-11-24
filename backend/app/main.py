@@ -29,6 +29,7 @@ from app.dropship_auto import router as dropship_router
 from app.admin_ebay_listings import router as admin_ebay_listings_router
 from app.admin_ebay_listings import start_status_sync_daily
 from app.ebay_oauth import router as ebay_oauth_router
+from app import amazon_analytics, amazon_buybox, amazon_core, amazon_finances, amazon_listings, amazon_new, amazon_sales
 from app.ebay_copy import router as ebay_copy_router
 from app.ebay_newdraft import router as ebay_newdraft_router
 from app.ebay_lookup import router as ebay_lookup_router
@@ -125,6 +126,14 @@ admin_router.include_router(dropship_router)
 admin_router.include_router(admin_ebay_new_router)
 admin_router.include_router(admin_ebay_listings_router)
 admin_router.include_router(ebay_oauth_router)
+admin_router.include_router(amazon_core.router)
+admin_router.include_router(amazon_listings.router)
+admin_router.include_router(amazon_sales.router)
+admin_router.include_router(amazon_sales.ship_router)
+admin_router.include_router(amazon_buybox.router)
+admin_router.include_router(amazon_new.router)
+admin_router.include_router(amazon_finances.router)
+admin_router.include_router(amazon_analytics.router)
 admin_router.include_router(ebay_edit_router)
 admin_router.include_router(ebay_sm_label_router)
 admin_router.include_router(ebay_vocab_router)
@@ -226,3 +235,16 @@ def _kit_mfr_numbers():
 def _rmatv_columns():
     """supplier_items.qty_other: Rocky Mountain's single stock number (Automatic Distributors' are per warehouse)."""
     ensure_rmatv_columns()
+
+
+@app.on_event("startup")
+def _amazon():
+    """Amazon channel: its tables (core first: the others alter amazon_accounts) and the poll/quantity timer (AMAZON_SALES_THREAD=0 stops it)."""
+    amazon_core.ensure_tables()
+    amazon_listings.ensure_tables()
+    amazon_sales.ensure_tables()
+    amazon_buybox.ensure_tables()
+    amazon_new.ensure_tables()
+    amazon_finances.ensure_tables()
+    amazon_analytics.ensure_tables()
+    amazon_sales.start_background()

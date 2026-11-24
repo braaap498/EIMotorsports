@@ -136,6 +136,11 @@ def shortages(db: Session) -> list:
                      coalesce(l.sale_date, l.created_at)
               from stock_reservations r join ebay_order_lines l on l.id = r.ebay_order_line_id
               where r.status = 'reserved'
+              union all
+              select r.id, r.product_id, r.quantity, 'Amazon'::text, l.amazon_order_id,
+                     coalesce(l.sale_date, l.created_at)
+              from stock_reservations r join amazon_order_lines l on l.id = r.amazon_order_line_id
+              where r.status = 'reserved'
             ), run as (
               select res.*, sum(res.quantity) over (partition by res.product_id order by res.placed_at, res.rid) as running
               from res
@@ -178,6 +183,29 @@ def ebay_line_dropship_flags(db: Session, order_ids) -> dict[tuple[str, int], bo
     return {(r.ebay_order_id, int(r.product_id)): bool(r.flagged) for r in rows}
 
 
+def amazon_line_dropship_flags(db: Session, order_ids) -> dict[tuple[str, int], bool]:
+    """{(Amazon order id, product id): True when the listing the buyer BOUGHT FROM is set to Drop ship}. The listing's own switch counts,
+    and so does a Drop ship tick on the product itself. Same rule as eBay's."""
+    ids = sorted({str(o) for o in order_ids if o})
+    if not ids:
+        return {}
+    rows = db.execute(
+        text(
+            """
+            select l.amazon_order_id, l.product_id,
+                   bool_or(coalesce(p.dropship_ok, false) or coalesce(al.dropship_ok, false)) as flagged
+            from amazon_order_lines l
+            join products p on p.id = l.product_id
+            left join amazon_listings al on al.account = l.account and al.sku = l.sku
+            where l.amazon_order_id = any(cast(:o as text[])) and l.product_id is not null
+            group by l.amazon_order_id, l.product_id
+            """
+        ),
+        {"o": ids},
+    ).all()
+    return {(r.amazon_order_id, int(r.product_id)): bool(r.flagged) for r in rows}
+
+
 def urgent_orders(db: Session) -> dict[str, list[str]]:
     """{ 'Channel|order ref': [reason, ...] } for every open order that needs a human decision and has not had one."""
     ensure_table(db)
@@ -193,6 +221,11 @@ def urgent_orders(db: Session) -> dict[str, list[str]]:
     except Exception:
         db.rollback()
         flags = {}
+    amz_flags: dict[tuple[str, int], bool] = {}
+    try:
+        amz_flags = amazon_line_dropship_flags(db, [r.order_ref for r in short if r.channel == "Amazon"])
+    except Exception:
+        db.rollback()
     # A website order is "unflagged" when its product is not ticked Drop ship on the website: nothing is ordered by itself, so a person is asked.
     web_flags: dict[int, bool] = {}
     web_ids = sorted({int(r.product_id) for r in short if r.channel == "Website" and r.product_id is not None})
@@ -220,10 +253,13 @@ def urgent_orders(db: Session) -> dict[str, list[str]]:
             # Not ticked Drop ship, our shelf is short, and the distributor's warehouses (Indiana, Nevada) have none either, or no
             # distributor is linked: there is nothing to ask. The part is simply out of stock, so it is not urgent.
             continue
-        unflagged = (r.channel == "eBay" and flags.get((r.order_ref, int(r.product_id))) is False) or (
+        unflagged = (
+            (r.channel == "eBay" and flags.get((r.order_ref, int(r.product_id))) is False)
+            or (r.channel == "Amazon" and amz_flags.get((r.order_ref, int(r.product_id))) is False)
+        ) or (
             r.channel == "Website" and web_flags.get(int(r.product_id)) is False
         )
-        where = "the listing it was bought from" if r.channel == "eBay" else "the product"
+        where = "the listing it was bought from" if r.channel in ("eBay", "Amazon") else "the product"
         note = (
             f"{r.sku}: short on our shelf (by {r.short}), and {where} is not set to Drop ship, so no "
             f"drop ship order is made by itself; {detail}. Decide whether to drop ship it or ship it from our own stock."
