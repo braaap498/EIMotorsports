@@ -233,6 +233,7 @@ export default function DropShipReview() {
 
   const job = jobs.find((j) => j.id !== later);
   if (!job) return null;
+  const dest = job.channel === "amazon" ? "Amazon" : job.channel === "web" ? "the website" : "eBay";
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-lg bg-white p-5 shadow-xl">
