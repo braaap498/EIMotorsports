@@ -7,7 +7,10 @@ Amazon Buy Box and pricing (Sales channels > Amazon > Pricing). Mounted at /admi
   PUT  /{id}         {max_price?}   a ceiling for that listing
 
 THE RULES (decide):
-  * FLOOR = what we cannot go under: (cost + shipping estimate) / (1 - referral fee - target margin). No cost -> no floor -> no advice.
+  * FLOOR (fulfilled by us, MFN) = (cost + shipping estimate) / (1 - referral fee - target margin). No cost -> no floor -> no advice.
+  * FLOOR (fulfilled by Amazon, FBA) = (cost + Amazon's fixed fees) / (1 - Amazon's referral rate - target margin). The referral rate and
+    fixed fees come from Amazon's own fee estimate (amazon_fba_fees.py), read by Refresh and stored on the listing; no shipping estimate.
+    No estimate (or one older than FBA_FEES_MAX_AGE_DAYS) -> no floor -> no advice, and Apply/queue refuse.
   * Amazon sells the item itself: match only if we can do it at or above the floor; otherwise STAND DOWN (do not compete).
   * We hold the Buy Box: raise toward Amazon's expected price (never above max_price); otherwise leave alone.
   * Someone else holds it: win at the featured-offer expected price if it is at or above the floor; else match the holder if that
@@ -17,6 +20,7 @@ The batch request/response shapes are from Amazon's Product Pricing API v2022-05
 """
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app import amazon_fba_fees as fba
 from app.amazon_core import MARKETPLACES, NA_ENDPOINT, _row, access_token
 from app.auth import require_admin
 from app.database import _session_factory, get_db
@@ -46,6 +51,10 @@ def ensure_tables() -> None:
             "alter table amazon_listings add column if not exists amazon_price numeric",
             "alter table amazon_listings add column if not exists max_price numeric",
             "alter table amazon_listings add column if not exists bb_checked_at timestamptz",
+            "alter table amazon_listings add column if not exists fba_referral_rate numeric",
+            "alter table amazon_listings add column if not exists fba_fixed_fees numeric",
+            "alter table amazon_listings add column if not exists fba_ref_price numeric",
+            "alter table amazon_listings add column if not exists fba_fees_at timestamptz",
         ):
             db.execute(text(stmt))
         db.commit()
@@ -66,6 +75,33 @@ def floor_price(cost: Optional[float], ship: float, fee_pct: float, margin_pct: 
     return round((cost * max(1, pieces) + ship) / keep, 2)
 
 
+FBA_FEES_MAX_AGE_DAYS = 3          # an FBA floor built on a fee estimate older than this is not trusted (no advice, Apply refuses)
+FBA_FEE_READS_PER_REFRESH = 25     # Amazon allows about one fee estimate a second, so one Refresh reads at most this many
+
+
+def _fees_fresh(at) -> bool:
+    if at is None:
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - at <= timedelta(days=FBA_FEES_MAX_AGE_DAYS)
+
+
+def floor_of(l) -> Optional[float]:
+    """The floor for one listing row, by how it is fulfilled. l has: fulfillment, cost, pieces_per_sale, referral_fee_pct, target_margin_pct,
+    ship_cost_est, fba_referral_rate, fba_fixed_fees, fba_fees_at. None when the cost, or for FBA a fresh fee estimate, is missing."""
+    cost = None if l.cost is None else float(l.cost)
+    pieces = int(l.pieces_per_sale or 1)
+    if l.fulfillment == "FBA":
+        if cost is None or cost <= 0 or l.fba_referral_rate is None or l.fba_fixed_fees is None or not _fees_fresh(l.fba_fees_at):
+            return None
+        try:
+            return fba.floor_from_fees(cost * max(1, pieces), float(l.fba_referral_rate), float(l.fba_fixed_fees), float(l.target_margin_pct) / 100.0)
+        except ValueError:
+            return None
+    return floor_price(cost, float(l.ship_cost_est), float(l.referral_fee_pct), float(l.target_margin_pct), pieces)
+
+
 def decide(l, floor: Optional[float]) -> dict:
     """l has: price, bb_checked_at, expected_price, bb_price, max_price, amazon_on_listing, amazon_price, bb_is_ours."""
     def out(action, price, why):
@@ -75,6 +111,8 @@ def decide(l, floor: Optional[float]) -> dict:
     if l.bb_checked_at is None:
         return out("unknown", None, "Not read from Amazon yet.")
     if floor is None:
+        if getattr(l, "fulfillment", None) == "FBA" and l.cost is not None and float(l.cost) > 0:
+            return out("unknown", None, "No floor yet: Amazon's fee estimate for this FBA listing is missing or old. Press Refresh.")
         return out("unknown", None, "No floor: add the product's cost first.")
     cur, exp, bb, mx, am = f(l.price), f(l.expected_price), f(l.bb_price), f(l.max_price), f(l.amazon_price)
     if l.amazon_on_listing:
@@ -101,14 +139,15 @@ _COST = "nullif(to_jsonb(p)->>'cost', '')::numeric"
 
 @router.get("/rows")
 def rows(account: str = "", only: str = "", offset: int = 0, limit: int = 50, db: Session = Depends(get_db)):
-    where, p = ["l.product_id is not null", "l.fulfillment = 'MFN'"], {"lim": min(limit, 200), "off": max(offset, 0)}
+    where, p = ["l.product_id is not null", "l.fulfillment in ('MFN', 'FBA')"], {"lim": min(limit, 200), "off": max(offset, 0)}
     if account.strip():
         where.append("l.account = :a")
         p["a"] = account.strip()
     res = db.execute(
         text(
             f"select l.id, l.account, l.sku, l.title, l.price, l.expected_price, l.bb_price, l.bb_is_ours, l.amazon_on_listing, l.amazon_price, "
-            f"l.max_price, l.bb_checked_at, l.pieces_per_sale, {_COST} as cost, a.referral_fee_pct, a.target_margin_pct, a.ship_cost_est "
+            f"l.max_price, l.bb_checked_at, l.pieces_per_sale, l.fulfillment, l.fba_referral_rate, l.fba_fixed_fees, l.fba_fees_at, "
+            f"{_COST} as cost, a.referral_fee_pct, a.target_margin_pct, a.ship_cost_est "
             f"from amazon_listings l join products p on p.id = l.product_id join amazon_accounts a on a.account = l.account "
             f"where {' and '.join(where)} order by l.id desc limit :lim offset :off"
         ),
@@ -116,11 +155,11 @@ def rows(account: str = "", only: str = "", offset: int = 0, limit: int = 50, db
     ).all()
     items = []
     for r in res:
-        fl = floor_price(None if r.cost is None else float(r.cost), float(r.ship_cost_est), float(r.referral_fee_pct), float(r.target_margin_pct), int(r.pieces_per_sale or 1))
+        fl = floor_of(r)
         d = decide(r, fl)
         if only and d["action"] != only:
             continue
-        items.append({"id": r.id, "account": r.account, "sku": r.sku, "title": r.title, "price": r.price, "floor": fl, "buy_box": r.bb_price,
+        items.append({"id": r.id, "account": r.account, "sku": r.sku, "title": r.title, "fulfillment": r.fulfillment, "price": r.price, "floor": fl, "buy_box": r.bb_price,
                       "bb_is_ours": r.bb_is_ours, "amazon_on_listing": r.amazon_on_listing, "checked": r.bb_checked_at, "max_price": r.max_price,
                       "action": d["action"], "suggested": d["price"], "why": d["why"]})
     return {"items": items}
@@ -133,7 +172,7 @@ class AccountIn(BaseModel):
 @router.post("/refresh")
 def refresh(body: AccountIn, db: Session = Depends(get_db)):
     a = _row(db, body.account)
-    ls = db.execute(text("select id, sku, marketplace from amazon_listings where account = :a and product_id is not null and fulfillment = 'MFN' order by bb_checked_at nulls first limit 200"), {"a": a.account}).all()
+    ls = db.execute(text("select id, sku, marketplace from amazon_listings where account = :a and product_id is not null and fulfillment in ('MFN', 'FBA') order by bb_checked_at nulls first limit 200"), {"a": a.account}).all()
     done = 0
     for i in range(0, len(ls), 40):
         chunk = ls[i : i + 40]
@@ -160,7 +199,36 @@ def refresh(body: AccountIn, db: Session = Depends(get_db)):
             db.execute(text("update amazon_listings set expected_price = :e, bb_checked_at = now() where id = :i"), {"e": exp, "i": c.id})
             done += 1
         db.commit()
-    return {"ok": True, "read": done}
+    fees = _refresh_fba_fees(db, a.account)
+    return {"ok": True, "read": done, **fees}
+
+
+def _refresh_fba_fees(db: Session, account: str) -> dict:
+    """Reads Amazon's fee estimate for FBA listings that have none, one older than a day, or one made at a price more than 30% away from
+    today's. At most FBA_FEE_READS_PER_REFRESH per call (the estimate API is about one call a second); press Refresh again for more.
+    A listing whose estimate fails keeps its old numbers (they stop being trusted after FBA_FEES_MAX_AGE_DAYS)."""
+    todo = db.execute(text(
+        f"select l.id, l.sku, l.marketplace, l.price, l.fba_ref_price, l.fba_fees_at from amazon_listings l join products p on p.id = l.product_id "
+        f"where l.account = :a and l.fulfillment = 'FBA' and l.price is not null and l.price > 0 and {_COST} > 0 "
+        f"and (l.fba_fees_at is null or l.fba_fees_at < now() - interval '24 hours' or l.fba_ref_price is null "
+        f"or abs(l.price - l.fba_ref_price) > 0.3 * l.fba_ref_price) "
+        f"order by l.fba_fees_at nulls first limit :n"), {"a": account, "n": FBA_FEE_READS_PER_REFRESH}).all()
+    ok = failed = 0
+    for l in todo:
+        price = float(l.price)
+        moved = l.fba_ref_price is not None and abs(price - float(l.fba_ref_price)) > 0.3 * float(l.fba_ref_price)
+        try:
+            parts = fba.fee_parts(db, account, l.marketplace, l.sku, price, use_cache=not moved)
+        except HTTPException:
+            parts = None
+        if parts is None:
+            failed += 1
+            continue
+        db.execute(text("update amazon_listings set fba_referral_rate = :r, fba_fixed_fees = :f, fba_ref_price = :p, fba_fees_at = now() where id = :i"),
+                   {"r": parts[0], "f": parts[1], "p": price, "i": l.id})
+        ok += 1
+    db.commit()
+    return {"fba_fees_read": ok, "fba_fees_failed": failed}
 
 
 class ApplyIn(BaseModel):
@@ -168,7 +236,8 @@ class ApplyIn(BaseModel):
 
 
 _LOAD = (
-    "select l.id, l.account, l.sku, l.marketplace, l.product_type, l.pieces_per_sale, {cost} as cost, a.referral_fee_pct, a.target_margin_pct, "
+    "select l.id, l.account, l.sku, l.marketplace, l.product_type, l.pieces_per_sale, l.fulfillment, l.fba_referral_rate, l.fba_fixed_fees, "
+    "l.fba_fees_at, {cost} as cost, a.referral_fee_pct, a.target_margin_pct, "
     "a.ship_cost_est, a.live_pushes_enabled, a.seller_id from amazon_listings l join products p on p.id = l.product_id "
     "join amazon_accounts a on a.account = l.account where l.id = :i"
 )
@@ -185,8 +254,10 @@ def _load_for_push(db: Session, listing_id: int):
 
 def _check_price(l, price: float) -> float:
     """The floor check shared by Apply and the queue. Returns the floor; raises when the price must not go out."""
-    fl = floor_price(None if l.cost is None else float(l.cost), float(l.ship_cost_est), float(l.referral_fee_pct), float(l.target_margin_pct), int(l.pieces_per_sale or 1))
+    fl = floor_of(l)
     if fl is None:
+        if l.fulfillment == "FBA" and l.cost is not None and float(l.cost) > 0:
+            raise HTTPException(409, "There is no recent Amazon fee estimate for this FBA listing, so there is no floor to protect. Press Refresh first.")
         raise HTTPException(409, "The product has no cost, so there is no floor to protect. Add the cost first.")
     if price < fl:
         raise HTTPException(409, f"{price:.2f} is under the floor of {fl:.2f}. Nothing was sent.")

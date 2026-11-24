@@ -935,9 +935,32 @@ def po_from_ebay_order(body: EbayDropIn, db: Session = Depends(get_db), user: Au
 # and written onto the PO only. Amazon requires us to be the seller of record, so the account's drop ship policy acknowledgment is
 # checked here too. The address response shape (Orders API v2026-01-01, includedData=RECIPIENT) is UNVERIFIED: read defensively.
 # --------------------------------------------------------------------------
+class ManualShipTo(BaseModel):
+    """A ship-to address staff copied from Seller Central, for when the app has no buyer-address (Direct-to-Consumer Shipping) role."""
+    full_name: str = Field(..., min_length=1, max_length=120)
+    line1: str = Field(..., min_length=1, max_length=120)
+    line2: str = Field("", max_length=120)
+    city: str = Field(..., min_length=1, max_length=80)
+    region: str = Field(..., min_length=2, max_length=40)
+    postal_code: str = Field(..., min_length=3, max_length=12)
+    country: str = Field("US", max_length=2)
+    phone: str = Field("", max_length=30)
+
+
 class AmazonDropIn(BaseModel):
     order: str = Field(..., min_length=3, max_length=40)           # the Amazon order number
     product_ids: Optional[list[int]] = Field(None, max_length=200)  # the parts staff chose; empty = every matched line
+    ship_to: Optional[ManualShipTo] = None                          # typed in by staff; when set, Amazon is NOT asked for the address
+
+
+def _buyer_address_role_on() -> bool:
+    """Set AMAZON_BUYER_ADDRESS_ROLE=off when the app was approved WITHOUT Direct-to-Consumer Shipping: Amazon is then never asked for
+    an address (no wasted call, no error), and staff type it in instead."""
+    return os.environ.get("AMAZON_BUYER_ADDRESS_ROLE", "on").strip().lower() not in ("off", "0", "false", "no")
+
+
+# The start of the message recorded when an order has no address. The Drop ship screen looks for it to show the address form.
+NEEDS_ADDRESS = "Needs ship-to address:"
 
 
 def _amazon_buyer_address(db: Session, account: str, order_id: str) -> dict:
@@ -1060,9 +1083,22 @@ def po_from_amazon_order(body: AmazonDropIn, db: Session = Depends(get_db), user
     picked = [l for l in lines if l.product_id is not None and (not chosen or l.product_id in chosen)]
     if not picked:
         raise HTTPException(409, "None of the chosen lines are matched to a product. Link the listing to a product first.")
-    addr = _amazon_buyer_address(db, o.account, o.amazon_order_id)
+    if body.ship_to is not None:
+        addr = {k: (v or "").strip() for k, v in body.ship_to.model_dump().items()}
+        addr["country"] = (addr.get("country") or "US").upper()
+        addr["phone"] = addr["phone"] if any(c.isdigit() for c in addr["phone"]) else ""
+    elif not _buyer_address_role_on():
+        addr = {}
+    else:
+        try:
+            addr = _amazon_buyer_address(db, o.account, o.amazon_order_id)
+        except HTTPException:
+            addr = {}   # no buyer-address role (or Amazon error): fall through to the "needs address" message below
     if not all((addr.get(k) or "").strip() for k in ("full_name", "line1", "city", "region", "postal_code")):
-        raise HTTPException(409, "Amazon did not return a complete ship-to address for that order (the app may not have access to buyer addresses).")
+        raise HTTPException(
+            409,
+            f"{NEEDS_ADDRESS} copy it from Seller Central (Orders > this order) and enter it here. Amazon did not give the app the buyer's address.",
+        )
     if addr.get("country") not in ("US", ""):
         raise HTTPException(409, f"This order ships to {addr['country']}. Drop shipping is set up for US addresses only: ship it from stock.")
     merged: dict[int, int] = {}

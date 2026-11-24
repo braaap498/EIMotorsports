@@ -167,6 +167,21 @@ class EditIn(BaseModel):
     attributes_json: Optional[str] = Field(None, max_length=20000)
 
 
+def _fulfillment_error(extra: dict) -> str | None:
+    """Checks the fulfillment_availability the owner typed (or the Fulfillment dropdown wrote). None means fine."""
+    fa = extra.get("fulfillment_availability")
+    if fa is None:
+        return None
+    if not isinstance(fa, list) or not fa or not all(isinstance(x, dict) for x in fa):
+        return "fulfillment_availability must be a list of objects, e.g. [{\"fulfillment_channel_code\": \"AMAZON_NA\"}]."
+    codes = {str(x.get("fulfillment_channel_code", "")).upper() for x in fa}
+    if "" in codes:
+        return "Each fulfillment_availability entry needs a fulfillment_channel_code (DEFAULT for merchant-fulfilled, AMAZON_NA for FBA)."
+    if any(c.startswith("AMAZON") for c in codes) and "DEFAULT" in codes:
+        return "A listing is either FBA (AMAZON_NA) or merchant-fulfilled (DEFAULT), not both."
+    return None
+
+
 @router.put("/drafts/{draft_id}")
 def edit_draft(draft_id: int, body: EditIn, db: Session = Depends(get_db)):
     d = db.execute(text("select status from amazon_drafts where id = :i"), {"i": draft_id}).first()
@@ -175,18 +190,35 @@ def edit_draft(draft_id: int, body: EditIn, db: Session = Depends(get_db)):
     if d.status == "published":
         raise HTTPException(409, "Already published. Edit the live listing instead.")
     data = body.model_dump(exclude_none=True)
-    if "attributes_json" in data:
+    if "attributes_json" in data and not data["attributes_json"].strip():
+        data["attributes_json"] = None      # a blank box clears the extra attributes (the Fulfillment dropdown writes "" when nothing is left)
+    elif "attributes_json" in data:
         try:
-            if not isinstance(json.loads(data["attributes_json"]), dict):
+            parsed = json.loads(data["attributes_json"])
+            if not isinstance(parsed, dict):
                 raise ValueError
         except ValueError:
             raise HTTPException(422, "Extra attributes must be a JSON object.")
+        bad = _fulfillment_error(parsed)
+        if bad:
+            raise HTTPException(422, bad)
     if not data:
         return {"ok": True}
     sets = ", ".join(f"{k} = :{k}" for k in data)
     db.execute(text(f"update amazon_drafts set {sets}, validated_ok = false, last_issues = null, updated_at = now() where id = :id"), {**data, "id": draft_id})
     db.commit()
     return {"ok": True, "note": "Edited, so it must be validated again before publishing."}
+
+
+def _is_fba(d) -> bool:
+    """A draft is FBA when the owner's extra-attributes JSON sets fulfillment_availability to an Amazon channel code
+    (AMAZON_NA), e.g. {"fulfillment_availability": [{"fulfillment_channel_code": "AMAZON_NA"}]}. Amazon holds the stock, so no quantity is sent."""
+    try:
+        extra = json.loads(d.attributes_json) if d.attributes_json else {}
+        fa = extra.get("fulfillment_availability") if isinstance(extra, dict) else None
+        return any(str((x or {}).get("fulfillment_channel_code", "")).upper().startswith("AMAZON") for x in (fa or []))
+    except (ValueError, AttributeError):
+        return False
 
 
 def _attributes(d, mk: str) -> dict:
@@ -210,6 +242,9 @@ def _attributes(d, mk: str) -> dict:
             attrs["product_description"] = [{"value": d.description, "language_tag": lang, "marketplace_id": mid}]
     extra = json.loads(d.attributes_json) if d.attributes_json else {}
     attrs.update(extra)   # the owner's JSON wins, so required product-type fields can be supplied by hand
+    if _is_fba(d):        # Amazon holds the stock, so never send a quantity for an FBA listing
+        attrs["fulfillment_availability"] = [{"fulfillment_channel_code": str(x.get("fulfillment_channel_code", "AMAZON_NA")).upper()}
+                                             for x in attrs.get("fulfillment_availability") or [] if isinstance(x, dict)]
     return attrs
 
 
@@ -271,8 +306,8 @@ def publish(draft_id: int, db: Session = Depends(get_db)):
     # record it so the next sync links it; if the product is known, link right away
     db.execute(text(
         "insert into amazon_listings (account, marketplace, sku, asin, title, product_type, status, price, quantity, fulfillment, product_id) "
-        "values (:a, :m, :s, :asin, :t, :pt, 'SUBMITTED', :pr, :q, 'MFN', :p) on conflict (account, marketplace, sku) do nothing"),
-        {"a": d.account, "m": d.marketplace, "s": d.sku, "asin": d.asin, "t": d.title, "pt": d.product_type, "pr": d.price, "q": d.quantity, "p": d.product_id})
+        "values (:a, :m, :s, :asin, :t, :pt, 'SUBMITTED', :pr, :q, :ful, :p) on conflict (account, marketplace, sku) do nothing"),
+        {"a": d.account, "m": d.marketplace, "s": d.sku, "asin": d.asin, "t": d.title, "pt": d.product_type, "pr": d.price, "q": 0 if _is_fba(d) else d.quantity, "ful": "FBA" if _is_fba(d) else "MFN", "p": d.product_id})
     db.commit()
     return {"ok": True, "submission": res.get("submissionId"), "status": res.get("status")}
 

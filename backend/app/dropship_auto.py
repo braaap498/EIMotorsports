@@ -431,13 +431,13 @@ def _amazon_problem(db: Session, order_id: str, account: Optional[str], msg: str
     db.commit()
 
 
-def _make_amazon_job(db: Session, order_id: str, account: Optional[str], product_ids: list[int], user: AuthUser, manual: bool = False) -> dict:
+def _make_amazon_job(db: Session, order_id: str, account: Optional[str], product_ids: list[int], user: AuthUser, manual: bool = False, ship_to: Optional[dict] = None) -> dict:
     """Make the PO and record the job. A refusal (no buyer address, FBA, policy not acknowledged...) is recorded as 'problem'."""
     from app.admin_purchase_orders import AmazonDropIn, po_from_amazon_order
 
     key = AMAZON_PREFIX + order_id
     try:
-        po = po_from_amazon_order(AmazonDropIn(order=order_id, product_ids=product_ids), db=db, user=user)
+        po = po_from_amazon_order(AmazonDropIn(order=order_id, product_ids=product_ids, ship_to=ship_to), db=db, user=user)
     except HTTPException as e:
         db.rollback()
         msg = str(e.detail)[:400]
@@ -1646,6 +1646,39 @@ def hold_job(job_id: int, db: Session = Depends(get_db)):
     db.execute(text("update dropship_jobs set stage = 'held', updated_at = now() where id = :i"), {"i": job_id})
     db.commit()
     return {"ok": True, "stage": "held"}
+
+
+class AmazonAddressIn(BaseModel):
+    full_name: str = Field(..., min_length=1, max_length=120)
+    line1: str = Field(..., min_length=1, max_length=120)
+    line2: str = Field("", max_length=120)
+    city: str = Field(..., min_length=1, max_length=80)
+    region: str = Field(..., min_length=2, max_length=40)
+    postal_code: str = Field(..., min_length=3, max_length=12)
+    country: str = Field("US", max_length=2)
+    phone: str = Field("", max_length=30)
+
+
+@router.post("/jobs/{job_id}/amazon-address")
+@needs(*PERMS)
+def amazon_address(job_id: int, body: AmazonAddressIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_route_access)):
+    """Staff pasted the ship-to from Seller Central for an Amazon order that stopped for lack of an address: replace the problem job
+    with a real one (PO + job). The address goes onto the PO only, like every other buyer address."""
+    _job(db, job_id)
+    j = db.execute(text("select id, stage, ebay_order_id, store, channel from dropship_jobs where id = :i"), {"i": job_id}).first()
+    if j.channel != "amazon" or j.stage != "problem":
+        raise HTTPException(409, "Only an Amazon order that needs attention can be given an address.")
+    key = str(j.ebay_order_id)
+    order_id = key[len(AMAZON_PREFIX):]
+    picks = _amazon_flagged_lines(db, order_id)
+    if not picks:
+        raise HTTPException(409, "Nothing on this order is set to drop ship any more. Ship it from our own stock, or make the PO by hand.")
+    db.execute(text("delete from dropship_jobs where id = :i and stage = 'problem'"), {"i": job_id})
+    db.commit()
+    res = _make_amazon_job(db, order_id, j.store, picks, user, ship_to=body.model_dump())
+    if res.get("problem"):
+        raise HTTPException(409, res["problem"])
+    return {"ok": True, **res}
 
 
 @router.post("/jobs/{job_id}/retry")

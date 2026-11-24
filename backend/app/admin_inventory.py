@@ -1414,7 +1414,7 @@ def _drop_ship_stages(db: Session, rows) -> dict[str, dict]:
     try:
         found = db.execute(
             text(
-                "select j.ebay_order_id, j.stage, j.problem, coalesce(h.po_number, j.po_number) as po_number "
+                "select j.id, j.ebay_order_id, j.stage, j.problem, coalesce(h.po_number, j.po_number) as po_number "
                 "from dropship_jobs j left join po_headers h on h.id = j.po_id where j.ebay_order_id = any(cast(:i as text[]))"
             ),
             {"i": ids},
@@ -1423,7 +1423,7 @@ def _drop_ship_stages(db: Session, rows) -> dict[str, dict]:
         db.rollback()
         return {}
     return {
-        f.ebay_order_id: {"stage": f.stage, "label": _DS_STAGE_LABEL.get(f.stage, f.stage), "po_number": f.po_number, "problem": f.problem}
+        f.ebay_order_id: {"job_id": f.id, "stage": f.stage, "label": _DS_STAGE_LABEL.get(f.stage, f.stage), "po_number": f.po_number, "problem": f.problem}
         for f in found
         if not (str(f.ebay_order_id).startswith("web:") and f.stage == "dismissed")
     }
