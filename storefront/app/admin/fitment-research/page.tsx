@@ -85,11 +85,15 @@ export default function FitmentResearchPage() {
     setBusy(false);
   };
   const runIn = (area: "suggest" | "paste", fn: () => Promise<string>) => run(fn, area);
-  // The message for one section, shown to the right of that section's heading (it takes no room of its own, so nothing moves).
+  // The message for one section, shown to the right of that section's heading, styled like the old banner. It sits in the
+  // heading line (no extra row), so nothing below it moves. Messages with no section of their own (approve, dismiss, PDFs)
+  // show beside the "Paste fitment" heading too, so nothing appears at the top of the page any more.
   const inlineMsg = (area: "suggest" | "paste") =>
-    msg && msg.area === area ? (
+    msg && (msg.area === area || (area === "paste" && (msg.area ?? "page") === "page")) ? (
       <span
-        className={`min-w-0 cursor-pointer truncate text-sm font-normal ${msg.kind === "error" ? "text-red-700" : msg.kind === "success" ? "text-green-700" : "text-gray-600"}`}
+        className={`min-w-0 cursor-pointer truncate rounded border px-3 py-1 text-sm font-normal ${
+          msg.kind === "error" ? "border-red-200 bg-red-50 text-red-800" : msg.kind === "success" ? "border-green-200 bg-green-50 text-green-800" : "border-blue-200 bg-blue-50 text-blue-800"
+        }`}
         title={`${msg.text} (click to close)`} onClick={() => setMsg(null)}
       >
         {msg.text}
@@ -156,15 +160,8 @@ export default function FitmentResearchPage() {
 
   return (
     <div className="space-y-6">
-      {/* Floats over the page (top right) so a message never pushes the page down. Click it to close; success and info close themselves. */}
-      {msg && (msg.area ?? "page") === "page" && (
-        <div className="fixed right-4 top-4 z-50 w-[28rem] max-w-[calc(100vw-2rem)] cursor-pointer shadow-lg" title="Click to close" onClick={() => setMsg(null)}>
-          <Notice kind={msg.kind}>{msg.text}</Notice>
-        </div>
-      )}
-
       <section className="space-y-3 rounded border border-gray-200 p-4">
-        <h2 className="flex items-baseline gap-3 font-semibold">Find suggestions{inlineMsg("suggest")}</h2>
+        <h2 className="flex items-center gap-3 font-semibold">Find suggestions{inlineMsg("suggest")}</h2>
         <div className="flex flex-wrap items-center gap-2">
           <button className={btnCls} disabled={busy} onClick={() => runIn("suggest", async () => {
             const r = await api<{ looked_at: number; suggestions_made: number }>("/fitment-research/names/run", { method: "POST", body: { limit: 500 } });
@@ -181,7 +178,7 @@ export default function FitmentResearchPage() {
       </section>
 
       <section className="space-y-3 rounded border border-gray-200 p-4">
-        <h2 className="flex items-baseline gap-3 font-semibold">Paste fitment from the catalog{inlineMsg("paste")}</h2>
+        <h2 className="flex items-center gap-3 font-semibold">Paste fitment from the catalog{inlineMsg("paste")}</h2>
         <p className="text-xs text-gray-500">
           On the distributor catalog page open the Fitment tab, click Expand All, copy everything and paste it here. Missing makes and models are
           added, years are added, and the part is linked to every pasted model-year (this also feeds its eBay compatible vehicles).
