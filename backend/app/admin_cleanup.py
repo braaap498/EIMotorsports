@@ -945,6 +945,15 @@ def merge(body: MergeIn, db: Session = Depends(get_db), user: AuthUser = Depends
 
         # ---- verify nothing was lost BEFORE committing ----------------------------------
         def count(table: str) -> int:
+            if table == "purchase_order_lines":
+                # the preview's "PO lines" number counts BOTH purchase-order line tables, so the check must too
+                return db.execute(
+                    text(
+                        "select (select count(*) from purchase_order_lines where product_id = :s) "
+                        "     + (select count(*) from po_lines where product_id = :s)"
+                    ),
+                    {"s": sid},
+                ).scalar()
             return db.execute(text(f"select count(*) from {table} where product_id = :s"), {"s": sid}).scalar()
 
         expected = {
