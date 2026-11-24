@@ -163,28 +163,30 @@ export default function FitmentResearchPage() {
           On the distributor catalog page open the Fitment tab, click Expand All, copy everything and paste it here. Missing makes and models are
           added, years are added, and the part is linked to every pasted model-year (this also feeds its eBay compatible vehicles).
         </p>
-        {/* The result sits to the right of the button (and the list of several matches drops over the page), so nothing below moves. */}
-        <div className="relative flex items-center gap-2">
+        {/* Both the chosen product and the list of several matches sit to the right of the button, so nothing below moves. */}
+        <div className="flex items-start gap-2">
           <input className={inputCls + " w-64 shrink-0"} placeholder="Product id, SKU or part # (e.g. 56-132)" value={pq}
             onChange={(e) => { setPq(e.target.value); setTarget(null); }} onKeyDown={(e) => e.key === "Enter" && pq.trim() && findProduct()} />
           <button className={btn2Cls + " shrink-0"} disabled={busy || !pq.trim()} onClick={findProduct}>Find product</button>
-          {target && (
-            <div className="flex min-w-0 flex-1 items-center gap-2 rounded bg-gray-50 px-3 py-2 text-sm">
-              <b className="truncate">{target.title}</b>
-              <span className="shrink-0 text-gray-400">{target.sku} {target.mpn ?? ""}</span>
-              <span className="shrink-0"><Badge tone={target.fitment_rows ? "amber" : "gray"}>{target.fitment_rows} vehicles already</Badge></span>
-            </div>
-          )}
-          {!target && found.length > 1 && (
-            <ul className="absolute left-0 top-full z-10 mt-1 max-h-72 w-full divide-y overflow-auto rounded border border-gray-200 bg-white text-sm shadow-lg">
-              {found.map((f) => (
-                <li key={f.id} className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 hover:bg-gray-50" onClick={() => setTarget(f)}>
-                  <span className="truncate">{f.title} <span className="text-gray-400">{f.sku} {f.mpn ?? ""}</span></span>
-                  <Badge>{f.fitment_rows} vehicles</Badge>
-                </li>
-              ))}
-            </ul>
-          )}
+          <div className="relative min-w-0 flex-1">
+            {target && (
+              <div className="flex items-center gap-2 rounded bg-gray-50 px-3 py-2 text-sm">
+                <b className="truncate">{target.title}</b>
+                <span className="shrink-0 text-gray-400">{target.sku} {target.mpn ?? ""}</span>
+                <span className="shrink-0"><Badge tone={target.fitment_rows ? "amber" : "gray"}>{target.fitment_rows} vehicles already</Badge></span>
+              </div>
+            )}
+            {!target && found.length > 1 && (
+              <ul className="absolute left-0 right-0 top-0 z-10 max-h-72 divide-y overflow-auto rounded border border-gray-200 bg-white text-sm shadow-lg">
+                {found.map((f) => (
+                  <li key={f.id} className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 hover:bg-gray-50" onClick={() => setTarget(f)}>
+                    <span className="truncate">{f.title} <span className="text-gray-400">{f.sku} {f.mpn ?? ""}</span></span>
+                    <Badge>{f.fitment_rows} vehicles</Badge>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
         <textarea className={inputCls + " h-96 w-full font-mono text-xs"} placeholder={"BMW\n2019\nF750GS\n2009\nG650GS\n…\nBuell\n2003\nXB9R Firebolt\n\nOR\n\nHONDA Rancher 420 2x4 2009 - 2026\nHONDA Rancher 420 4x4 EPS 2020 - 2024\nHONDA Rancher 420 AT 4x4 IRS 2009 - 2014"}
           value={pasted} onChange={(e) => { setPasted(e.target.value); setPreview(null); }} />
