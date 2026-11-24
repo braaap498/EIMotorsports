@@ -283,8 +283,13 @@ def list_models(
             from vehicle_models vm
             join vehicle_makes mk on mk.id = vm.make_id
             left join vehicle_types vt on vt.id = vm.vehicle_type_id
+            left join vehicle_models pmo on pmo.id = vm.parent_model_id
             {where}
-            order by mk.name, vm.name
+            order by mk.name,
+                     coalesce(pmo.name, vm.name),            -- a submodel sorts under the model it nests under
+                     coalesce(vm.parent_model_id, vm.id),    -- two models with the same name stay apart
+                     (vm.parent_model_id is not null),       -- the model first, then its submodels
+                     vm.name, vm.id
             limit :limit offset :offset
             """
         ),

@@ -542,7 +542,8 @@ export default function ModelsPage() {
             {data.items.map((m) => (
               <tr key={m.id}>
                 <td className="px-3 py-2">{m.make}</td>
-                <td className="px-3 py-2 font-medium">
+                <td className={`px-3 py-2 font-medium ${m.parent_name ? "border-l-4 border-gray-200 pl-8" : ""}`}>
+                  {m.parent_name && <span className="mr-1 text-gray-400">↳</span>}
                   {m.name}
                   {m.parent_name && <span className="block text-xs font-normal text-gray-500">submodel of {m.parent_name}</span>}
                   {m.submodels > 0 && <span className="block text-xs font-normal text-gray-500">{m.submodels} submodel{m.submodels === 1 ? "" : "s"}</span>}
