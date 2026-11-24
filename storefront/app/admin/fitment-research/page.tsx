@@ -44,7 +44,8 @@ export default function FitmentResearchPage() {
   const [picked, setPicked] = useState<Record<number, boolean>>({});
   const [years, setYears] = useState<Record<number, [string, string]>>({});
   const [pid, setPid] = useState("");
-  const [msg, setMsg] = useState<{ kind: "info" | "error" | "success"; text: string } | null>(null);
+  // area: which heading the message is shown beside ("page" = floating at the top right)
+  const [msg, setMsg] = useState<{ kind: "info" | "error" | "success"; text: string; area?: "suggest" | "paste" | "page" } | null>(null);
   const [busy, setBusy] = useState(false);
   // paste copied catalog fitment onto one product
   const [pq, setPq] = useState("");
@@ -78,11 +79,22 @@ export default function FitmentResearchPage() {
     return () => clearInterval(t);
   }, [pdfs]);
 
-  const run = async (fn: () => Promise<string>) => {
+  const run = async (fn: () => Promise<string>, area: "suggest" | "paste" | "page" = "page") => {
     setBusy(true); setMsg(null);
-    try { setMsg({ kind: "success", text: await fn() }); load(); } catch (e) { setMsg({ kind: "error", text: errMsg(e) }); }
+    try { setMsg({ kind: "success", text: await fn(), area }); load(); } catch (e) { setMsg({ kind: "error", text: errMsg(e), area }); }
     setBusy(false);
   };
+  const runIn = (area: "suggest" | "paste", fn: () => Promise<string>) => run(fn, area);
+  // The message for one section, shown to the right of that section's heading (it takes no room of its own, so nothing moves).
+  const inlineMsg = (area: "suggest" | "paste") =>
+    msg && msg.area === area ? (
+      <span
+        className={`min-w-0 cursor-pointer truncate text-sm font-normal ${msg.kind === "error" ? "text-red-700" : msg.kind === "success" ? "text-green-700" : "text-gray-600"}`}
+        title={`${msg.text} (click to close)`} onClick={() => setMsg(null)}
+      >
+        {msg.text}
+      </span>
+    ) : null;
 
   const review = async (r: Row) => {
     setOpen(r); setDetail(null);
@@ -102,14 +114,14 @@ export default function FitmentResearchPage() {
     return `Added ${r.added} machine-years${r.skipped ? `; ${r.skipped} skipped (no model or years)` : ""}.`;
   });
 
-  const findProduct = () => run(async () => {
+  const findProduct = () => runIn("paste", async () => {
     const r = await api<Found[]>(`/fitment-research/paste/products?q=${encodeURIComponent(pq.trim())}`);
     setFound(r);
     if (r.length === 1) setTarget(r[0]);
     return r.length ? `${r.length} product${r.length === 1 ? "" : "s"} found.` : "No product matches that.";
   });
 
-  const previewPaste = () => run(async () => {
+  const previewPaste = () => runIn("paste", async () => {
     const r = await api<Preview>("/fitment-research/paste/preview", { method: "POST", body: { text: pasted } });
     setPreview(r); setSkipMakes({}); setSkipModels({});
     const t = r.totals;
@@ -117,10 +129,10 @@ export default function FitmentResearchPage() {
   });
 
   const applyPaste = () => {
-    if (!vtype) { setMsg({ kind: "error", text: "Choose the type for new models first. Nothing was added." }); return; }
+    if (!vtype) { setMsg({ kind: "error", text: "Choose the type for new models first. Nothing was added.", area: "paste" }); return; }
     return applyPasteNow();
   };
-  const applyPasteNow = () => target && run(async () => {
+  const applyPasteNow = () => target && runIn("paste", async () => {
     const r = await api<Record<string, number>>(`/fitment-research/products/${target.id}/paste/apply`, {
       method: "POST",
       body: {
@@ -145,22 +157,22 @@ export default function FitmentResearchPage() {
   return (
     <div className="space-y-6">
       {/* Floats over the page (top right) so a message never pushes the page down. Click it to close; success and info close themselves. */}
-      {msg && (
+      {msg && (msg.area ?? "page") === "page" && (
         <div className="fixed right-4 top-4 z-50 w-[28rem] max-w-[calc(100vw-2rem)] cursor-pointer shadow-lg" title="Click to close" onClick={() => setMsg(null)}>
           <Notice kind={msg.kind}>{msg.text}</Notice>
         </div>
       )}
 
       <section className="space-y-3 rounded border border-gray-200 p-4">
-        <h2 className="font-semibold">Find suggestions</h2>
+        <h2 className="flex items-baseline gap-3 font-semibold">Find suggestions{inlineMsg("suggest")}</h2>
         <div className="flex flex-wrap items-center gap-2">
-          <button className={btnCls} disabled={busy} onClick={() => run(async () => {
+          <button className={btnCls} disabled={busy} onClick={() => runIn("suggest", async () => {
             const r = await api<{ looked_at: number; suggestions_made: number }>("/fitment-research/names/run", { method: "POST", body: { limit: 500 } });
             return `Read ${r.looked_at} product names; ${r.suggestions_made} suggestions made.`;
           })}>Read machines from product names</button>
           <span className="text-sm text-gray-500">or research one product with AI:</span>
           <input className={inputCls + " w-28"} placeholder="Product id" value={pid} onChange={(e) => setPid(e.target.value)} />
-          <button className={btn2Cls} disabled={busy || !pid} onClick={() => run(async () => {
+          <button className={btn2Cls} disabled={busy || !pid} onClick={() => runIn("suggest", async () => {
             const r = await api<{ machines: number; verdict: string; used_catalog_pages: number }>(`/fitment-research/products/${pid}/ai`, { method: "POST" });
             return `AI found ${r.machines} machines (${r.verdict}); ${r.used_catalog_pages} catalog pages used.`;
           })}>{busy ? "Working…" : "Research"}</button>
@@ -169,7 +181,7 @@ export default function FitmentResearchPage() {
       </section>
 
       <section className="space-y-3 rounded border border-gray-200 p-4">
-        <h2 className="font-semibold">Paste fitment from the catalog</h2>
+        <h2 className="flex items-baseline gap-3 font-semibold">Paste fitment from the catalog{inlineMsg("paste")}</h2>
         <p className="text-xs text-gray-500">
           On the distributor catalog page open the Fitment tab, click Expand All, copy everything and paste it here. Missing makes and models are
           added, years are added, and the part is linked to every pasted model-year (this also feeds its eBay compatible vehicles).
