@@ -41,6 +41,8 @@ type Item = {
   product_id: number | null; // the SINGLE product of this part (never a kit that contains it)
   product_title: string | null;
   product_sku: string | null; // the EI- number
+  product_image?: string | null; // main photo of that product (thumbnail)
+  product_image_full?: string | null;
   products: number;
 };
 type FieldDef = { key: string; label: string; required: boolean };
@@ -203,12 +205,13 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
         {/* the same table as the Automatic Distributors catalog: fixed layout, small text, sortable headings */}
         <table className="w-full table-fixed text-left text-xs">
           <colgroup>
-            {["6.5rem", "6.5rem", "6.5rem", "", "2.5rem", "4.5rem", "4.5rem", "3.75rem", "3rem", "6.5rem", "5.5rem", "5rem"].map((w, i) => (
+            {["2.75rem", "6.5rem", "6.5rem", "6.5rem", "", "2.5rem", "4.5rem", "4.5rem", "3.75rem", "3rem", "6.5rem", "5.5rem", "5rem"].map((w, i) => (
               <col key={i} style={w ? { width: w } : undefined} />
             ))}
           </colgroup>
           <thead className="text-gray-500">
             <tr>
+              <th className="py-0.5 pr-2"></th>
               <Th k="brand">Brand</Th>
               <Th k="sku">SKU</Th>
               <Th k="mfr">Mfr no.</Th>
@@ -226,6 +229,17 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
           <tbody className="divide-y divide-gray-100">
             {(items ?? []).map((it) => (
               <tr key={it.id} className={`align-middle ${it.active ? "" : "text-gray-400"}`}>
+                <td className="py-0.5 pr-2">
+                  {/* the main photo of the product linked to this part */}
+                  {it.product_image ? (
+                    <a href={it.product_image_full ?? it.product_image} target="_blank" rel="noreferrer" title="The linked product's main photo. Click for full size">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={it.product_image} alt="" loading="lazy" className="h-9 w-9 rounded border border-gray-100 bg-white object-contain" />
+                    </a>
+                  ) : (
+                    <div className="h-9 w-9" />
+                  )}
+                </td>
                 <td className="truncate py-0.5 pr-2" title={it.manufacturer ?? ""}>{it.manufacturer ?? "—"}</td>
                 <td className="truncate py-0.5 pr-2 font-medium" title={it.sku}>
                   {it.sku}
@@ -261,7 +275,7 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
             ))}
             {items && items.length === 0 && (
               <tr>
-                <td colSpan={12} className="p-6 text-center text-gray-500">
+                <td colSpan={13} className="p-6 text-center text-gray-500">
                   Nothing found. Try fewer words.
                 </td>
               </tr>

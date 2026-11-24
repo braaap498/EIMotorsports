@@ -21,6 +21,8 @@ type Part = {
   manufacturer: string | null; // the brand (Wiseco, Tusk, ...): this is what goes in the product's Manufacturer, never the distributor
   image: string | null; // thumbnail
   image_full: string | null;
+  product_image?: string | null; // main photo of the linked product (thumbnail): shown when the part has no picture of its own
+  product_image_full?: string | null;
   description: string | null;
   unit_cost: number | null;
   product_id: number | null;
@@ -30,7 +32,7 @@ type Part = {
 };
 type Flash = { kind: "success" | "error" | "info"; text: string } | null;
 
-const PAGE = 50;
+const PAGE_SIZES = [25, 50, 100, 200];
 const blank = { part_number: "", mfr_number: "", manufacturer: "", same: false, description: "", unit_cost: "" };
 const money = (v: number | null) =>
   v == null ? "—" : `$${Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -48,22 +50,30 @@ export default function ManualParts({ dist }: { dist: Dist }) {
   const [items, setItems] = useState<Part[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
+  const [limit, setLimit] = useState(50);
   const [q, setQ] = useState("");
   const [only, setOnly] = useState<"all" | "no_product" | "has_product">("all");
   const [sort, setSort] = useState<"brand" | "sku" | "mfr" | "name" | "cost">("sku");
   const [dir, setDir] = useState<"asc" | "desc">("asc");
   const [loading, setLoading] = useState(true);
   const [flash, setFlash] = useState<Flash>(null);
+  // the add fields keep the last part typed (or picked) until Clear is pressed
   const [form, setForm] = useState(blank);
+  // "Make similar": the part the fields were copied from. The new part needs a different SKU and Mfr no.
+  const [similar, setSimilar] = useState<Part | null>(null);
+  const [simOpen, setSimOpen] = useState(false);
+  const [simQ, setSimQ] = useState("");
+  const [simHits, setSimHits] = useState<Part[]>([]);
+  const [simBusy, setSimBusy] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [edit, setEdit] = useState<{ id: number; part: string; mfr: string; brand: string; desc: string; cost: string } | null>(null);
+  const [edit, setEdit] = useState<{ id: number; part: string; orig: string; mfr: string; brand: string; desc: string; cost: string } | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [tick, setTick] = useState(0);
 
   const load = useCallback(() => {
     setLoading(true);
     api<{ items: Part[]; total: number }>(
-      `/kits/manual-catalog?distributor_id=${dist.id}&q=${encodeURIComponent(q.trim())}&only=${only}&sort=${sort}&dir=${dir}&limit=${PAGE}&offset=${offset}`
+      `/kits/manual-catalog?distributor_id=${dist.id}&q=${encodeURIComponent(q.trim())}&only=${only}&sort=${sort}&dir=${dir}&limit=${limit}&offset=${offset}`
     )
       .then((r) => {
         setItems(r.items);
@@ -71,7 +81,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
       })
       .catch((e) => setFlash({ kind: "error", text: errMsg(e) }))
       .finally(() => setLoading(false));
-  }, [dist.id, q, only, sort, dir, offset]);
+  }, [dist.id, q, only, sort, dir, offset, limit]);
 
   // reload when the vendor, the search, the filter or the page changes (the search waits a moment while typing)
   useEffect(() => {
@@ -84,6 +94,13 @@ export default function ManualParts({ dist }: { dist: Dist }) {
     if (!form.part_number.trim()) return setFlash({ kind: "error", text: "Type the SKU." });
     const cost = form.unit_cost.trim() === "" ? null : Number(form.unit_cost);
     if (cost !== null && Number.isNaN(cost)) return setFlash({ kind: "error", text: "Cost must be a number." });
+    if (similar) {
+      const sku = form.part_number.trim().toLowerCase();
+      const mfr = (form.same ? form.part_number : form.mfr_number).trim().toLowerCase();
+      if (sku === similar.part_number.toLowerCase()) return setFlash({ kind: "error", text: `A similar part needs a different SKU than ${similar.part_number}.` });
+      if (!mfr || mfr === (similar.mfr_number ?? "").trim().toLowerCase())
+        return setFlash({ kind: "error", text: `A similar part needs a different Mfr no.${similar.mfr_number ? ` than ${similar.mfr_number}` : ""}.` });
+    }
     setAdding(true);
     setFlash(null);
     try {
@@ -98,8 +115,9 @@ export default function ManualParts({ dist }: { dist: Dist }) {
           unit_cost: cost,
         },
       });
-      setForm(blank);
-      setFlash({ kind: "success", text: "Part saved." });
+      // the fields stay as they are so the next part can start from this one; Clear empties them
+      setSimilar(null);
+      setFlash({ kind: "success", text: "Part saved. The fields still hold it: change what differs, or press Clear." });
       setTick((n) => n + 1);
     } catch (e) {
       setFlash({ kind: "error", text: errMsg(e) });
@@ -108,18 +126,66 @@ export default function ManualParts({ dist }: { dist: Dist }) {
     }
   }
 
+  function clearForm() {
+    setForm(blank);
+    setSimilar(null);
+    setSimOpen(false);
+    setSimQ("");
+    setSimHits([]);
+    setFlash(null);
+  }
+
+  // look up saved parts of this distributor for the Make similar picker
+  useEffect(() => {
+    if (!simOpen) return;
+    const t = setTimeout(() => {
+      setSimBusy(true);
+      api<{ items: Part[] }>(`/kits/manual-catalog?distributor_id=${dist.id}&q=${encodeURIComponent(simQ.trim())}&sort=sku&dir=asc&limit=8&offset=0`)
+        .then((r) => setSimHits(r.items))
+        .catch(() => setSimHits([]))
+        .finally(() => setSimBusy(false));
+    }, 200);
+    return () => clearTimeout(t);
+  }, [simOpen, simQ, dist.id]);
+
+  // copy a part's brand, description and cost into the add fields; the SKU and Mfr no. are left empty to be typed
+  function useAsTemplate(p: Part) {
+    setSimilar(p);
+    setForm({
+      part_number: "",
+      mfr_number: "",
+      manufacturer: p.manufacturer ?? "",
+      same: false,
+      description: p.description ?? "",
+      unit_cost: p.unit_cost != null ? String(p.unit_cost) : "",
+    });
+    setSimOpen(false);
+    setSimQ("");
+    setFlash({ kind: "info", text: `Copied ${p.part_number}. Type a new SKU and a new Mfr no., then Add part.` });
+  }
+
+  // typed an exact SKU instead of picking from the list
+  function pickTyped() {
+    const t = simQ.trim().toLowerCase();
+    if (!t) return;
+    const hit = simHits.find((h) => h.part_number.toLowerCase() === t) ?? (simHits.length === 1 ? simHits[0] : undefined);
+    if (hit) useAsTemplate(hit);
+    else setFlash({ kind: "error", text: `No saved part matches "${simQ.trim()}". Pick one from the list.` });
+  }
+
   async function saveEdit() {
     if (!edit) return;
     const cost = edit.cost.trim() === "" ? null : Number(edit.cost);
     if (cost !== null && Number.isNaN(cost)) return setFlash({ kind: "error", text: "Cost must be a number." });
+    if (!edit.part.trim()) return setFlash({ kind: "error", text: "The SKU can't be empty." });
     setBusyId(edit.id);
     try {
       await api(`/kits/manual-catalog/${edit.id}`, {
         method: "PUT",
-        body: { mfr_number: edit.mfr.trim() || null, manufacturer: edit.brand.trim() || null, description: edit.desc.trim() || null, unit_cost: cost },
+        body: { part_number: edit.part.trim(), mfr_number: edit.mfr.trim() || null, manufacturer: edit.brand.trim() || null, description: edit.desc.trim() || null, unit_cost: cost },
       });
       setEdit(null);
-      setFlash({ kind: "success", text: "Part updated. Products that use it follow the change." });
+      setFlash({ kind: "success", text: edit.part.trim() !== edit.orig ? `Part updated (SKU is now ${edit.part.trim()}). Products that use it follow the change.` : "Part updated. Products that use it follow the change." });
       setTick((n) => n + 1);
     } catch (e) {
       setFlash({ kind: "error", text: errMsg(e) });
@@ -245,18 +311,74 @@ export default function ManualParts({ dist }: { dist: Dist }) {
           <button type="button" className={btnCls} disabled={adding} onClick={() => void add()}>
             {adding ? "Saving…" : "Add part"}
           </button>
+          <button type="button" className={btn2Cls} title="Empty every field" onClick={clearForm}>
+            Clear fields
+          </button>
+          <button type="button" className={btn2Cls} aria-expanded={simOpen} onClick={() => setSimOpen((o) => !o)}>
+            Make similar
+          </button>
         </div>
+
+        {similar && (
+          <p className="text-xs text-gray-600">
+            Similar to <span className="font-mono font-semibold">{similar.part_number}</span>
+            {similar.mfr_number ? ` (Mfr no. ${similar.mfr_number})` : ""}: it needs its own SKU and Mfr no.
+          </p>
+        )}
+
+        {simOpen && (
+          <div className="relative max-w-md rounded bg-gray-50 p-2">
+            <label className="block text-xs">
+              Type a SKU or pick one from the list
+              <input
+                className={inputCls}
+                autoFocus
+                value={simQ}
+                placeholder="SKU, Mfr no. or name"
+                onChange={(e) => setSimQ(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    pickTyped();
+                  }
+                }}
+              />
+            </label>
+            <ul className="mt-1 max-h-56 divide-y divide-gray-100 overflow-y-auto rounded border border-gray-200 bg-white text-xs">
+              {simBusy && simHits.length === 0 && <li className="px-2 py-1 text-gray-500">Loading…</li>}
+              {!simBusy && simHits.length === 0 && <li className="px-2 py-1 text-gray-500">No saved parts match.</li>}
+              {simHits.map((h) => (
+                <li key={h.id}>
+                  <button type="button" className="flex w-full items-baseline gap-2 px-2 py-1 text-left hover:bg-gray-50" onClick={() => useAsTemplate(h)}>
+                    <span className="font-mono font-semibold">{h.part_number}</span>
+                    <span className="truncate text-gray-500">{[h.manufacturer, h.description].filter(Boolean).join(" · ")}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
 
       <div className="rounded-lg border border-gray-200 bg-white p-4 space-y-3">
         <div className="flex flex-wrap items-end gap-3">
-          <label className="min-w-[14rem] flex-1 text-xs">
+          {/* the search box, the button and the filters keep one fixed width, whatever is typed or shown */}
+          <label className="w-80 flex-none text-xs">
             Search
-            <input className={inputCls} value={q} placeholder="SKU, Mfr no., brand or name" onChange={(e) => setQ(e.target.value)} />
+            <input
+              className={inputCls}
+              value={q}
+              placeholder="SKU, Mfr no., brand or name"
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && setTick((n) => n + 1)}
+            />
           </label>
-          <label className="text-xs">
+          <button type="button" className={`${btnCls} w-24 flex-none text-center`} onClick={() => setTick((n) => n + 1)}>
+            Search
+          </button>
+          <label className="w-44 flex-none text-xs">
             Show
             <select className={inputCls} value={only} onChange={(e) => setOnly(e.target.value as typeof only)}>
               <option value="all">All parts</option>
@@ -264,14 +386,35 @@ export default function ManualParts({ dist }: { dist: Dist }) {
               <option value="has_product">Has a product</option>
             </select>
           </label>
-          <span className="pb-2 text-xs text-gray-500">{loading ? "Loading…" : `${total.toLocaleString()} part${total === 1 ? "" : "s"}`}</span>
+          <label className="flex flex-none items-center gap-2 pb-2 text-xs text-gray-600">
+            Per page
+            <select
+              className="rounded border border-gray-300 px-2 py-1 text-sm"
+              value={limit}
+              onChange={(e) => {
+                setLimit(Number(e.target.value));
+                setOffset(0);
+              }}
+            >
+              {PAGE_SIZES.map((x) => (
+                <option key={x} value={x}>
+                  {x}
+                </option>
+              ))}
+            </select>
+          </label>
+          {loading && <span className="pb-2 text-xs text-gray-500">Loading…</span>}
         </div>
 
         {edit && (
           <div className="flex flex-wrap items-end gap-2 rounded bg-gray-50 p-2">
             <span className="text-xs text-gray-600">
-              Editing <span className="font-mono font-semibold">{edit.part}</span>. Every product that uses it follows.
+              Editing <span className="font-mono font-semibold">{edit.orig}</span>. Every product that uses it follows.
             </span>
+            <label className="text-xs">
+              SKU
+              <input className={inputCls} value={edit.part} onChange={(e) => setEdit({ ...edit, part: e.target.value })} />
+            </label>
             <label className="text-xs">
               Mfr no.
               <input className={inputCls} value={edit.mfr} onChange={(e) => setEdit({ ...edit, mfr: e.target.value })} />
@@ -296,6 +439,8 @@ export default function ManualParts({ dist }: { dist: Dist }) {
             </button>
           </div>
         )}
+
+        {total > limit && <Pager total={total} limit={limit} offset={offset} onChange={(o) => setOffset(o)} />}
 
         {items.length === 0 && !loading ? (
           <p className="text-sm text-gray-500">
@@ -341,6 +486,17 @@ export default function ManualParts({ dist }: { dist: Dist }) {
                             ×
                           </button>
                         </div>
+                      ) : p.product_image ? (
+                        <div className="group relative h-9 w-9">
+                          <a href={p.product_image_full ?? p.product_image} target="_blank" rel="noreferrer" title="The linked product's main photo. Click for full size">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img src={p.product_image} alt="" loading="lazy" className="h-9 w-9 rounded border border-gray-100 bg-white object-contain" />
+                          </a>
+                          <label title="Give this part its own picture" className="absolute -bottom-1 -right-1 hidden h-4 w-4 cursor-pointer items-center justify-center rounded-full bg-gray-700 text-[10px] leading-none text-white group-hover:flex">
+                            ↻
+                            <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" disabled={busyId === p.id} onChange={(e) => { void uploadPhoto(p, e.target.files?.[0]); e.target.value = ""; }} />
+                          </label>
+                        </div>
                       ) : (
                         <label title="Add a picture" className="relative flex h-9 w-9 cursor-pointer items-center justify-center rounded border border-dashed border-gray-300 bg-gray-50 text-gray-400 hover:border-gray-500 hover:text-gray-600">
                           <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -379,7 +535,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
                       <button
                         type="button"
                         className="ml-2 text-xs text-gray-600 underline"
-                        onClick={() => setEdit({ id: p.id, part: p.part_number, mfr: p.mfr_number ?? "", brand: p.manufacturer ?? "", desc: p.description ?? "", cost: p.unit_cost != null ? String(p.unit_cost) : "" })}
+                        onClick={() => setEdit({ id: p.id, part: p.part_number, orig: p.part_number, mfr: p.mfr_number ?? "", brand: p.manufacturer ?? "", desc: p.description ?? "", cost: p.unit_cost != null ? String(p.unit_cost) : "" })}
                       >
                         Edit
                       </button>
@@ -395,7 +551,7 @@ export default function ManualParts({ dist }: { dist: Dist }) {
             </table>
           </div>
         )}
-        <Pager total={total} limit={PAGE} offset={offset} onChange={(o) => setOffset(o)} />
+        <Pager total={total} limit={limit} offset={offset} onChange={(o) => setOffset(o)} />
       </div>
     </div>
   );

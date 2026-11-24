@@ -895,8 +895,10 @@ function DistributorHub() {
     <div className="space-y-5">
       {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
 
-      <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-4">
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+      {/* the card is one fixed height for every distributor: a long address scrolls inside its own box instead of stretching the card,
+          and the edit form opens below the card rather than inside it */}
+      <div className="flex min-h-[15rem] flex-col rounded-lg border border-gray-200 bg-white p-4 sm:h-60">
+        <div className="flex min-h-0 flex-1 flex-wrap items-start gap-x-6 gap-y-3">
           <label className="block text-sm font-medium text-gray-700">
             <span className="mb-1 block">Distributor</span>
             <select
@@ -918,7 +920,7 @@ function DistributorHub() {
             </select>
           </label>
 
-          <div className="min-w-[14rem] flex-1 text-sm text-gray-700">
+          <div className="h-full min-w-[14rem] flex-1 overflow-y-auto text-sm text-gray-700">
             {row ? (
               <>
                 <div className="whitespace-pre-line">{row.address || "No address yet."}</div>
@@ -930,7 +932,7 @@ function DistributorHub() {
             ) : null}
           </div>
 
-          <div className="flex flex-wrap gap-2 pt-6">
+          <div className="flex w-72 flex-none flex-wrap content-start gap-2 pt-6">
             {row && (
               <button type="button" className={btn2Cls} onClick={() => start(row)}>
                 Edit
@@ -956,22 +958,22 @@ function DistributorHub() {
             )}
           </div>
         </div>
-        <p className="text-xs text-gray-500">The address prints in the Vendor box on the purchase order, one line per line you type.</p>
-
-        {editing !== null && (
-          <DistributorForm
-            key={editing === "new" ? `new-${preset}` : editing.id}
-            dist={editing === "new" ? null : editing}
-            presetName={preset}
-            onCancel={() => setEditing(null)}
-            onSaved={() => {
-              setEditing(null);
-              reload();
-              setFlash({ kind: "success", text: "Distributor saved." });
-            }}
-          />
-        )}
+        <p className="pt-2 text-xs text-gray-500">The address prints in the Vendor box on the purchase order, one line per line you type.</p>
       </div>
+
+      {editing !== null && (
+        <DistributorForm
+          key={editing === "new" ? `new-${preset}` : editing.id}
+          dist={editing === "new" ? null : editing}
+          presetName={preset}
+          onCancel={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            reload();
+            setFlash({ kind: "success", text: "Distributor saved." });
+          }}
+        />
+      )}
 
       {showCatalog ? (
         <AutodistInner />
