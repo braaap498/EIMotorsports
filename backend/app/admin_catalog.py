@@ -980,6 +980,16 @@ def list_products(
                    p.universal_in_vehicle_search, p.fitment_exempt,
                    (select count(distinct v.model_id) from product_fitment pf join vehicles v on v.id = pf.vehicle_id where pf.product_id = p.id) as fitment_count,
                    (select count(*) from product_fitment pfy where pfy.product_id = p.id) as fitment_years,
+                   case when nullif(btrim(coalesce(p.custom_label_sku, '')), '') is null
+                        then (select count(*) from channel_listings cl where cl.product_id = p.id
+                                and regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') <> ''
+                                and (exists (select 1 from ebay_report_rows r
+                                              where r.item_id = regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g')
+                                                and nullif(btrim(coalesce(r.custom_label_sku, '')), '') is not null)
+                                  or exists (select 1 from ebay_label_import i
+                                              where cast(i.item_number as text) = regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g')
+                                                and nullif(btrim(coalesce(cast(i.custom_label_sku as text), '')), '') is not null)))
+                        else 0 end as ebay_listings,
                    {_STATUS_SQL} as fitment_status
             from products p {where}
             order by {order_by} limit :limit offset :offset
@@ -1302,6 +1312,78 @@ def product_fitment(product_id: int, db: Session = Depends(get_db)):
         )
         m["years"].append({"vehicle_id": r.vehicle_id, "year": r.year, "submodel": r.submodel})
     return {"is_universal": prod.is_universal, "models": list(models.values())}
+
+
+@router.post("/products/{product_id}/label-from-ebay")
+@needs("products.edit_details")
+def label_from_ebay(product_id: int, db: Session = Depends(get_db)):
+    """The "Get label from eBay" button on the Products list. Only for a product with NO custom label that has eBay
+    listings linked to it. Walks the linked listings in order and takes the custom label of the first one that has one,
+    looking in the Active listings report (ebay_report_rows), then the Inventory labels (ebay_label_import). The label goes on the product, and onto the saved copy of every linked listing
+    that has none, so the eBay sales channel Listings page shows it. Nothing is sent to eBay (those listings already
+    carry the label, or can be sent with "Update eBay label" there). Refused when another product already has that label."""
+    prod = db.execute(text("select id, custom_label_sku from products where id = :i"), {"i": product_id}).first()
+    if not prod:
+        raise HTTPException(404, "Product not found")
+    if (prod.custom_label_sku or "").strip():
+        raise HTTPException(409, f"This product already has the custom label {prod.custom_label_sku.strip()}.")
+    items = [
+        r[0]
+        for r in db.execute(
+            text(
+                "select regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') from channel_listings cl "
+                "where cl.product_id = :p and regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') <> '' order by cl.id"
+            ),
+            {"p": product_id},
+        ).all()
+    ]
+    if not items:
+        raise HTTPException(404, "This product has no eBay listing linked to it.")
+    label, source, found_item = "", "", ""
+    for item in items:
+        for src, sql in (
+            ("Active listings", "select custom_label_sku from ebay_report_rows where item_id = :i"),
+            ("Inventory", "select custom_label_sku from ebay_label_import where cast(item_number as text) = :i"),
+        ):
+            try:
+                with db.begin_nested():
+                    rows = db.execute(text(sql), {"i": item}).all()
+            except Exception:
+                continue  # a table that is not there yet
+            for (v,) in rows:
+                v = str(v or "").strip()
+                if v:
+                    label, source, found_item = v, src, item
+                    break
+            if label:
+                break
+        if label:
+            break
+    if not label:
+        raise HTTPException(404, f"None of this product's {len(items)} eBay listing(s) has a custom label in the Active listings or Inventory data. Upload a fresh Active listings report first.")
+    other = db.execute(
+        text("select id, sku_display from products where lower(btrim(custom_label_sku)) = lower(:l) and id <> :p limit 1"),
+        {"l": label, "p": product_id},
+    ).first()
+    if other:
+        raise HTTPException(409, f"Listing {found_item} has the label {label}, but product {other.sku_display or other.id} already uses it. Merge or relink them first.")
+    try:
+        db.execute(text("update products set custom_label_sku = :l, updated_at = now() where id = :p"), {"l": label, "p": product_id})
+    except IntegrityError:
+        conflict(db, f"The label {label} is already used by another product.")
+    filled = 0
+    for item in items:
+        for tbl in ("ebay_report_rows", "ebay_api_details"):
+            try:
+                with db.begin_nested():
+                    filled += db.execute(
+                        text(f"update {tbl} set custom_label_sku = :l where item_id = :i and nullif(btrim(coalesce(custom_label_sku, '')), '') is null"),
+                        {"l": label, "i": item},
+                    ).rowcount or 0
+            except Exception:
+                pass
+    db.commit()
+    return {"id": product_id, "custom_label_sku": label, "source": source, "from_item": found_item, "listing_copies_filled": filled, "listings": len(items)}
 
 
 @router.post("/products/{product_id}/fitment", status_code=201)

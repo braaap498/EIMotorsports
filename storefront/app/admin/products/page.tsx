@@ -23,6 +23,7 @@ type Row = {
   is_active: boolean;
   is_universal: boolean;
   fitment_count: number;
+  ebay_listings?: number; // linked eBay listings that have a label on the Active listings or Inventory data; only counted while the product has no custom label
   fitment_years?: number; // model-year rows; fitment_count is the machines (models) they belong to
   fitment_status: FitmentStatus;
 };
@@ -303,6 +304,29 @@ export default function ProductsPage() {
     }
   }
 
+  // "Get label from eBay": copies the custom label of the product's first linked eBay listing that has one onto the product.
+  const [labelBusy, setLabelBusy] = useState<number | null>(null);
+  const [labelMsg, setLabelMsg] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  async function getLabelFromEbay(p: Row) {
+    setLabelBusy(p.id);
+    setLabelMsg(null);
+    try {
+      const r = await api<{ custom_label_sku: string; source: string; from_item: string; listing_copies_filled: number }>(
+        `/products/${p.id}/label-from-ebay`,
+        { method: "POST" },
+      );
+      setData((cur) => (cur ? { ...cur, items: cur.items.map((x) => (x.id === p.id ? { ...x, custom_label_sku: r.custom_label_sku, ebay_listings: 0 } : x)) } : cur));
+      setLabelMsg({
+        kind: "success",
+        text: `${p.sku}: custom label ${r.custom_label_sku} taken from eBay item ${r.from_item} (${r.source}).${r.listing_copies_filled ? ` Also filled in on ${r.listing_copies_filled} eBay listing record${r.listing_copies_filled === 1 ? "" : "s"} that had none.` : ""}`,
+      });
+    } catch (e) {
+      setLabelMsg({ kind: "error", text: `${p.sku}: ${errMsg(e)}` });
+    } finally {
+      setLabelBusy(null);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -317,6 +341,7 @@ export default function ProductsPage() {
         )}
       </div>
       {error && <Notice kind="error">{error}</Notice>}
+      {labelMsg && <Notice kind={labelMsg.kind}>{labelMsg.text}</Notice>}
 
       <div className="flex flex-wrap items-end gap-3">
         <Field label="Search">
@@ -502,7 +527,20 @@ export default function ProductsPage() {
                   </td>
                 )}
                 <td className="truncate px-3 py-2 text-gray-600" title={p.sku}>{p.sku}</td>
-                <td className="break-all px-3 py-2 text-gray-600" title={p.custom_label_sku ?? ""}>{p.custom_label_sku ?? "—"}</td>
+                <td className="break-all px-3 py-2 text-gray-600" title={p.custom_label_sku ?? ""}>
+                  {p.custom_label_sku ?? "—"}
+                  {!p.custom_label_sku && (p.ebay_listings ?? 0) > 0 && can("products.edit_details") && (
+                    <button
+                      type="button"
+                      className="ml-2 rounded border border-blue-300 bg-blue-50 px-2 py-0.5 text-xs text-blue-800 hover:bg-blue-100 disabled:opacity-50"
+                      disabled={labelBusy === p.id}
+                      title="Take the custom label from this product's first linked eBay listing that has one (Active listings or Inventory) and put it on the product"
+                      onClick={() => void getLabelFromEbay(p)}
+                    >
+                      {labelBusy === p.id ? "Getting…" : "Get label from eBay"}
+                    </button>
+                  )}
+                </td>
                 <td className="px-3 py-2 font-medium">
                   <Link href={`/admin/products/${p.id}`} className="hover:underline">{p.title}</Link>
                 </td>
