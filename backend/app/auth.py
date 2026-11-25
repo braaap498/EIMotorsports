@@ -100,7 +100,7 @@ def current_user(
 
 
 MFA_REQUIRED = "MFA required: set up or enter your authenticator code."
-PASSWORD_EXPIRED = "Your password has expired. Ask an admin to set a new one, or change it from the sign-in page."
+PASSWORD_EXPIRED = "Your password has expired. Choose a new one to continue."
 
 
 def _password_age_days(stamp: str) -> int | None:
@@ -111,6 +111,16 @@ def _password_age_days(stamp: str) -> int | None:
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - when).days
+
+
+def password_days_left(user: AuthUser, settings: Settings) -> int | None:
+    """Days until this user's password hits the age limit, or None when there is no limit or no stamped date."""
+    if settings.password_max_age_days <= 0 or not user.password_changed_at:
+        return None
+    age = _password_age_days(user.password_changed_at)
+    if age is None:
+        return None
+    return max(settings.password_max_age_days - age, 0)
 
 
 def require_staff(user: AuthUser = Depends(current_user), settings: Settings = Depends(get_settings)) -> AuthUser:

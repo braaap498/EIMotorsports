@@ -63,7 +63,7 @@ from app.order_activity import ensure_tables as ensure_order_activity_tables
 from app.order_activity import router as order_activity_router
 from app.warehouse_stock import ensure_tables as ensure_warehouse_tables
 from app.warehouse_stock import router as warehouse_stock_router
-from app.auth import AuthUser, require_staff
+from app.auth import AuthUser, password_days_left, require_staff
 from app.config import get_settings
 from app.database import get_db
 from app.fitment import router as fitment_router
@@ -117,6 +117,7 @@ def me(user: AuthUser = Depends(require_staff)):
         "email": user.email,
         "role": user.role,
         "permissions": sorted(user.permissions),
+        "password_days_left": password_days_left(user, settings),
     }
 
 

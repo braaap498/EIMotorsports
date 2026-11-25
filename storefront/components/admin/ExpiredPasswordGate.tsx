@@ -11,7 +11,7 @@ import { Notice, btnCls, btn2Cls, Field } from "./ui";
 import PasswordInput from "./PasswordInput";
 
 // Same rule the API applies to passwords set by an admin (admin_users.check_password_policy).
-function policyProblem(v: string): string {
+export function policyProblem(v: string): string {
   if (v.length < 12) return "Use at least 12 characters.";
   if (!/[^A-Za-z0-9]/.test(v)) return "Include at least one special character, such as ! @ # $ % & *.";
   if (!/[A-Za-z]/.test(v) || !/[0-9]/.test(v)) return "Include at least one letter and one number.";

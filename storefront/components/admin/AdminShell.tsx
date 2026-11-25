@@ -11,6 +11,8 @@ import { AdminAccessProvider } from "./AdminAccess";
 import { ShellBackProvider } from "./ShellBack";
 import DropShipReview from "./DropShipReview";
 import AdminMfaGate from "./AdminMfaGate";
+import ExpiredPasswordGate from "./ExpiredPasswordGate";
+import PasswordExpiryBanner from "./PasswordExpiryBanner";
 
 type Status = "loading" | "signedout" | "forbidden" | "error" | "ok" | "mfa" | "expired";
 
@@ -188,6 +190,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("");
   const [permissions, setPermissions] = useState<string[]>([]);
+  const [daysLeft, setDaysLeft] = useState<number | null>(null);
   const [problem, setProblem] = useState("");
   const [attempt, setAttempt] = useState(0);
   const router = useRouter();
@@ -242,11 +245,12 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         return;
       }
       try {
-        const me = await api<{ email: string | null; role: string; permissions?: string[] }>("/me");
+        const me = await api<{ email: string | null; role: string; permissions?: string[]; password_days_left?: number | null }>("/me");
         if (!active) return;
         setEmail(me.email ?? "");
         setRole(me.role);
         setPermissions(me.permissions ?? []);
+        setDaysLeft(typeof me.password_days_left === "number" ? me.password_days_left : null);
         setStatus(["owner", "admin", "staff"].includes(me.role) ? "ok" : "forbidden");
       } catch (e) {
         if (!active) return;
@@ -282,14 +286,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
   if (status === "loading") return <p className="p-8 text-sm text-gray-500">Loading…</p>;
   if (status === "signedout") return <LoginForm />;
   if (status === "mfa") return <AdminMfaGate onDone={() => setAttempt((n) => n + 1)} onSignOut={signOut} />;
-  if (status === "expired") {
-    return (
-      <div className="mx-auto mt-24 w-full max-w-md space-y-4 p-4">
-        <Notice kind="error">{problem}</Notice>
-        <button className={btn2Cls} onClick={signOut}>Sign out</button>
-      </div>
-    );
-  }
+  if (status === "expired") return <ExpiredPasswordGate onDone={() => setAttempt((n) => n + 1)} onSignOut={signOut} />;
 
   if (status === "forbidden" || status === "error") {
     return (
@@ -352,6 +349,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <main className="min-w-0 flex-1 p-4 md:p-6">
+        <PasswordExpiryBanner daysLeft={daysLeft} onChanged={() => setAttempt((n) => n + 1)} />
         <div className="w-full">
           {blocked && pathname === "/admin" && navItems[0] ? (
             <Redirect to={navItems[0].href} />
