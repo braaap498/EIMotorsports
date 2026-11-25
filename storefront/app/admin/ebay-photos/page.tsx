@@ -42,7 +42,7 @@ type ApiLabelsResp = {
   remaining: number;
   blank_without_store: number;
 };
-type InvItem = { item: string; label: string | null; saved: string | null; ebay: string | null; checked_on_ebay: boolean; problem: string | null; differs_from_product?: boolean };
+type InvItem = { item: string; label: string | null; saved: string | null; ebay: string | null; checked_on_ebay: boolean; problem: string | null; differs_from_product?: boolean; saved_from?: string[] | null };
 type InvJob = {
   id: number;
   mode: "saved" | "live";
@@ -620,6 +620,7 @@ export default function EbayPhotoImportPage() {
                         <td className="px-3 py-1.5">{it.label || "(none)"}</td>
                         <td className="px-3 py-1.5 text-gray-600">
                           {it.saved || "—"} / {it.checked_on_ebay ? it.ebay || "(none)" : "not asked"}
+                          {it.saved && <div className="text-gray-400">saved label from: {it.saved_from?.length ? it.saved_from.join(", ") : "an earlier run (run Step 1 again to see)"}</div>}
                           {it.problem && <div className="text-amber-700">{it.problem}</div>}
                         </td>
                       </tr>

@@ -1601,8 +1601,12 @@ class _InvJob:
             return c.execute(text("select status from inventory_label_jobs where id = :i"), {"i": self.id}).scalar() == "stopping"
 
 
-def _inv_gather(db: Session, batch) -> tuple[dict, dict]:
-    """The item ids each product in the batch points to (with link store/status) and the labels saved for them."""
+_SAVED_FROM = {1: "Seller Hub report", 2: "eBay lookup", 3: "label import", 4: "saved listing copy"}
+
+
+def _inv_gather(db: Session, batch) -> tuple[dict, dict, dict]:
+    """The item ids each product in the batch points to (with link store/status), the labels saved for them, and which
+    saved copy each label was found in ({item: {label: [source names]}}), so a flagged row can say where its label is from."""
     pids = [b.id for b in batch]
     links: dict[int, dict[str, dict]] = {pid: {} for pid in pids}
     for r in db.execute(
@@ -1620,10 +1624,11 @@ def _inv_gather(db: Session, batch) -> tuple[dict, dict]:
             links[b.id][b.own] = {"store": None, "active": True}  # source id of an unmerged product: ask eBay
     all_ids = sorted({d for m in links.values() for d in m})
     saved: dict[str, list[str]] = defaultdict(list)
+    srcs: dict[str, dict[str, list[str]]] = defaultdict(dict)
     for chunk in _chunks(all_ids, 3000):
-        for item, lab in db.execute(
+        for item, lab, o in db.execute(
             text(
-                "select item, lab from ("
+                "select item, lab, o from ("
                 " select item_id as item, custom_label_sku as lab, 1 as o from ebay_report_rows"
                 " union all select item_id, custom_label_sku, 2 from ebay_api_details where status = 'ok'"
                 " union all select cast(item_number as text), cast(custom_label_sku as text), 3 from ebay_label_import"
@@ -1634,7 +1639,10 @@ def _inv_gather(db: Session, batch) -> tuple[dict, dict]:
         ):
             if lab.strip() not in saved[item]:
                 saved[item].append(lab.strip())
-    return links, saved
+            names = srcs[item].setdefault(lab.strip(), [])
+            if _SAVED_FROM[o] not in names:
+                names.append(_SAVED_FROM[o])
+    return links, saved, srcs
 
 
 def _inv_work(db: Session, job: _InvJob, mode: str, scope: str):
@@ -1678,7 +1686,7 @@ def _inv_work(db: Session, job: _InvJob, mode: str, scope: str):
         batch = db.execute(text(todo_sql), {**params0, "last": last_id}).all()
         if not batch:
             break
-        links, saved = _inv_gather(db, batch)
+        links, saved, srcs = _inv_gather(db, batch)
         for b in batch:
             last_id = b.id
             job.save()
@@ -1728,6 +1736,8 @@ def _inv_work(db: Session, job: _InvJob, mode: str, scope: str):
                     continue
 
                 j = _judge_product(b.label, items)
+                for r in j["rows"]:  # which saved copy the label is from (shown on the flagged list)
+                    r["saved_from"] = (srcs.get(r["item"], {}).get(r["saved"] or "") or None) if r.get("saved") else None
                 if j["outcome"] == "filled":
                     n = db.execute(
                         text("update products set custom_label_sku = :l, updated_at = now() "
