@@ -679,7 +679,7 @@ export default function KitPartsPanel({
               <div className="space-y-1 rounded border border-gray-200 p-2">
                 <label className="block text-xs">
                   Search parts
-                  <input className={inputCls} value={savedQ} placeholder="search vendor part #, manufacturer # or description" onChange={(e) => setSavedQ(e.target.value)} />
+                  <input className={inputCls} value={savedQ} placeholder="search SKU, manufacturer # or description" onChange={(e) => setSavedQ(e.target.value)} />
                 </label>
                 {savedRes.length === 0 ? (
                   <p className="text-xs text-gray-500">{savedQ.trim() ? "Nothing saved matches. Add it as a new part below." : `No parts saved for ${vendor.name} yet. Parts you add below are saved here when you save the distributor parts.`}</p>
@@ -724,10 +724,10 @@ export default function KitPartsPanel({
               </div>
               <p className="text-xs font-medium text-gray-700">Not in the list? Add a new part</p>
               <div className="flex flex-wrap items-end gap-2">
-                <label className="text-xs">Vendor part #<input className={inputCls} value={man.part_number} onChange={(e) => setMan({ ...man, part_number: e.target.value })} /></label>
+                <label className="text-xs">SKU<input className={inputCls} value={man.part_number} onChange={(e) => setMan({ ...man, part_number: e.target.value })} /></label>
                 <label className="text-xs">Manufacturer #<input className={inputCls} value={man.same ? man.part_number : man.mfr_number} disabled={man.same} onChange={(e) => setMan({ ...man, mfr_number: e.target.value })} /></label>
                 <label className="text-xs">Brand<input className={inputCls} value={man.manufacturer} placeholder="brand, e.g. Tusk" onChange={(e) => setMan({ ...man, manufacturer: e.target.value })} /></label>
-                <label className="flex items-center gap-1 pb-2 text-xs" title="Use the vendor part # as the manufacturer # too"><input type="checkbox" checked={man.same} onChange={(e) => setMan({ ...man, same: e.target.checked })} />Same as vendor part #</label>
+                <label className="flex items-center gap-1 pb-2 text-xs" title="Use the SKU as the manufacturer # too"><input type="checkbox" checked={man.same} onChange={(e) => setMan({ ...man, same: e.target.checked })} />Same as SKU</label>
                 <label className="min-w-[12rem] flex-1 text-xs">Description<input className={inputCls} value={man.description} onChange={(e) => setMan({ ...man, description: e.target.value })} /></label>
                 <label className="text-xs">Cost<input type="number" step="0.01" className={`${inputCls} w-24`} value={man.unit_cost} onChange={(e) => setMan({ ...man, unit_cost: e.target.value })} /></label>
                 <label className="text-xs">Qty<input type="number" min={1} className={`${inputCls} w-20`} value={man.quantity} onChange={(e) => setMan({ ...man, quantity: e.target.value })} /></label>
