@@ -135,6 +135,12 @@ export default function ProductsPage() {
   const [bulkMode, setBulkMode] = useState<FitmentMode>("not_vehicle");
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
+  // temporary: one custom label for the ticked products
+  const [lblOpen, setLblOpen] = useState(false);
+  const [lblText, setLblText] = useState("");
+  const [lblReplace, setLblReplace] = useState(false);
+  const [lblBusy, setLblBusy] = useState(false);
+  const [lblErr, setLblErr] = useState("");
   const [bulkMsg, setBulkMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   const mayChangeFitment = can("fitment.add");
@@ -268,6 +274,29 @@ export default function ProductsPage() {
   const anyFilter = Boolean(q || published || fitment || category || distributor || brand || stock);
   const pageIds = data.items.map((i) => i.id);
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => sel.has(id));
+
+  async function applyLabel() {
+    const label = lblText.trim();
+    if (!label || sel.size === 0) return;
+    if (sel.size > 1 && !window.confirm(`Give the label ${label} to ${lblReplace ? "all " : "the products without a label among "}the ${sel.size} ticked products?\n\nThey will all share this one label. Nothing is sent to eBay.`)) return;
+    setLblBusy(true);
+    setLblErr("");
+    try {
+      const r = await api<{ updated: number; skipped_with_label: number; label: string }>("/products/bulk-label", {
+        method: "POST",
+        body: { ids: Array.from(sel), label, replace: lblReplace, allow_shared: true },
+      });
+      setBulkMsg({ kind: "success", text: `Custom label ${r.label} set on ${r.updated} product${r.updated === 1 ? "" : "s"}${r.skipped_with_label ? `; ${r.skipped_with_label} already had a label and were left alone` : ""}. Nothing was sent to eBay.` });
+      setLblOpen(false);
+      setLblText("");
+      setSel(new Set());
+      load();
+    } catch (e) {
+      setLblErr(errMsg(e));
+    } finally {
+      setLblBusy(false);
+    }
+  }
 
   async function applyBulk(scope: "selected" | "list") {
     const count = scope === "selected" ? sel.size : data.total;
@@ -456,6 +485,9 @@ export default function ProductsPage() {
             <button type="button" className="rounded border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50" disabled={bulkBusy || !anyFilter} onClick={() => void applyBulk("list")} title={anyFilter ? "" : "Pick a category, search or status first"}>
               Apply to all {data.total.toLocaleString()} in this list
             </button>
+            <button type="button" className={btnCls} disabled={bulkBusy || sel.size === 0} title="Temporary: give the ticked products a custom label" onClick={() => { setLblErr(""); setLblOpen(true); }}>
+              Set custom label on {sel.size} selected&hellip;
+            </button>
             {sel.size > 0 && (
               <button type="button" className="text-xs text-blue-700 underline" onClick={() => setSel(new Set())}>
                 Clear ticks
@@ -466,6 +498,29 @@ export default function ProductsPage() {
             {MODE_OPTIONS.find((o) => o.value === bulkMode)?.help} To mark everything in a category at once, pick the category above, then use &ldquo;Apply to all&rdquo;. Nothing changes until you confirm.
           </p>
           {bulkMsg && <Notice kind={bulkMsg.kind}>{bulkMsg.text}</Notice>}
+        </div>
+      )}
+
+      {lblOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-md space-y-3 rounded-lg bg-white p-4 shadow-xl">
+            <h2 className="text-lg font-semibold">Set custom label</h2>
+            <p className="text-sm text-gray-600">Applies to the {sel.size} ticked product{sel.size === 1 ? "" : "s"}. Nothing is sent to eBay.</p>
+            <Field label="Custom label">
+              <input className={`${inputCls} w-full`} value={lblText} autoFocus maxLength={50} placeholder="letters, numbers, - _ ." onChange={(e) => setLblText(e.target.value)} disabled={lblBusy} />
+            </Field>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={lblReplace} onChange={(e) => setLblReplace(e.target.checked)} disabled={lblBusy} />
+              Also replace labels that products already have
+            </label>
+            {lblErr && <Notice kind="error">{lblErr}</Notice>}
+            <div className="flex justify-end gap-2">
+              <button type="button" className="rounded border border-gray-300 px-3 py-2 text-sm" disabled={lblBusy} onClick={() => setLblOpen(false)}>Cancel</button>
+              <button type="button" className={btnCls} disabled={lblBusy || !lblText.trim() || sel.size === 0} onClick={() => void applyLabel()}>
+                {lblBusy ? "Saving…" : "Apply"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

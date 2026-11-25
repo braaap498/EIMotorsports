@@ -1089,6 +1089,48 @@ class FitmentModeIn(BaseModel):
     expected_count: Optional[int] = None
 
 
+class BulkLabelIn(BaseModel):
+    ids: list[int] = Field(..., min_length=1, max_length=1000)
+    label: str = Field(..., min_length=1, max_length=50)  # 50 = eBay's limit for a custom label
+    replace: bool = False  # false = products that already have a label are left alone
+    allow_shared: bool = False  # must be true to give ONE label to more than one product
+
+
+@router.post("/products/bulk-label")
+@needs("products.edit_details")
+def bulk_label(body: BulkLabelIn, db: Session = Depends(get_db)):
+    """Temporary tool on the Products list: give the ticked products one custom label. Products that already have a label
+    are skipped unless replace is true. Refused when a product that is NOT ticked already uses the label, and when it
+    would go on more than one product without allow_shared. Nothing is sent to eBay."""
+    label = body.label.strip()
+    if not label or not re.fullmatch(r"[A-Za-z0-9\-_.]+", label):
+        raise HTTPException(422, "A custom label can only use letters, numbers, - _ and . (no spaces).")
+    ids = list(dict.fromkeys(body.ids))
+    other = db.execute(
+        text("select id, sku_display from products where lower(btrim(custom_label_sku)) = lower(:l) and id <> all(:ids) limit 1"),
+        {"l": label, "ids": ids},
+    ).first()
+    if other:
+        raise HTTPException(409, f"Product {other.sku_display or other.id} (not ticked) already uses the label {label}.")
+    rows = db.execute(
+        text("select id, custom_label_sku from products where id = any(:ids)"), {"ids": ids}
+    ).all()
+    todo = [r.id for r in rows if body.replace or not (r.custom_label_sku or "").strip()]
+    skipped = len(rows) - len(todo)
+    if len(todo) > 1 and not body.allow_shared:
+        raise HTTPException(409, f"This would give the same label to {len(todo)} products. Confirm that to continue.")
+    if todo:
+        try:
+            db.execute(
+                text("update products set custom_label_sku = :l, updated_at = now() where id = any(:ids)"),
+                {"l": label, "ids": todo},
+            )
+        except IntegrityError:
+            conflict(db, f"The label {label} cannot be used on more than one product here (the database requires labels to be unique).")
+    db.commit()
+    return {"updated": len(todo), "skipped_with_label": skipped, "missing": len(ids) - len(rows), "label": label}
+
+
 @router.post("/products/fitment-mode")
 @needs("fitment.add")
 def set_fitment_mode(body: FitmentModeIn, db: Session = Depends(get_db)):
