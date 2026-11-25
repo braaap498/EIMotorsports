@@ -467,10 +467,12 @@ export default function ProductsPage() {
         </div>
       )}
       {mayChangeFitment && data.total > 0 && bulkOpen && (
+        <div>
+          <button type="button" className="text-sm text-blue-700 underline" onClick={() => setBulkOpen(false)}>Hide</button>
+        </div>
+      )}
+      {mayChangeFitment && data.total > 0 && bulkOpen && (
         <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50 p-3">
-          <div className="flex justify-end">
-            <button type="button" className="text-xs text-gray-600 underline" onClick={() => setBulkOpen(false)}>Hide</button>
-          </div>
           <div className="flex flex-wrap items-end gap-3">
             <Field label="Set how these products match vehicles">
               <select className={`${inputCls} min-w-[18rem]`} value={bulkMode} onChange={(e) => setBulkMode(e.target.value as FitmentMode)} disabled={bulkBusy}>
