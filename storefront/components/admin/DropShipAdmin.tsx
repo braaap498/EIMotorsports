@@ -6,6 +6,7 @@ import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "./ui";
 import { PoReview, type DsJob } from "./DropShipReview";
 import DropShipActivity from "./DropShipActivity";
+import AmazonAddressJobs from "./AmazonAddressJobs";
 
 /* Drop ship: every drop ship setting in one place.
    - the switches (count the distributor's stock, raise listings, make POs automatically)
@@ -110,6 +111,9 @@ export default function DropShipAdmin() {
           Only a product with its parts matched to the Automatic Distributors catalog can be ticked.
         </p>
       </div>
+
+      {/* Amazon orders that stopped for a ship-to address; renders nothing when there are none */}
+      <AmazonAddressJobs onChanged={() => void loadSettings()} />
 
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
       {health && health.warnings.length > 0 && (

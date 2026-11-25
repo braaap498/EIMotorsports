@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import AmazonFulfillmentSelect, { fulfillmentOf } from "./AmazonFulfillmentSelect";
 import { api, apiDownload, errMsg } from "../../lib/adminApi";
 import { Badge, Field, Notice, btnCls, btn2Cls, inputCls } from "./ui";
 import { useAmazonAccounts } from "./amazonShared";
@@ -8,7 +9,7 @@ import { useAmazonAccounts } from "./amazonShared";
 type Draft = {
   id: number; account: string; marketplace: string; product_id: number | null; mode: string; sku: string; asin: string | null; product_type: string | null;
   title: string | null; bullets: string | null; description: string | null; price: number | null; quantity: number; status: string;
-  validated_ok: boolean; last_issues: string | null;
+  validated_ok: boolean; last_issues: string | null; attributes_json?: string | null;
 };
 type Issue = { severity?: string; code?: string; message?: string; attributeNames?: string[] };
 
@@ -131,7 +132,10 @@ export default function AmazonNew() {
             <div className="grid gap-2 sm:grid-cols-2">
               <Field label="Title" className="sm:col-span-2"><input className={inputCls} value={d.title ?? ""} onChange={(x) => setE(d.id, { title: x.target.value })} /></Field>
               <Field label="Price"><input className={inputCls} type="number" value={d.price ?? ""} onChange={(x) => setE(d.id, { price: x.target.value === "" ? null : Number(x.target.value) })} /></Field>
-              <Field label="Quantity"><input className={inputCls} type="number" value={d.quantity} onChange={(x) => setE(d.id, { quantity: Number(x.target.value) })} /></Field>
+              <AmazonFulfillmentSelect value={d.attributes_json} disabled={d.status === "published"} onChange={(v) => setE(d.id, { attributes_json: v })} />
+              <Field label={fulfillmentOf(d.attributes_json) === "fba" ? "Quantity (not used for FBA)" : "Quantity"}>
+                <input className={inputCls} type="number" disabled={fulfillmentOf(d.attributes_json) === "fba"} value={d.quantity} onChange={(x) => setE(d.id, { quantity: Number(x.target.value) })} />
+              </Field>
               {d.mode === "new" && (
                 <>
                   <Field label="Bullets (one per line, up to 5)"><textarea className={inputCls} rows={4} value={d.bullets ?? ""} onChange={(x) => setE(d.id, { bullets: x.target.value })} /></Field>
@@ -145,7 +149,7 @@ export default function AmazonNew() {
               </ul>
             )}
             <div className="flex flex-wrap gap-2">
-              <button className={btn2Cls} disabled={!edit[d.id]} onClick={() => void act(async () => { await api(`/amazon-new/drafts/${d.id}`, { method: "PUT", body: { title: d.title, price: d.price, quantity: d.quantity, bullets: d.bullets, description: d.description } }); setEdit((x) => { const y = { ...x }; delete y[d.id]; return y; }); }, "Saved. Validate again before publishing.")}>Save changes</button>
+              <button className={btn2Cls} disabled={!edit[d.id]} onClick={() => void act(async () => { await api(`/amazon-new/drafts/${d.id}`, { method: "PUT", body: { title: d.title, price: d.price, quantity: d.quantity, bullets: d.bullets, description: d.description, ...(edit[d.id] && "attributes_json" in edit[d.id] ? { attributes_json: d.attributes_json ?? "" } : {}) } }); setEdit((x) => { const y = { ...x }; delete y[d.id]; return y; }); }, "Saved. Validate again before publishing.")}>Save changes</button>
               <button className={btn2Cls} disabled={d.status === "published" || !!edit[d.id]} onClick={() => void validate(d0)}>Validate (preview only)</button>
               <button className={btnCls} disabled={!d.validated_ok || d.status === "published" || !!edit[d.id]} onClick={() => { if (window.confirm(`Publish ${d.sku} to Amazon? This sends it for real.`)) void act(() => api(`/amazon-new/drafts/${d.id}/publish`, { method: "POST" }), "Sent to Amazon."); }}>Publish</button>
               {d.product_id && <button className={btn2Cls} onClick={() => void fitment(d.product_id as number)}>Fitment CSV</button>}
