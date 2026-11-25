@@ -487,8 +487,8 @@ export default function ProductsPage() {
             <button type="button" className="rounded border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50" disabled={bulkBusy || !anyFilter} onClick={() => void applyBulk("list")} title={anyFilter ? "" : "Pick a category, search or status first"}>
               Apply to all {data.total.toLocaleString()} in this list
             </button>
-            <button type="button" className={btnCls} disabled={bulkBusy || sel.size === 0} title="Temporary: give the ticked products a custom label" onClick={() => { setLblErr(""); setLblOpen(true); }}>
-              Set custom label on {sel.size} selected&hellip;
+            <button type="button" className={btnCls} disabled={bulkBusy || sel.size === 0} title="Temporary: give the ticked products a custom label (the popup shows how many are ticked)" onClick={() => { setLblErr(""); setLblOpen(true); }}>
+              Set custom label&hellip;
             </button>
             {sel.size > 0 && (
               <button type="button" className="text-xs text-blue-700 underline" onClick={() => setSel(new Set())}>
@@ -509,12 +509,13 @@ export default function ProductsPage() {
             <h2 className="text-lg font-semibold">Set custom label</h2>
             <p className="text-sm text-gray-600">Applies to the {sel.size} ticked product{sel.size === 1 ? "" : "s"}. Nothing is sent to eBay.</p>
             <Field label="Custom label">
-              <input className={`${inputCls} w-full`} value={lblText} autoFocus maxLength={50} placeholder="letters, numbers, - _ ." onChange={(e) => setLblText(e.target.value)} disabled={lblBusy} />
+              <input className={`${inputCls} w-full`} value={lblText} autoFocus maxLength={50} placeholder="e.g. 9612PSxx125728xx62-09020" onChange={(e) => setLblText(e.target.value)} disabled={lblBusy} />
             </Field>
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" checked={lblReplace} onChange={(e) => setLblReplace(e.target.checked)} disabled={lblBusy} />
               Also replace labels that products already have
             </label>
+            <p className="text-xs text-gray-500">Off: ticked products that already have a custom label are left alone. On: their label is overwritten too.</p>
             {lblErr && <Notice kind="error">{lblErr}</Notice>}
             <div className="flex justify-end gap-2">
               <button type="button" className="rounded border border-gray-300 px-3 py-2 text-sm" disabled={lblBusy} onClick={() => setLblOpen(false)}>Cancel</button>
