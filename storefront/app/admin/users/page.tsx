@@ -52,11 +52,27 @@ type CustomerList = {
 const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", staff: "Employee" };
 
 // No look-alike characters (0/O, 1/l/I) so a password read out loud is not misheard.
-const PW_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+// The server requires 12+ characters with a letter, a digit and a special character, so the generator always includes all three.
+const PW_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz";
+const PW_DIGITS = "23456789";
+const PW_SYMBOLS = "!@#$%&*?";
+const PW_CHARS = PW_LETTERS + PW_DIGITS + PW_SYMBOLS;
+function randInt(n: number): number {
+  const r = new Uint32Array(1);
+  crypto.getRandomValues(r);
+  return r[0] % n;
+}
 function generatePassword(length = 16): string {
-  const bytes = new Uint32Array(length);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => PW_CHARS[b % PW_CHARS.length]).join("");
+  const out = Array.from({ length }, () => PW_CHARS[randInt(PW_CHARS.length)]);
+  // One letter, one digit and one symbol are always present (the server requires them); then everything is shuffled.
+  [PW_LETTERS, PW_DIGITS, PW_SYMBOLS].forEach((set, i) => {
+    out[i] = set[randInt(set.length)];
+  });
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = randInt(i + 1);
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out.join("");
 }
 
 // Ticking a permission also ticks the ones it needs (you can't edit what you can't open);

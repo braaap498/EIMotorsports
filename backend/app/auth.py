@@ -136,7 +136,9 @@ def require_staff(user: AuthUser = Depends(current_user), settings: Settings = D
     return user
 
 
-def require_admin(user: AuthUser = Depends(current_user)) -> AuthUser:
+def require_admin(user: AuthUser = Depends(require_staff)) -> AuthUser:
+    # Goes through require_staff first, so the REQUIRE_MFA and PASSWORD_MAX_AGE_DAYS switches cover every admin route, not only the
+    # ones guarded by require_route_access.
     if user.role not in ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
