@@ -72,6 +72,8 @@ def ensure_tables() -> None:
                  created_at timestamptz not null default now(),
                  updated_at timestamptz not null default now()
                )""",
+            # per-account buyer-address switch: null = follow AMAZON_BUYER_ADDRESS_ROLE, 'on' / 'off' = override for this account
+            "alter table amazon_accounts add column if not exists buyer_address_role text",
         ):
             db.execute(text(stmt))
         db.commit()
@@ -169,7 +171,7 @@ def accounts(db: Session = Depends(get_db)):
             "select account, display_name, seller_id, (refresh_token_enc is not null) as authorized, authorized_at, authorized_by, "
             "live_pushes_enabled, sales_polling_enabled, sales_poll_minutes, sales_qty_push_enabled, marketplaces, "
             "dropship_policy_ack, dropship_policy_ack_by, dropship_policy_ack_at, referral_fee_pct, target_margin_pct, "
-            "ship_cost_est, stand_down_enabled from amazon_accounts order by account"
+            "ship_cost_est, stand_down_enabled, buyer_address_role from amazon_accounts order by account"
         )
     ).all()
     return {"accounts": [dict(r._mapping) for r in rows], "marketplaces": MARKETPLACES}
@@ -237,6 +239,7 @@ class SettingsIn(BaseModel):
     stand_down_enabled: Optional[bool] = None
     channel_id: Optional[int] = Field(None, ge=1)  # the Amazon row of your channels table; turns on writing Amazon sales to sales_transactions
     dropship_policy_ack: Optional[bool] = None
+    buyer_address_role: Optional[str] = Field(None, max_length=10)  # "on", "off", or "default" (follow the AMAZON_BUYER_ADDRESS_ROLE env var)
 
 
 @router.put("/settings")
@@ -263,6 +266,12 @@ def put_settings(body: SettingsIn, db: Session = Depends(get_db), user: AuthUser
                 raise HTTPException(409, "Turn Live pushes ON first (it is the master switch for changing Amazon).")
             sets.append(f"{col} = :{field}")
             p[field] = v
+    if body.buyer_address_role is not None:
+        v = body.buyer_address_role.strip().lower()
+        if v not in ("on", "off", "default"):
+            raise HTTPException(422, "Buyer address must be on, off or default.")
+        sets.append("buyer_address_role = :bar")
+        p["bar"] = None if v == "default" else v
     if body.dropship_policy_ack is not None:
         sets.append("dropship_policy_ack = :ack, dropship_policy_ack_by = :ackby, dropship_policy_ack_at = case when :ack then now() end")
         p["ack"], p["ackby"] = body.dropship_policy_ack, (user.email or user.user_id) if body.dropship_policy_ack else None

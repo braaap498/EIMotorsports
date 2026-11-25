@@ -154,6 +154,18 @@ export default function AmazonAccounts() {
                 />
               </Field>
             ))}
+            <Field label="Ask Amazon for the buyer address" className="w-64">
+              <select
+                className={inputCls}
+                value={a.buyer_address_role ?? "default"}
+                disabled={busy === "bar" + a.account}
+                onChange={(e) => void run("bar" + a.account, () => put(a.account, { buyer_address_role: e.target.value }), "Saved.")}
+              >
+                <option value="default">Server default</option>
+                <option value="on">Yes: ask Amazon</option>
+                <option value="off">No: staff type the address</option>
+              </select>
+            </Field>
             <Field label="Marketplaces (US,CA,MX,BR)" className="w-44">
               <input
                 className={inputCls}

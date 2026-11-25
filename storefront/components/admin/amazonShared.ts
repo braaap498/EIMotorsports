@@ -19,6 +19,8 @@ export type AmazonAccount = {
   target_margin_pct: number | null;
   ship_cost_est: number | null;
   stand_down_enabled: boolean;
+  /** "on" / "off" for this account, or null = follow the server's AMAZON_BUYER_ADDRESS_ROLE setting. */
+  buyer_address_role?: "on" | "off" | null;
 };
 
 /** The Amazon accounts, loaded once. `account` is the one picked in the filter ("" = all). */

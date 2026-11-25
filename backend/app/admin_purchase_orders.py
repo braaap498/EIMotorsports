@@ -953,9 +953,18 @@ class AmazonDropIn(BaseModel):
     ship_to: Optional[ManualShipTo] = None                          # typed in by staff; when set, Amazon is NOT asked for the address
 
 
-def _buyer_address_role_on() -> bool:
-    """Set AMAZON_BUYER_ADDRESS_ROLE=off when the app was approved WITHOUT Direct-to-Consumer Shipping: Amazon is then never asked for
-    an address (no wasted call, no error), and staff type it in instead."""
+def _buyer_address_role_on(db: Optional[Session] = None, account: str = "") -> bool:
+    """Is Amazon asked for the buyer's address? The account's own setting (amazon_accounts.buyer_address_role: 'on' / 'off') wins;
+    when it is empty the AMAZON_BUYER_ADDRESS_ROLE env var decides (default on). Off = the app was approved WITHOUT Direct-to-Consumer
+    Shipping: Amazon is never asked (no wasted call, no error) and staff type the address in instead."""
+    if db is not None and account:
+        try:
+            v = db.execute(text("select buyer_address_role from amazon_accounts where account = :a"), {"a": account}).scalar()
+        except Exception:
+            db.rollback()   # column not there yet: fall back to the env var
+            v = None
+        if v in ("on", "off"):
+            return v == "on"
     return os.environ.get("AMAZON_BUYER_ADDRESS_ROLE", "on").strip().lower() not in ("off", "0", "false", "no")
 
 
@@ -1087,7 +1096,7 @@ def po_from_amazon_order(body: AmazonDropIn, db: Session = Depends(get_db), user
         addr = {k: (v or "").strip() for k, v in body.ship_to.model_dump().items()}
         addr["country"] = (addr.get("country") or "US").upper()
         addr["phone"] = addr["phone"] if any(c.isdigit() for c in addr["phone"]) else ""
-    elif not _buyer_address_role_on():
+    elif not _buyer_address_role_on(db, o.account):
         addr = {}
     else:
         try:
