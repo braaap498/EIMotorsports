@@ -496,32 +496,30 @@ export default function EbayPhotoImportPage() {
         {labelTarget === "inventory" && (
           <div className="space-y-3">
             <p className="max-w-3xl text-sm text-gray-600">
-              Fills in the blank custom labels on the products. Each product&rsquo;s eBay item numbers (all the listings merged
-              into it, or its own source listing if it was never merged) must agree on one label before it is applied. A product
-              that already has a label is never changed; if one of its item numbers has a different label, it is listed below.
-              Runs on the server, so you can leave this page.
+              Fills in the blank custom labels on the products, using only what eBay says for each active listing. Saved reports
+              and earlier copies are not used. Each product&rsquo;s item numbers (all the listings merged into it, or its own source
+              listing if it was never merged) must agree on one label before it is applied. A product that already has a label is
+              never changed; if an active listing has a different label on eBay, it is listed below. Ended listings and listings in
+              a store that is not connected are not asked and never cause a listing. Runs on the server, so you can leave this page.
             </p>
             <div className="max-w-3xl rounded border border-gray-200 p-3 text-sm">
-              <div className="font-medium">Step 1: check against the labels already saved (no eBay calls, a minute or two)</div>
+              <div className="font-medium">Step 1: list the products (no eBay calls, a minute or two)</div>
               <p className="mt-1 text-xs text-gray-500">
-                Uses the Seller Hub reports and earlier eBay answers. Fills blank products whose item numbers agree, and lists the ones that do not.
+                Gathers every product and the eBay item numbers it points to. Nothing is judged or filled in here: labels come only from Step 2.
               </p>
               <button type="button" className={btnCls + " mt-2"} disabled={invBusy || invRunning} onClick={() => void startInv("saved")}>
-                Step 1: fill from saved labels
+                Step 1: list the products
               </button>
               {inv && inv.unchecked > 0 && <span className="ml-3 text-xs text-gray-500">{inv.unchecked.toLocaleString()} products not checked yet</span>}
             </div>
             <div className="max-w-3xl rounded border border-gray-200 p-3 text-sm">
               <div className="font-medium">Step 2: check against eBay</div>
               <p className="mt-1 text-xs text-gray-500">
-                Asks eBay about the active listings of the products that need it: blanks, the listed ones, and labels step 1 filled
-                in. Ended listings cannot be asked and keep their saved label. If eBay&rsquo;s daily limit is reached it pauses;
-                start it again later and it carries on.
+                Asks eBay for the custom label of every active listing of every product, then fills blank products whose listings
+                agree and lists the ones that differ. Ended listings cannot be asked and are skipped. If eBay&rsquo;s daily limit is
+                reached it pauses; start it again later and it carries on.
               </p>
-              <label className="mt-2 flex items-center gap-2 text-xs">
-                <input type="checkbox" checked={invAll} onChange={(e) => setInvAll(e.target.checked)} disabled={invRunning} />
-                Check every product on eBay, not only the ones above (takes much longer)
-              </label>
+              
               <div className="mt-2 flex flex-wrap items-center gap-3">
                 <button type="button" className={btnCls} disabled={invBusy || invRunning || !inv || (inv.unchecked > 0 && Object.keys(inv.totals).length === 0)} onClick={() => void startInv("live", invAll ? "all" : "attention")}>
                   Step 2: check against eBay
@@ -600,7 +598,7 @@ export default function EbayPhotoImportPage() {
                     <th className="px-3 py-2">Product label</th>
                     <th className="px-3 py-2">Item number</th>
                     <th className="px-3 py-2">Label on that item</th>
-                    <th className="px-3 py-2">Saved / eBay</th>
+                    <th className="px-3 py-2">eBay (live)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -619,8 +617,7 @@ export default function EbayPhotoImportPage() {
                         <td className="px-3 py-1.5">{it.item}</td>
                         <td className="px-3 py-1.5">{it.label || "(none)"}</td>
                         <td className="px-3 py-1.5 text-gray-600">
-                          {it.saved || "—"} / {it.checked_on_ebay ? it.ebay || "(none)" : "not asked"}
-                          {it.saved && <div className="text-gray-400">saved label from: {it.saved_from?.length ? it.saved_from.join(", ") : "an earlier run (run Step 1 again to see)"}</div>}
+                          {it.checked_on_ebay ? it.ebay || "(none)" : "not asked (ended or other store)"}
                           {it.problem && <div className="text-amber-700">{it.problem}</div>}
                         </td>
                       </tr>

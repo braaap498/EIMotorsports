@@ -1440,14 +1440,17 @@ def labels_from_ebay(body: FillApiIn, db: Session = Depends(get_db)):
 #
 # For every product we gather its item ids: every channel_listings row linked to it, plus its own EBAY-<id> (the
 # source of a product that was never merged). Then:
-#   product has a label   -> every id's label must equal it. Any id with a different label is LISTED (id_mismatch),
-#                            nothing changes. All fine = already_ok.
-#   product has no label  -> all ids must agree (saved vs eBay, and id vs id). One agreed label is applied (filled).
-#                            No label anywhere = left blank (no_label). Any disagreement = listed (conflict), nothing applied.
+# ONLY eBay's own answer for an ACTIVE listing counts as a listing's label. Saved copies (Seller Hub reports, label
+# imports, saved listing copies) are never used: they are snapshots that go stale. A listing eBay cannot be asked
+# about (ended, or in a store that is not connected) has no label for this check and never causes a flag.
+#   product has a label   -> every ANSWERED id's label must equal it. Any answered id with a different label is LISTED
+#                            (id_mismatch), nothing changes. All fine = already_ok.
+#   product has no label  -> all answered ids must agree. One agreed label is applied (filled).
+#                            No label from eBay = left blank (no_label). Any disagreement = listed (conflict), nothing applied.
 # A label that is already set is never overwritten and nothing is ever changed on eBay. Progress is kept in
 # inventory_label_checks (one row per checked product), so a stopped or paused run carries on.
 SCOPES = {
-    "attention": ("filled", "no_label", "conflict", "id_mismatch"),  # blanks, listed ones, and labels pass 1 filled in
+    "attention": ("already_ok", "filled", "no_label", "conflict", "id_mismatch"),  # every product: nothing is trusted but eBay's answer
     "flagged": ("conflict", "id_mismatch"),
     "all": ("already_ok", "filled", "no_label", "conflict", "id_mismatch"),
 }
@@ -1533,19 +1536,15 @@ def _judge_product(product_label: str, items: dict) -> dict:
             if not live and len(varskus) > 1:
                 # variation listing whose variations carry different labels: one product label cannot be picked
                 why = "listing has " + str(len(varskus)) + " different variation labels: " + ", ".join(varskus[:6])
-            elif saved_norm and (not live or _lab_norm(live) not in saved_norm or len(saved_norm) > 1):
-                why = "eBay and the saved label differ" if len(saved_norm) == 1 else "saved labels disagree with each other or eBay"
             final = live
         else:
-            unverified += 1
-            final = saved[0] if saved else ""
-            if len(saved_norm) > 1:
-                why = "saved labels disagree with each other"
+            unverified += 1  # not asked (ended / other store): a saved copy is NOT used, so this listing says nothing
+            final = ""
         if why:
             conflicts += 1
         if final:
             best[item] = final
-        rows.append({"item": item, "label": final or None, "saved": saved[0] if saved else None,
+        rows.append({"item": item, "label": final or None, "saved": None,
                      "ebay": (d.get("ebay") or None) if d["state"] == "ok" else None,
                      "checked_on_ebay": d["state"] == "ok", "problem": why or None})
 
@@ -1601,6 +1600,7 @@ class _InvJob:
             return c.execute(text("select status from inventory_label_jobs where id = :i"), {"i": self.id}).scalar() == "stopping"
 
 
+_USE_SAVED_LABELS = False  # eBay only. True would bring back the saved report / import / listing copies
 _SAVED_FROM = {1: "Seller Hub report", 2: "eBay lookup", 3: "label import", 4: "saved listing copy"}
 
 
@@ -1623,9 +1623,9 @@ def _inv_gather(db: Session, batch) -> tuple[dict, dict, dict]:
         if b.own and b.own not in links[b.id]:
             links[b.id][b.own] = {"store": None, "active": True}  # source id of an unmerged product: ask eBay
     all_ids = sorted({d for m in links.values() for d in m})
-    saved: dict[str, list[str]] = defaultdict(list)
+    saved: dict[str, list[str]] = defaultdict(list)  # stays empty: saved copies are no longer used (see the rules above)
     srcs: dict[str, dict[str, list[str]]] = defaultdict(dict)
-    for chunk in _chunks(all_ids, 3000):
+    for chunk in _chunks(all_ids if _USE_SAVED_LABELS else [], 3000):
         for item, lab, o in db.execute(
             text(
                 "select item, lab, o from ("
@@ -1673,7 +1673,7 @@ def _inv_work(db: Session, job: _InvJob, mode: str, scope: str):
         count_sql = "select count(*) from products p where not exists (select 1 from inventory_label_checks c where c.product_id = p.id)"
         params0 = {}
     job.total = int(db.execute(text(count_sql), params0).scalar() or 0)
-    job.message = ("Asking eBay about each product's listings…" if live else "Checking products against the saved labels…")
+    job.message = ("Asking eBay about each product's listings…" if live else "Listing the products and their active eBay listings (no eBay calls)…")
     job.save(force=True)
     if live and not stores:
         job.message = "No eBay store is connected, so eBay cannot be asked. Connect a store on the Stores page."
