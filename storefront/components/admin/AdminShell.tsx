@@ -10,8 +10,9 @@ import PasswordInput from "./PasswordInput";
 import { AdminAccessProvider } from "./AdminAccess";
 import { ShellBackProvider } from "./ShellBack";
 import DropShipReview from "./DropShipReview";
+import AdminMfaGate from "./AdminMfaGate";
 
-type Status = "loading" | "signedout" | "forbidden" | "error" | "ok";
+type Status = "loading" | "signedout" | "forbidden" | "error" | "ok" | "mfa" | "expired";
 
 // `any`: shown to employees who hold at least one of these permissions.
 // Items without `any` are for owners and admins only.
@@ -249,7 +250,11 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         setStatus(["owner", "admin", "staff"].includes(me.role) ? "ok" : "forbidden");
       } catch (e) {
         if (!active) return;
-        if (e instanceof ApiError && e.status === 403) setStatus("forbidden");
+        if (e instanceof ApiError && e.status === 403 && /^MFA required/.test(e.message)) setStatus("mfa");
+        else if (e instanceof ApiError && e.status === 403 && /password has expired/.test(e.message)) {
+          setProblem(e.message);
+          setStatus("expired");
+        } else if (e instanceof ApiError && e.status === 403) setStatus("forbidden");
         else if (e instanceof ApiError && e.status === 401) setStatus("signedout");
         else {
           setProblem(errMsg(e));
@@ -276,6 +281,15 @@ export default function AdminShell({ children }: { children: ReactNode }) {
 
   if (status === "loading") return <p className="p-8 text-sm text-gray-500">Loading…</p>;
   if (status === "signedout") return <LoginForm />;
+  if (status === "mfa") return <AdminMfaGate onDone={() => setAttempt((n) => n + 1)} onSignOut={signOut} />;
+  if (status === "expired") {
+    return (
+      <div className="mx-auto mt-24 w-full max-w-md space-y-4 p-4">
+        <Notice kind="error">{problem}</Notice>
+        <button className={btn2Cls} onClick={signOut}>Sign out</button>
+      </div>
+    );
+  }
 
   if (status === "forbidden" || status === "error") {
     return (

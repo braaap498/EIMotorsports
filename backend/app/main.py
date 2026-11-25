@@ -91,6 +91,17 @@ app.add_middleware(
     allow_credentials=False,  # bearer tokens, not cookies
 )
 
+@app.middleware("http")
+async def security_headers(request, call_next):
+    """Cheap, safe response headers: HTTPS only (HSTS), no content sniffing, no referrer leakage, no framing."""
+    resp = await call_next(request)
+    resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    return resp
+
+
 admin_router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_staff)])
 
 

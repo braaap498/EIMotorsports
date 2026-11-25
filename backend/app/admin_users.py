@@ -103,6 +103,18 @@ def _clean_permissions(v: Optional[list[str]]) -> Optional[list[str]]:
     return None if v is None else normalize(v)
 
 
+def check_password_policy(v: str) -> str:
+    """Staff password rules (what the Amazon security form asks for): at least 12 characters, with a special character,
+    a letter and a digit. The 365-day age limit is enforced in auth.py (PASSWORD_MAX_AGE_DAYS); MFA by REQUIRE_MFA."""
+    if len(v) < 12:
+        raise ValueError("Use at least 12 characters.")
+    if not re.search(r"[^A-Za-z0-9]", v):
+        raise ValueError("Include at least one special character, such as ! @ # $ % & *.")
+    if not re.search(r"[A-Za-z]", v) or not re.search(r"[0-9]", v):
+        raise ValueError("Include at least one letter and one number.")
+    return v
+
+
 class NewUser(BaseModel):
     display_name: str = Field(max_length=40)
     last_name: str = Field(min_length=1, max_length=40)   # required for new accounts
@@ -110,6 +122,11 @@ class NewUser(BaseModel):
     role: Literal["admin", "staff"]
     password: str = Field(min_length=12, max_length=72)
     permissions: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v: str) -> str:
+        return check_password_policy(v)
 
     @field_validator("permissions")
     @classmethod
@@ -140,6 +157,11 @@ class NewUser(BaseModel):
 
 class SetPassword(BaseModel):
     password: str = Field(min_length=12, max_length=72)
+
+    @field_validator("password")
+    @classmethod
+    def _pw(cls, v: str) -> str:
+        return check_password_policy(v)
 
 
 class EditUser(BaseModel):
@@ -218,6 +240,7 @@ def _public(u: dict) -> dict:
         "permissions": am.get("permissions") if isinstance(am.get("permissions"), list) else [],
         "last_sign_in_at": u.get("last_sign_in_at"),
         "created_at": u.get("created_at"),
+        "password_changed_at": am.get("password_changed_at") or "",
     }
 
 

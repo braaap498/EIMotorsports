@@ -20,6 +20,7 @@ Trade-off: a role or permission change, or a deactivation, takes effect when
 the user's current token expires (Supabase default: 1 hour), not instantly.
 """
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 
 import jwt
@@ -41,6 +42,8 @@ class AuthUser:
     email: str | None
     role: str
     permissions: frozenset[str] = frozenset()
+    aal: str = ""  # Supabase assurance level: aal1 = password only, aal2 = password + second factor
+    password_changed_at: str = ""  # app_metadata.password_changed_at (set by the database trigger in the security notes)
 
 
 @lru_cache
@@ -91,12 +94,35 @@ def current_user(
         email=claims.get("email"),
         role=meta.get("role") or "",
         permissions=frozenset(p for p in perms if isinstance(p, str)),
+        aal=str(claims.get("aal") or ""),
+        password_changed_at=str(meta.get("password_changed_at") or ""),
     )
 
 
-def require_staff(user: AuthUser = Depends(current_user)) -> AuthUser:
+MFA_REQUIRED = "MFA required: set up or enter your authenticator code."
+PASSWORD_EXPIRED = "Your password has expired. Ask an admin to set a new one, or change it from the sign-in page."
+
+
+def _password_age_days(stamp: str) -> int | None:
+    try:
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).days
+
+
+def require_staff(user: AuthUser = Depends(current_user), settings: Settings = Depends(get_settings)) -> AuthUser:
     if user.role not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Staff access required")
+    # Two optional switches (off unless the environment turns them on): a second factor, and a password age limit.
+    if settings.require_mfa and user.aal != "aal2":
+        raise HTTPException(status_code=403, detail=MFA_REQUIRED)
+    if settings.password_max_age_days > 0 and user.password_changed_at:
+        age = _password_age_days(user.password_changed_at)
+        if age is not None and age > settings.password_max_age_days:
+            raise HTTPException(status_code=403, detail=PASSWORD_EXPIRED)
     return user
 
 

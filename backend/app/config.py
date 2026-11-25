@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     fitment_ai_model: str = "claude-sonnet-4-6"
 
+    # Security switches for staff accounts (both off by default so nothing locks out before they are set up).
+    # require_mfa: staff need a second factor (Supabase TOTP, token level aal2) to use the admin API.
+    require_mfa: bool = False
+    # password_max_age_days: staff whose password is older than this are refused until it is changed (0 = off; 365 = annual).
+    password_max_age_days: int = 0
+
     allowed_origins: str = "http://localhost:3000"
 
     # Public base address of the Supabase Storage bucket that holds the photos.
