@@ -774,12 +774,11 @@ export default function EbayLiveListingsPage() {
 
   // Send the product's custom label to every eBay listing linked to it (the same send the product page does), then
   // show the label on the rows that now match.
-  async function sendLabelNow() {
-    if (!afterRelink) return;
+  async function sendLabelFor(productId: number) {
     setRelinkBusy(true);
     try {
       const s = await api<{ cls: string; results: { item_id: string; status: string; detail: string }[] }>(
-        `/kits/${afterRelink.product_id}/sync`,
+        `/kits/${productId}/sync`,
         { method: "POST" },
       );
       const good = new Set(s.results.filter((x) => x.status === "updated" || x.status === "already_current").map((x) => x.item_id.replace(/[^0-9]/g, "")));
@@ -797,6 +796,19 @@ export default function EbayLiveListingsPage() {
     } finally {
       setRelinkBusy(false);
     }
+  }
+
+  async function sendLabelNow() {
+    if (!afterRelink) return;
+    await sendLabelFor(afterRelink.product_id);
+  }
+
+  // The "Update eBay label" button on a row whose eBay label differs from its product's label. Asks first, because it
+  // changes eBay and goes to every listing linked to that product, not just this row.
+  async function fixRowLabel(it: RepoItem) {
+    if (!it.product_label) return;
+    if (!window.confirm(`Change the custom label on eBay from ${it.custom_label ?? "(none)"} to ${it.product_label}?\n\nThis goes to every eBay listing linked to ${it.sku ?? `product ${it.product_id}`}.`)) return;
+    await sendLabelFor(it.product_id);
   }
 
   async function loadZero() {
@@ -1352,6 +1364,17 @@ export default function EbayLiveListingsPage() {
                             <span className="ml-2" title={`The label last read from eBay is ${it.custom_label}, but the product it points at has ${it.product_label}. The saved copy can be out of date; sending the label from the product page refreshes it.`}>
                               <Badge tone="amber">Label differs from product</Badge>
                             </span>
+                          )}
+                          {it.product_label && it.custom_label && it.product_label.trim().toLowerCase() !== it.custom_label.trim().toLowerCase() && (
+                            <button
+                              type="button"
+                              className="ml-2 text-xs text-blue-700 underline hover:text-black disabled:opacity-50"
+                              disabled={relinkBusy}
+                              title={`Send ${it.product_label} to eBay as this listing's custom label`}
+                              onClick={() => void fixRowLabel(it)}
+                            >
+                              Update eBay label
+                            </button>
                           )}
                           {it.is_product_source && (
                             <span className="ml-3" title="The product's photo gallery is taken from this listing">
