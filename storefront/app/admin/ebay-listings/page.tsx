@@ -1365,17 +1365,6 @@ export default function EbayLiveListingsPage() {
                               <Badge tone="amber">Label differs from product</Badge>
                             </span>
                           )}
-                          {it.product_label && it.custom_label && it.product_label.trim().toLowerCase() !== it.custom_label.trim().toLowerCase() && (
-                            <button
-                              type="button"
-                              className="ml-2 text-xs text-blue-700 underline hover:text-black disabled:opacity-50"
-                              disabled={relinkBusy}
-                              title={`Send ${it.product_label} to eBay as this listing's custom label`}
-                              onClick={() => void fixRowLabel(it)}
-                            >
-                              Update eBay label
-                            </button>
-                          )}
                           {it.is_product_source && (
                             <span className="ml-3" title="The product's photo gallery is taken from this listing">
                               <Badge tone="gray">Product photos</Badge>
@@ -1414,6 +1403,17 @@ export default function EbayLiveListingsPage() {
                             <span className="ml-1">
                               <Badge tone="amber">Unsent edits</Badge>
                             </span>
+                          )}
+                          {it.product_label && it.custom_label && it.product_label.trim().toLowerCase() !== it.custom_label.trim().toLowerCase() && (
+                            <button
+                              type="button"
+                              className="ml-2 rounded border border-amber-400 bg-amber-50 px-2 py-0.5 text-xs text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                              disabled={relinkBusy}
+                              title={`eBay has ${it.custom_label}; the product has ${it.product_label}. Send the product's label to eBay.`}
+                              onClick={() => void fixRowLabel(it)}
+                            >
+                              Update eBay label
+                            </button>
                           )}
                         </td>
                       </ClickRow>
