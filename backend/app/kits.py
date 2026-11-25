@@ -451,13 +451,29 @@ def clear_manual_photo(item_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+def _manual_starter_description(saved_description: Optional[str], title: str, brand: Optional[str]) -> str:
+    """The product's starting description for a product made from a saved (hand-built catalog) part: the part's own description
+    text, its brand, and the usual fitment reminder (same shape as the Automatic Distributors starter description). HTML limited
+    to the tags the editor allows; it claims nothing the saved part does not say."""
+    import html as _h
+
+    text_ = (saved_description or "").strip() or title
+    b = (brand or "").strip()
+    items = f"<li>Brand: {_h.escape(b)}</li>" if b else ""
+    return (
+        f"<p>{_h.escape(text_.rstrip('.'))}.</p>{'<ul>' + items + '</ul>' if items else ''}"
+        "<p>Please confirm this part fits your machine before ordering.</p>"
+    )
+
+
 @router.post("/manual-catalog/{item_id}/make-product", status_code=201)
 @needs("products.create")
 def make_manual_product(item_id: int, db: Session = Depends(get_db)):
     """Make one product from a saved part, the way the Automatic Distributors page does from a catalog part: a new product
     (NOT published: it has no price yet) with one distributor part (quantity 1) that follows the saved part, the saved part's
-    manufacturer # on the product, and the custom label set to the vendor part # when that is free. Photos, price, category
-    and the rest are set on the product afterwards."""
+    manufacturer # on the product, the part's brand, cost and picture, a starting description built from the saved part's description
+    and brand, and the custom label set to the vendor part # when that is free. Price, category and the rest are set on the
+    product afterwards."""
     from app.admin_catalog import slugify  # late import: that module imports this one
 
     m = db.execute(
@@ -481,10 +497,11 @@ def make_manual_product(item_id: int, db: Session = Depends(get_db)):
     try:
         pid = db.execute(
             text(
-                "insert into products (title, slug, manufacturer_part_number, cost, quantity_on_hand, condition, is_published, is_active, is_universal, show_part_number) "
-                "values (:title, :slug, :mpn, :cost, 0, 'New', false, true, false, false) returning id"
+                "insert into products (title, slug, manufacturer_part_number, cost, quantity_on_hand, condition, is_published, is_active, is_universal, show_part_number, description) "
+                "values (:title, :slug, :mpn, :cost, 0, 'New', false, true, false, false, :desc) returning id"
             ),
-            {"title": title, "slug": slug, "mpn": (m.mfr_number or "").strip() or None, "cost": m.unit_cost},
+            {"title": title, "slug": slug, "mpn": (m.mfr_number or "").strip() or None, "cost": m.unit_cost,
+             "desc": _manual_starter_description(m.description, title, m.manufacturer)},
         ).scalar()
         db.execute(
             text(
