@@ -10,6 +10,15 @@ Mounted at /admin/rmatv/* (owner/admin only).
   POST /import/start      begin an import (the browser then sends the rows in pieces)
   POST /import/chunk      one piece of the file
   POST /import/finish     check the whole file arrived, then retire parts that left the file
+  GET  /sftp/status       is the Rocky Mountain SFTP login set up on the server (nothing is contacted)
+  POST /sftp/check        log in, list the folders and files (two levels), show the server's host key
+  POST /sftp/peek         column names and sample lines of the data files found (nothing is stored)
+  GET/PUT /sftp/config    which file is the catalog / your prices / the photo links, and any column choices you made
+  POST /import/sftp       pull the catalog file, then your prices, from the SFTP server (runs in the background)
+  POST /import/sftp-prices   pull just the price file
+  POST /import/sftp-photos   read photo links from the photo file (or the catalog file)
+  GET/PUT /sftp/schedule  automatic sync (off by default): the server checks the files' date and size and imports only on change
+  GET  /overview          the catalog at a glance      GET /items/{id}  one part in full      GET /match-report  our products vs the catalog
 
 HOW IT FITS
   * Rocky Mountain parts live in the same table as Automatic Distributors parts (supplier_items), told apart by
@@ -23,6 +32,10 @@ HOW IT FITS
     Rocky Mountain turns out to have an API, its adapter should build the same dicts (see clean_row) and call
     `upsert_rows` between _begin_run and _finish_run; nothing else here changes. Any API key belongs in the
     server's environment (RMATV_API_KEY and the like), never in the browser and never in the database.
+  * SFTP (sftp.rockymountainatv.com, port 22) is the live feed. The login is read from the server's environment
+    (RMATV_SFTP_USER, RMATV_SFTP_PASSWORD, optionally RMATV_SFTP_HOST / RMATV_SFTP_PORT / RMATV_SFTP_HOSTKEY), never stored
+    in the database or sent to the browser. Needs `paramiko` in requirements.txt. The SFTP jobs go through the same
+    `upsert_rows` / `_finish_run` as the file upload, so nothing else here changes.
   * We do not know the exact columns of Rocky Mountain's file, so the browser reads the file, /import/detect
     guesses which column is which, and the person can correct each guess before anything is stored.
 
@@ -31,8 +44,18 @@ LICENSE
   here is admin-only and nothing is mounted on the public store API. All of it sits in supplier_items rows with
   supplier = 'rmatv' (and supplier_import_runs), so it can be removed in one step if the agreement ends.
 """
+import base64
+import csv
+import hashlib
+import json
 import logging
+import os
 import re
+import socket
+import stat as _stat
+import tempfile
+import threading
+import time
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -527,7 +550,7 @@ def items(
         text(
             f"with {SINGLES_CTE} "
             "select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, s.dealer_cost, "
-            "s.qty_other, s.upc, s.active, s.updated_at, "
+            "s.qty_other, s.upc, s.active, s.updated_at, s.my_cost, s.map_price, s.images[1] as image, "
             # only the SINGLE product of this part (linked, or the same barcode / manufacturer #); a kit that contains it is not shown
             f"{single_pick('supplier')} as product_id, "
             f"{single_count('supplier')} as products "
@@ -543,7 +566,7 @@ def items(
     out = []
     for r in rows:
         d = dict(r._mapping)
-        for k in ("list_price", "dealer_cost"):
+        for k in ("list_price", "dealer_cost", "my_cost", "map_price"):
             d[k] = float(d[k]) if d[k] is not None else None
         d["product_title"], d["product_sku"] = titles.get(d["product_id"]) or (None, None)
         d["product_image"], d["product_image_full"] = photos.get(d["product_id"]) or (None, None)
@@ -628,3 +651,938 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
         db.rollback()
         raise HTTPException(500, f"Could not make the product: {str(e)[:300]}")
     return {"product_id": pid, "title": title, "custom_label": label, "published": False}
+
+
+# ==========================================================================
+# SFTP feed (sftp.rockymountainatv.com): the same things the Automatic Distributors FTP gives us
+# ==========================================================================
+# We do not yet know Rocky Mountain's file names or columns, so nothing is hard-coded: "Test connection" lists what is on the
+# server, "Look at the files" shows each data file's columns, and the person says which file is the catalog, which holds their
+# prices and which holds photo links (saved in supplier_sync_settings.config). Columns are matched by NAME, so a file whose
+# columns move around still imports. Everything lands in supplier_items through upsert_rows, like the file upload.
+from app.autodist import _DETAIL_UPDATE, _LABEL_MATCH_SQL, _MATCH, _num, _open_downloaded  # noqa: E402
+
+SFTP_TIMEOUT = 60
+SFTP_BATCH = 2000
+SCHEDULER_TICK_SECONDS = 30
+_DATA_EXT = (".csv", ".txt", ".tsv", ".dat", ".zip")
+_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp")
+_COST = "coalesce(s.my_cost, s.dealer_cost)"   # your own price when the price file gave one, else the catalog's dealer price
+
+# the price file: our own cost, MAP and shipping facts. It only updates parts already stored; it never adds or retires parts.
+_PRICE_FIELDS: list[tuple[str, str]] = [
+    ("sku", "SKU"), ("my_cost", "Your cost"), ("map_price", "MAP price"), ("list_price", "List / retail price"),
+    ("weight_lb", "Weight (lb)"), ("length_in", "Length (in)"), ("width_in", "Width (in)"), ("height_in", "Height (in)"),
+]
+_PRICE_ALIASES: dict[str, list[str]] = {
+    "sku": _ALIASES["sku"],
+    "my_cost": _ALIASES["dealer_cost"],
+    "map_price": ["mapprice", "mappricing", "map", "minimumadvertisedprice"],
+    "list_price": _ALIASES["list_price"],
+    "weight_lb": ["weight", "itemweight", "actualweight", "weightlb", "weightlbs", "shipweight", "shippingweight"],
+    "length_in": ["length", "itemlength", "lengthin"],
+    "width_in": ["width", "itemwidth", "widthin"],
+    "height_in": ["height", "itemheight", "heightin"],
+}
+_PHOTO_ALIASES: dict[str, list[str]] = {
+    "sku": _ALIASES["sku"],
+    "images": ["images", "imageurls", "imagelinks", "photos", "photourls", "pictures", "pictureurls", "imageurl", "imagelink", "image", "photo", "photourl", "picture", "pictureurl"],
+    **{f"image_{i}": [f"imageurl{i}", f"image{i}", f"photo{i}", f"photourl{i}", f"picture{i}", f"imagelink{i}", f"imagepath{i}"] for i in range(1, 7)},
+}
+_MAP_KEYS = {"catalog_map": {k for k, _, _ in FIELDS}, "price_map": {k for k, _ in _PRICE_FIELDS}, "photo_map": set(_PHOTO_ALIASES)}
+_FILE_KEYS = ("catalog_file", "price_file", "photo_file")
+
+
+def _sftp_settings() -> tuple[str, int, str, str]:
+    host = re.sub(r"^s?ftp://", "", os.environ.get("RMATV_SFTP_HOST", "sftp.rockymountainatv.com").strip()).strip("/")
+    try:
+        port = int(os.environ.get("RMATV_SFTP_PORT", "22").strip() or 22)
+    except ValueError:
+        port = 22
+    return host, port, os.environ.get("RMATV_SFTP_USER", "").strip(), os.environ.get("RMATV_SFTP_PASSWORD", "")
+
+
+class _Sftp:
+    """One open login. Always close() it."""
+
+    def __init__(self, transport, client, fingerprint: str):
+        self.transport, self.sftp, self.fingerprint = transport, client, fingerprint
+
+    def close(self) -> None:
+        for c in (self.sftp, self.transport):
+            try:
+                c.close()
+            except Exception:
+                pass
+
+
+def _sftp_connect() -> _Sftp:
+    host, port, user, pw = _sftp_settings()
+    if not user or not pw:
+        raise HTTPException(400, "The Rocky Mountain SFTP login is not set. Add RMATV_SFTP_USER and RMATV_SFTP_PASSWORD in the server environment.")
+    try:
+        import paramiko
+    except ImportError:
+        raise HTTPException(503, "SFTP is not installed on the server yet: add paramiko to requirements.txt and redeploy.")
+    tr = None
+    try:
+        sock = socket.create_connection((host, port), timeout=SFTP_TIMEOUT)
+        tr = paramiko.Transport(sock)
+        tr.connect(username=user, password=pw)
+        key = tr.get_remote_server_key()
+        fp = "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
+        pinned = os.environ.get("RMATV_SFTP_HOSTKEY", "").strip()
+        if pinned and pinned.removeprefix("SHA256:").rstrip("=") != fp.removeprefix("SHA256:"):
+            tr.close()
+            raise HTTPException(502, f"The server's host key ({fp}) is not the one set in RMATV_SFTP_HOSTKEY. Nothing was sent. If Rocky Mountain changed servers, update that setting.")
+        client = paramiko.SFTPClient.from_transport(tr)
+        client.get_channel().settimeout(SFTP_TIMEOUT)
+        return _Sftp(tr, client, fp)
+    except HTTPException:
+        raise
+    except paramiko.AuthenticationException:
+        if tr:
+            tr.close()
+        raise HTTPException(502, "Rocky Mountain's SFTP server refused the username or password.")
+    except Exception as e:  # network, timeout, DNS, key exchange
+        if tr:
+            tr.close()
+        log.warning("rmatv sftp connect failed: %s", e)
+        raise HTTPException(502, f"Could not reach the Rocky Mountain SFTP server ({host}:{port}): {e}")
+
+
+def _sftp_list(cli: _Sftp, folder: str = "") -> list[dict]:
+    try:
+        attrs = cli.sftp.listdir_attr(folder or ".")
+    except (IOError, OSError):
+        return []
+    out = []
+    for a in attrs:
+        if a.filename in (".", ".."):
+            continue
+        out.append({"name": a.filename, "dir": _stat.S_ISDIR(a.st_mode or 0), "size": a.st_size, "mtime": a.st_mtime})
+    return sorted(out, key=lambda x: (not x["dir"], x["name"].lower()))
+
+
+def _join(folder: str, name: str) -> str:
+    return f"{folder.rstrip('/')}/{name}" if folder else name
+
+
+def _sftp_tree(cli: _Sftp, max_entries: int = 400, per_folder: int = 80) -> list[dict]:
+    """Every folder and file two levels deep, so we can see what Rocky Mountain publishes (data, prices, images). A huge image
+    folder is summarised instead of listed."""
+    out: list[dict] = []
+
+    def walk(folder: str, depth: int) -> None:
+        kids = _sftp_list(cli, folder)
+        for n, k in enumerate(kids):
+            if len(out) >= max_entries:
+                return
+            if n >= per_folder:
+                out.append({"path": _join(folder, f"… {len(kids) - per_folder} more"), "dir": False, "size": None, "mtime": None, "image": False, "more": True})
+                return
+            path = _join(folder, k["name"])
+            out.append({"path": path, "dir": k["dir"], "size": k["size"], "mtime": k["mtime"], "image": k["name"].lower().endswith(_IMAGE_EXT), "more": False})
+            if k["dir"] and depth < 2:
+                walk(path, depth + 1)
+
+    try:
+        walk("", 1)
+    except Exception as e:  # a folder we cannot open must not break the check
+        log.warning("rmatv sftp tree stopped: %s", e)
+    return out
+
+
+def _signature(cli: _Sftp, path: str) -> str:
+    """A cheap fingerprint (modified time | size) so a check can tell whether Rocky Mountain published something new WITHOUT
+    downloading it."""
+    try:
+        a = cli.sftp.stat(path)
+        return f"{int(a.st_mtime) if a.st_mtime else '-'}|{a.st_size if a.st_size is not None else '-'}"
+    except Exception:
+        return "-|-"
+
+
+def _preview(cli: _Sftp, path: str, limit: int = 65536) -> bytes:
+    with cli.sftp.open(path, "rb") as f:
+        return f.read(limit)
+
+
+def _sniff(first_line: str) -> str:
+    return max([",", "\t", "|", ";"], key=lambda d: first_line.count(d))
+
+
+def _preview_columns(data: bytes) -> tuple[Optional[list[str]], list[str], Optional[str]]:
+    """(columns, up to two sample lines, note) from the first bytes of a file."""
+    if data[:2] == b"PK":
+        return None, [], "A zip file: it is unzipped during import, so its columns can only be shown after a first import."
+    txt = data.decode("utf-8-sig", errors="replace")
+    lines = txt.splitlines()[:-1] if "\n" in txt else txt.splitlines()  # the last line is probably cut off
+    if not lines:
+        return None, [], "empty"
+    delim = _sniff(lines[0])
+    recs = list(csv.reader(lines[:3], delimiter=delim, quoting=csv.QUOTE_MINIMAL if delim == "," else csv.QUOTE_NONE))
+    return [c.strip() for c in recs[0]], [" | ".join(r)[:400] for r in recs[1:3]], None
+
+
+def _detect(header: list[str], aliases: dict[str, list[str]]) -> dict[str, int]:
+    heads = [_head(c) for c in header]
+    out: dict[str, int] = {}
+    used: set[int] = set()
+    for field, names in aliases.items():
+        for alias in names:
+            hit = next((i for i, h in enumerate(heads) if h == alias and i not in used), None)
+            if hit is not None:
+                out[field] = hit
+                used.add(hit)
+                break
+    return out
+
+
+def _index_map(header: list[str], overrides: Optional[dict], aliases: dict[str, list[str]]) -> dict[str, int]:
+    """Field -> column index. A column the person chose (by its header text) wins; the rest are guessed from the header names."""
+    out: dict[str, int] = {}
+    for field, hdr in (overrides or {}).items():
+        if field in aliases and hdr:
+            idx = next((i for i, h in enumerate(header) if h.strip() == str(hdr).strip()), None)
+            if idx is not None:
+                out[field] = idx
+    guess = _detect(header, {f: a for f, a in aliases.items() if f not in out})
+    taken = set(out.values())
+    for f, i in guess.items():
+        if i not in taken:
+            out[f] = i
+            taken.add(i)
+    return out
+
+
+def _guess_role(columns: list[str]) -> Optional[str]:
+    cat = _detect(columns, {k: _ALIASES[k] for k in _ALIASES})
+    price = _detect(columns, _PRICE_ALIASES)
+    photo = _detect(columns, _PHOTO_ALIASES)
+    has_img = any(k.startswith("image") for k in photo)
+    if "sku" in cat and has_img and len(cat) <= 3:
+        return "photos"
+    if "sku" in cat and len(cat) >= 4:
+        return "catalog"
+    if "sku" in price and ("my_cost" in price or "map_price" in price) and len(cat) < 4:
+        return "price"
+    if "sku" in cat and has_img:
+        return "photos"
+    return None
+
+
+# ---- settings kept in supplier_sync_settings (the same table Automatic Distributors uses) -------------------------------
+_settings_ready = False
+
+
+def _ensure_settings(db: Session) -> None:
+    global _settings_ready
+    if _settings_ready:
+        return
+    try:
+        db.execute(text("alter table supplier_sync_settings add column if not exists config text"))
+        db.execute(text("insert into supplier_sync_settings (supplier) values (:s) on conflict do nothing"), {"s": SUPPLIER})
+        db.commit()
+        _settings_ready = True
+    except Exception:
+        db.rollback()
+        log.exception("rmatv: could not prepare supplier_sync_settings (is the table there? sql/autodist_sync_settings.sql)")
+
+
+def _config(db: Session) -> dict:
+    _ensure_settings(db)
+    try:
+        raw = db.execute(text("select config from supplier_sync_settings where supplier = :s"), {"s": SUPPLIER}).scalar()
+        d = json.loads(raw) if raw else {}
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        db.rollback()
+        return {}
+
+
+def _sync_note(db: Session, *, summary: Optional[str] = None, error: Optional[str] = None, signature: Optional[str] = None,
+               price_signature: Optional[str] = None, changed: bool = False) -> None:
+    try:
+        db.execute(
+            text(
+                "update supplier_sync_settings set last_summary = coalesce(:sm, last_summary), last_error = :er, "
+                "last_signature = coalesce(:sg, last_signature), last_price_signature = coalesce(:pg, last_price_signature), "
+                "last_changed_at = case when :ch then now() else last_changed_at end, updated_at = now() where supplier = :s"
+            ),
+            {"sm": summary, "er": (error or None) and error[:400], "sg": signature, "pg": price_signature, "ch": changed, "s": SUPPLIER},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.warning("could not record the Rocky Mountain sync result")
+
+
+def _set_run_note(db: Session, run_id: int, status: str, note: str) -> None:
+    db.execute(text("update supplier_import_runs set status = :st, finished_at = now(), note = :n where id = :i"), {"st": status, "n": note[:400], "i": run_id})
+    db.commit()
+
+
+# ---- reading a remote file -----------------------------------------------------------------------------------------------
+def _download(path: str) -> tuple[str, str]:
+    """Download one remote file to a temp file. Returns (temp path, signature). The caller deletes the temp file."""
+    cli = _sftp_connect()
+    tmp_path = None
+    try:
+        sig = _signature(cli, path)
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".feed") as tmp:
+                tmp_path = tmp.name
+                cli.sftp.getfo(path, tmp)
+        except (IOError, OSError):
+            raise HTTPException(404, f"Could not read {path} on the server. Check the file's name in the SFTP settings.")
+        return tmp_path, sig
+    except Exception:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise
+    finally:
+        cli.close()
+
+
+def _open_rows(tmp_path: str, aliases: dict, overrides: Optional[dict], need: tuple = ("sku",)):
+    stream, delim, closer = _open_downloaded(tmp_path)
+    reader = csv.reader(stream, delimiter=delim, quoting=csv.QUOTE_MINIMAL if delim == "," else csv.QUOTE_NONE)
+    header = next(reader, None)
+    if not header:
+        closer()
+        raise HTTPException(400, "That file is empty.")
+    header = [h.strip() for h in header]
+    mapping = _index_map(header, overrides, aliases)
+    if any(n not in mapping for n in need):
+        closer()
+        raise HTTPException(400, "No SKU column found in that file. Its columns are: " + ", ".join(h for h in header if h)[:600])
+    return mapping, reader, closer, header
+
+
+def _rm_run_job(run_id: int, work, fail_msg: str) -> bool:
+    """Shared wrapper for the background jobs: own DB session, error notes, temp-file cleanup."""
+    gen = get_db()
+    db = next(gen)
+    try:
+        work(db)
+        return True
+    except HTTPException as e:
+        db.rollback()
+        _set_run_note(db, run_id, "failed", str(e.detail))
+        _sync_note(db, error=str(e.detail))
+    except Exception:
+        db.rollback()
+        log.exception("rmatv sftp job failed (run %s)", run_id)
+        _set_run_note(db, run_id, "failed", fail_msg)
+        _sync_note(db, error=fail_msg)
+    finally:
+        gen.close()
+    return False
+
+
+def _catalog_job(run_id: int) -> bool:
+    """Background: download the catalog file, store it in batches, then retire what left the file (with the safety net)."""
+
+    def work(db: Session) -> None:
+        cfg = _config(db)
+        path = (cfg.get("catalog_file") or "").strip()
+        if not path:
+            raise HTTPException(400, "Choose which file is the catalog first (SFTP feed > Which file is which).")
+        tmp, sig = _download(path)
+        try:
+            mapping, reader, closer, _h = _open_rows(tmp, {k: _ALIASES[k] for k in _ALIASES}, cfg.get("catalog_map"))
+            seen = skipped = new_total = 0
+            batch: dict[str, dict] = {}
+
+            def flush() -> None:
+                nonlocal seen, new_total
+                if not batch:
+                    return
+                rows = list(batch.values())
+                new_total += upsert_rows(db, run_id, rows)
+                seen += len(rows)
+                db.execute(text("update supplier_import_runs set rows_seen = :n, rows_new = :w, rows_skipped = :k where id = :i"),
+                           {"n": seen, "w": new_total, "k": skipped, "i": run_id})
+                db.commit()
+                batch.clear()
+
+            try:
+                for rec in reader:
+                    if not rec or all(not c.strip() for c in rec):
+                        continue
+                    row = clean_row(rec, mapping)
+                    if row is None:
+                        skipped += 1
+                        continue
+                    batch[row["sku"]] = row
+                    if len(batch) >= SFTP_BATCH:
+                        flush()
+                flush()
+            finally:
+                closer()
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        res = _finish_run(db, run_id, seen + skipped, False)
+        if res.get("needs_review"):
+            _sync_note(db, summary=f"Stored {seen:,} parts; waiting for you to confirm retiring the missing ones.", signature=sig, changed=True)
+        else:
+            _sync_note(db, summary=f"Imported {seen:,} parts ({new_total:,} new, {res.get('retired', 0):,} retired).", signature=sig, changed=True)
+
+    return _rm_run_job(run_id, work, "The SFTP import failed. See the server log. Nothing was retired.")
+
+
+def _clean_price(raw: dict) -> Optional[dict]:
+    sku = (raw.get("sku") or "").strip()
+    if not sku or len(sku) > SKU_MAX:
+        return None
+    return {
+        "sku": sku, "my_cost": _price(raw.get("my_cost")), "map_price": _price(raw.get("map_price")), "list_price": _price(raw.get("list_price")),
+        "weight_lb": _num(raw.get("weight_lb"), 4, 100_000) or None, "length_in": _num(raw.get("length_in"), 4, 100_000) or None,
+        "width_in": _num(raw.get("width_in"), 4, 100_000) or None, "height_in": _num(raw.get("height_in"), 4, 100_000) or None,
+    }
+
+
+# A column the file does not have (or a blank cell) leaves what we already hold alone: coalesce(new, old).
+_PRICE_UPDATE = """
+with incoming as (
+  select * from unnest(cast(:sku as text[]), cast(:cost as numeric[]), cast(:map as numeric[]), cast(:lp as numeric[]),
+                       cast(:wt as numeric[]), cast(:len as numeric[]), cast(:wid as numeric[]), cast(:hgt as numeric[]))
+  as t(sku, my_cost, map_price, list_price, weight_lb, length_in, width_in, height_in)
+), up as (
+  update supplier_items s set
+    my_cost = coalesce(i.my_cost, s.my_cost), map_price = coalesce(i.map_price, s.map_price),
+    list_price = coalesce(i.list_price, s.list_price), weight_lb = coalesce(i.weight_lb, s.weight_lb),
+    length_in = coalesce(i.length_in, s.length_in), width_in = coalesce(i.width_in, s.width_in),
+    height_in = coalesce(i.height_in, s.height_in), price_synced_at = now(),
+    updated_at = case when (s.my_cost, s.map_price, s.list_price) is distinct from
+                           (coalesce(i.my_cost, s.my_cost), coalesce(i.map_price, s.map_price), coalesce(i.list_price, s.list_price))
+                      then now() else s.updated_at end
+  from incoming i where s.supplier = :sup and s.sku = i.sku
+  returning 1
+)
+select count(*) from up
+"""
+
+
+def _update_prices(db: Session, rows: list[dict]) -> int:
+    if not rows:
+        return 0
+    c = lambda k: [r[k] for r in rows]  # noqa: E731
+    return int(db.execute(text(_PRICE_UPDATE), {"sup": SUPPLIER, "sku": c("sku"), "cost": c("my_cost"), "map": c("map_price"), "lp": c("list_price"),
+                                                "wt": c("weight_lb"), "len": c("length_in"), "wid": c("width_in"), "hgt": c("height_in")}).scalar() or 0)
+
+
+def _clean_photo(raw: dict) -> Optional[dict]:
+    sku = (raw.get("sku") or "").strip()
+    if not sku or len(sku) > SKU_MAX:
+        return None
+    cells = [raw.get(f"image_{i}") or "" for i in range(1, 7)] + [raw.get("images") or ""]
+    urls: list[str] = []
+    for cell in cells:
+        for u in re.split(r"[|;\r\n]+|,\s*(?=https?://)|\s+(?=https?://)", cell.strip()):
+            u = u.strip().replace(" ", "%20")
+            if u.lower().startswith(("http://", "https://")) and u not in urls:
+                urls.append(u[:500])
+    return {"sku": sku, "images": "\n".join(urls[:6])}
+
+
+def _update_photos(db: Session, rows: list[dict]) -> int:
+    if not rows:
+        return 0
+    return int(db.execute(text(_DETAIL_UPDATE), {"sup": SUPPLIER, "sku": [r["sku"] for r in rows], "imgs": [r["images"] for r in rows]}).scalar() or 0)
+
+
+def _update_job(run_id: int, file_key: str, map_key: str, aliases: dict, need_any: tuple, cleaner, updater, summarize, price_signature: bool = False) -> bool:
+    """Background: download a file and use its lines to update parts we already hold (never adds or retires)."""
+
+    def work(db: Session) -> None:
+        cfg = _config(db)
+        path = (cfg.get(file_key) or "").strip()
+        if not path and file_key == "photo_file":
+            path = (cfg.get("catalog_file") or "").strip()   # the catalog file may hold the photo links itself
+        if not path:
+            raise HTTPException(400, "Choose that file first (SFTP feed > Which file is which).")
+        tmp, sig = _download(path)
+        try:
+            mapping, reader, closer, header = _open_rows(tmp, aliases, cfg.get(map_key))
+            if not any(k in mapping for k in need_any):
+                closer()
+                raise HTTPException(400, "That file has none of the columns this needs. Its columns are: " + ", ".join(h for h in header if h)[:500])
+            seen = skipped = matched = 0
+            batch: dict[str, dict] = {}
+
+            def flush() -> None:
+                nonlocal seen, matched
+                if not batch:
+                    return
+                rows = list(batch.values())
+                matched += updater(db, rows)
+                seen += len(rows)
+                db.execute(text("update supplier_import_runs set rows_seen = :n, rows_new = :m, rows_skipped = :k where id = :i"),
+                           {"n": seen, "m": matched, "k": skipped, "i": run_id})
+                db.commit()
+                batch.clear()
+
+            try:
+                for rec in reader:
+                    if not rec or all(not c.strip() for c in rec):
+                        continue
+                    row = cleaner({f: (rec[i].strip() if i < len(rec) else "") for f, i in mapping.items()})
+                    if row is None:
+                        skipped += 1
+                        continue
+                    batch[row["sku"]] = row
+                    if len(batch) >= SFTP_BATCH:
+                        flush()
+                flush()
+            finally:
+                closer()
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        if seen == 0:
+            raise HTTPException(400, "That file held no usable lines.")
+        db.execute(text("update supplier_import_runs set status = 'done', finished_at = now(), rows_skipped = :k, note = null where id = :i"), {"k": skipped, "i": run_id})
+        db.commit()
+        _sync_note(db, summary=summarize(matched, seen, skipped), price_signature=sig if price_signature else None, changed=price_signature)
+
+    return _rm_run_job(run_id, work, "The import failed. See the server log.")
+
+
+def _price_job(run_id: int) -> bool:
+    return _update_job(run_id, "price_file", "price_map", _PRICE_ALIASES, ("my_cost", "map_price", "list_price", "weight_lb"), _clean_price, _update_prices,
+                       lambda m, s, k: f"Prices updated: {m:,} of the {s:,} lines in the price file matched a stored part.", price_signature=True)
+
+
+def _photo_job(run_id: int) -> bool:
+    return _update_job(run_id, "photo_file", "photo_map", _PHOTO_ALIASES, ("images", *[f"image_{i}" for i in range(1, 7)]), _clean_photo, _update_photos,
+                       lambda m, s, k: f"Photo links updated for {m:,} parts ({s:,} lines read).")
+
+
+def _sync_all(run_id: int) -> None:
+    """Manual sync: the catalog first, then your prices (when a price file is chosen)."""
+    if not _catalog_job(run_id):
+        return
+    gen = get_db()
+    db = next(gen)
+    try:
+        if not (_config(db).get("price_file") or "").strip():
+            return
+        price_run = _begin_run(db, "sftp_price", "sync")
+    except HTTPException:
+        return
+    finally:
+        gen.close()
+    _price_job(price_run)
+
+
+def _require_login() -> None:
+    _, _, u, pw = _sftp_settings()
+    if not u or not pw:
+        raise HTTPException(400, "The Rocky Mountain SFTP login is not set. Add RMATV_SFTP_USER and RMATV_SFTP_PASSWORD in the server environment.")
+
+
+@router.get("/sftp/status")
+def sftp_status():
+    """Is the login set up? Contacts nothing and never returns the password."""
+    host, port, user, pw = _sftp_settings()
+    return {"configured": bool(user and pw), "host": host, "port": port, "user": user or None, "host_key_pinned": bool(os.environ.get("RMATV_SFTP_HOSTKEY", "").strip())}
+
+
+@router.post("/sftp/check")
+def sftp_check(db: Session = Depends(get_db)):
+    """Log in and list what is on the server. Changes nothing."""
+    cli = _sftp_connect()
+    try:
+        try:
+            where = cli.sftp.normalize(".")
+        except Exception:
+            where = None
+        tree = _sftp_tree(cli)
+    finally:
+        cli.close()
+    files = [t for t in tree if not t["dir"] and not t["more"]]
+    cfg = _config(db)
+    return {
+        "fingerprint": cli.fingerprint, "login_folder": where, "tree": tree, "image_files": sum(1 for t in tree if t["image"]),
+        "data_files": [t["path"] for t in files if t["path"].lower().endswith(_DATA_EXT)],
+        "other_files": [t["path"] for t in files if not t["path"].lower().endswith(_DATA_EXT) and not t["image"]][:40],
+        "config": {k: cfg.get(k) for k in _FILE_KEYS},
+    }
+
+
+class PeekIn(BaseModel):
+    paths: list[str] = Field(default_factory=list, max_length=20)
+
+
+@router.post("/sftp/peek")
+def sftp_peek(body: PeekIn):
+    """Column names and two sample lines of each data file (the first 32 KB of each; nothing is stored). With no paths it looks at
+    every data file in the top two folder levels."""
+    cli = _sftp_connect()
+    out = []
+    try:
+        paths = body.paths or [t["path"] for t in _sftp_tree(cli) if not t["dir"] and not t["more"] and t["path"].lower().endswith(_DATA_EXT)][:15]
+        for path in paths:
+            item: dict = {"path": path, "columns": None, "sample": [], "error": None, "note": None, "role": None, "size": None, "mtime": None}
+            try:
+                a = cli.sftp.stat(path)
+                item["size"], item["mtime"] = a.st_size, a.st_mtime
+                cols, sample, note = _preview_columns(_preview(cli, path, 32768))
+                item["columns"], item["sample"] = cols, sample
+                if note == "empty":
+                    item["error"] = "empty"
+                else:
+                    item["note"] = note
+                if cols:
+                    item["role"] = _guess_role(cols)
+                    item["catalog_mapped"] = {f: cols[i] for f, i in _detect(cols, {k: _ALIASES[k] for k in _ALIASES}).items()}
+            except Exception as e:
+                item["error"] = str(e)[:200]
+            out.append(item)
+    finally:
+        cli.close()
+    return {"files": out, "fingerprint": cli.fingerprint}
+
+
+class ConfigIn(BaseModel):
+    catalog_file: Optional[str] = Field(None, max_length=300)
+    price_file: Optional[str] = Field(None, max_length=300)
+    photo_file: Optional[str] = Field(None, max_length=300)
+    catalog_map: Optional[dict[str, str]] = None   # field -> the file's header text, for the columns the guess got wrong
+    price_map: Optional[dict[str, str]] = None
+    photo_map: Optional[dict[str, str]] = None
+
+
+@router.get("/sftp/config")
+def sftp_config(db: Session = Depends(get_db)):
+    cfg = _config(db)
+    return {k: cfg.get(k) for k in (*_FILE_KEYS, "catalog_map", "price_map", "photo_map")}
+
+
+@router.put("/sftp/config")
+def sftp_config_set(body: ConfigIn, db: Session = Depends(get_db)):
+    cfg = _config(db)
+    for k, v in body.model_dump(exclude_unset=True).items():
+        if k in _FILE_KEYS:
+            v = (v or "").strip()
+            if v:
+                cfg[k] = v
+            else:
+                cfg.pop(k, None)
+        else:
+            clean = {f: str(h).strip()[:200] for f, h in (v or {}).items() if f in _MAP_KEYS[k] and str(h).strip()}
+            if clean:
+                cfg[k] = clean
+            else:
+                cfg.pop(k, None)
+    db.execute(text("update supplier_sync_settings set config = :c, updated_at = now() where supplier = :s"), {"c": json.dumps(cfg), "s": SUPPLIER})
+    db.commit()
+    return {k: cfg.get(k) for k in (*_FILE_KEYS, "catalog_map", "price_map", "photo_map")}
+
+
+@router.post("/import/sftp")
+def import_sftp(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Start pulling the catalog (then your prices) from the SFTP server. Returns at once; it runs in the background and shows in the import log."""
+    _require_login()
+    if not (_config(db).get("catalog_file") or "").strip():
+        raise HTTPException(400, "Choose which file is the catalog first (SFTP feed > Which file is which).")
+    run_id = _begin_run(db, "sftp", user.email or user.user_id)
+    threading.Thread(target=_sync_all, args=(run_id,), daemon=True, name=f"rmatv-sftp-{run_id}").start()
+    return {"run_id": run_id}
+
+
+@router.post("/import/sftp-prices")
+def import_sftp_prices(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    _require_login()
+    if not (_config(db).get("price_file") or "").strip():
+        raise HTTPException(400, "Choose the price file first (SFTP feed > Which file is which).")
+    run_id = _begin_run(db, "sftp_price", user.email or user.user_id)
+    threading.Thread(target=_price_job, args=(run_id,), daemon=True, name=f"rmatv-price-{run_id}").start()
+    return {"run_id": run_id}
+
+
+@router.post("/import/sftp-photos")
+def import_sftp_photos(db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Read the photo links (the photo file, else the catalog file). Manual only: photos rarely change."""
+    _require_login()
+    cfg = _config(db)
+    if not ((cfg.get("photo_file") or "").strip() or (cfg.get("catalog_file") or "").strip()):
+        raise HTTPException(400, "Choose the photo file (or the catalog file, if it holds the photo links) first.")
+    run_id = _begin_run(db, "sftp_photos", user.email or user.user_id)
+    threading.Thread(target=_photo_job, args=(run_id,), daemon=True, name=f"rmatv-photos-{run_id}").start()
+    return {"run_id": run_id}
+
+
+# ---- automatic sync (off until someone turns it on) --------------------------------------------------------------------
+class ScheduleIn(BaseModel):
+    enabled: Optional[bool] = None
+    interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
+
+
+def _schedule_row(db: Session) -> dict:
+    _ensure_settings(db)
+    row = db.execute(
+        text("select auto_enabled, interval_minutes, last_checked_at, last_changed_at, last_summary, last_error from supplier_sync_settings where supplier = :s"),
+        {"s": SUPPLIER},
+    ).first()
+    d = dict(row._mapping) if row else {"auto_enabled": False, "interval_minutes": 60}
+    d["running"] = bool(db.execute(
+        text("select 1 from supplier_import_runs where supplier = :s and status = 'running' and started_at > now() - interval '30 minutes' limit 1"), {"s": SUPPLIER}).scalar())
+    return d
+
+
+@router.get("/sftp/schedule")
+def sftp_schedule(db: Session = Depends(get_db)):
+    return _schedule_row(db)
+
+
+@router.put("/sftp/schedule")
+def sftp_schedule_set(body: ScheduleIn, db: Session = Depends(get_db)):
+    _schedule_row(db)
+    if body.enabled is not None:
+        if body.enabled:
+            _require_login()
+            if not (_config(db).get("catalog_file") or "").strip():
+                raise HTTPException(400, "Choose which file is the catalog first, then turn automatic sync on.")
+        db.execute(text("update supplier_sync_settings set auto_enabled = :e, last_checked_at = case when :e and not auto_enabled then null else last_checked_at end, "
+                        "updated_at = now() where supplier = :s"), {"e": body.enabled, "s": SUPPLIER})
+    if body.interval_minutes is not None:
+        db.execute(text("update supplier_sync_settings set interval_minutes = :m, updated_at = now() where supplier = :s"), {"m": body.interval_minutes, "s": SUPPLIER})
+    db.commit()
+    return _schedule_row(db)
+
+
+def _auto_tick() -> None:
+    """Every N minutes: ask the server for each chosen file's date and size (a few bytes); download and import only what changed."""
+    gen = get_db()
+    db = next(gen)
+    try:
+        _ensure_settings(db)
+        claimed = db.execute(
+            text("update supplier_sync_settings set last_checked_at = now() where supplier = :s and auto_enabled "
+                 "and (last_checked_at is null or last_checked_at <= now() - make_interval(mins => interval_minutes)) "
+                 "returning last_signature, last_price_signature"), {"s": SUPPLIER}).first()
+        db.commit()
+        if claimed is None:
+            return  # off, not due yet, or another copy of the server took this check
+        cfg = _config(db)
+        cat, price = (cfg.get("catalog_file") or "").strip(), (cfg.get("price_file") or "").strip()
+        if not cat:
+            return
+        try:
+            cli = _sftp_connect()
+            try:
+                sig = _signature(cli, cat)
+                price_sig = _signature(cli, price) if price else None
+            finally:
+                cli.close()
+        except HTTPException as e:
+            _sync_note(db, error=str(e.detail))
+            return
+        inv_changed = sig == "-|-" or sig != claimed[0]
+        price_changed = bool(price) and (price_sig == "-|-" or price_sig != claimed[1])
+        if not inv_changed and not price_changed:
+            _sync_note(db, summary="Checked: Rocky Mountain's files have not changed since the last import.")
+            return
+        if inv_changed:
+            try:
+                run_id = _begin_run(db, "sftp_auto", "automatic sync")
+            except HTTPException:
+                return  # an import is already running
+            if not _catalog_job(run_id):
+                return
+        if price_changed:
+            try:
+                price_run = _begin_run(db, "sftp_price", "automatic sync")
+            except HTTPException:
+                return
+            _price_job(price_run)
+    except Exception:
+        db.rollback()
+        log.exception("rmatv automatic sync check failed")
+    finally:
+        gen.close()
+
+
+def _scheduler_loop() -> None:
+    time.sleep(60)  # let the server finish starting
+    while True:
+        try:
+            _auto_tick()
+        except Exception:
+            log.exception("rmatv scheduler")
+        time.sleep(SCHEDULER_TICK_SECONDS)
+
+
+def _start_scheduler() -> None:
+    if os.environ.get("RMATV_SCHEDULER", "1").strip().lower() in ("0", "false", "no", "off"):
+        return
+    threading.Thread(target=_scheduler_loop, daemon=True, name="rmatv-auto-sync").start()
+
+
+_start_scheduler()
+
+
+# ---- the catalog at a glance, one part in full, our products vs the catalog -----------------------------------------------
+@router.get("/overview")
+def catalog_overview(db: Session = Depends(get_db)):
+    """Totals, data gaps, stock, price bands, units of measure and every brand."""
+    t = db.execute(
+        text(
+            f"""
+            select count(*) as total, count(*) filter (where s.active) as active, count(*) filter (where not s.active) as retired,
+                   count(*) filter (where s.active and s.qty_other > 0) as in_stock, count(*) filter (where s.active and s.qty_other = 0) as out_of_stock,
+                   coalesce(sum(s.qty_other) filter (where s.active), 0) as units,
+                   coalesce(sum({_COST} * s.qty_other) filter (where s.active), 0) as stock_value_at_cost,
+                   coalesce(sum(s.list_price * s.qty_other) filter (where s.active), 0) as stock_value_at_list,
+                   count(distinct s.manufacturer) filter (where s.active) as brands,
+                   count(*) filter (where s.active and s.upc_norm is null) as no_barcode,
+                   count(*) filter (where s.active and s.images is null) as no_photo,
+                   count(*) filter (where s.active and s.mfr_number is null) as no_mfr_number,
+                   count(*) filter (where s.active and s.name is null) as no_name,
+                   count(*) filter (where s.active and {_COST} is null) as no_cost,
+                   count(*) filter (where s.active and s.list_price is null) as no_list_price,
+                   count(*) filter (where s.active and s.list_price < {_COST}) as list_below_cost,
+                   count(*) filter (where s.active and s.updated_at >= now() - interval '7 days') as changed_7d,
+                   count(*) filter (where s.active and s.updated_at >= now() - interval '30 days') as changed_30d,
+                   avg((s.list_price - {_COST}) / nullif(s.list_price, 0) * 100) filter (where s.active and s.list_price > 0 and {_COST} is not null) as avg_margin_pct,
+                   max(s.last_seen_at) as last_seen
+            from supplier_items s where s.supplier = :s
+            """
+        ),
+        {"s": SUPPLIER},
+    ).first()
+    brands = db.execute(
+        text(
+            f"""
+            select coalesce(s.manufacturer, '(no brand)') as brand, s.manufacturer is null as unbranded, count(*) as parts,
+                   count(*) filter (where s.qty_other > 0) as in_stock, coalesce(sum(s.qty_other), 0) as units,
+                   coalesce(sum({_COST} * s.qty_other), 0) as stock_value_at_cost,
+                   min({_COST}) as min_cost, max({_COST}) as max_cost, avg({_COST}) as avg_cost
+            from supplier_items s where s.supplier = :s and s.active group by s.manufacturer order by count(*) desc, s.manufacturer limit 3000
+            """
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    bands = db.execute(
+        text(
+            f"""
+            select band, ord, count(*) as parts from (
+              select case when c is null then 'No cost' when c < 5 then 'Under $5' when c < 25 then '$5 – $25' when c < 100 then '$25 – $100'
+                          when c < 250 then '$100 – $250' when c < 500 then '$250 – $500' else '$500 and up' end as band,
+                     case when c is null then 99 when c < 5 then 1 when c < 25 then 2 when c < 100 then 3 when c < 250 then 4 when c < 500 then 5 else 6 end as ord
+              from (select {_COST} as c from supplier_items s where s.supplier = :s and s.active) x) y
+            group by band, ord order by ord
+            """
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    uoms = db.execute(
+        text("select coalesce(unit_of_measure, '(none)') as uom, unit_of_measure is null as unset, count(*) as parts from supplier_items "
+             "where supplier = :s and active group by unit_of_measure order by count(*) desc limit 50"), {"s": SUPPLIER}).all()
+    return {
+        "totals": {k: (float(v) if isinstance(v, Decimal) else v) for k, v in t._mapping.items()},
+        "brands": [{k: (float(v) if isinstance(v, Decimal) else v) for k, v in b._mapping.items()} for b in brands],
+        "price_bands": [{"band": b.band, "parts": b.parts} for b in bands],
+        "units_of_measure": [dict(u._mapping) for u in uoms],
+    }
+
+
+@router.get("/items/{item_id}")
+def item_detail(item_id: int, db: Session = Depends(get_db)):
+    """Everything stored about one part, what we sell that matches it, and other parts that share its barcode or manufacturer number."""
+    from app.autodist import _MPN as _P_MPN  # late import, like the other modules here
+
+    row = db.execute(text("select * from supplier_items where id = :id and supplier = :s"), {"id": item_id, "s": SUPPLIER}).first()
+    if not row:
+        raise HTTPException(404, "That part isn't stored (it may have been removed).")
+    item = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in row._mapping.items()}
+    item["standard_cost"] = item.get("dealer_cost")
+    if item.get("my_cost") is not None:
+        item["dealer_cost"] = item["my_cost"]
+    run = None
+    if item.get("last_run_id"):
+        r = db.execute(text("select id, source, status, started_at, finished_at, rows_seen from supplier_import_runs where id = :id"), {"id": item["last_run_id"]}).first()
+        run = dict(r._mapping) if r else None
+    upc_n = item.get("upc_norm") if item.get("upc_norm") and len(item["upc_norm"]) >= 8 else None
+    mpn_n = item.get("mfr_number_norm")
+    mine: list[dict] = []
+    if upc_n or mpn_n:
+        found = db.execute(
+            text(
+                f"""
+                select * from (
+                  select p.id, p.sku_display as sku, p.title, coalesce(p.quantity_on_hand, 0) as on_hand, p.list_price, p.cost, coalesce(p.is_active, true) as is_active,
+                         nullif(btrim({_P_MPN}), '') as mfr_no,
+                         nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') as upc_n,
+                         nullif(upper(regexp_replace(coalesce({_P_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n
+                  from products p) x
+                where (cast(:u as text) is not null and x.upc_n = :u) or (cast(:m as text) is not null and x.mpn_n = :m) order by x.id limit 25
+                """
+            ),
+            {"u": upc_n, "m": mpn_n},
+        ).all()
+        for f in found:
+            d = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in f._mapping.items()}
+            d["by"] = "barcode" if upc_n and d["upc_n"] == upc_n else "part number"
+            d.pop("upc_n", None)
+            d.pop("mpn_n", None)
+            mine.append(d)
+    cols = f"id, sku, mfr_number, manufacturer, name, list_price, {_COST.replace('s.', '')} as dealer_cost, qty_other, upc, active"
+
+    def similar(where: str, val: str) -> list[dict]:
+        rows = db.execute(text(f"select {cols} from supplier_items where supplier = :s and {where} and id <> :id order by manufacturer, sku limit 50"),
+                          {"s": SUPPLIER, "v": val, "id": item_id}).all()
+        return [{k: (float(v) if isinstance(v, Decimal) else v) for k, v in r._mapping.items()} for r in rows]
+
+    return {
+        "item": item, "last_run": run, "ours": mine,
+        "same_barcode": similar("upc_norm = :v", upc_n) if upc_n else [],
+        "same_part_number": similar("mfr_number_norm = :v", mpn_n) if mpn_n else [],
+        "brand_part_count": db.execute(text("select count(*) from supplier_items where supplier = :s and manufacturer = :b and active"),
+                                       {"s": SUPPLIER, "b": item["manufacturer"]}).scalar() if item.get("manufacturer") else 0,
+    }
+
+
+@router.get("/match-report")
+def match_report(db: Session = Depends(get_db)):
+    """How many of OUR products match a Rocky Mountain part (barcode, then part number, then custom label). Changes nothing."""
+    rows = db.execute(text(_MATCH), {"s": SUPPLIER}).all()
+    counts = {"upc": 0, "upc_many": 0, "mpn": 0, "mpn_many": 0, "none": 0}
+    for r in rows:
+        counts[r.kind] += 1
+    from app.autodist import _MPN as _P_MPN
+
+    review_ids = [r.id for r in rows if r.kind in ("mpn", "mpn_many")][:300]
+    review: list[dict] = []
+    if review_ids:
+        found = db.execute(
+            text(
+                f"""
+                select p.id, p.sku_display as sku, p.title, s.sku as supplier_sku, s.manufacturer, s.name as supplier_name, {_COST} as effective_cost
+                from products p join supplier_items s on s.supplier = :s and s.active
+                 and s.mfr_number_norm = nullif(upper(regexp_replace(coalesce({_P_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '')
+                where p.id = any(cast(:ids as bigint[])) order by p.id, s.manufacturer
+                """
+            ),
+            {"s": SUPPLIER, "ids": review_ids},
+        ).all()
+        review = [{k: (float(v) if isinstance(v, Decimal) else v) for k, v in f._mapping.items()} for f in found]
+    none_ids = [r.id for r in rows if r.kind == "none"]
+    label_rows: list[dict] = []
+    if none_ids:
+        found = db.execute(text(_LABEL_MATCH_SQL), {"s": SUPPLIER, "ids": none_ids}).all()
+        label_rows = [{k: (float(v) if isinstance(v, Decimal) else v) for k, v in f._mapping.items()} for f in found]
+    counts["label"] = len({f["id"] for f in label_rows})
+    return {"total_products": len(rows), "counts": counts, "review": review, "review_limited": len(review_ids) == 300,
+            "label_review": label_rows[:400], "label_limited": len(label_rows) > 400}

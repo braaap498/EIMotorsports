@@ -6,6 +6,8 @@ import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "./ui";
 import { parseDelimited } from "./rmatvCsv";
 import CatalogTh from "./CatalogTh";
+import RmatvSftp, { SFTP_SOURCE_LABELS } from "./RmatvSftp";
+import RmatvOverview from "./RmatvOverview";
 
 // Rocky Mountain ATV/MC: its catalog (read from a file you upload) and the tools around it. Owners and admins only.
 // This is the distributor's licensed data: dealer cost and stock stay on this screen and are never shown on the public store.
@@ -33,6 +35,9 @@ type Item = {
   name: string | null;
   list_price: number | null;
   dealer_cost: number | null;
+  my_cost?: number | null; // your own price from the price file, when there is one (it replaces the dealer cost)
+  map_price?: number | null;
+  image?: string | null; // first photo link from the feed
   qty_other: number;
   upc: string | null;
   unit_of_measure: string | null;
@@ -57,6 +62,8 @@ const pct = (v: number | null) => (v == null ? "—" : `${v.toFixed(0)}%`);
 const tone = (s: string) => (s === "done" ? "green" : s === "running" ? "blue" : "amber");
 
 function runLabel(r: Run) {
+  if (r.source === "sftp_price") return `prices: ${n(r.rows_new)} of ${n(r.rows_seen)} lines matched a stored part`;
+  if (r.source === "sftp_photos") return `photo links: ${n(r.rows_new)} parts updated (${n(r.rows_seen)} lines read)`;
   return (
     `${n(r.rows_seen)} parts, ${n(r.rows_new)} new` +
     (r.rows_skipped ? `, ${n(r.rows_skipped)} duplicate or unreadable lines skipped` : "") +
@@ -145,7 +152,7 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
   if (!hasData) {
     return (
       <div className="rounded border border-gray-200 bg-white p-6 text-sm text-gray-600">
-        No Rocky Mountain parts are stored yet. Open the <b>Import</b> tab and upload the catalog or price list file from the Rocky Mountain dealer site.
+        No Rocky Mountain parts are stored yet. Open the <b>Import</b> tab: connect to the SFTP feed, or upload the catalog or price list file from the Rocky Mountain dealer site.
       </div>
     );
   }
@@ -237,10 +244,10 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
               <tr key={it.id} className={`align-middle ${it.active ? "" : "text-gray-400"}`}>
                 <td className="py-0.5 pr-2">
                   {/* the main photo of the product linked to this part */}
-                  {it.product_image ? (
-                    <a href={it.product_image_full ?? it.product_image} target="_blank" rel="noreferrer" title="The linked product's main photo. Click for full size">
+                  {it.product_image || it.image ? (
+                    <a href={it.product_image_full ?? it.product_image ?? it.image ?? "#"} target="_blank" rel="noreferrer" title={it.product_image ? "The linked product's main photo. Click for full size" : "Rocky Mountain's photo. Click for full size"}>
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={it.product_image} alt="" loading="lazy" className="h-9 w-9 rounded border border-gray-100 bg-white object-contain" />
+                      <img src={(it.product_image ?? it.image) as string} alt="" loading="lazy" className="h-9 w-9 rounded border border-gray-100 bg-white object-contain" />
                     </a>
                   ) : (
                     <div className="h-9 w-9" />
@@ -254,13 +261,13 @@ function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number 
                 <td className="truncate py-0.5 pr-2" title={it.mfr_number ?? ""}>{it.mfr_number ?? "—"}</td>
                 <td className="truncate py-0.5 pr-2" title={it.name ?? ""}>{it.name ?? "—"}</td>
                 <td className="whitespace-nowrap py-0.5 pr-2">{it.unit_of_measure ?? ""}</td>
-                <td className="whitespace-nowrap py-0.5 pr-2 text-right">{money(it.list_price)}</td>
-                <td className="whitespace-nowrap py-0.5 pr-2 text-right">{money(it.dealer_cost)}</td>
+                <td className="whitespace-nowrap py-0.5 pr-2 text-right" title={it.map_price != null ? `MAP ${money(it.map_price)}` : ""}>{money(it.list_price)}{it.map_price != null && <span className="text-gray-400">*</span>}</td>
+                <td className="whitespace-nowrap py-0.5 pr-2 text-right" title={it.my_cost != null && it.dealer_cost != null ? `Catalog price ${money(it.dealer_cost)}` : ""}>{money(it.my_cost ?? it.dealer_cost)}</td>
                 <td className="whitespace-nowrap py-0.5 pr-2 text-right">
-                  {it.list_price == null || it.dealer_cost == null || !it.list_price ? (
+                  {it.list_price == null || (it.my_cost ?? it.dealer_cost) == null || !it.list_price ? (
                     "—"
                   ) : (
-                    <span className={it.list_price - it.dealer_cost < 0 ? "text-red-700" : ""}>{pct(((it.list_price - it.dealer_cost) / it.list_price) * 100)}</span>
+                    <span className={it.list_price - (it.my_cost ?? it.dealer_cost ?? 0) < 0 ? "text-red-700" : ""}>{pct(((it.list_price - (it.my_cost ?? it.dealer_cost ?? 0)) / it.list_price) * 100)}</span>
                   )}
                 </td>
                 <td className="whitespace-nowrap py-0.5 pr-2 text-right font-medium">{n(it.qty_other)}</td>
@@ -387,6 +394,7 @@ function RmatvImport({ runs, onChanged }: { runs: Run[]; onChanged: () => void }
 
   return (
     <div className="space-y-4">
+      <RmatvSftp runs={runs} onChanged={onChanged} />
       <div className="space-y-2 rounded border border-gray-200 bg-white p-4 text-sm">
         <div className="flex flex-wrap items-center gap-3">
           <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" className="hidden" onChange={(e) => void chooseFile(e.target.files?.[0] ?? null)} />
@@ -396,7 +404,7 @@ function RmatvImport({ runs, onChanged }: { runs: Run[]; onChanged: () => void }
           <span className="text-xs text-gray-500">{progress || "A part list or price list from the Rocky Mountain dealer site, saved as CSV with a header row. Run it again any time to refresh prices and stock."}</span>
         </div>
         <p className="text-xs text-gray-500">
-          There is no automatic feed from Rocky Mountain yet. If they give you API access, it will fill this same catalog and nothing else here changes.
+          Uploading a file by hand still works and fills the same catalog as the SFTP feed. If Rocky Mountain later gives you API access, it will fill this same catalog too and nothing else here changes.
         </p>
       </div>
 
@@ -485,7 +493,7 @@ function RmatvImport({ runs, onChanged }: { runs: Run[]; onChanged: () => void }
             <li key={r.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1.5">
               <span className="text-gray-500">{new Date(r.started_at).toLocaleString()}</span>
               <Badge tone={tone(r.status)}>{r.status === "needs_review" ? "needs review" : r.status}</Badge>
-              <span>{runLabel(r)}</span>
+              <span>{SFTP_SOURCE_LABELS[r.source] ? <span className="mr-1 text-gray-500">[{SFTP_SOURCE_LABELS[r.source]}]</span> : null}{runLabel(r)}</span>
               {r.created_by && <span className="text-gray-400">{r.created_by}</span>}
               {r.note && <span className="text-red-700">{r.note}</span>}
             </li>
@@ -499,7 +507,7 @@ function RmatvImport({ runs, onChanged }: { runs: Run[]; onChanged: () => void }
 
 /* --------------------------------------------------------------------- page */
 
-type Tab = "catalog" | "import";
+type Tab = "catalog" | "overview" | "import";
 
 export default function RmatvInner() {
   const [counts, setCounts] = useState<Counts | null>(null);
@@ -538,14 +546,14 @@ export default function RmatvInner() {
       )}
 
       <div className="flex flex-wrap gap-1 border-b border-gray-200">
-        {(["catalog", "import"] as const).map((k) => (
+        {(["catalog", "overview", "import"] as const).map((k) => (
           <button
             key={k}
             type="button"
             onClick={() => setTab(k)}
             className={`-mb-px rounded-t px-4 py-2 text-sm ${tab === k ? "border border-gray-200 border-b-white bg-white font-medium" : "text-gray-600 hover:text-gray-900"}`}
           >
-            {k === "catalog" ? "Catalog" : "Import"}
+            {k === "catalog" ? "Catalog" : k === "overview" ? "Overview" : "Import"}
           </button>
         ))}
       </div>
@@ -553,6 +561,7 @@ export default function RmatvInner() {
       <div className={tab === "catalog" ? "" : "hidden"}>
         <RmatvCatalog hasData={!!counts?.active} version={version} />
       </div>
+      {tab === "overview" && <RmatvOverview version={version} />}
       <div className={tab === "import" ? "" : "hidden"}>
         <RmatvImport runs={runs} onChanged={() => void refresh()} />
       </div>
