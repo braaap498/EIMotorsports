@@ -1001,10 +1001,77 @@ def _title_without_part_number(brand, name, mfr, sku) -> str:
     return " ".join(parts)[:200].strip() or (sku or "")
 
 
+# Keyword rules for the part type guess: (regex on the catalog Name, candidate part type names in order of preference). The first
+# candidate that really exists on the store's part type list (and fits the guessed category) is used, so a rule whose names are not
+# on your list does nothing. Add or edit lines here; more specific phrases go BEFORE general ones (the first rule that gives a type wins).
+_TYPE_RULES: list[tuple[str, list[str]]] = [
+    (r"\b(gas|fuel)\s+(tank\s+)?cap\b|\btank\s+cap\b", ["Fuel Tank Cap", "Gas Cap", "Fuel Cap"]),
+    (r"\bfuel\s+(pump|module)\b", ["Fuel Pump"]),
+    (r"\bfuel\s+(line|hose)\b", ["Fuel Line", "Fuel Hose"]),
+    (r"\bfuel\s+filter\b", ["Fuel Filter"]),
+    (r"\bfuel\s+(valve|petcock)\b|\bpetcock\b", ["Fuel Valve", "Petcock"]),
+    (r"\bfuel\s+injector\b", ["Fuel Injector"]),
+    (r"\bcarb(uretor)?\s+(rebuild\s+)?kit\b|\bcarb(uretor)?\b", ["Carburetor", "Carburetor Kit"]),
+    (r"\bair\s+filter\b|\bair\s+cleaner\b", ["Air Filter"]),
+    (r"\boil\s+filter\b", ["Oil Filter"]),
+    (r"\bspark\s+plug\b", ["Spark Plug"]),
+    (r"\bbrake\s+pads?\b", ["Brake Pads", "Brake Pad"]),
+    (r"\bbrake\s+(shoes?)\b", ["Brake Shoes", "Brake Shoe"]),
+    (r"\bbrake\s+(rotor|disc)\b", ["Brake Rotor", "Brake Disc"]),
+    (r"\bbrake\s+(line|hose)\b", ["Brake Line", "Brake Hose"]),
+    (r"\bbrake\s+(caliper)\b|\bcaliper\b", ["Brake Caliper", "Caliper"]),
+    (r"\bmaster\s+cylinder\b", ["Master Cylinder", "Brake Master Cylinder"]),
+    (r"\bwheel\s+bearing\b", ["Wheel Bearing"]),
+    (r"\bbearing\s+(and|&)\s+seal\b|\bbearing\s+kit\b", ["Bearing Kit", "Wheel Bearing"]),
+    (r"\bball\s+joint\b", ["Ball Joint"]),
+    (r"\btie\s+rod\b", ["Tie Rod", "Tie Rod End"]),
+    (r"\bcv\s+(axle|joint|boot)\b|\baxle\b", ["CV Axle", "Axle"]),
+    (r"\ba[- ]?arm\b|\bcontrol\s+arm\b", ["A-Arm", "Control Arm"]),
+    (r"\bshock\s+absorber\b|\bshocks?\b", ["Shock Absorber", "Shock"]),
+    (r"\bdrive\s+belt\b|\bcvt\s+belt\b|\bclutch\s+belt\b", ["Drive Belt", "CVT Belt"]),
+    (r"\bdrive\s+chain\b|\broller\s+chain\b", ["Drive Chain", "Chain"]),
+    (r"\bsprocket\b", ["Sprocket"]),
+    (r"\bwater\s+pump\b", ["Water Pump"]),
+    (r"\bthermostat\b", ["Thermostat"]),
+    (r"\bradiator\s+(hose)\b", ["Radiator Hose"]),
+    (r"\bradiator\s+cap\b", ["Radiator Cap"]),
+    (r"\bradiator\b", ["Radiator"]),
+    (r"\bgasket\s+(kit|set)\b|\bgasket\b", ["Gasket Kit", "Gasket"]),
+    (r"\bpiston\s+kit\b|\bpiston\b", ["Piston Kit", "Piston"]),
+    (r"\bstator\b", ["Stator"]),
+    (r"\bregulator\b|\brectifier\b", ["Regulator/Rectifier", "Voltage Regulator", "Regulator"]),
+    (r"\bignition\s+coil\b", ["Ignition Coil"]),
+    (r"\bstarter\s+(motor)\b|\bstarter\b", ["Starter", "Starter Motor"]),
+    (r"\bbattery\b", ["Battery"]),
+    (r"\bheadlight\b|\bhead\s+light\b", ["Headlight"]),
+    (r"\btail\s*light\b", ["Taillight", "Tail Light"]),
+    (r"\bwinch\b", ["Winch"]),
+    (r"\bsnorkel\b", ["Snorkel Kit", "Snorkel"]),
+    (r"\bhandlebar\s+grips?\b|\bgrips?\b", ["Grips", "Handlebar Grips"]),
+    (r"\bhandlebars?\b", ["Handlebar", "Handlebars"]),
+    (r"\bthrottle\s+cable\b", ["Throttle Cable"]),
+    (r"\bclutch\s+cable\b", ["Clutch Cable"]),
+    (r"\bcable\b", ["Cable"]),
+    (r"\bskid\s+plate\b", ["Skid Plate"]),
+    (r"\bfender\b", ["Fender"]),
+    (r"\bseat\s+cover\b", ["Seat Cover"]),
+    (r"\bmirror\b", ["Mirror"]),
+    (r"\bwindshield\b", ["Windshield"]),
+    (r"\bexhaust\b|\bmuffler\b|\bsilencer\b", ["Exhaust", "Muffler"]),
+    (r"\btires?\b", ["Tire", "Tires"]),
+    (r"\bwheel\b|\brim\b", ["Wheel"]),
+    (r"\bo[- ]?ring\b", ["O-Ring"]),
+    (r"\boil\s+seal\b|\bseal\s+kit\b", ["Seal Kit", "Oil Seal"]),
+    (r"\bbolt\s+kit\b|\bhardware\s+kit\b", ["Hardware Kit", "Bolt Kit"]),
+]
+_TYPE_RULES_RE = [(re.compile(rx, re.I), cands) for rx, cands in _TYPE_RULES]
+
+
 def _guess_category_and_type(db: Session, name: str):
     """Best educated guess at (category_id, part_type name) from the part's name, using the store's own category tree and part
     type list (read at run time). Category: the category whose name has the most words in common with the name (a whole-name
-    match wins). Part type: the longest type name found in the name among types that fit the category. Either may be None;
+    match wins). Part type: the longest type name found in the name among types that fit the category, then a type whose every
+    word is in the name, then the keyword rules in _TYPE_RULES. Either may be None;
     never raises, so a failed guess cannot block making the product."""
     try:
         words = lambda t: {w[:-1] if len(w) > 3 and w.endswith("s") else w for w in re.findall(r"[a-z0-9]+", (t or "").lower())} - {"and", "the", "for", "with", "kit", "set", "parts", "part", "other"}
@@ -1044,6 +1111,18 @@ def _guess_category_and_type(db: Session, name: str):
                 tw = words(r.name)
                 if tw and tw <= nw and ok(r):
                     ptype = r.name
+                    break
+        if ptype is None:  # 3. keyword rules (_TYPE_RULES): the first rule whose candidate really is on the store's list and fits
+            by_lower = {r.name.lower(): r for r in rows}
+            for rx, cands in _TYPE_RULES_RE:
+                if not rx.search(name or ""):
+                    continue
+                for c in cands:
+                    r = by_lower.get(c.lower())
+                    if r is not None and ok(r):
+                        ptype = r.name
+                        break
+                if ptype is not None:
                     break
         return best, ptype
     except Exception:
