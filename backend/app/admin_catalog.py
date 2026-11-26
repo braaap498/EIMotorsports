@@ -1361,7 +1361,60 @@ def product_fitment(product_id: int, db: Session = Depends(get_db)):
             },
         )
         m["years"].append({"vehicle_id": r.vehicle_id, "year": r.year, "submodel": r.submodel})
-    return {"is_universal": prod.is_universal, "models": list(models.values())}
+    return {"is_universal": prod.is_universal, "models": list(models.values()), "catalog_fitment": _catalog_fitment_info(db, product_id)}
+
+
+def _catalog_fitment_part(db: Session, product_id: int):
+    """The Rocky Mountain catalog part whose fitment cell can be copied onto this product, or None.
+    Only for a product with exactly ONE distributor part, and that part is a Rocky Mountain catalog part with a fitment cell
+    (a kit's parts each fit different machines; the "Compare kit parts' fitment" button handles those)."""
+    try:
+        with db.begin_nested():
+            return db.execute(
+                text(
+                    "select s.id, s.sku, s.fitment from product_kit_parts k join supplier_items s on s.id = k.supplier_item_id "
+                    "where k.product_id = :p and s.supplier = 'rmatv' and nullif(btrim(coalesce(s.fitment, '')), '') is not null "
+                    "and (select count(*) from product_kit_parts z where z.product_id = :p) = 1 limit 1"
+                ),
+                {"p": product_id},
+            ).first()
+    except Exception:
+        return None  # the fitment column is not there yet (Rocky Mountain never set up)
+
+
+def _catalog_fitment_info(db: Session, product_id: int) -> Optional[dict]:
+    """What the fitment panel needs to offer "Get fitment from Rocky Mountain": the part's SKU and how many machines its cell names."""
+    part = _catalog_fitment_part(db, product_id)
+    if not part:
+        return None
+    from app.rmatv import _parse_fitment_cell  # late import: rmatv imports this module
+
+    parsed, _bad = _parse_fitment_cell(part.fitment)
+    return {"sku": part.sku, "machines": len(parsed)} if parsed else None
+
+
+@router.post("/products/{product_id}/fitment/from-catalog")
+@needs("fitment.add")
+def fitment_from_catalog(product_id: int, db: Session = Depends(get_db)):
+    """The "Get fitment" button on the Fitment bar, for products made from a Rocky Mountain part before making a product copied the
+    part's fitment. Does exactly what making the product does now (rmatv._apply_fitment): one product_fitment row per machine and
+    year in the part's fitment cell, adding a make, model or year to the fitment tool only when it is new. Rows already there are kept."""
+    _product_or_404(db, product_id)
+    part = _catalog_fitment_part(db, product_id)
+    if not part:
+        raise HTTPException(404, "This product's distributor part is not a Rocky Mountain catalog part with fitment.")
+    from app.rmatv import _apply_fitment
+
+    try:
+        c = _apply_fitment(db, product_id, part.fitment)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not add the fitment: {str(e)[:300]}")
+    if not c["entries"]:
+        db.rollback()
+        raise HTTPException(422, f"The fitment of {part.sku} in the Rocky Mountain catalog could not be read.")
+    db.commit()
+    return {"sku": part.sku, **c}
 
 
 @router.post("/products/{product_id}/label-from-ebay")

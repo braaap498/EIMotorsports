@@ -18,6 +18,7 @@ type FitModel = {
 type Opt = { id: number; name: string };
 type ModelOpt = { id: number; name: string; make: string; year_min: number | null; year_max: number | null };
 type YearRow = { vehicle_id: number; year: number };
+type CatalogFit = { sku: string; machines: number } | null; // a Rocky Mountain part whose fitment can be copied on
 
 export default function FitmentPanel({
   productId,
@@ -41,6 +42,7 @@ export default function FitmentPanel({
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [kitOpen, setKitOpen] = useState(false);
+  const [catalogFit, setCatalogFit] = useState<CatalogFit>(null);
 
   // pickers
   const [types, setTypes] = useState<Opt[]>([]);
@@ -56,9 +58,10 @@ export default function FitmentPanel({
   const [rangeTo, setRangeTo] = useState("");
 
   const loadFits = useCallback(() => {
-    api<{ models: FitModel[] }>(`/products/${productId}/fitment`)
+    api<{ models: FitModel[]; catalog_fitment?: CatalogFit }>(`/products/${productId}/fitment`)
       .then((r) => {
         setFits(r.models);
+        setCatalogFit(r.catalog_fitment ?? null);
         setSel((prev) => new Set([...prev].filter((id) => r.models.some((m) => m.model_id === id))));
       })
       .catch((e) => setMsg({ kind: "error", text: errMsg(e) }));
@@ -161,6 +164,34 @@ export default function FitmentPanel({
     }
   }
 
+  // products made from a Rocky Mountain part before making a product copied its fitment: copy it on now
+  async function fromCatalog() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await api<{ sku: string; fitment_added: number; already_had: number; unreadable: number; makes_created: number; models_created: number; years_created: number }>(
+        `/products/${productId}/fitment/from-catalog`,
+        { method: "POST" }
+      );
+      const parts = [`${r.fitment_added} model year${r.fitment_added === 1 ? "" : "s"} added from Rocky Mountain part ${r.sku}`];
+      if (r.already_had) parts.push(`${r.already_had} already present`);
+      const created = [
+        r.makes_created && `${r.makes_created} make${r.makes_created === 1 ? "" : "s"}`,
+        r.models_created && `${r.models_created} model${r.models_created === 1 ? "" : "s"}`,
+        r.years_created && `${r.years_created} year${r.years_created === 1 ? "" : "s"}`,
+      ].filter(Boolean);
+      if (created.length) parts.push(`new to the fitment tool: ${created.join(", ")}`);
+      if (r.unreadable) parts.push(`${r.unreadable} entr${r.unreadable === 1 ? "y" : "ies"} could not be read`);
+      setMsg({ kind: "success", text: parts.join("; ") });
+      loadFits();
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+  const showCatalogBtn = mayAdd && mode === "vehicle" && fits.length === 0 && !!catalogFit;
+
   const canAdd = !!modelId && (allYears || picked.size > 0);
 
   const toggleSel = (id: number) =>
@@ -261,6 +292,21 @@ export default function FitmentPanel({
     <details className="rounded-lg border border-gray-200 bg-white p-4">
       <summary className="cursor-pointer text-lg font-semibold">
         Fitment <span className="text-sm font-normal text-gray-500">({fits.length} machine{fits.length === 1 ? "" : "s"}{mode === "vehicle" ? "" : `, ${MODE_OPTIONS.find((o) => o.value === mode)?.short.toLowerCase()}`})</span>
+        {showCatalogBtn && catalogFit && (
+          <button
+            type="button"
+            className={`${btn2Cls} float-right text-sm font-normal`}
+            disabled={busy || kitPartsDirty}
+            title={kitPartsDirty ? "Save the distributor parts first." : `Copy the ${catalogFit.machines} machine${catalogFit.machines === 1 ? "" : "s"} listed for Rocky Mountain part ${catalogFit.sku}`}
+            onClick={(e) => {
+              e.preventDefault(); // a click inside <summary> would otherwise open/close the panel
+              e.stopPropagation();
+              void fromCatalog();
+            }}
+          >
+            {busy ? "Getting fitment…" : "Get fitment"}
+          </button>
+        )}
       </summary>
 
       <div className="mt-3 space-y-5">
