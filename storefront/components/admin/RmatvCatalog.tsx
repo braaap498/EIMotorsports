@@ -16,7 +16,7 @@ import { Badge, Modal, Notice, Pager, btn2Cls, inputCls } from "./ui";
 
 type Totals = {
   total: number; active: number; retired: number; in_stock: number; out_of_stock: number;
-  units: number;
+  units: number; in_utah?: number; in_kentucky?: number; units_utah?: number; units_kentucky?: number;
   stock_value_at_cost: string | number; stock_value_at_list: string | number; brands: number;
   no_barcode: number; no_fitment: number; no_mfr_number: number; no_name: number; no_cost: number; no_list_price: number; list_below_cost: number; no_photo: number;
   changed_7d: number; changed_30d: number; avg_margin_pct: string | number | null; last_seen: string | null;
@@ -34,7 +34,7 @@ type Overview = {
 type Row = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
   unit_of_measure: string | null; list_price: number | null; dealer_cost: number | null; standard_cost: number | null; my_cost: number | null; map_price: number | null;
-  qty_other: number; qty_total: number;
+  qty_other: number; qty_utah: number | null; qty_kentucky: number | null; msrp: number | null; qty_total: number;
   upc: string | null; images: string[] | null; active: boolean; updated_at: string | null; last_seen_at: string | null;
   margin: number | null; margin_pct: number | null;
   product_id: number | null; // the SINGLE product of this part (never a kit that contains it)
@@ -61,12 +61,12 @@ type Detail = {
 };
 
 type Filters = {
-  q: string; field: string; brand: string; status: string; stock: string; uom: string;
+  q: string; field: string; brand: string; status: string; stock: string; warehouse: string; uom: string;
   min_qty: string; max_qty: string; min_cost: string; max_cost: string; min_list: string; max_list: string;
   min_margin_pct: string; max_margin_pct: string; missing: string; ours: string; changed_days: string; seen_days: string;
 };
 const EMPTY: Filters = {
-  q: "", field: "all", brand: "", status: "active", stock: "", uom: "",
+  q: "", field: "all", brand: "", status: "active", stock: "", warehouse: "", uom: "",
   min_qty: "", max_qty: "", min_cost: "", max_cost: "", min_list: "", max_list: "",
   min_margin_pct: "", max_margin_pct: "", missing: "", ours: "", changed_days: "", seen_days: "",
 };
@@ -275,6 +275,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
   const activeChips: { label: string; clear: () => void }[] = [];
   if (f.brand) activeChips.push({ label: `Brand: ${f.brand}`, clear: () => set({ brand: "" }) });
   if (f.status !== "active") activeChips.push({ label: f.status === "all" ? "Including retired" : "Retired only", clear: () => set({ status: "active" }) });
+  if (f.warehouse) activeChips.push({ label: `Stock in ${f.warehouse === "utah" ? "Utah" : "Kentucky"}`, clear: () => set({ warehouse: "" }) });
   if (f.stock) activeChips.push({ label: f.stock === "in" ? "In stock" : "Out of stock", clear: () => set({ stock: "" }) });
   if (f.uom) activeChips.push({ label: `Unit: ${f.uom}`, clear: () => set({ uom: "" }) });
   if (f.missing) activeChips.push({ label: `Data gap: ${MISSING_LABEL[f.missing]}`, clear: () => set({ missing: "" }) });
@@ -360,6 +361,20 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                       <td className="py-1 pr-3 text-right">{n(t.in_stock)}</td>
                       <td className="py-1 text-right">{n(t.units)}</td>
                     </tr>
+                    {t.units_utah != null && (
+                      <>
+                        <tr>
+                          <td className="py-1 pr-3"><button type="button" className="underline" onClick={() => set({ warehouse: "utah", status: "active" })}>Utah</button></td>
+                          <td className="py-1 pr-3 text-right">{n(t.in_utah)}</td>
+                          <td className="py-1 text-right">{n(t.units_utah)}</td>
+                        </tr>
+                        <tr>
+                          <td className="py-1 pr-3"><button type="button" className="underline" onClick={() => set({ warehouse: "kentucky", status: "active" })}>Kentucky</button></td>
+                          <td className="py-1 pr-3 text-right">{n(t.in_kentucky)}</td>
+                          <td className="py-1 text-right">{n(t.units_kentucky)}</td>
+                        </tr>
+                      </>
+                    )}
                   </tbody>
                 </table>
                 <p className="mt-1 text-xs text-gray-500">
@@ -523,6 +538,13 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
               <option value="out">Out of stock</option>
             </select>
           </Lbl>
+          <Lbl text="Warehouse">
+            <select className={inputCls} value={f.warehouse} onChange={(e) => set({ warehouse: e.target.value })}>
+              <option value="">Either</option>
+              <option value="utah">Has stock in Utah</option>
+              <option value="kentucky">Has stock in Kentucky</option>
+            </select>
+          </Lbl>
           <Lbl text="Part status">
             <select className={inputCls} value={f.status} onChange={(e) => set({ status: e.target.value })}>
               <option value="active">Active (in the files)</option>
@@ -646,7 +668,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                     <Th k="list" right>List</Th>
                     <Th k="cost" right>Cost</Th>
                     <Th k="margin_pct" right title="(list − cost) / list">Margin</Th>
-                    <Th k="stock" right title="At Rocky Mountain (Utah and Kentucky added; 10+ counts as 10)">Stock</Th>
+                    <Th k="stock" right title="At Rocky Mountain: Utah + Kentucky total (UT / KY shown under it); 10+ counts as 10">Stock</Th>
                     <th className="whitespace-nowrap py-1 pr-3">Barcode</th>
                     <th className="whitespace-nowrap py-1 pr-3">Ours</th>
                     <Th k="updated">Changed</Th>
@@ -684,12 +706,15 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                       <td className="truncate py-1 pr-3" title={r.mfr_number ?? ""}>{r.mfr_number ?? "—"}</td>
                       <td className="break-words py-1 pr-3">{r.name ?? "—"}</td>
                       <td className="whitespace-nowrap py-1 pr-3" title={uomName(r.unit_of_measure) ?? ""}>{r.unit_of_measure ?? ""}</td>
-                      <td className="whitespace-nowrap py-1 pr-3 text-right" title={r.map_price != null ? `MAP ${money(r.map_price)}` : ""}>{money(r.list_price)}{r.map_price != null && <span className="text-gray-400">*</span>}</td>
+                      <td className="whitespace-nowrap py-1 pr-3 text-right" title={r.map_price != null ? `MAP price (MSRP ${r.msrp != null ? money(r.msrp) : "none"})` : ""}>{money(r.list_price)}{r.map_price != null && <span className="text-gray-400">*</span>}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right" title={r.my_cost != null && r.standard_cost != null ? `Catalog price ${money(r.standard_cost)}` : ""}>{money(r.dealer_cost)}</td>
                       <td className="py-1 pr-3 text-right whitespace-nowrap" title={r.margin == null ? "" : `${money(r.margin)} per unit`}>
                         {r.margin == null ? "—" : <span className={Number(r.margin) < 0 ? "text-red-700" : ""}>{pct(r.margin_pct)}</span>}
                       </td>
-                      <td className="whitespace-nowrap py-1 pr-3 text-right font-medium">{n(r.qty_other)}</td>
+                      <td className="whitespace-nowrap py-1 pr-3 text-right font-medium" title={r.qty_utah != null || r.qty_kentucky != null ? `Utah ${n(r.qty_utah ?? 0)} · Kentucky ${n(r.qty_kentucky ?? 0)}` : ""}>
+                        {n(r.qty_other)}
+                        {(r.qty_utah != null || r.qty_kentucky != null) && <div className="text-[10px] font-normal text-gray-500">UT {n(r.qty_utah ?? 0)} · KY {n(r.qty_kentucky ?? 0)}</div>}
+                      </td>
                       <td className="truncate py-1 pr-3" title={r.upc ?? ""}>{r.upc ?? "—"}</td>
                       <td className="truncate py-1 pr-3" onClick={(e) => e.stopPropagation()}>
                         {r.product_id ? (
@@ -742,21 +767,22 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
     ["Brand", it.manufacturer ? <button type="button" className="underline" onClick={() => onBrand(String(it.manufacturer))}>{String(it.manufacturer)} ({n(d.brand_part_count)} parts)</button> : "—"],
     ["Unit of measure", (it.unit_of_measure as string) ?? "—"],
     ["Barcode (UPC)", (it.upc as string) ?? "—"],
-    ["List price", money(it.list_price as string | null)],
+    ["List price", it.map_price != null ? `${money(it.list_price as string | null)} (MAP price)` : money(it.list_price as string | null)],
     ["Your cost", money(it.dealer_cost as string | null)],
     ...(it.my_cost != null && it.standard_cost != null ? ([["Catalog (dealer) price", money(it.standard_cost as number)]] as [string, ReactNode][]) : []),
-    ...(it.map_price != null ? ([["MAP price", money(it.map_price as number)]] as [string, ReactNode][]) : []),
+    ...(it.map_price != null && it.msrp != null ? ([["MSRP (not used: MAP is the list price)", money(it.msrp as number)]] as [string, ReactNode][]) : []),
     [
       "Margin",
       cost != null && list != null && list > 0 ? `${money(list - cost)} per unit (${(((list - cost) / list) * 100).toFixed(1)}% of list)` : "—",
     ],
+    ...(it.qty_utah != null || it.qty_kentucky != null ? ([["Stock in Utah", n(it.qty_utah ?? 0)], ["Stock in Kentucky", n(it.qty_kentucky ?? 0)]] as [string, ReactNode][]) : []),
     ["Stock at Rocky Mountain", `${n(total)}${cost != null ? ` (${money0(cost * total)} at cost)` : ""} — a part shown as 10+ counts as 10`],
     ["Status", it.active ? <Badge tone="green">active, in the files</Badge> : <Badge tone="gray">retired, left the files</Badge>],
     ["Last changed", when(it.updated_at)],
     ["Last seen in the files", when(it.last_seen_at)],
     ["First stored", when(it.created_at)],
   ];
-  const known = new Set(["id", "supplier", "sku", "mfr_number", "mfr_number_norm", "manufacturer", "name", "unit_of_measure", "list_price", "dealer_cost", "qty_maine", "qty_indiana", "qty_nevada", "qty_other", "my_cost", "map_price", "standard_cost", "upc", "upc_norm", "images", "images_synced_at", "active", "updated_at", "last_seen_at", "created_at", "last_run_id"]);
+  const known = new Set(["id", "supplier", "sku", "mfr_number", "mfr_number_norm", "manufacturer", "name", "unit_of_measure", "list_price", "dealer_cost", "qty_maine", "qty_indiana", "qty_nevada", "qty_other", "qty_utah", "qty_kentucky", "msrp", "my_cost", "map_price", "standard_cost", "upc", "upc_norm", "images", "images_synced_at", "active", "updated_at", "last_seen_at", "created_at", "last_run_id"]);
   const extra = Object.entries(it).filter(([k, v]) => !known.has(k) && v != null && v !== "");
 
   const mini = (title: string, list: Mini[]) =>

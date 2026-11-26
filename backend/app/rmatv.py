@@ -30,9 +30,11 @@ HOW IT FITS
     Purchase orders, Distributor parts on a product, and receiving all work from a part's id, so they work for
     these parts without any change: the PO line's Part # is the Rocky Mountain part number, and its cost is the
     dealer cost stored here.
-  * Rocky Mountain stock is kept as one number in supplier_items.qty_other. The files give Utah and Kentucky (QTY_UT + QTY_KY,
-    or one TOTAL_QTY); they are added together, and a capped value such as "10+" counts as 10. It is NEVER added to
+  * Rocky Mountain stock: supplier_items.qty_utah and qty_kentucky hold the two warehouses and qty_other their TOTAL. The files give
+    Utah and Kentucky (QTY_UT, QTY_KY) or only one TOTAL_QTY (then the two warehouse columns stay empty); the total is the sum, and a capped value such as "10+" counts as 10. It is NEVER added to
     products.quantity_on_hand: that number only counts parts on our own shelf.
+  * LIST PRICE: the catalog shows, sorts, filters and computes margin on the MAP price when a part has one (supplier_items.map_price,
+    from the catalog file or the price file), else on the list / MSRP price.
   * `upsert_rows` is the one door the data goes through. Today the rows come from a file the person uploads. If
     Rocky Mountain turns out to have an API, its adapter should build the same dicts (see clean_row) and call
     `upsert_rows` between _begin_run and _finish_run; nothing else here changes. Any API key belongs in the
@@ -101,6 +103,9 @@ def ensure_columns() -> None:
     try:
         db.execute(text("alter table supplier_items add column if not exists qty_other integer not null default 0"))
         db.execute(text("alter table supplier_items add column if not exists fitment text"))
+        db.execute(text("alter table supplier_items add column if not exists qty_utah integer"))
+        db.execute(text("alter table supplier_items add column if not exists qty_kentucky integer"))
+        db.execute(text("alter table supplier_items add column if not exists map_price numeric"))
         db.commit()
     except Exception:
         db.rollback()
@@ -119,9 +124,11 @@ FIELDS: list[tuple[str, str, bool]] = [
     ("manufacturer", "Brand", False),
     ("mfr_number", "Mfr #", False),
     ("dealer_cost", "Your cost (dealer price)", False),
-    ("list_price", "List / retail price", False),
-    ("qty", "Quantity in stock", False),
-    ("qty_2", "More stock (added to the stock above, e.g. a second warehouse)", False),
+    ("list_price", "List / retail price (MSRP)", False),
+    ("map_price", "MAP price (used as the list price when there is one)", False),
+    ("qty", "Total quantity in stock (used only when the file has no Utah / Kentucky columns)", False),
+    ("qty_ut", "Stock in Utah", False),
+    ("qty_ky", "Stock in Kentucky", False),
     ("upc", "UPC / barcode", False),
     ("unit_of_measure", "Unit of measure", False),
     ("images", "Photo link(s)", False),
@@ -141,8 +148,10 @@ _ALIASES: dict[str, list[str]] = {
     "mfr_number": ["manufacturerpartnumber", "manufacturernumber", "mfrpartnumber", "mfrnumber", "mfrpart", "mfgpartnumber", "mfgpart", "mpn", "brandpartnumber", "vendorpartnumber", "vendorpart", "mfid"],
     "dealer_cost": ["dealercost", "dealerprice", "dealernet", "yourcost", "yourprice", "customerprice", "netprice", "wholesaleprice", "wholesale", "yourdealerprice"],
     "list_price": ["listprice", "msrp", "retailprice", "retail", "suggestedretail"],
-    "qty": ["totalqty", "qtyavailable", "quantityavailable", "availableqty", "availablequantity", "qtyonhand", "onhand", "quantityonhand", "instock", "stock", "qty", "quantity", "inventory", "available", "qtyut"],
-    "qty_2": ["qtyky"],
+    "qty": ["totalqty", "qtyavailable", "quantityavailable", "availableqty", "availablequantity", "qtyonhand", "onhand", "quantityonhand", "instock", "stock", "qty", "quantity", "inventory", "available"],
+    "qty_ut": ["qtyut", "qtyutah", "utahqty", "utqty", "utahstock", "utstock", "utah"],
+    "qty_ky": ["qtyky", "qtykentucky", "kyqty", "kentuckyqty", "kentuckystock", "kystock", "kentucky"],
+    "map_price": ["mapprice", "mappricing", "map", "minimumadvertisedprice"],
     "upc": ["upc", "upccode", "upcnumber", "barcode", "ean", "gtin", "upcean"],
     "unit_of_measure": ["unitofmeasure", "uom", "unit", "packagequantity"],
     "images": _IMAGE_ALIASES,
@@ -246,6 +255,13 @@ def clean_row(values: list[str], mapping: dict[str, int]) -> Optional[dict]:
         return None
     mfr = get("mfr_number") or None
     upc = get("upc") or None
+    # two warehouses (Utah + Kentucky) when the file has them: the total is their sum; else the file's single total
+    if "qty_ut" in mapping or "qty_ky" in mapping:
+        ut, ky = _qty(get("qty_ut")), _qty(get("qty_ky"))
+        total = min(ut + ky, 100_000_000)
+    else:
+        ut = ky = None
+        total = _qty(get("qty"))
     return {
         "sku": sku,
         "mfr_number": mfr,
@@ -255,7 +271,10 @@ def clean_row(values: list[str], mapping: dict[str, int]) -> Optional[dict]:
         "unit_of_measure": get("unit_of_measure") or None,
         "list_price": _price(get("list_price")),
         "dealer_cost": _price(get("dealer_cost")),
-        "qty_other": min(_qty(get("qty")) + _qty(get("qty_2")), 100_000_000),
+        "map_price": _price(get("map_price")),
+        "qty_utah": ut,
+        "qty_kentucky": ky,
+        "qty_other": total,
         "upc": upc,
         "upc_norm": norm_upc(upc),
         "fitment": get("fitment")[:20000],   # "" when the row has none: the fitment already stored is kept
@@ -287,18 +306,18 @@ with incoming as (
   select * from unnest(
     cast(:sku as text[]), cast(:mfr as text[]), cast(:mfrn as text[]), cast(:brand as text[]),
     cast(:name as text[]), cast(:uom as text[]), cast(:lp as numeric[]), cast(:dc as numeric[]),
-    cast(:qo as integer[]), cast(:upc as text[]), cast(:upcn as text[]), cast(:imgs as text[]), cast(:fit as text[])
+    cast(:qo as integer[]), cast(:upc as text[]), cast(:upcn as text[]), cast(:imgs as text[]), cast(:fit as text[]), cast(:qu as integer[]), cast(:qk as integer[]), cast(:mp as numeric[])
   ) as t(sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure, list_price, dealer_cost,
-         qty_other, upc, upc_norm, imgs, fit)
+         qty_other, upc, upc_norm, imgs, fit, qu, qk, mp)
 ), up as (
   insert into supplier_items (supplier, sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure,
                               list_price, dealer_cost, qty_maine, qty_indiana, qty_nevada, qty_other, upc, upc_norm,
-                              last_run_id, images, images_synced_at, fitment)
+                              last_run_id, images, images_synced_at, fitment, qty_utah, qty_kentucky, map_price)
   select :sup, sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure,
          list_price, dealer_cost, 0, 0, 0, qty_other, upc, upc_norm, :run,
          case when nullif(imgs, '') is null then null else string_to_array(imgs, chr(10)) end,
          case when nullif(imgs, '') is null then null else now() end,
-         nullif(fit, '')
+         nullif(fit, ''), qu, qk, mp
   from incoming
   on conflict (supplier, sku) do update set
     mfr_number = excluded.mfr_number, mfr_number_norm = excluded.mfr_number_norm,
@@ -308,6 +327,8 @@ with incoming as (
     last_seen_at = now(), last_run_id = excluded.last_run_id,
     images = coalesce(excluded.images, supplier_items.images),
     fitment = coalesce(excluded.fitment, supplier_items.fitment),
+    qty_utah = excluded.qty_utah, qty_kentucky = excluded.qty_kentucky,
+    map_price = coalesce(excluded.map_price, supplier_items.map_price),
     images_synced_at = case when excluded.images is not null then now() else supplier_items.images_synced_at end,
     updated_at = case
       when not supplier_items.active
@@ -348,6 +369,9 @@ def upsert_rows(db: Session, run_id: int, rows: list[dict]) -> int:
             "upcn": col("upc_norm"),
             "imgs": [r.get("images") or "" for r in rows],
             "fit": [r.get("fitment") or "" for r in rows],
+            "qu": [r.get("qty_utah") for r in rows],
+            "qk": [r.get("qty_kentucky") for r in rows],
+            "mp": [r.get("map_price") for r in rows],
         },
     ).scalar()
     return int(new_rows or 0)
@@ -542,17 +566,20 @@ def brands(db: Session = Depends(get_db)):
 
 
 _COST = "coalesce(s.my_cost, s.dealer_cost)"   # your own price when the price file gave one, else the catalog's dealer price
+_LIST = "coalesce(s.map_price, s.list_price)"   # the list price shown: the MAP price when there is one, else the MSRP
 _SORTS = {
     "brand": "lower(s.manufacturer)",
     "sku": "s.sku",
     "mfr": "s.mfr_number",
     "name": "lower(s.name)",
     "uom": "s.unit_of_measure",
-    "list": "s.list_price",
+    "list": _LIST,
     "cost": _COST,
-    "margin": f"(s.list_price - {_COST})",
-    "margin_pct": f"((s.list_price - {_COST}) / nullif(s.list_price, 0))",
+    "margin": f"({_LIST} - {_COST})",
+    "margin_pct": f"(({_LIST} - {_COST}) / nullif({_LIST}, 0))",
     "stock": "s.qty_other",
+    "utah": "s.qty_utah",
+    "kentucky": "s.qty_kentucky",
     "updated": "s.updated_at",
     "seen": "s.last_seen_at",
 }
@@ -562,8 +589,8 @@ _GAPS = {
     "mfr": "s.mfr_number is null",
     "name": "s.name is null",
     "cost": f"{_COST} is null",
-    "list": "s.list_price is null",
-    "below_cost": f"(s.list_price is not null and {_COST} is not null and s.list_price < {_COST})",
+    "list": f"{_LIST} is null",
+    "below_cost": f"({_LIST} is not null and {_COST} is not null and {_LIST} < {_COST})",
     "photo": "s.images is null",
     "fitment": "s.fitment is null",
 }
@@ -575,7 +602,7 @@ def _like(word: str) -> str:
 
 
 def _filters(q, field, brand, status, stock, min_qty, max_qty, min_cost, max_cost, min_list, max_list,
-             min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days) -> tuple[str, str, dict]:
+             min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days, warehouse=None) -> tuple[str, str, dict]:
     """(with-clause, where-clause, params) for the catalog browser. Every value is bound, never pasted in."""
     from app.kits import SINGLES_CTE, single_exists  # late import, like the other modules here
 
@@ -614,15 +641,19 @@ def _filters(q, field, brand, status, stock, min_qty, max_qty, min_cost, max_cos
         where.append("s.qty_other > 0")
     elif stock == "out":
         where.append("s.qty_other = 0")
+    if warehouse == "utah":
+        where.append("s.qty_utah > 0")
+    elif warehouse == "kentucky":
+        where.append("s.qty_kentucky > 0")
     for key, expr, op, val in (
         ("min_qty", "s.qty_other", ">=", min_qty), ("max_qty", "s.qty_other", "<=", max_qty),
         ("min_cost", _COST, ">=", min_cost), ("max_cost", _COST, "<=", max_cost),
-        ("min_list", "s.list_price", ">=", min_list), ("max_list", "s.list_price", "<=", max_list),
+        ("min_list", _LIST, ">=", min_list), ("max_list", _LIST, "<=", max_list),
     ):
         if val is not None:
             params[key] = val
             where.append(f"{expr} {op} :{key}")
-    pct = f"((s.list_price - {_COST}) / nullif(s.list_price, 0) * 100)"
+    pct = f"(({_LIST} - {_COST}) / nullif({_LIST}, 0) * 100)"
     if min_margin_pct is not None:
         params["min_mp"] = min_margin_pct
         where.append(f"{pct} >= :min_mp")
@@ -651,6 +682,7 @@ def items(
     brand: Optional[str] = Query(None, max_length=120),
     status: str = Query("active", pattern="^(active|inactive|all)$"),
     stock: Optional[str] = Query(None, pattern="^(in|out)$", description="in = stock at Rocky Mountain, out = none"),
+    warehouse: Optional[str] = Query(None, pattern="^(utah|kentucky)$", description="stock in this warehouse"),
     min_qty: Optional[int] = Query(None, ge=0),
     max_qty: Optional[int] = Query(None, ge=0),
     min_cost: Optional[float] = Query(None, ge=0),
@@ -676,7 +708,7 @@ def items(
 
     with_clause, clause, params = _filters(
         q, field, brand, status, stock, min_qty, max_qty, min_cost, max_cost, min_list, max_list,
-        min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days,
+        min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days, warehouse,
     )
     agg = db.execute(
         text(
@@ -691,10 +723,10 @@ def items(
     page = db.execute(
         text(
             f"with {SINGLES_CTE} "
-            f"select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, {_COST} as dealer_cost, "
-            "s.dealer_cost as standard_cost, s.my_cost, s.map_price, s.qty_other, s.qty_other as qty_total, s.upc, s.images, s.active, "
-            f"s.updated_at, s.last_seen_at, (s.list_price - {_COST}) as margin, "
-            f"((s.list_price - {_COST}) / nullif(s.list_price, 0) * 100) as margin_pct, "
+            f"select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, {_LIST} as list_price, {_COST} as dealer_cost, "
+            "s.dealer_cost as standard_cost, s.my_cost, s.map_price, s.list_price as msrp, s.qty_other, s.qty_utah, s.qty_kentucky, s.qty_other as qty_total, s.upc, s.images, s.active, "
+            f"s.updated_at, s.last_seen_at, ({_LIST} - {_COST}) as margin, "
+            f"(({_LIST} - {_COST}) / nullif({_LIST}, 0) * 100) as margin_pct, "
             f"{single_pick('supplier')} as product_id, {single_count('supplier')} as products "
             f"from supplier_items s where {clause} order by {order} limit :n offset :o"
         ),
@@ -1752,8 +1784,10 @@ def catalog_overview(db: Session = Depends(get_db)):
             select count(*) as total, count(*) filter (where s.active) as active, count(*) filter (where not s.active) as retired,
                    count(*) filter (where s.active and s.qty_other > 0) as in_stock, count(*) filter (where s.active and s.qty_other = 0) as out_of_stock,
                    coalesce(sum(s.qty_other) filter (where s.active), 0) as units,
+                   count(*) filter (where s.active and s.qty_utah > 0) as in_utah, count(*) filter (where s.active and s.qty_kentucky > 0) as in_kentucky,
+                   coalesce(sum(s.qty_utah) filter (where s.active), 0) as units_utah, coalesce(sum(s.qty_kentucky) filter (where s.active), 0) as units_kentucky,
                    coalesce(sum({_COST} * s.qty_other) filter (where s.active), 0) as stock_value_at_cost,
-                   coalesce(sum(s.list_price * s.qty_other) filter (where s.active), 0) as stock_value_at_list,
+                   coalesce(sum({_LIST} * s.qty_other) filter (where s.active), 0) as stock_value_at_list,
                    count(distinct s.manufacturer) filter (where s.active) as brands,
                    count(*) filter (where s.active and s.upc_norm is null) as no_barcode,
                    count(*) filter (where s.active and s.images is null) as no_photo,
@@ -1761,11 +1795,11 @@ def catalog_overview(db: Session = Depends(get_db)):
                    count(*) filter (where s.active and s.mfr_number is null) as no_mfr_number,
                    count(*) filter (where s.active and s.name is null) as no_name,
                    count(*) filter (where s.active and {_COST} is null) as no_cost,
-                   count(*) filter (where s.active and s.list_price is null) as no_list_price,
-                   count(*) filter (where s.active and s.list_price < {_COST}) as list_below_cost,
+                   count(*) filter (where s.active and {_LIST} is null) as no_list_price,
+                   count(*) filter (where s.active and {_LIST} < {_COST}) as list_below_cost,
                    count(*) filter (where s.active and s.updated_at >= now() - interval '7 days') as changed_7d,
                    count(*) filter (where s.active and s.updated_at >= now() - interval '30 days') as changed_30d,
-                   avg((s.list_price - {_COST}) / nullif(s.list_price, 0) * 100) filter (where s.active and s.list_price > 0 and {_COST} is not null) as avg_margin_pct,
+                   avg(({_LIST} - {_COST}) / nullif({_LIST}, 0) * 100) filter (where s.active and {_LIST} > 0 and {_COST} is not null) as avg_margin_pct,
                    max(s.last_seen_at) as last_seen
             from supplier_items s where s.supplier = :s
             """
@@ -1818,6 +1852,9 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "That part isn't stored (it may have been removed).")
     item = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in row._mapping.items()}
     item["standard_cost"] = item.get("dealer_cost")
+    item["msrp"] = item.get("list_price")
+    if item.get("map_price") is not None:
+        item["list_price"] = item["map_price"]   # the MAP price is the list price when there is one
     if item.get("my_cost") is not None:
         item["dealer_cost"] = item["my_cost"]
     run = None
@@ -1865,7 +1902,7 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
         else:
             d["by"] = "linked part"
             mine.insert(0, d)
-    cols = f"id, sku, mfr_number, manufacturer, name, list_price, {_COST.replace('s.', '')} as dealer_cost, qty_other, upc, active"
+    cols = f"id, sku, mfr_number, manufacturer, name, coalesce(map_price, list_price) as list_price, {_COST.replace('s.', '')} as dealer_cost, qty_other, upc, active"
 
     def similar(where: str, val: str) -> list[dict]:
         rows = db.execute(text(f"select {cols} from supplier_items where supplier = :s and {where} and id <> :id order by manufacturer, sku limit 50"),

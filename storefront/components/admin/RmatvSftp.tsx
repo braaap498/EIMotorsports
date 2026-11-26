@@ -26,7 +26,7 @@ const ROLES = [
   { key: "price_file", map: "price_map", label: "Your prices (optional)", short: "prices" },
   { key: "photo_file", map: "photo_map", label: "Photo links (optional; else the catalog file)", short: "photo links" },
 ] as const;
-const CATALOG_FIELDS: [string, string][] = [["sku", "SKU"], ["name", "Name"], ["manufacturer", "Brand"], ["mfr_number", "Mfr #"], ["dealer_cost", "Your cost"], ["list_price", "List price"], ["qty", "Stock"], ["qty_2", "More stock (added to Stock)"], ["upc", "Barcode"], ["unit_of_measure", "Unit"], ["images", "Photo link(s)"], ["fitment", "Fitment"]];
+const CATALOG_FIELDS: [string, string][] = [["sku", "SKU"], ["name", "Name"], ["manufacturer", "Brand"], ["mfr_number", "Mfr #"], ["dealer_cost", "Your cost"], ["list_price", "List price (MSRP)"], ["map_price", "MAP price (used as list price when present)"], ["qty_ut", "Stock in Utah"], ["qty_ky", "Stock in Kentucky"], ["qty", "Total stock (only if no Utah / Kentucky columns)"], ["upc", "Barcode"], ["unit_of_measure", "Unit"], ["images", "Photo link(s)"], ["fitment", "Fitment"]];
 const FIELDS: Record<string, [string, string][]> = {
   catalog_map: CATALOG_FIELDS,
   oem_map: CATALOG_FIELDS,
