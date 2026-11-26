@@ -11,8 +11,8 @@ import { Badge, Notice, btnCls, btn2Cls, inputCls } from "./ui";
 type Run = { id: number; source: string; status: string; rows_seen: number; rows_skipped: number; note: string | null };
 type Status = { configured: boolean; host: string; port: number; user: string | null; host_key_pinned: boolean };
 type Config = {
-  catalog_file?: string | null; price_file?: string | null; photo_file?: string | null;
-  catalog_map?: Record<string, string> | null; price_map?: Record<string, string> | null; photo_map?: Record<string, string> | null;
+  catalog_file?: string | null; oem_file?: string | null; price_file?: string | null; photo_file?: string | null;
+  catalog_map?: Record<string, string> | null; oem_map?: Record<string, string> | null; price_map?: Record<string, string> | null; photo_map?: Record<string, string> | null;
 };
 type TreeItem = { path: string; dir: boolean; size: number | null; mtime: number | null; image: boolean; more: boolean };
 type Check = { fingerprint: string; login_folder: string | null; tree: TreeItem[]; image_files: number; data_files: string[]; other_files: string[]; config: Config };
@@ -22,11 +22,14 @@ type Msg = { kind: "error" | "success" | "info"; text: string } | null;
 
 const ROLES = [
   { key: "catalog_file", map: "catalog_map", label: "Catalog (parts, your cost, stock)", short: "catalog" },
+  { key: "oem_file", map: "oem_map", label: "Second catalog: OEM parts (optional; adds the parts the first catalog lacks)", short: "OEM catalog" },
   { key: "price_file", map: "price_map", label: "Your prices (optional)", short: "prices" },
   { key: "photo_file", map: "photo_map", label: "Photo links (optional; else the catalog file)", short: "photo links" },
 ] as const;
+const CATALOG_FIELDS: [string, string][] = [["sku", "SKU"], ["name", "Name"], ["manufacturer", "Brand"], ["mfr_number", "Mfr #"], ["dealer_cost", "Your cost"], ["list_price", "List price"], ["qty", "Stock"], ["qty_2", "More stock (added to Stock)"], ["upc", "Barcode"], ["unit_of_measure", "Unit"]];
 const FIELDS: Record<string, [string, string][]> = {
-  catalog_map: [["sku", "SKU"], ["name", "Name"], ["manufacturer", "Brand"], ["mfr_number", "Mfr #"], ["dealer_cost", "Your cost"], ["list_price", "List price"], ["qty", "Stock"], ["upc", "Barcode"], ["unit_of_measure", "Unit"]],
+  catalog_map: CATALOG_FIELDS,
+  oem_map: CATALOG_FIELDS,
   price_map: [["sku", "SKU"], ["my_cost", "Your cost"], ["map_price", "MAP"], ["list_price", "List price"], ["weight_lb", "Weight (lb)"], ["length_in", "Length"], ["width_in", "Width"], ["height_in", "Height"]],
   photo_map: [["sku", "SKU"], ["images", "All links in one column"], ["image_1", "Link 1"], ["image_2", "Link 2"], ["image_3", "Link 3"], ["image_4", "Link 4"], ["image_5", "Link 5"], ["image_6", "Link 6"]],
 };
@@ -106,8 +109,8 @@ export default function RmatvSftp({ runs, onChanged }: { runs: Run[]; onChanged:
   }
   const saveCfg = () => act("save", async () => {
     const r = await api<Config>("/rmatv/sftp/config", { method: "PUT", body: {
-      catalog_file: cfg.catalog_file ?? "", price_file: cfg.price_file ?? "", photo_file: cfg.photo_file ?? "",
-      catalog_map: cfg.catalog_map ?? {}, price_map: cfg.price_map ?? {}, photo_map: cfg.photo_map ?? {},
+      catalog_file: cfg.catalog_file ?? "", oem_file: cfg.oem_file ?? "", price_file: cfg.price_file ?? "", photo_file: cfg.photo_file ?? "",
+      catalog_map: cfg.catalog_map ?? {}, oem_map: cfg.oem_map ?? {}, price_map: cfg.price_map ?? {}, photo_map: cfg.photo_map ?? {},
     } });
     setCfg(r);
     setSaved(true);
@@ -184,7 +187,7 @@ export default function RmatvSftp({ runs, onChanged }: { runs: Run[]; onChanged:
                       <span className="text-gray-400">{bytes(f.size)}{f.mtime ? ` · ${when(f.mtime)}` : ""}</span>
                       {f.role && <Badge tone="blue">looks like {f.role === "price" ? "prices" : f.role === "photos" ? "photo links" : "the catalog"}</Badge>}
                       {f.columns && (
-                        <span className="ml-auto flex gap-1">
+                        <span className="ml-auto flex flex-wrap gap-1">
                           {ROLES.map((r) => (
                             <button key={r.key} type="button" className="rounded border border-gray-300 px-1.5 hover:bg-gray-50" onClick={() => setFile(r.key, f.path)}>Use as {r.short}</button>
                           ))}

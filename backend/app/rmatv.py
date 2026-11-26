@@ -26,7 +26,8 @@ HOW IT FITS
     Purchase orders, Distributor parts on a product, and receiving all work from a part's id, so they work for
     these parts without any change: the PO line's Part # is the Rocky Mountain part number, and its cost is the
     dealer cost stored here.
-  * Rocky Mountain stock is one number (no warehouses), kept in supplier_items.qty_other. It is NEVER added to
+  * Rocky Mountain stock is kept as one number in supplier_items.qty_other. The files give Utah and Kentucky (QTY_UT + QTY_KY,
+    or one TOTAL_QTY); they are added together, and a capped value such as "10+" counts as 10. It is NEVER added to
     products.quantity_on_hand: that number only counts parts on our own shelf.
   * `upsert_rows` is the one door the data goes through. Today the rows come from a file the person uploads. If
     Rocky Mountain turns out to have an API, its adapter should build the same dicts (see clean_row) and call
@@ -36,6 +37,9 @@ HOW IT FITS
     (RMATV_SFTP_USER, RMATV_SFTP_PASSWORD, optionally RMATV_SFTP_HOST / RMATV_SFTP_PORT / RMATV_SFTP_HOSTKEY), never stored
     in the database or sent to the browser. Needs `paramiko` in requirements.txt. The SFTP jobs go through the same
     `upsert_rows` / `_finish_run` as the file upload, so nothing else here changes.
+  * Two catalog files: the main catalog file (Inventory_TIER_1_v3.csv, full detail) and an optional second one for the OEM parts
+    (Inventory_TIER_1_withOEM_v2.csv adds Honda, Kawasaki, Suzuki and CFMoto parts). Both are read in ONE run, so the retire step
+    sees them together. A part in both files is taken from the main file; the second file only adds the parts the first lacks.
   * We do not know the exact columns of Rocky Mountain's file, so the browser reads the file, /import/detect
     guesses which column is which, and the person can correct each guess before anything is stored.
 
@@ -106,6 +110,7 @@ FIELDS: list[tuple[str, str, bool]] = [
     ("dealer_cost", "Your cost (dealer price)", False),
     ("list_price", "List / retail price", False),
     ("qty", "Quantity in stock", False),
+    ("qty_2", "More stock (added to the stock above, e.g. a second warehouse)", False),
     ("upc", "UPC / barcode", False),
     ("unit_of_measure", "Unit of measure", False),
 ]
@@ -113,13 +118,14 @@ FIELDS: list[tuple[str, str, bool]] = [
 # Header names (case, spaces and punctuation ignored), best guess first. The lists do not overlap, so one column
 # never feeds two fields. A bare "Price" or "Cost" is NOT guessed: it could be retail or ours, so the person picks it.
 _ALIASES: dict[str, list[str]] = {
-    "sku": ["rmatvpartnumber", "rmatvpart", "rmatvsku", "rockymountainpartnumber", "partnumber", "partno", "partnum", "part", "sku", "itemnumber", "itemno", "item", "productnumber", "productno", "stocknumber"],
+    "sku": ["prodno", "rmatvpartnumber", "rmatvpart", "rmatvsku", "rockymountainpartnumber", "partnumber", "partno", "partnum", "part", "sku", "itemnumber", "itemno", "item", "productnumber", "productno", "stocknumber"],
     "name": ["itemname", "productname", "name", "partname", "partdescription", "productdescription", "itemdescription", "description", "title"],
     "manufacturer": ["brand", "brandname", "manufacturer", "manufacturername", "mfr", "mfgname", "make"],
-    "mfr_number": ["manufacturerpartnumber", "manufacturernumber", "mfrpartnumber", "mfrnumber", "mfrpart", "mfgpartnumber", "mfgpart", "mpn", "brandpartnumber", "vendorpartnumber", "vendorpart"],
+    "mfr_number": ["manufacturerpartnumber", "manufacturernumber", "mfrpartnumber", "mfrnumber", "mfrpart", "mfgpartnumber", "mfgpart", "mpn", "brandpartnumber", "vendorpartnumber", "vendorpart", "mfid"],
     "dealer_cost": ["dealercost", "dealerprice", "dealernet", "yourcost", "yourprice", "customerprice", "netprice", "wholesaleprice", "wholesale", "yourdealerprice"],
-    "list_price": ["listprice", "retailprice", "retail", "msrp", "suggestedretail"],
-    "qty": ["qtyavailable", "quantityavailable", "availableqty", "availablequantity", "qtyonhand", "onhand", "quantityonhand", "instock", "stock", "qty", "quantity", "inventory", "available"],
+    "list_price": ["listprice", "msrp", "retailprice", "retail", "suggestedretail"],
+    "qty": ["totalqty", "qtyavailable", "quantityavailable", "availableqty", "availablequantity", "qtyonhand", "onhand", "quantityonhand", "instock", "stock", "qty", "quantity", "inventory", "available", "qtyut"],
+    "qty_2": ["qtyky"],
     "upc": ["upc", "upccode", "upcnumber", "barcode", "ean", "gtin", "upcean"],
     "unit_of_measure": ["unitofmeasure", "uom", "unit", "packagequantity"],
 }
@@ -130,13 +136,26 @@ def _head(h: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (h or "").lower())
 
 
+def _with_price(aliases: dict[str, list[str]], heads: list[str]) -> dict[str, list[str]]:
+    """Rocky Mountain's own layout (PRODNO and MF_ID columns): there a bare PRICE column is the dealer's cost. In any other
+    file a bare Price could be retail or ours, so it is not guessed (see above)."""
+    if "prodno" not in heads or "mfid" not in heads:
+        return aliases
+    out = dict(aliases)
+    for key in ("dealer_cost", "my_cost"):
+        if key in out and "price" not in out[key]:
+            out[key] = [*out[key], "price"]
+    return out
+
+
 def detect_mapping(columns: list[str]) -> dict[str, int]:
     """The file's header row -> {field: index of the column that feeds it}. Fields with no good guess are left out."""
     heads = [_head(c) for c in columns]
+    aliases = _with_price(_ALIASES, heads)
     out: dict[str, int] = {}
     used: set[int] = set()
     for field, _label, _req in FIELDS:
-        for alias in _ALIASES[field]:
+        for alias in aliases[field]:
             hit = next((i for i, h in enumerate(heads) if h == alias and i not in used), None)
             if hit is not None:
                 out[field] = hit
@@ -172,7 +191,8 @@ def _price(value: Optional[str]) -> Optional[Decimal]:
 
 
 def _qty(value: Optional[str]) -> int:
-    v = re.sub(r"[\s,]", "", value or "")
+    """'12' -> 12. A capped value such as '10+' (Rocky Mountain shows no more than that) counts as 10."""
+    v = re.sub(r"[\s,+>]", "", value or "")
     try:
         return max(0, min(int(Decimal(v)), 100_000_000))
     except (InvalidOperation, ValueError):
@@ -201,7 +221,7 @@ def clean_row(values: list[str], mapping: dict[str, int]) -> Optional[dict]:
         "unit_of_measure": get("unit_of_measure") or None,
         "list_price": _price(get("list_price")),
         "dealer_cost": _price(get("dealer_cost")),
-        "qty_other": _qty(get("qty")),
+        "qty_other": min(_qty(get("qty")) + _qty(get("qty_2")), 100_000_000),
         "upc": upc,
         "upc_norm": norm_upc(upc),
     }
@@ -680,7 +700,7 @@ _PRICE_ALIASES: dict[str, list[str]] = {
     "map_price": ["mapprice", "mappricing", "map", "minimumadvertisedprice"],
     "list_price": _ALIASES["list_price"],
     "weight_lb": ["weight", "itemweight", "actualweight", "weightlb", "weightlbs", "shipweight", "shippingweight"],
-    "length_in": ["length", "itemlength", "lengthin"],
+    "length_in": ["length", "itemlength", "lengthin", "depth"],
     "width_in": ["width", "itemwidth", "widthin"],
     "height_in": ["height", "itemheight", "heightin"],
 }
@@ -689,8 +709,9 @@ _PHOTO_ALIASES: dict[str, list[str]] = {
     "images": ["images", "imageurls", "imagelinks", "photos", "photourls", "pictures", "pictureurls", "imageurl", "imagelink", "image", "photo", "photourl", "picture", "pictureurl"],
     **{f"image_{i}": [f"imageurl{i}", f"image{i}", f"photo{i}", f"photourl{i}", f"picture{i}", f"imagelink{i}", f"imagepath{i}"] for i in range(1, 7)},
 }
-_MAP_KEYS = {"catalog_map": {k for k, _, _ in FIELDS}, "price_map": {k for k, _ in _PRICE_FIELDS}, "photo_map": set(_PHOTO_ALIASES)}
-_FILE_KEYS = ("catalog_file", "price_file", "photo_file")
+_MAP_KEYS = {"catalog_map": {k for k, _, _ in FIELDS}, "oem_map": {k for k, _, _ in FIELDS}, "price_map": {k for k, _ in _PRICE_FIELDS}, "photo_map": set(_PHOTO_ALIASES)}
+_FILE_KEYS = ("catalog_file", "oem_file", "price_file", "photo_file")
+_CFG_KEYS = (*_FILE_KEYS, "catalog_map", "oem_map", "price_map", "photo_map")
 
 
 def _sftp_settings() -> tuple[str, int, str, str]:
@@ -829,7 +850,7 @@ def _detect(header: list[str], aliases: dict[str, list[str]]) -> dict[str, int]:
     heads = [_head(c) for c in header]
     out: dict[str, int] = {}
     used: set[int] = set()
-    for field, names in aliases.items():
+    for field, names in _with_price(aliases, heads).items():
         for alias in names:
             hit = next((i for i, h in enumerate(heads) if h == alias and i not in used), None)
             if hit is not None:
@@ -985,55 +1006,77 @@ def _rm_run_job(run_id: int, work, fail_msg: str) -> bool:
 
 
 def _catalog_job(run_id: int) -> bool:
-    """Background: download the catalog file, store it in batches, then retire what left the file (with the safety net)."""
+    """Background: download the catalog file (and the second, OEM catalog file when one is chosen), store the parts in batches,
+    then retire what left the files (with the safety net). Both files belong to ONE run, so the retire step sees them together:
+    a part in either file is kept. A part in both files is taken from the first (main) file; the second only adds the parts the
+    first lacks. If either file cannot be read the whole run fails and nothing is retired."""
 
     def work(db: Session) -> None:
         cfg = _config(db)
         path = (cfg.get("catalog_file") or "").strip()
         if not path:
             raise HTTPException(400, "Choose which file is the catalog first (SFTP feed > Which file is which).")
-        tmp, sig = _download(path)
-        try:
-            mapping, reader, closer, _h = _open_rows(tmp, {k: _ALIASES[k] for k in _ALIASES}, cfg.get("catalog_map"))
-            seen = skipped = new_total = 0
-            batch: dict[str, dict] = {}
+        oem_path = (cfg.get("oem_file") or "").strip()
+        if oem_path and oem_path == path:
+            raise HTTPException(400, "The catalog file and the OEM file are the same file. Choose a different file for the OEM parts, or choose none.")
+        n = {"seen": 0, "skipped": 0, "new": 0, "dupes": 0, "from_oem": 0}
+        taken: set[str] = set()   # part numbers the first file stored in this run (only kept when there is a second file)
 
-            def flush() -> None:
-                nonlocal seen, new_total
-                if not batch:
-                    return
-                rows = list(batch.values())
-                new_total += upsert_rows(db, run_id, rows)
-                seen += len(rows)
-                db.execute(text("update supplier_import_runs set rows_seen = :n, rows_new = :w, rows_skipped = :k where id = :i"),
-                           {"n": seen, "w": new_total, "k": skipped, "i": run_id})
-                db.commit()
-                batch.clear()
-
+        def load(file_path: str, overrides: Optional[dict], first: bool) -> str:
+            tmp, sig = _download(file_path)
             try:
-                for rec in reader:
-                    if not rec or all(not c.strip() for c in rec):
-                        continue
-                    row = clean_row(rec, mapping)
-                    if row is None:
-                        skipped += 1
-                        continue
-                    batch[row["sku"]] = row
-                    if len(batch) >= SFTP_BATCH:
-                        flush()
-                flush()
+                mapping, reader, closer, _h = _open_rows(tmp, {k: _ALIASES[k] for k in _ALIASES}, overrides)
+                batch: dict[str, dict] = {}
+
+                def flush() -> None:
+                    if not batch:
+                        return
+                    rows = list(batch.values())
+                    n["new"] += upsert_rows(db, run_id, rows)
+                    n["seen"] += len(rows)
+                    if not first:
+                        n["from_oem"] += len(rows)
+                    db.execute(text("update supplier_import_runs set rows_seen = :n, rows_new = :w, rows_skipped = :k where id = :i"),
+                               {"n": n["seen"], "w": n["new"], "k": n["skipped"], "i": run_id})
+                    db.commit()
+                    batch.clear()
+
+                try:
+                    for rec in reader:
+                        if not rec or all(not c.strip() for c in rec):
+                            continue
+                        row = clean_row(rec, mapping)
+                        if row is None:
+                            n["skipped"] += 1
+                            continue
+                        if first and oem_path:
+                            taken.add(row["sku"])
+                        elif not first and row["sku"] in taken:
+                            n["dupes"] += 1   # already stored from the main file, with fuller detail
+                            continue
+                        batch[row["sku"]] = row
+                        if len(batch) >= SFTP_BATCH:
+                            flush()
+                    flush()
+                finally:
+                    closer()
             finally:
-                closer()
-        finally:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-        res = _finish_run(db, run_id, seen + skipped, False)
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            return sig
+
+        sigs = [load(path, cfg.get("catalog_map"), True)]
+        if oem_path:
+            sigs.append(load(oem_path, cfg.get("oem_map"), False))
+        sig = "+".join(sigs)
+        res = _finish_run(db, run_id, n["seen"] + n["skipped"], False)
+        oem_note = f" {n['from_oem']:,} of them come from the OEM file." if oem_path else ""
         if res.get("needs_review"):
-            _sync_note(db, summary=f"Stored {seen:,} parts; waiting for you to confirm retiring the missing ones.", signature=sig, changed=True)
+            _sync_note(db, summary=f"Stored {n['seen']:,} parts; waiting for you to confirm retiring the missing ones.{oem_note}", signature=sig, changed=True)
         else:
-            _sync_note(db, summary=f"Imported {seen:,} parts ({new_total:,} new, {res.get('retired', 0):,} retired).", signature=sig, changed=True)
+            _sync_note(db, summary=f"Imported {n['seen']:,} parts ({n['new']:,} new, {res.get('retired', 0):,} retired).{oem_note}", signature=sig, changed=True)
 
     return _rm_run_job(run_id, work, "The SFTP import failed. See the server log. Nothing was retired.")
 
@@ -1099,8 +1142,10 @@ def _update_photos(db: Session, rows: list[dict]) -> int:
     return int(db.execute(text(_DETAIL_UPDATE), {"sup": SUPPLIER, "sku": [r["sku"] for r in rows], "imgs": [r["images"] for r in rows]}).scalar() or 0)
 
 
-def _update_job(run_id: int, file_key: str, map_key: str, aliases: dict, need_any: tuple, cleaner, updater, summarize, price_signature: bool = False) -> bool:
-    """Background: download a file and use its lines to update parts we already hold (never adds or retires)."""
+def _update_job(run_id: int, file_key: str, map_key: str, aliases: dict, need_any: tuple, cleaner, updater, summarize, price_signature: bool = False,
+                extra_file_key: Optional[str] = None) -> bool:
+    """Background: download a file and use its lines to update parts we already hold (never adds or retires). With extra_file_key
+    and that file chosen (the OEM catalog), its lines are used too, for the parts the first file did not cover."""
 
     def work(db: Session) -> None:
         cfg = _config(db)
@@ -1109,51 +1154,64 @@ def _update_job(run_id: int, file_key: str, map_key: str, aliases: dict, need_an
             path = (cfg.get("catalog_file") or "").strip()   # the catalog file may hold the photo links itself
         if not path:
             raise HTTPException(400, "Choose that file first (SFTP feed > Which file is which).")
-        tmp, sig = _download(path)
-        try:
-            mapping, reader, closer, header = _open_rows(tmp, aliases, cfg.get(map_key))
-            if not any(k in mapping for k in need_any):
-                closer()
-                raise HTTPException(400, "That file has none of the columns this needs. Its columns are: " + ", ".join(h for h in header if h)[:500])
-            seen = skipped = matched = 0
-            batch: dict[str, dict] = {}
+        extra = (cfg.get(extra_file_key) or "").strip() if extra_file_key else ""
+        paths = [path] + ([extra] if extra and extra != path else [])
+        n = {"seen": 0, "skipped": 0, "matched": 0}
+        done: set[str] = set()   # parts the first file already updated; the second file does not redo them
 
-            def flush() -> None:
-                nonlocal seen, matched
-                if not batch:
-                    return
-                rows = list(batch.values())
-                matched += updater(db, rows)
-                seen += len(rows)
-                db.execute(text("update supplier_import_runs set rows_seen = :n, rows_new = :m, rows_skipped = :k where id = :i"),
-                           {"n": seen, "m": matched, "k": skipped, "i": run_id})
-                db.commit()
-                batch.clear()
-
+        def one_file(file_path: str, first: bool) -> str:
+            tmp, sig = _download(file_path)
             try:
-                for rec in reader:
-                    if not rec or all(not c.strip() for c in rec):
-                        continue
-                    row = cleaner({f: (rec[i].strip() if i < len(rec) else "") for f, i in mapping.items()})
-                    if row is None:
-                        skipped += 1
-                        continue
-                    batch[row["sku"]] = row
-                    if len(batch) >= SFTP_BATCH:
-                        flush()
-                flush()
+                mapping, reader, closer, header = _open_rows(tmp, aliases, cfg.get(map_key))
+                if not any(k in mapping for k in need_any):
+                    closer()
+                    raise HTTPException(400, f"{file_path} has none of the columns this needs. Its columns are: " + ", ".join(h for h in header if h)[:500])
+                batch: dict[str, dict] = {}
+
+                def flush() -> None:
+                    if not batch:
+                        return
+                    rows = list(batch.values())
+                    n["matched"] += updater(db, rows)
+                    n["seen"] += len(rows)
+                    if first and len(paths) > 1:
+                        done.update(batch)
+                    db.execute(text("update supplier_import_runs set rows_seen = :n, rows_new = :m, rows_skipped = :k where id = :i"),
+                               {"n": n["seen"], "m": n["matched"], "k": n["skipped"], "i": run_id})
+                    db.commit()
+                    batch.clear()
+
+                try:
+                    for rec in reader:
+                        if not rec or all(not c.strip() for c in rec):
+                            continue
+                        row = cleaner({f: (rec[i].strip() if i < len(rec) else "") for f, i in mapping.items()})
+                        if row is None:
+                            n["skipped"] += 1
+                            continue
+                        if not first and row["sku"] in done:
+                            continue
+                        batch[row["sku"]] = row
+                        if len(batch) >= SFTP_BATCH:
+                            flush()
+                    flush()
+                finally:
+                    closer()
             finally:
-                closer()
-        finally:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-        if seen == 0:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            return sig
+
+        sig = one_file(paths[0], True)
+        for more in paths[1:]:
+            one_file(more, False)
+        if n["seen"] == 0:
             raise HTTPException(400, "That file held no usable lines.")
-        db.execute(text("update supplier_import_runs set status = 'done', finished_at = now(), rows_skipped = :k, note = null where id = :i"), {"k": skipped, "i": run_id})
+        db.execute(text("update supplier_import_runs set status = 'done', finished_at = now(), rows_skipped = :k, note = null where id = :i"), {"k": n["skipped"], "i": run_id})
         db.commit()
-        _sync_note(db, summary=summarize(matched, seen, skipped), price_signature=sig if price_signature else None, changed=price_signature)
+        _sync_note(db, summary=summarize(n["matched"], n["seen"], n["skipped"]), price_signature=sig if price_signature else None, changed=price_signature)
 
     return _rm_run_job(run_id, work, "The import failed. See the server log.")
 
@@ -1165,7 +1223,7 @@ def _price_job(run_id: int) -> bool:
 
 def _photo_job(run_id: int) -> bool:
     return _update_job(run_id, "photo_file", "photo_map", _PHOTO_ALIASES, ("images", *[f"image_{i}" for i in range(1, 7)]), _clean_photo, _update_photos,
-                       lambda m, s, k: f"Photo links updated for {m:,} parts ({s:,} lines read).")
+                       lambda m, s, k: f"Photo links updated for {m:,} parts ({s:,} lines read).", extra_file_key="oem_file")
 
 
 def _sync_all(run_id: int) -> None:
@@ -1256,9 +1314,11 @@ def sftp_peek(body: PeekIn):
 
 class ConfigIn(BaseModel):
     catalog_file: Optional[str] = Field(None, max_length=300)
+    oem_file: Optional[str] = Field(None, max_length=300)   # the second catalog (OEM parts), optional
     price_file: Optional[str] = Field(None, max_length=300)
     photo_file: Optional[str] = Field(None, max_length=300)
     catalog_map: Optional[dict[str, str]] = None   # field -> the file's header text, for the columns the guess got wrong
+    oem_map: Optional[dict[str, str]] = None
     price_map: Optional[dict[str, str]] = None
     photo_map: Optional[dict[str, str]] = None
 
@@ -1266,7 +1326,7 @@ class ConfigIn(BaseModel):
 @router.get("/sftp/config")
 def sftp_config(db: Session = Depends(get_db)):
     cfg = _config(db)
-    return {k: cfg.get(k) for k in (*_FILE_KEYS, "catalog_map", "price_map", "photo_map")}
+    return {k: cfg.get(k) for k in _CFG_KEYS}
 
 
 @router.put("/sftp/config")
@@ -1287,7 +1347,7 @@ def sftp_config_set(body: ConfigIn, db: Session = Depends(get_db)):
                 cfg.pop(k, None)
     db.execute(text("update supplier_sync_settings set config = :c, updated_at = now() where supplier = :s"), {"c": json.dumps(cfg), "s": SUPPLIER})
     db.commit()
-    return {k: cfg.get(k) for k in (*_FILE_KEYS, "catalog_map", "price_map", "photo_map")}
+    return {k: cfg.get(k) for k in _CFG_KEYS}
 
 
 @router.post("/import/sftp")
@@ -1377,12 +1437,15 @@ def _auto_tick() -> None:
             return  # off, not due yet, or another copy of the server took this check
         cfg = _config(db)
         cat, price = (cfg.get("catalog_file") or "").strip(), (cfg.get("price_file") or "").strip()
+        oem = (cfg.get("oem_file") or "").strip()
         if not cat:
             return
         try:
             cli = _sftp_connect()
             try:
                 sig = _signature(cli, cat)
+                if oem and oem != cat:
+                    sig += "+" + _signature(cli, oem)   # same shape _catalog_job stores
                 price_sig = _signature(cli, price) if price else None
             finally:
                 cli.close()
