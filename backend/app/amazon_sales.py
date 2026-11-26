@@ -12,6 +12,8 @@ HOW A SALE FLOWS (same as eBay)
      part is picked, as with eBay. A queued quantity update goes to every other channel listing of that product.
   4. A canceled order that has not been picked releases its parts. A line with no product link is kept as 'unmatched' and retried.
   5. A line on a listing marked drop ship is NOT set aside: it goes to state 'dropship' (the drop ship chain takes it from there).
+  6. A Fulfilled-by-Amazon (FBA) order, or a line on an FBA listing, is NEVER set aside or picked: Amazon holds and ships that stock, so the
+     line goes straight to history and "Mark shipped" refuses it. It still counts in Orders and Analytics.
 
 Built since: Mark picked, shipment confirmation, background loop, the employee-facing ship_router, scan-out support
 (take_stock_for_reference), drop ship hooks (mark_lines_dropship / undo_lines_dropship), sales_transactions rows, analytics rebuild
@@ -136,6 +138,32 @@ def _first(d: dict, *names):
     return None
 
 
+def _fulfillment_text(o: dict) -> str:
+    """How Amazon says the order is fulfilled, as text. Reads the flat field names and a nested `fulfillment` object (UNVERIFIED names: compare raw_sample)."""
+    f = _first(o, "fulfillmentType", "fulfillmentChannel")
+    if f is None:
+        nested = o.get("fulfillment") if isinstance(o, dict) else None
+        if isinstance(nested, str):
+            f = nested
+        elif isinstance(nested, dict):
+            f = _first(nested, "fulfilledBy", "fulfillmentChannel", "fulfillmentType", "channel")
+    return str(f or "")
+
+
+def is_fba_text(v) -> bool:
+    """True for Amazon's 'fulfilled by Amazon' values: AFN (Orders v0), AMAZON / AMAZON_NA (newer APIs), or our own FBA label."""
+    t = str(v or "").strip().upper().replace(" ", "_")
+    return t in ("AFN", "FBA") or t.startswith("AMAZON")
+
+
+def _listing_is_fba(db: Session, account: str, sku: Optional[str]) -> bool:
+    """Second opinion from the listing: the listing sync marks a listing FBA when Amazon holds its stock."""
+    if not sku:
+        return False
+    r = db.execute(text("select 1 from amazon_listings where account = :a and sku = :s and fulfillment = 'FBA' limit 1"), {"a": account, "s": sku}).first()
+    return r is not None
+
+
 def _shipping_paid(o: dict, items: list) -> Optional[Decimal]:
     """What the buyer paid for shipping, or None when this order does not say (None keeps drop ship at the review step).
     UNVERIFIED field names: compare amazon_orders.raw_sample, then trim the names to the real ones."""
@@ -187,7 +215,7 @@ def _parse_order(o: dict) -> dict:
         "zip": _first(addr, "postalCode", "zip"),
         "country": _first(addr, "countryCode", "country"),
         "total": _money(_first(o, "orderTotal", "total")),
-        "fulfillment": str(_first(o, "fulfillmentType", "fulfillmentChannel") or ""),
+        "fulfillment": _fulfillment_text(o),
         "lines": lines,
     }
 
@@ -272,6 +300,11 @@ def _apply_line(db: Session, ln, od: dict) -> Optional[int]:
         return None
     dropship, pieces = _listing_flags(db, ln.account, ln.sku)
     _record_sale(db, ln, od, pid, pieces)  # no-op until amazon_accounts.channel_id is set
+    if is_fba_text(od.get("fulfillment")) or _listing_is_fba(db, ln.account, ln.sku):
+        # Fulfilled by Amazon: Amazon holds and ships this stock, so nothing is set aside here, there is nothing to pick or confirm,
+        # and the shelf count is never touched. The line goes straight to history (it is still counted in Orders and Analytics).
+        db.execute(text("update amazon_order_lines set state = 'history', product_id = :p, pieces_per_sale = :pc where id = :l"), {"p": pid, "pc": pieces, "l": ln.id})
+        return None
     if od["shipped"]:
         db.execute(text("update amazon_order_lines set state = 'history', product_id = :p, pieces_per_sale = :pc where id = :l"), {"p": pid, "pc": pieces, "l": ln.id})
         return None
@@ -454,7 +487,7 @@ def lines(
         ),
         p,
     ).all()
-    return {"total": total, "items": [dict(r._mapping) for r in rows]}
+    return {"total": total, "items": [{**dict(r._mapping), "is_fba": is_fba_text(r.fulfillment)} for r in rows]}
 
 
 @ship_router.post("/lines/{line_id}/release")
@@ -538,6 +571,11 @@ def mark_shipped(order_pk: int, body: ShipIn, db: Session = Depends(get_db), use
         raise HTTPException(404, "That order is not in the list.")
     if od.cancelled:
         raise HTTPException(409, "That order is cancelled.")
+    if is_fba_text(od.fulfillment) or db.execute(
+        text("select 1 from amazon_order_lines l join amazon_listings g on g.account = l.account and g.sku = l.sku where l.order_pk = :o and g.fulfillment = 'FBA' limit 1"),
+        {"o": order_pk},
+    ).first():
+        raise HTTPException(409, "Amazon ships this order itself (Fulfilled by Amazon), so there is no shipment to confirm.")
     acct = _row(db, od.account)
     if not acct.live_pushes_enabled:
         raise HTTPException(409, "Live pushes are OFF for this Amazon account.")
