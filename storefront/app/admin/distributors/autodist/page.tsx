@@ -978,10 +978,7 @@ function DistributorHub() {
       {showCatalog ? (
         <AutodistInner />
       ) : showRmatv ? (
-        <>
-          <RmatvInner />
-          {row && <ManualParts key={row.id} dist={row} />}
-        </>
+        <RmatvInner />
       ) : row && !isAutodist(row.name) && !isRmatv(row.name) ? (
         <ManualParts key={row.id} dist={row} />
       ) : row ? (

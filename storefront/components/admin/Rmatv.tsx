@@ -1,13 +1,12 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
-import { Badge, Notice, Pager, btnCls, btn2Cls, inputCls } from "./ui";
+import { Badge, Notice, btnCls, btn2Cls, inputCls } from "./ui";
 import { parseDelimited } from "./rmatvCsv";
-import CatalogTh from "./CatalogTh";
+import RmatvCatalog from "./RmatvCatalog";
+import RmatvLinks from "./RmatvLinks";
 import RmatvSftp, { SFTP_SOURCE_LABELS } from "./RmatvSftp";
-import RmatvOverview from "./RmatvOverview";
 
 // Rocky Mountain ATV/MC: its catalog (read from a file you upload) and the tools around it. Owners and admins only.
 // This is the distributor's licensed data: dealer cost and stock stay on this screen and are never shown on the public store.
@@ -27,38 +26,12 @@ type Run = {
   note: string | null;
   created_by: string | null;
 };
-type Item = {
-  id: number;
-  sku: string;
-  mfr_number: string | null;
-  manufacturer: string | null;
-  name: string | null;
-  list_price: number | null;
-  dealer_cost: number | null;
-  my_cost?: number | null; // your own price from the price file, when there is one (it replaces the dealer cost)
-  map_price?: number | null;
-  image?: string | null; // first photo link from the feed
-  qty_other: number;
-  upc: string | null;
-  unit_of_measure: string | null;
-  updated_at: string | null;
-  active: boolean;
-  product_id: number | null; // the SINGLE product of this part (never a kit that contains it)
-  product_title: string | null;
-  product_sku: string | null; // the EI- number
-  product_image?: string | null; // main photo of that product (thumbnail)
-  product_image_full?: string | null;
-  products: number;
-};
 type FieldDef = { key: string; label: string; required: boolean };
 type Finish = { ok: boolean; needs_review: boolean; missing?: number; held?: number; stored: number; new: number; skipped?: number; retired?: number };
 type Staged = { fileName: string; header: string[]; data: string[][]; fields: FieldDef[]; mapping: Record<string, number | ""> };
 
 const PIECE = 3000; // data lines per request
 const n = (x: number) => x.toLocaleString("en-US");
-const money = (v: number | string | null | undefined) =>
-  v == null || v === "" ? "—" : `$${Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const pct = (v: number | null) => (v == null ? "—" : `${v.toFixed(0)}%`);
 const tone = (s: string) => (s === "done" ? "green" : s === "running" ? "blue" : "amber");
 
 function runLabel(r: Run) {
@@ -72,236 +45,6 @@ function runLabel(r: Run) {
 }
 
 type Msg = { kind: "error" | "success" | "info"; text: string } | null;
-
-/* ------------------------------------------------------------------ catalog */
-
-type Filters = { q: string; brand: string; inStock: boolean; status: "active" | "inactive" | "all"; only: "all" | "no_product" | "has_product"; sort: string; desc: boolean };
-const LIMIT = 50;
-
-function RmatvCatalog({ hasData, version }: { hasData: boolean; version: number }) {
-  const [f, setF] = useState<Filters>({ q: "", brand: "", inStock: false, status: "active", only: "all", sort: "sku", desc: false });
-  const [qDraft, setQDraft] = useState("");
-  const [offset, setOffset] = useState(0);
-  const [items, setItems] = useState<Item[] | null>(null);
-  const [total, setTotal] = useState(0);
-  const [brands, setBrands] = useState<{ name: string; count: number }[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [flash, setFlash] = useState<Msg>(null);
-  const [busyId, setBusyId] = useState<number | null>(null);
-  const [tick, setTick] = useState(0);
-
-  async function makeProduct(it: Item) {
-    if (!window.confirm(`Make a product from ${it.sku}?\n\nIt is created unpublished, with this part as its distributor part and the custom label set to the Mfr no. (or the SKU) when that is free.`)) return;
-    setBusyId(it.id);
-    setFlash(null);
-    try {
-      const r = await api<{ product_id: number; title: string; custom_label: string | null }>(`/rmatv/items/${it.id}/make-product`, { method: "POST" });
-      setFlash({
-        kind: "info",
-        text: `Made product #${r.product_id}: ${r.title}${r.custom_label ? ` (custom label ${r.custom_label})` : ". Its custom label was left blank: that number is already a label or cannot be one"}. It is NOT published; set a price, photos and category on the product.`,
-      });
-      setTick((x) => x + 1);
-    } catch (e) {
-      setFlash({ kind: "error", text: errMsg(e) });
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  useEffect(() => {
-    api<{ items: { name: string; count: number }[] }>("/rmatv/brands").then((r) => setBrands(r.items)).catch(() => setBrands([]));
-  }, [version]);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const p = new URLSearchParams({ limit: String(LIMIT), offset: String(offset), sort: f.sort, status: f.status });
-      if (f.q) p.set("q", f.q);
-      if (f.brand) p.set("brand", f.brand);
-      if (f.inStock) p.set("in_stock", "true");
-      if (f.only !== "all") p.set("only", f.only);
-      if (f.desc) p.set("desc", "true");
-      const r = await api<{ total: number; items: Item[] }>(`/rmatv/items?${p}`);
-      setItems(r.items);
-      setTotal(r.total);
-    } catch (e) {
-      setError(errMsg(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [f, offset, version, tick]);
-
-  useEffect(() => {
-    if (hasData) void load();
-  }, [hasData, load]);
-
-  const change = (patch: Partial<Filters>) => {
-    setOffset(0);
-    setF((x) => ({ ...x, ...patch }));
-  };
-  const sortBy = (key: string) =>
-    change({ sort: key, desc: f.sort === key ? !f.desc : ["list", "cost", "margin", "stock", "updated"].includes(key) });
-  const Th = ({ k, children, right, title }: { k: string; children: ReactNode; right?: boolean; title?: string }) => (
-    <CatalogTh active={f.sort === k} dir={f.desc ? "desc" : "asc"} onClick={() => sortBy(k)} right={right} title={title}>
-      {children}
-    </CatalogTh>
-  );
-
-  if (!hasData) {
-    return (
-      <div className="rounded border border-gray-200 bg-white p-6 text-sm text-gray-600">
-        No Rocky Mountain parts are stored yet. Open the <b>Import</b> tab: connect to the SFTP feed, or upload the catalog or price list file from the Rocky Mountain dealer site.
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-end gap-3 rounded border border-gray-200 bg-white p-3 text-sm">
-        <label className="min-w-[16rem] flex-1">
-          <span className="mb-1 block text-xs text-gray-500">Search SKU, Mfr no., name, brand or barcode</span>
-          <input
-            className={inputCls}
-            value={qDraft}
-            onChange={(e) => setQDraft(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && change({ q: qDraft.trim() })}
-          />
-        </label>
-        <label>
-          <span className="mb-1 block text-xs text-gray-500">Brand</span>
-          <select className={`${inputCls} !w-48`} value={f.brand} onChange={(e) => change({ brand: e.target.value })}>
-            <option value="">(any)</option>
-            {brands.map((b) => (
-              <option key={b.name} value={b.name}>
-                {b.name} ({n(b.count)})
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span className="mb-1 block text-xs text-gray-500">Show</span>
-          <select className={`${inputCls} !w-36`} value={f.status} onChange={(e) => change({ status: e.target.value as Filters["status"] })}>
-            <option value="active">Current parts</option>
-            <option value="inactive">Dropped parts</option>
-            <option value="all">Both</option>
-          </select>
-        </label>
-        <label>
-          <span className="mb-1 block text-xs text-gray-500">Ours</span>
-          <select className={`${inputCls} !w-40`} value={f.only} onChange={(e) => change({ only: e.target.value as Filters["only"] })}>
-            <option value="all">(any)</option>
-            <option value="no_product">No product yet</option>
-            <option value="has_product">Has a product</option>
-          </select>
-        </label>
-        <label className="flex items-center gap-2 pb-2">
-          <input type="checkbox" checked={f.inStock} onChange={(e) => change({ inStock: e.target.checked })} />
-          In stock only
-        </label>
-        <button type="button" className={btnCls} onClick={() => change({ q: qDraft.trim() })}>
-          Search
-        </button>
-      </div>
-
-      {error && <Notice kind="error">{error}</Notice>}
-      {flash && <Notice kind={flash.kind}>{flash.text}</Notice>}
-
-      {total > LIMIT && (
-        <div className={loading ? "opacity-50" : ""}>
-          <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
-        </div>
-      )}
-
-      <div className="rounded border border-gray-200 bg-white p-2">
-        {/* the same table as the Automatic Distributors catalog: fixed layout, small text, sortable headings */}
-        <table className="w-full table-fixed text-left text-xs">
-          <colgroup>
-            {["2.75rem", "6.5rem", "6.5rem", "6.5rem", "", "2.5rem", "4.5rem", "4.5rem", "3.75rem", "3rem", "6.5rem", "5.5rem", "5rem"].map((w, i) => (
-              <col key={i} style={w ? { width: w } : undefined} />
-            ))}
-          </colgroup>
-          <thead className="text-gray-500">
-            <tr>
-              <th className="py-0.5 pr-2"></th>
-              <Th k="brand">Brand</Th>
-              <Th k="sku">SKU</Th>
-              <Th k="mfr">Mfr no.</Th>
-              <Th k="name">Name</Th>
-              <Th k="uom">Unit</Th>
-              <Th k="list" right>List</Th>
-              <Th k="cost" right>Cost</Th>
-              <Th k="margin" right title="(list − cost) / list">Margin</Th>
-              <Th k="stock" right>Total</Th>
-              <th className="whitespace-nowrap py-1 pr-3">Barcode</th>
-              <th className="whitespace-nowrap py-1 pr-3">Ours</th>
-              <Th k="updated">Changed</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {(items ?? []).map((it) => (
-              <tr key={it.id} className={`align-middle ${it.active ? "" : "text-gray-400"}`}>
-                <td className="py-0.5 pr-2">
-                  {/* the main photo of the product linked to this part */}
-                  {it.product_image || it.image ? (
-                    <a href={it.product_image_full ?? it.product_image ?? it.image ?? "#"} target="_blank" rel="noreferrer" title={it.product_image ? "The linked product's main photo. Click for full size" : "Rocky Mountain's photo. Click for full size"}>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={(it.product_image ?? it.image) as string} alt="" loading="lazy" className="h-9 w-9 rounded border border-gray-100 bg-white object-contain" />
-                    </a>
-                  ) : (
-                    <div className="h-9 w-9" />
-                  )}
-                </td>
-                <td className="truncate py-0.5 pr-2" title={it.manufacturer ?? ""}>{it.manufacturer ?? "—"}</td>
-                <td className="truncate py-0.5 pr-2 font-medium" title={it.sku}>
-                  {it.sku}
-                  {!it.active && <span className="ml-1"><Badge tone="gray">retired</Badge></span>}
-                </td>
-                <td className="truncate py-0.5 pr-2" title={it.mfr_number ?? ""}>{it.mfr_number ?? "—"}</td>
-                <td className="truncate py-0.5 pr-2" title={it.name ?? ""}>{it.name ?? "—"}</td>
-                <td className="whitespace-nowrap py-0.5 pr-2">{it.unit_of_measure ?? ""}</td>
-                <td className="whitespace-nowrap py-0.5 pr-2 text-right" title={it.map_price != null ? `MAP ${money(it.map_price)}` : ""}>{money(it.list_price)}{it.map_price != null && <span className="text-gray-400">*</span>}</td>
-                <td className="whitespace-nowrap py-0.5 pr-2 text-right" title={it.my_cost != null && it.dealer_cost != null ? `Catalog price ${money(it.dealer_cost)}` : ""}>{money(it.my_cost ?? it.dealer_cost)}</td>
-                <td className="whitespace-nowrap py-0.5 pr-2 text-right">
-                  {it.list_price == null || (it.my_cost ?? it.dealer_cost) == null || !it.list_price ? (
-                    "—"
-                  ) : (
-                    <span className={it.list_price - (it.my_cost ?? it.dealer_cost ?? 0) < 0 ? "text-red-700" : ""}>{pct(((it.list_price - (it.my_cost ?? it.dealer_cost ?? 0)) / it.list_price) * 100)}</span>
-                  )}
-                </td>
-                <td className="whitespace-nowrap py-0.5 pr-2 text-right font-medium">{n(it.qty_other)}</td>
-                <td className="truncate py-0.5 pr-2" title={it.upc ?? ""}>{it.upc ?? "—"}</td>
-                <td className="truncate py-0.5 pr-2">
-                  {it.product_id ? (
-                    <Link href={`/admin/products/${it.product_id}`} title={it.product_title ?? ""}>
-                      <Badge tone="green">{it.product_sku ?? `#${it.product_id}`}</Badge>
-                    </Link>
-                  ) : (
-                    <button type="button" className="rounded border border-gray-300 px-1.5 py-0 text-xs hover:bg-gray-50 disabled:opacity-50" disabled={busyId === it.id || !it.active} onClick={() => void makeProduct(it)}>
-                      Make product
-                    </button>
-                  )}
-                </td>
-                <td className="whitespace-nowrap py-0.5 pr-2 text-gray-500">{it.updated_at ? new Date(it.updated_at).toLocaleDateString() : "—"}</td>
-              </tr>
-            ))}
-            {items && items.length === 0 && (
-              <tr>
-                <td colSpan={13} className="p-6 text-center text-gray-500">
-                  Nothing found. Try fewer words.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      <div className={loading ? "opacity-50" : ""}>
-        <Pager total={total} limit={LIMIT} offset={offset} onChange={setOffset} />
-      </div>
-    </div>
-  );
-}
 
 /* ------------------------------------------------------------------- import */
 
@@ -507,7 +250,7 @@ function RmatvImport({ runs, onChanged }: { runs: Run[]; onChanged: () => void }
 
 /* --------------------------------------------------------------------- page */
 
-type Tab = "catalog" | "overview" | "import";
+type Tab = "catalog" | "import";
 
 export default function RmatvInner() {
   const [counts, setCounts] = useState<Counts | null>(null);
@@ -546,14 +289,14 @@ export default function RmatvInner() {
       )}
 
       <div className="flex flex-wrap gap-1 border-b border-gray-200">
-        {(["catalog", "overview", "import"] as const).map((k) => (
+        {(["catalog", "import"] as const).map((k) => (
           <button
             key={k}
             type="button"
             onClick={() => setTab(k)}
             className={`-mb-px rounded-t px-4 py-2 text-sm ${tab === k ? "border border-gray-200 border-b-white bg-white font-medium" : "text-gray-600 hover:text-gray-900"}`}
           >
-            {k === "catalog" ? "Catalog" : k === "overview" ? "Overview" : "Import"}
+            {k === "catalog" ? "Catalog" : "Import"}
           </button>
         ))}
       </div>
@@ -561,9 +304,9 @@ export default function RmatvInner() {
       <div className={tab === "catalog" ? "" : "hidden"}>
         <RmatvCatalog hasData={!!counts?.active} version={version} />
       </div>
-      {tab === "overview" && <RmatvOverview version={version} />}
       <div className={tab === "import" ? "" : "hidden"}>
         <RmatvImport runs={runs} onChanged={() => void refresh()} />
+        <div className="mt-5"><RmatvLinks onChanged={() => void refresh()} /></div>
       </div>
     </div>
   );

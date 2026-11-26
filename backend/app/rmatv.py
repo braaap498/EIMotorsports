@@ -5,7 +5,10 @@ Mounted at /admin/rmatv/* (owner/admin only).
 
   GET  /summary           what is stored, and the last imports
   GET  /brands            brands in the catalog, for the filter
-  GET  /items             browse / search the stored parts
+  GET  /items             browse / search the stored parts (same filters as the Automatic Distributors catalog)
+  POST /items/{id}/make-product   make the part's single product; its photo links become the product's photos
+  POST /photos/store      download the photos of those products into our storage (background)   GET /photos/status
+  GET/POST /relink        carry the products' links from the hand-typed saved parts (and dropped catalog parts) to the catalog parts
   POST /import/detect     which column of the file feeds which field (reads nothing, changes nothing)
   POST /import/start      begin an import (the browser then sends the rows in pieces)
   POST /import/chunk      one piece of the file
@@ -40,6 +43,11 @@ HOW IT FITS
   * Two catalog files: the main catalog file (Inventory_TIER_1_v3.csv, full detail) and an optional second one for the OEM parts
     (Inventory_TIER_1_withOEM_v2.csv adds Honda, Kawasaki, Suzuki and CFMoto parts). Both are read in ONE run, so the retire step
     sees them together. A part in both files is taken from the main file; the second file only adds the parts the first lacks.
+  * Photo links come with the catalog file (its PICTURE column) in the same run. A product made from the part gets them as
+    product_photos rows and they are downloaded into our storage; the part itself keeps only the link. A row with no link
+    never wipes the links already held.
+  * The old hand-typed list (Distributor parts > Saved parts) is replaced by the catalog. A product's pointer to its part
+    (product_kit_parts.manual_item_id) is moved to the same catalog part by /relink; nothing is deleted.
   * We do not know the exact columns of Rocky Mountain's file, so the browser reads the file, /import/detect
     guesses which column is which, and the person can correct each guess before anything is stored.
 
@@ -60,6 +68,7 @@ import stat as _stat
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -113,10 +122,13 @@ FIELDS: list[tuple[str, str, bool]] = [
     ("qty_2", "More stock (added to the stock above, e.g. a second warehouse)", False),
     ("upc", "UPC / barcode", False),
     ("unit_of_measure", "Unit of measure", False),
+    ("images", "Photo link(s)", False),
 ]
 
 # Header names (case, spaces and punctuation ignored), best guess first. The lists do not overlap, so one column
 # never feeds two fields. A bare "Price" or "Cost" is NOT guessed: it could be retail or ours, so the person picks it.
+# a column of photo links (Rocky Mountain's own files call it PICTURE); the best guess first
+_IMAGE_ALIASES = ["picture", "pictureurl", "pictureurls", "pictures", "images", "imageurls", "imagelinks", "imageurl", "imagelink", "image", "photos", "photourls", "photourl", "photo"]
 _ALIASES: dict[str, list[str]] = {
     "sku": ["prodno", "rmatvpartnumber", "rmatvpart", "rmatvsku", "rockymountainpartnumber", "partnumber", "partno", "partnum", "part", "sku", "itemnumber", "itemno", "item", "productnumber", "productno", "stocknumber"],
     "name": ["itemname", "productname", "name", "partname", "partdescription", "productdescription", "itemdescription", "description", "title"],
@@ -128,6 +140,7 @@ _ALIASES: dict[str, list[str]] = {
     "qty_2": ["qtyky"],
     "upc": ["upc", "upccode", "upcnumber", "barcode", "ean", "gtin", "upcean"],
     "unit_of_measure": ["unitofmeasure", "uom", "unit", "packagequantity"],
+    "images": _IMAGE_ALIASES,
 }
 FIELD_KEYS = {k for k, _, _ in FIELDS}
 
@@ -199,6 +212,21 @@ def _qty(value: Optional[str]) -> int:
         return 0
 
 
+def _split_urls(cell: str) -> list[str]:
+    """A cell holding one or more photo links (separated by | ; , spaces or new lines) -> the http(s) links, in order, no repeats."""
+    urls: list[str] = []
+    for u in re.split(r"[|;\r\n]+|,\s*(?=https?://)|\s+(?=https?://)", (cell or "").strip()):
+        u = u.strip().replace(" ", "%20")
+        if u.lower().startswith(("http://", "https://")) and u not in urls:
+            urls.append(u[:500])
+    return urls
+
+
+def _clean_urls(images) -> list[str]:
+    """supplier_items.images (a list of links, or None) -> the usable links."""
+    return [u.strip() for u in (images or []) if u and u.strip().lower().startswith(("http://", "https://"))]
+
+
 def clean_row(values: list[str], mapping: dict[str, int]) -> Optional[dict]:
     """One file row + the column mapping -> the values stored. None when the row has no usable part number."""
 
@@ -224,6 +252,7 @@ def clean_row(values: list[str], mapping: dict[str, int]) -> Optional[dict]:
         "qty_other": min(_qty(get("qty")) + _qty(get("qty_2")), 100_000_000),
         "upc": upc,
         "upc_norm": norm_upc(upc),
+        "images": "\n".join(_split_urls(get("images"))[:6]),   # "" when the row has none: the links already stored are kept
     }
 
 
@@ -251,15 +280,17 @@ with incoming as (
   select * from unnest(
     cast(:sku as text[]), cast(:mfr as text[]), cast(:mfrn as text[]), cast(:brand as text[]),
     cast(:name as text[]), cast(:uom as text[]), cast(:lp as numeric[]), cast(:dc as numeric[]),
-    cast(:qo as integer[]), cast(:upc as text[]), cast(:upcn as text[])
+    cast(:qo as integer[]), cast(:upc as text[]), cast(:upcn as text[]), cast(:imgs as text[])
   ) as t(sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure, list_price, dealer_cost,
-         qty_other, upc, upc_norm)
+         qty_other, upc, upc_norm, imgs)
 ), up as (
   insert into supplier_items (supplier, sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure,
                               list_price, dealer_cost, qty_maine, qty_indiana, qty_nevada, qty_other, upc, upc_norm,
-                              last_run_id)
+                              last_run_id, images, images_synced_at)
   select :sup, sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure,
-         list_price, dealer_cost, 0, 0, 0, qty_other, upc, upc_norm, :run
+         list_price, dealer_cost, 0, 0, 0, qty_other, upc, upc_norm, :run,
+         case when nullif(imgs, '') is null then null else string_to_array(imgs, chr(10)) end,
+         case when nullif(imgs, '') is null then null else now() end
   from incoming
   on conflict (supplier, sku) do update set
     mfr_number = excluded.mfr_number, mfr_number_norm = excluded.mfr_number_norm,
@@ -267,6 +298,8 @@ with incoming as (
     list_price = excluded.list_price, dealer_cost = excluded.dealer_cost,
     qty_other = excluded.qty_other, upc = excluded.upc, upc_norm = excluded.upc_norm,
     last_seen_at = now(), last_run_id = excluded.last_run_id,
+    images = coalesce(excluded.images, supplier_items.images),
+    images_synced_at = case when excluded.images is not null then now() else supplier_items.images_synced_at end,
     updated_at = case
       when not supplier_items.active
         or (supplier_items.mfr_number, supplier_items.manufacturer, supplier_items.name, supplier_items.list_price,
@@ -304,6 +337,7 @@ def upsert_rows(db: Session, run_id: int, rows: list[dict]) -> int:
             "qo": col("qty_other"),
             "upc": col("upc"),
             "upcn": col("upc_norm"),
+            "imgs": [r.get("images") or "" for r in rows],
         },
     ).scalar()
     return int(new_rows or 0)
@@ -497,17 +531,30 @@ def brands(db: Session = Depends(get_db)):
     return {"items": [{"name": r.manufacturer, "count": r.n} for r in rows]}
 
 
+_COST = "coalesce(s.my_cost, s.dealer_cost)"   # your own price when the price file gave one, else the catalog's dealer price
 _SORTS = {
-    "sku": "s.sku",
-    "name": "lower(s.name)",
     "brand": "lower(s.manufacturer)",
+    "sku": "s.sku",
     "mfr": "s.mfr_number",
-    "cost": "s.dealer_cost",
+    "name": "lower(s.name)",
+    "uom": "s.unit_of_measure",
     "list": "s.list_price",
+    "cost": _COST,
+    "margin": f"(s.list_price - {_COST})",
+    "margin_pct": f"((s.list_price - {_COST}) / nullif(s.list_price, 0))",
     "stock": "s.qty_other",
     "updated": "s.updated_at",
-    "uom": "s.unit_of_measure",
-    "margin": "((s.list_price - s.dealer_cost) / nullif(s.list_price, 0))",
+    "seen": "s.last_seen_at",
+}
+# data gaps the browser can look for (same list as the Automatic Distributors catalog)
+_GAPS = {
+    "upc": "s.upc_norm is null",
+    "mfr": "s.mfr_number is null",
+    "name": "s.name is null",
+    "cost": f"{_COST} is null",
+    "list": "s.list_price is null",
+    "below_cost": f"(s.list_price is not null and {_COST} is not null and s.list_price < {_COST})",
+    "photo": "s.images is null",
 }
 
 
@@ -516,97 +563,159 @@ def _like(word: str) -> str:
     return "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-@router.get("/items")
-def items(
-    q: Optional[str] = Query(None, max_length=200, description="words anywhere: part number, manufacturer number, name, brand or UPC"),
-    brand: Optional[str] = Query(None, max_length=100),
-    in_stock: bool = False,
-    status: str = Query("active", pattern="^(active|inactive|all)$"),
-    only: str = Query("all", pattern="^(all|no_product|has_product)$", description="parts with / without their single product"),
-    sort: str = Query("sku", pattern="^(sku|name|brand|mfr|cost|list|stock|updated|uom|margin)$"),
-    desc: bool = False,
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
+def _filters(q, field, brand, status, stock, min_qty, max_qty, min_cost, max_cost, min_list, max_list,
+             min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days) -> tuple[str, str, dict]:
+    """(with-clause, where-clause, params) for the catalog browser. Every value is bound, never pasted in."""
+    from app.kits import SINGLES_CTE, single_exists  # late import, like the other modules here
+
     where = ["s.supplier = :sup"]
-    params: dict = {"sup": SUPPLIER, "n": limit, "o": offset}
+    params: dict = {"sup": SUPPLIER}
     if status == "active":
         where.append("s.active")
     elif status == "inactive":
         where.append("not s.active")
-    if brand:
-        where.append("lower(s.manufacturer) = lower(:brand)")
-        params["brand"] = brand.strip()
-    if in_stock:
-        where.append("s.qty_other > 0")
-    for i, word in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:6]):
-        params[f"w{i}"] = _like(word)
-        cond = (
-            f"s.sku ilike :w{i} or s.mfr_number ilike :w{i} or s.name ilike :w{i} or s.manufacturer ilike :w{i} or s.upc ilike :w{i}"
-        )
-        norm = re.sub(r"[^A-Za-z0-9]", "", word).upper()
-        if norm:  # dashes and spaces in part numbers are ignored, as everywhere else
-            params[f"p{i}"] = f"%{norm}%"
-            cond += (
-                f" or upper(regexp_replace(s.sku, '[^A-Za-z0-9]', '', 'g')) like :p{i} or s.mfr_number_norm like :p{i}"
-            )
-        digits = re.sub(r"\D", "", word).lstrip("0")
-        if len(digits) >= 8:  # a typed or scanned barcode: UPC-A and EAN-13 forms meet (same rule as norm_upc)
-            params[f"u{i}"] = f"%{digits}%"
-            cond += f" or s.upc_norm like :u{i}"
-        where.append(f"({cond})")
-    from app.kits import SINGLES_CTE, product_main_photos, single_count, single_exists, single_pick  # late import, like the other modules here
 
-    used = single_exists("supplier")
-    if only == "no_product":
-        where.append(f"not {used}")
-    elif only == "has_product":
-        where.append(used)
-    clause = " and ".join(where)
-    total = db.execute(text(f"with {SINGLES_CTE} select count(*) from supplier_items s where {clause}"), params).scalar()
-    order = f"{_SORTS[sort]} {'desc' if desc else 'asc'} nulls last, s.sku"
-    rows = db.execute(
+    cols = {
+        "sku": ["s.sku"], "mfr": ["s.mfr_number"], "name": ["s.name"], "brand": ["s.manufacturer"], "upc": ["s.upc"],
+        "all": ["s.sku", "s.mfr_number", "s.name", "s.manufacturer", "s.upc"],
+    }[field]
+    for i, word in enumerate([w for w in re.split(r"\s+", (q or "").strip()) if w][:8]):
+        params[f"w{i}"] = _like(word)
+        parts = [f"{c} ilike :w{i}" for c in cols]
+        norm = re.sub(r"[^A-Za-z0-9]", "", word).upper()
+        if len(norm) >= 3 and field in ("all", "mfr", "sku"):  # dashes and spaces in part numbers are ignored, as everywhere else
+            params[f"p{i}"] = f"%{norm}%"
+            parts.append(f"upper(regexp_replace(s.sku, '[^A-Za-z0-9]', '', 'g')) like :p{i}")
+            parts.append(f"s.mfr_number_norm like :p{i}")
+        digits = re.sub(r"\D", "", word).lstrip("0")
+        if len(digits) >= 8 and field in ("all", "upc"):  # a typed or scanned barcode: UPC-A and EAN-13 forms meet (same rule as norm_upc)
+            params[f"u{i}"] = f"%{digits}%"
+            parts.append(f"s.upc_norm like :u{i}")
+        where.append("(" + " or ".join(parts) + ")")
+
+    if brand:
+        params["brand"] = brand.strip()
+        where.append("lower(s.manufacturer) = lower(:brand)")
+    if uom:
+        params["uom"] = uom
+        where.append("s.unit_of_measure = :uom")
+    if stock == "in":
+        where.append("s.qty_other > 0")
+    elif stock == "out":
+        where.append("s.qty_other = 0")
+    for key, expr, op, val in (
+        ("min_qty", "s.qty_other", ">=", min_qty), ("max_qty", "s.qty_other", "<=", max_qty),
+        ("min_cost", _COST, ">=", min_cost), ("max_cost", _COST, "<=", max_cost),
+        ("min_list", "s.list_price", ">=", min_list), ("max_list", "s.list_price", "<=", max_list),
+    ):
+        if val is not None:
+            params[key] = val
+            where.append(f"{expr} {op} :{key}")
+    pct = f"((s.list_price - {_COST}) / nullif(s.list_price, 0) * 100)"
+    if min_margin_pct is not None:
+        params["min_mp"] = min_margin_pct
+        where.append(f"{pct} >= :min_mp")
+    if max_margin_pct is not None:
+        params["max_mp"] = max_margin_pct
+        where.append(f"{pct} <= :max_mp")
+    if missing:
+        where.append(_GAPS[missing])
+    with_clause = ""
+    if ours:  # "ours" = the part has its SINGLE product (a kit that merely contains it does not count)
+        with_clause = f"with {SINGLES_CTE} "
+        where.append(single_exists("supplier") if ours == "yes" else f"not {single_exists('supplier')}")
+    if changed_days:
+        params["cd"] = changed_days
+        where.append("s.updated_at >= now() - make_interval(days => :cd)")
+    if seen_days:
+        params["sd"] = seen_days
+        where.append("s.last_seen_at >= now() - make_interval(days => :sd)")
+    return with_clause, " and ".join(where), params
+
+
+@router.get("/items")
+def items(
+    q: Optional[str] = Query(None, max_length=200, description="every word must match"),
+    field: str = Query("all", pattern="^(all|sku|mfr|name|brand|upc)$", description="which column the words are matched against"),
+    brand: Optional[str] = Query(None, max_length=120),
+    status: str = Query("active", pattern="^(active|inactive|all)$"),
+    stock: Optional[str] = Query(None, pattern="^(in|out)$", description="in = stock at Rocky Mountain, out = none"),
+    min_qty: Optional[int] = Query(None, ge=0),
+    max_qty: Optional[int] = Query(None, ge=0),
+    min_cost: Optional[float] = Query(None, ge=0),
+    max_cost: Optional[float] = Query(None, ge=0),
+    min_list: Optional[float] = Query(None, ge=0),
+    max_list: Optional[float] = Query(None, ge=0),
+    min_margin_pct: Optional[float] = Query(None, description="(list - cost) / list, in percent"),
+    max_margin_pct: Optional[float] = Query(None),
+    uom: Optional[str] = Query(None, max_length=40),
+    missing: Optional[str] = Query(None, pattern="^(upc|mfr|name|cost|list|below_cost|photo)$", description="data gaps to find"),
+    ours: Optional[str] = Query(None, pattern="^(yes|no)$", description="the part already has its single product of ours"),
+    changed_days: Optional[int] = Query(None, ge=1, le=3650, description="price / stock / details changed within N days"),
+    seen_days: Optional[int] = Query(None, ge=1, le=3650, description="still in the feed as of N days ago"),
+    sort: str = Query("brand", pattern="^(" + "|".join(_SORTS) + ")$"),
+    dir: str = Query("asc", pattern="^(asc|desc)$"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """The catalog browser, the same as the Automatic Distributors one: any mix of filters; the totals describe everything that
+    matches, not just this page. Each row also says which single product of ours it already has (if any)."""
+    from app.kits import SINGLES_CTE, single_count, single_pick  # late import, like the other modules here
+
+    with_clause, clause, params = _filters(
+        q, field, brand, status, stock, min_qty, max_qty, min_cost, max_cost, min_list, max_list,
+        min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days,
+    )
+    agg = db.execute(
         text(
-            f"with {SINGLES_CTE} "
-            "select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, s.dealer_cost, "
-            "s.qty_other, s.upc, s.active, s.updated_at, s.my_cost, s.map_price, s.images[1] as image, "
-            # only the SINGLE product of this part (linked, or the same barcode / manufacturer #); a kit that contains it is not shown
-            f"{single_pick('supplier')} as product_id, "
-            f"{single_count('supplier')} as products "
-            f"from supplier_items s where {clause} order by {order} limit :n offset :o"
+            f"{with_clause}select count(*) as total, count(*) filter (where s.qty_other > 0) as in_stock, "
+            f"count(distinct s.manufacturer) as brands, min({_COST}) as min_cost, max({_COST}) as max_cost, "
+            f"avg({_COST}) as avg_cost, coalesce(sum({_COST} * s.qty_other), 0) as stock_value_at_cost, "
+            f"coalesce(sum(s.qty_other), 0) as units from supplier_items s where {clause}"
         ),
         params,
+    ).first()
+    order = f"{_SORTS[sort]} {'desc' if dir == 'desc' else 'asc'} nulls last, s.sku, s.id"
+    page = db.execute(
+        text(
+            f"with {SINGLES_CTE} "
+            f"select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, {_COST} as dealer_cost, "
+            "s.dealer_cost as standard_cost, s.my_cost, s.map_price, s.qty_other, s.qty_other as qty_total, s.upc, s.images, s.active, "
+            f"s.updated_at, s.last_seen_at, (s.list_price - {_COST}) as margin, "
+            f"((s.list_price - {_COST}) / nullif(s.list_price, 0) * 100) as margin_pct, "
+            f"{single_pick('supplier')} as product_id, {single_count('supplier')} as products "
+            f"from supplier_items s where {clause} order by {order} limit :n offset :o"
+        ),
+        {**params, "n": limit, "o": offset},
     ).all()
-    ids = [r.product_id for r in rows if r.product_id]
+    rows = []
+    for r in page:
+        d = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in r._mapping.items()}
+        d["products"] = int(d["products"] or 0)
+        rows.append(d)
+    ids = [d["product_id"] for d in rows if d["product_id"]]
     titles = {}
     if ids:
         titles = {t.id: (t.title, t.sku_display) for t in db.execute(text("select id, title, sku_display from products where id = any(cast(:i as bigint[]))"), {"i": ids}).all()}
-    photos = product_main_photos(db, ids)
-    out = []
-    for r in rows:
-        d = dict(r._mapping)
-        for k in ("list_price", "dealer_cost", "my_cost", "map_price"):
-            d[k] = float(d[k]) if d[k] is not None else None
+    for d in rows:
         d["product_title"], d["product_sku"] = titles.get(d["product_id"]) or (None, None)
-        d["product_image"], d["product_image_full"] = photos.get(d["product_id"]) or (None, None)
-        d["products"] = int(d["products"] or 0)
-        out.append(d)
-    return {"total": total, "items": out}
+    return {"total": agg.total, "rows": rows, "summary": {k: (float(v) if isinstance(v, Decimal) else v) for k, v in agg._mapping.items()}}
 
 
 @router.post("/items/{item_id}/make-product", status_code=201)
 def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     """Make the single product for one Rocky Mountain part, the way the Automatic Distributors page does: a new product (not
     published: no price yet) with one distributor part (quantity 1) that follows the catalog part, the part's manufacturer
-    number on the product, and the custom label set to the manufacturer number (else the SKU) when that is free. Refused only when
+    number on the product, and the custom label set to the SKU when that is free. The part's photo links (from the catalog file)
+    become the product's photos and are downloaded into our own storage right after (see _store_photos). Refused only when
     the part's SINGLE product already exists; a kit that contains the part does not stop it."""
     from app.admin_catalog import slugify  # late imports: those modules import this one's helpers
     from app.autodist import _product_title
     from app.kits import CLS_JOIN, CLS_MAX, SINGLES_CTE, TOKEN_RE, label_token_for, parts_mpn, single_pick
 
     it = db.execute(
-        text("select id, sku, mfr_number, manufacturer, name, dealer_cost, upc from supplier_items where id = :i and supplier = :s"),
+        text("select id, sku, mfr_number, manufacturer, name, dealer_cost, upc, images from supplier_items where id = :i and supplier = :s"),
         {"i": item_id, "s": SUPPLIER},
     ).first()
     if not it:
@@ -628,6 +737,7 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
     while db.execute(text("select 1 from products where slug = :s"), {"s": slug}).first():
         k += 1
         slug = f"{base}-{k}"
+    urls = _clean_urls(it.images)
     try:
         pid = db.execute(
             text(
@@ -654,15 +764,19 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
             mid = find_or_create(db, it.manufacturer)
             if mid:
                 db.execute(text("update products set part_manufacturer_id = :m where id = :p"), {"m": mid, "p": pid})
+        # the supplier's photo links become the product's photos (links only; the files are downloaded after this commit)
+        for i, url in enumerate(urls):
+            db.execute(
+                text("insert into product_photos (product_id, source_url, is_primary, sort_order) values (:p, :u, :pr, :o)"),
+                {"p": pid, "u": url, "pr": i == 0, "o": i},
+            )
         label = None
-        for cand in (it.sku,):  # the vendor SKU; a manufacturer number is only used where the person ticks it on the part
-            tok = label_token_for(cand or "")
-            if tok and TOKEN_RE.fullmatch(tok) and CLS_JOIN not in tok.lower() and len(tok) <= CLS_MAX and not db.execute(
-                text("select 1 from products o where lower(o.custom_label_sku) = lower(:t)"), {"t": tok}
-            ).first():
-                db.execute(text("update products set custom_label_sku = :t, updated_at = now() where id = :p"), {"t": tok, "p": pid})
-                label = tok
-                break
+        tok = label_token_for(it.sku or "")
+        if tok and TOKEN_RE.fullmatch(tok) and CLS_JOIN not in tok.lower() and len(tok) <= CLS_MAX and not db.execute(
+            text("select 1 from products o where lower(o.custom_label_sku) = lower(:t)"), {"t": tok}
+        ).first():
+            db.execute(text("update products set custom_label_sku = :t, updated_at = now() where id = :p"), {"t": tok, "p": pid})
+            label = tok
         db.commit()
     except HTTPException:
         db.rollback()
@@ -670,7 +784,8 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
     except Exception as e:
         db.rollback()
         raise HTTPException(500, f"Could not make the product: {str(e)[:300]}")
-    return {"product_id": pid, "title": title, "custom_label": label, "published": False}
+    return {"product_id": pid, "title": title, "custom_label": label, "published": False,
+            "photos": len(urls), "photos_saving": _start_photos() if urls else False}
 
 
 # ==========================================================================
@@ -680,14 +795,14 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
 # server, "Look at the files" shows each data file's columns, and the person says which file is the catalog, which holds their
 # prices and which holds photo links (saved in supplier_sync_settings.config). Columns are matched by NAME, so a file whose
 # columns move around still imports. Everything lands in supplier_items through upsert_rows, like the file upload.
-from app.autodist import _DETAIL_UPDATE, _LABEL_MATCH_SQL, _MATCH, _num, _open_downloaded  # noqa: E402
+from app import photo_store  # noqa: E402
+from app.autodist import _DETAIL_UPDATE, _LABEL_MATCH_SQL, _MATCH, _fetch_and_store, _num, _open_downloaded  # noqa: E402
 
 SFTP_TIMEOUT = 60
 SFTP_BATCH = 2000
 SCHEDULER_TICK_SECONDS = 30
 _DATA_EXT = (".csv", ".txt", ".tsv", ".dat", ".zip")
 _IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp")
-_COST = "coalesce(s.my_cost, s.dealer_cost)"   # your own price when the price file gave one, else the catalog's dealer price
 
 # the price file: our own cost, MAP and shipping facts. It only updates parts already stored; it never adds or retires parts.
 _PRICE_FIELDS: list[tuple[str, str]] = [
@@ -706,7 +821,7 @@ _PRICE_ALIASES: dict[str, list[str]] = {
 }
 _PHOTO_ALIASES: dict[str, list[str]] = {
     "sku": _ALIASES["sku"],
-    "images": ["images", "imageurls", "imagelinks", "photos", "photourls", "pictures", "pictureurls", "imageurl", "imagelink", "image", "photo", "photourl", "picture", "pictureurl"],
+    "images": _IMAGE_ALIASES,
     **{f"image_{i}": [f"imageurl{i}", f"image{i}", f"photo{i}", f"photourl{i}", f"picture{i}", f"imagelink{i}", f"imagepath{i}"] for i in range(1, 7)},
 }
 _MAP_KEYS = {"catalog_map": {k for k, _, _ in FIELDS}, "oem_map": {k for k, _, _ in FIELDS}, "price_map": {k for k, _ in _PRICE_FIELDS}, "photo_map": set(_PHOTO_ALIASES)}
@@ -1019,7 +1134,7 @@ def _catalog_job(run_id: int) -> bool:
         oem_path = (cfg.get("oem_file") or "").strip()
         if oem_path and oem_path == path:
             raise HTTPException(400, "The catalog file and the OEM file are the same file. Choose a different file for the OEM parts, or choose none.")
-        n = {"seen": 0, "skipped": 0, "new": 0, "dupes": 0, "from_oem": 0}
+        n = {"seen": 0, "skipped": 0, "new": 0, "dupes": 0, "from_oem": 0, "photos": 0}
         taken: set[str] = set()   # part numbers the first file stored in this run (only kept when there is a second file)
 
         def load(file_path: str, overrides: Optional[dict], first: bool) -> str:
@@ -1034,6 +1149,7 @@ def _catalog_job(run_id: int) -> bool:
                     rows = list(batch.values())
                     n["new"] += upsert_rows(db, run_id, rows)
                     n["seen"] += len(rows)
+                    n["photos"] += sum(1 for r in rows if r.get("images"))
                     if not first:
                         n["from_oem"] += len(rows)
                     db.execute(text("update supplier_import_runs set rows_seen = :n, rows_new = :w, rows_skipped = :k where id = :i"),
@@ -1072,7 +1188,7 @@ def _catalog_job(run_id: int) -> bool:
             sigs.append(load(oem_path, cfg.get("oem_map"), False))
         sig = "+".join(sigs)
         res = _finish_run(db, run_id, n["seen"] + n["skipped"], False)
-        oem_note = f" {n['from_oem']:,} of them come from the OEM file." if oem_path else ""
+        oem_note = (f" {n['from_oem']:,} of them come from the OEM file." if oem_path else "") + (f" {n['photos']:,} came with photo links." if n["photos"] else "")
         if res.get("needs_review"):
             _sync_note(db, summary=f"Stored {n['seen']:,} parts; waiting for you to confirm retiring the missing ones.{oem_note}", signature=sig, changed=True)
         else:
@@ -1129,10 +1245,9 @@ def _clean_photo(raw: dict) -> Optional[dict]:
     cells = [raw.get(f"image_{i}") or "" for i in range(1, 7)] + [raw.get("images") or ""]
     urls: list[str] = []
     for cell in cells:
-        for u in re.split(r"[|;\r\n]+|,\s*(?=https?://)|\s+(?=https?://)", cell.strip()):
-            u = u.strip().replace(" ", "%20")
-            if u.lower().startswith(("http://", "https://")) and u not in urls:
-                urls.append(u[:500])
+        for u in _split_urls(cell):
+            if u not in urls:
+                urls.append(u)
     return {"sku": sku, "images": "\n".join(urls[:6])}
 
 
@@ -1601,6 +1716,23 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
             d.pop("upc_n", None)
             d.pop("mpn_n", None)
             mine.append(d)
+    linked = db.execute(
+        text(
+            "select p.id, p.sku_display as sku, p.title, coalesce(p.quantity_on_hand, 0) as on_hand, p.list_price, p.cost, coalesce(p.is_active, true) as is_active "
+            "from product_kit_parts k join products p on p.id = k.product_id where k.supplier_item_id = :i group by p.id order by p.id limit 25"
+        ),
+        {"i": item_id},
+    ).all()
+    have = {m["id"] for m in mine}
+    for f in reversed(linked):  # the products that follow this very part come first
+        d = {k: (float(v) if isinstance(v, Decimal) else v) for k, v in f._mapping.items()}
+        if d["id"] in have:
+            for m in mine:
+                if m["id"] == d["id"]:
+                    m["by"] = "linked part"
+        else:
+            d["by"] = "linked part"
+            mine.insert(0, d)
     cols = f"id, sku, mfr_number, manufacturer, name, list_price, {_COST.replace('s.', '')} as dealer_cost, qty_other, upc, active"
 
     def similar(where: str, val: str) -> list[dict]:
@@ -1649,3 +1781,237 @@ def match_report(db: Session = Depends(get_db)):
     counts["label"] = len({f["id"] for f in label_rows})
     return {"total_products": len(rows), "counts": counts, "review": review, "review_limited": len(review_ids) == 300,
             "label_review": label_rows[:400], "label_limited": len(label_rows) > 400}
+
+
+# --------------------------------------------------------------------------
+# photos: the supplier's links -> our own storage (same as Automatic Distributors)
+# --------------------------------------------------------------------------
+# A product made from a part starts with the part's photo LINKS (product_photos.source_url, no image_key). This downloads each
+# one into our storage (same bucket, resizing and keys as an uploaded photo) and fills in image_key. A hidden photo is skipped.
+# Only rows still missing a stored file are touched, so running it again is harmless.
+_PHOTO_PENDING = (
+    "from product_photos pp where pp.image_key is null and nullif(btrim(pp.source_url), '') is not null "
+    "and not coalesce(pp.hidden, false) and pp.source_url not ilike '%ebay%' "
+    "and exists (select 1 from product_kit_parts k join supplier_items s on s.id = k.supplier_item_id "
+    "            where k.product_id = pp.product_id and s.supplier = :s)"
+)
+_PHOTO_WORKERS = 6
+_photo_state: dict = {"running": False, "message": "", "done": 0, "total": 0, "stored": 0, "failed": 0, "errors": [], "finished_at": None}
+_photo_lock = threading.Lock()
+
+
+def _begin_photo_run() -> bool:
+    """Claim the photo run. False when one is already going."""
+    with _photo_lock:
+        if _photo_state["running"]:
+            return False
+        _photo_state.update(running=True, message="Starting…", done=0, total=0, stored=0, failed=0, errors=[], finished_at=None)
+        return True
+
+
+def _store_photos(limit: int = 2000) -> dict:
+    """Download the pending photos into storage. The caller has already claimed the run with _begin_photo_run().
+    Never raises; the outcome is in the returned counts and in _photo_state["message"]."""
+    gen = get_db()
+    db = next(gen)
+    stored = failed = dup = 0
+    errors: list[str] = []
+    total = 0
+    try:
+        rows = db.execute(
+            text(f"select pp.id, pp.product_id, pp.source_url {_PHOTO_PENDING} order by pp.product_id, pp.sort_order, pp.id limit :lim"),
+            {"s": SUPPLIER, "lim": limit},
+        ).all()
+        total = len(rows)
+        _photo_state.update(total=total, done=0, message=f"Saving {total:,} photo{'' if total == 1 else 's'} to storage…")
+        stop = threading.Event()
+        with ThreadPoolExecutor(max_workers=_PHOTO_WORKERS) as pool:
+            futs = {pool.submit(_fetch_and_store, r.source_url.strip(), stop): r for r in rows}
+            for n, fut in enumerate(as_completed(futs), 1):
+                r = futs[fut]
+                try:
+                    key = fut.result()
+                except Exception as e:
+                    failed += 1
+                    if len(errors) < 5 and str(e) != "stopped":
+                        errors.append(f"product {r.product_id}: {str(e)[:150]}")
+                else:
+                    try:
+                        on_product = db.execute(
+                            text("select 1 from product_photos where product_id = :p and image_key = :k and id <> :id limit 1"),
+                            {"p": r.product_id, "k": key, "id": r.id},
+                        ).first()
+                        if on_product:
+                            db.execute(text("update product_photos set hidden = true where id = :id"), {"id": r.id})
+                            dup += 1
+                        else:
+                            db.execute(
+                                text("update product_photos set image_key = :k, storage_path = :sp where id = :id"),
+                                {"k": key, "sp": photo_store.full_path(key), "id": r.id},
+                            )
+                            stored += 1
+                    except Exception as e:
+                        db.rollback()
+                        failed += 1
+                        if len(errors) < 5:
+                            errors.append(f"product {r.product_id}: {str(e)[:150]}")
+                if n % 25 == 0:
+                    db.commit()
+                _photo_state.update(done=n, stored=stored, failed=failed, errors=errors)
+        db.commit()
+        left = db.execute(text(f"select count(*) {_PHOTO_PENDING}"), {"s": SUPPLIER}).scalar() or 0
+        msg = f"Saved {stored:,} photo{'' if stored == 1 else 's'} to storage; {failed:,} could not be saved."
+        if dup:
+            msg += f" {dup:,} duplicate{'' if dup == 1 else 's'} turned off."
+        if left:
+            msg += f" {left:,} still waiting; run it again to continue."
+        _photo_state["message"] = msg
+    except Exception as e:
+        db.rollback()
+        log.exception("saving Rocky Mountain photos failed")
+        _photo_state["message"] = f"Stopped: {str(e)[:300]}"
+    finally:
+        _photo_state.update(running=False, stored=stored, failed=failed, errors=errors, finished_at=time.time())
+        gen.close()
+    return {"total": total, "stored": stored, "failed": failed, "duplicates": dup, "message": _photo_state["message"]}
+
+
+def _start_photos(limit: int = 500) -> bool:
+    """Start downloading the pending photos in the background (a no-op when a run is already going). True when one was started."""
+    if not _begin_photo_run():
+        return False
+    threading.Thread(target=_store_photos, args=(limit,), daemon=True, name="rmatv-store-photos").start()
+    return True
+
+
+class StorePhotosIn(BaseModel):
+    limit: int = Field(500, ge=1, le=5000)
+
+
+@router.post("/photos/store")
+def photos_store(body: StorePhotosIn, user: AuthUser = Depends(require_admin)):
+    """Download the photos of products made from Rocky Mountain parts into our storage. Runs in the background."""
+    if not _start_photos(body.limit):
+        raise HTTPException(409, "Photos are already being saved.")
+    return {"running": True}
+
+
+@router.get("/photos/status")
+def photos_status(db: Session = Depends(get_db)):
+    pending = db.execute(text(f"select count(*) {_PHOTO_PENDING}"), {"s": SUPPLIER}).scalar() or 0
+    return {**{k: v for k, v in _photo_state.items()}, "pending": int(pending)}
+
+
+# --------------------------------------------------------------------------
+# carrying the product links over to the catalog parts
+# --------------------------------------------------------------------------
+# Before the catalog file was loaded, Rocky Mountain parts were typed by hand ("saved parts"); a product points at its part through
+# product_kit_parts (manual_item_id for a saved part, supplier_item_id for a catalog part). When the catalog replaces that list,
+# each pointer moves to the catalog part that is the SAME part, matched in this order to ONE active catalog part:
+#   1. the same part number (dashes, spaces and case ignored)
+#   2. the same manufacturer number (only when exactly one part has it; "brand differs" matches are only moved on request)
+#   3. the same barcode (only when exactly one part has it)
+# More than one candidate, or none, leaves the pointer exactly as it is. The product's own part number, custom label and price are
+# never touched; only which part it points at. Nothing is deleted.
+_RELINK_SQL = r"""
+with dist as (select id from po_distributors where name ~* 'rocky\s*mountain\s*atv|rmatv'),
+tgt as materialized (
+  select id, upper(regexp_replace(sku, '[^A-Za-z0-9]', '', 'g')) as sku_n, mfr_number_norm as mfr_n,
+         case when length(coalesce(upc_norm, '')) >= 8 then upc_norm end as upc_n, manufacturer as brand
+  from supplier_items where supplier = :s and active
+),
+src as (
+  select k.id as kid, k.product_id, 'saved part' as kind, m.part_number as old_number, m.manufacturer as brand,
+         nullif(upper(regexp_replace(coalesce(m.part_number, ''), '[^A-Za-z0-9]', '', 'g')), '') as sku_n,
+         nullif(upper(regexp_replace(coalesce(m.mfr_number, ''), '[^A-Za-z0-9]', '', 'g')), '') as mfr_n,
+         cast(null as text) as upc_n
+  from product_kit_parts k join manual_catalog_items m on m.id = k.manual_item_id
+  where k.supplier_item_id is null and m.distributor_id in (select id from dist)
+  union all
+  select k.id, k.product_id, 'dropped part', o.sku, o.manufacturer,
+         nullif(upper(regexp_replace(o.sku, '[^A-Za-z0-9]', '', 'g')), ''), o.mfr_number_norm,
+         case when length(coalesce(o.upc_norm, '')) >= 8 then o.upc_norm end
+  from product_kit_parts k join supplier_items o on o.id = k.supplier_item_id and o.supplier = :s and not o.active
+),
+by_sku as (select s.kid, array_agg(t.id order by t.id) as ids from src s join tgt t on s.sku_n is not null and t.sku_n = s.sku_n group by s.kid),
+by_mfr as (
+  select s.kid, array_agg(t.id order by t.id) as ids,
+         bool_and(s.brand is null or t.brand is null or lower(btrim(s.brand)) = lower(btrim(t.brand))) as agree
+  from src s join tgt t on s.mfr_n is not null and t.mfr_n = s.mfr_n group by s.kid),
+by_upc as (select s.kid, array_agg(t.id order by t.id) as ids from src s join tgt t on s.upc_n is not null and t.upc_n = s.upc_n group by s.kid)
+select s.kid, s.product_id, s.kind, s.old_number,
+       case when cardinality(bs.ids) = 1 then bs.ids[1]
+            when bs.ids is null and cardinality(bm.ids) = 1 then bm.ids[1]
+            when bs.ids is null and bm.ids is null and cardinality(bu.ids) = 1 then bu.ids[1] end as target_id,
+       case when cardinality(bs.ids) = 1 then 'part number'
+            when bs.ids is null and cardinality(bm.ids) = 1 then case when bm.agree then 'manufacturer number' else 'manufacturer number, brand differs' end
+            when bs.ids is null and bm.ids is null and cardinality(bu.ids) = 1 then 'barcode' end as matched_by,
+       coalesce(cardinality(bs.ids), cardinality(bm.ids), cardinality(bu.ids), 0) as candidates
+from src s left join by_sku bs on bs.kid = s.kid left join by_mfr bm on bm.kid = s.kid left join by_upc bu on bu.kid = s.kid
+"""
+_LOOSE = "manufacturer number, brand differs"
+
+
+def _relink_plan(db: Session) -> list[dict]:
+    rows = db.execute(
+        text(
+            f"with plan as ({_RELINK_SQL}) "
+            "select r.kid, r.product_id, r.kind, r.old_number, r.target_id, r.matched_by, r.candidates, "
+            "p.sku_display as product_sku, p.title as product_title, t.sku as new_sku, t.manufacturer as new_brand, t.name as new_name "
+            "from plan r join products p on p.id = r.product_id left join supplier_items t on t.id = r.target_id order by r.kid"
+        ),
+        {"s": SUPPLIER},
+    ).all()
+    return [dict(r._mapping) for r in rows]
+
+
+@router.get("/relink")
+def relink_preview(db: Session = Depends(get_db)):
+    """What carrying the product links over to the catalog would do. Changes nothing."""
+    plan = _relink_plan(db)
+    by: dict[str, int] = {}
+    for r in plan:
+        key = r["matched_by"] or ("several parts match" if r["candidates"] > 1 else "no matching part")
+        by[key] = by.get(key, 0) + 1
+    ready = [r for r in plan if r["target_id"] and r["matched_by"] != _LOOSE]
+    loose = [r for r in plan if r["matched_by"] == _LOOSE]
+    sample = sorted(plan, key=lambda r: (r["target_id"] is not None and r["matched_by"] != _LOOSE, r["kid"]))[:300]
+    return {
+        "total": len(plan), "from_saved_parts": sum(1 for r in plan if r["kind"] == "saved part"),
+        "from_dropped_parts": sum(1 for r in plan if r["kind"] == "dropped part"),
+        "ready": len(ready), "brand_differs": len(loose), "left_alone": len(plan) - len(ready) - len(loose),
+        "by": by,
+        "number_changes": sum(1 for r in ready if re.sub(r"[^A-Za-z0-9]", "", (r["old_number"] or "")).upper() != re.sub(r"[^A-Za-z0-9]", "", (r["new_sku"] or "")).upper()),
+        "sample": [
+            {"product_id": r["product_id"], "product_sku": r["product_sku"], "product_title": r["product_title"], "kind": r["kind"],
+             "old_number": r["old_number"], "new_sku": r["new_sku"], "new_brand": r["new_brand"], "new_name": r["new_name"],
+             "matched_by": r["matched_by"], "candidates": r["candidates"]}
+            for r in sample
+        ],
+        "limited": len(plan) > len(sample),
+    }
+
+
+class RelinkIn(BaseModel):
+    include_brand_differs: bool = False   # also move the matches made by manufacturer number alone where the brands differ
+
+
+@router.post("/relink")
+def relink_apply(body: RelinkIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Point each product's distributor part at the catalog part that is the same part (see the rules above). Safe to run again."""
+    plan = _relink_plan(db)
+    move = [r for r in plan if r["target_id"] and (r["matched_by"] != _LOOSE or body.include_brand_differs)]
+    if move:
+        try:
+            db.execute(
+                text(
+                    "update product_kit_parts k set supplier_item_id = v.tid, manual_item_id = null "
+                    "from unnest(cast(:kids as bigint[]), cast(:tids as bigint[])) as v(kid, tid) where k.id = v.kid"
+                ),
+                {"kids": [r["kid"] for r in move], "tids": [r["target_id"] for r in move]},
+            )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(500, f"Could not move the links: {str(e)[:300]}")
+    return {"moved": len(move), "products": len({r["product_id"] for r in move}), "left_alone": len(plan) - len(move)}
