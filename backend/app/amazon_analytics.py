@@ -8,12 +8,15 @@ Read-only toward Amazon: nothing here calls Amazon.
   GET  /summary              ?account=&days=    totals: orders, units, revenue, fees, estimated margin
   GET  /daily                ?account=&days=    one row per day
   GET  /top-products         ?account=&days=&limit=   best sellers by revenue (linked products only show a product id)
+  GET  /overview             ?account=&start=&end=    everything the Amazon tab of the Analytics page needs (dates, not "days"); refreshes the
+                                                      rollup first when it is empty or more than 30 minutes old
 
 rebuild(db) can also be called from the background timer after a poll. Cancelled orders are excluded.
 Margin is an estimate: revenue - refunds (item price part, from amazon_finances) - fees (when Amazon gave them) - product cost x units x pieces per sale. Lines whose product has no
 cost are counted in revenue but flagged in `lines_without_cost`.
 """
 import logging
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -133,3 +136,101 @@ def top_products(account: str = "", days: int = Query(30, ge=1, le=730), limit: 
              group by l.product_id, coalesce(l.product_id::text, l.sku)
              order by revenue desc limit :lim"""), p).all()
     return {"products": [{**dict(r._mapping), "revenue": float(r.revenue), "units": int(r.units)} for r in rows]}
+
+
+# ---- Analytics page (Amazon tab): one call with everything the tab shows, for a date range like the eBay and QuickBooks tabs.
+
+def _refresh_if_stale(db: Session) -> None:
+    """Keep the rollup fresh without a timer: empty -> build two years, older than 30 minutes -> redo the last 90 days."""
+    try:
+        r = db.execute(text(
+            "select count(*) n, coalesce(extract(epoch from (now() - max(refreshed_at))), 1e9) age from amazon_analytics_daily"
+        )).first()
+        if r.n == 0:
+            rebuild(db, None, 730)
+        elif float(r.age) > 1800:
+            rebuild(db, None, 90)
+    except Exception:
+        db.rollback()
+        log.exception("could not refresh the Amazon analytics rollup")
+
+
+def _range(account: str, start: Optional[date], end: Optional[date]):
+    where, p = ["true"], {}
+    if account.strip():
+        where.append("account = :a")
+        p["a"] = account.strip()
+    if start:
+        where.append("day >= :s")
+        p["s"] = start
+    if end:
+        where.append("day <= :e")
+        p["e"] = end
+    return " and ".join(where), p
+
+
+def _num(row: dict, keys: tuple) -> dict:
+    return {k: (float(v) if k in keys and v is not None else v) for k, v in row.items()}
+
+
+@router.get("/overview")
+def overview(account: str = "", start: Optional[date] = None, end: Optional[date] = None, db: Session = Depends(get_db)):
+    _refresh_if_stale(db)
+    where, p = _range(account, start, end)
+    money = ("revenue", "fees", "cost", "refunds")
+    k = db.execute(text(
+        f"select coalesce(sum(orders),0) orders, coalesce(sum(units),0) units, coalesce(sum(revenue),0) revenue, coalesce(sum(refunds),0) refunds, "
+        f"coalesce(sum(fees),0) fees, coalesce(sum(cost),0) cost, coalesce(sum(lines_without_cost),0) lines_without_cost, "
+        f"coalesce(sum(dropship_lines),0) dropship_lines, min(day) first_date, max(day) last_date, max(refreshed_at) refreshed_at "
+        f"from amazon_analytics_daily where {where}"), p).first()
+    kpi = _num(dict(k._mapping), money)
+    kpi["orders"], kpi["units"] = int(kpi["orders"]), int(kpi["units"])
+    kpi["lines_without_cost"], kpi["dropship_lines"] = int(kpi["lines_without_cost"]), int(kpi["dropship_lines"])
+    kpi["estimated_margin"] = round(kpi["revenue"] - kpi["refunds"] - kpi["fees"] - kpi["cost"], 2)
+    kpi["first_date"] = kpi["first_date"].isoformat() if kpi["first_date"] else None
+    kpi["last_date"] = kpi["last_date"].isoformat() if kpi["last_date"] else None
+    refreshed_at = kpi.pop("refreshed_at")
+
+    by_account = [
+        {**_num(dict(r._mapping), money), "orders": int(r.orders), "units": int(r.units)}
+        for r in db.execute(text(
+            f"select account, sum(orders) orders, sum(units) units, sum(revenue) revenue, sum(refunds) refunds, sum(fees) fees, sum(cost) cost "
+            f"from amazon_analytics_daily where {where} group by account order by revenue desc"), p).all()
+    ]
+    monthly = [
+        {**_num(dict(r._mapping), money), "orders": int(r.orders), "units": int(r.units)}
+        for r in db.execute(text(
+            f"select to_char(date_trunc('month', day), 'YYYY-MM') as month, account, sum(orders) orders, sum(units) units, sum(revenue) revenue, "
+            f"sum(refunds) refunds, sum(fees) fees, sum(cost) cost from amazon_analytics_daily where {where} group by 1, 2 order by 1, 2"), p).all()
+    ]
+
+    # Best sellers come from the order lines (same filters, by sale date).
+    lw, lp = ["not o.cancelled"], {}
+    if account.strip():
+        lw.append("o.account = :a")
+        lp["a"] = account.strip()
+    if start:
+        lw.append("(coalesce(l.sale_date, o.created_at_amazon))::date >= :s")
+        lp["s"] = start
+    if end:
+        lw.append("(coalesce(l.sale_date, o.created_at_amazon))::date <= :e")
+        lp["e"] = end
+
+    def top(order: str):
+        rows = db.execute(text(
+            f"""select l.product_id, coalesce(max(pr.title), max(l.title)) as title, max(l.sku) as sku, sum(l.quantity) units,
+                       sum(l.quantity * coalesce(l.unit_price, 0)) revenue, count(distinct o.id) orders
+                  from amazon_order_lines l join amazon_orders o on o.id = l.order_pk left join products pr on pr.id = l.product_id
+                 where {" and ".join(lw)}
+                 group by l.product_id, coalesce(l.product_id::text, l.sku)
+                 order by {order} desc limit 10"""), lp).all()
+        return [{**dict(r._mapping), "revenue": float(r.revenue), "units": int(r.units), "orders": int(r.orders)} for r in rows]
+
+    return {
+        "kpi": kpi,
+        "by_account": by_account,
+        "monthly": monthly,
+        "top_revenue": top("revenue"),
+        "top_units": top("units"),
+        "refreshed_at": refreshed_at.isoformat() if refreshed_at else None,
+    }

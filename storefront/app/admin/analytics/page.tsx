@@ -5,6 +5,7 @@ import { api, errMsg } from "../../../lib/adminApi";
 import { Notice, btn2Cls, inputCls } from "../../../components/admin/ui";
 import ImportPanel, { type StoreInfo } from "../../../components/admin/analytics/ImportPanel";
 import QuickBooksSection from "../../../components/admin/analytics/QuickBooksSection";
+import AmazonSection, { AMAZON_COLOR } from "../../../components/admin/analytics/AmazonSection";
 import InsightsSection, { useInsights, type InsightsView } from "../../../components/admin/analytics/InsightsSection";
 import {
   Card, Columns, Donut, Empty, HBars, Kpi, Legend, LineChart, PALETTE, StackedBars, TileMap,
@@ -56,7 +57,7 @@ function rangeFor(p: Preset, from: string, to: string): { start?: string; end?: 
   return {};
 }
 
-type Tab = "ebay" | "quickbooks";
+type Tab = "ebay" | "quickbooks" | "amazon";
 type Sub = "overview" | InsightsView;
 const SUBS: { key: Sub; label: string; hint: string }[] = [
   { key: "overview", label: "Overview", hint: "Sales, orders, products, places" },
@@ -101,7 +102,7 @@ export default function AnalyticsPage() {
   const [storesLoaded, setStoresLoaded] = useState(false);
   // The eBay tab only exists while at least one store is connected on the Live listings screen.
   const ebayAvailable = connected.length > 0;
-  const tab: Tab = storesLoaded && !ebayAvailable ? "quickbooks" : tabState;
+  const tab: Tab = storesLoaded && !ebayAvailable && tabState === "ebay" ? "quickbooks" : tabState;
   const [sub, setSub] = useState<Sub>("overview");
   const range = useMemo(() => rangeFor(preset, from, to), [preset, from, to]);
 
@@ -139,7 +140,7 @@ export default function AnalyticsPage() {
   // Remember the tab in the address (#ebay, #ebay/season, #quickbooks) so a reload or a shared link lands in the same place.
   useEffect(() => {
     const [t, sb] = window.location.hash.replace("#", "").split("/");
-    if (t === "quickbooks") setTabState("quickbooks");
+    if (t === "quickbooks" || t === "amazon") setTabState(t);
     if (sb === "odd" || sb === "season" || sb === "buyers") setSub(sb);
   }, []);
   const go = (t: Tab, sb: Sub) => {
@@ -209,7 +210,7 @@ export default function AnalyticsPage() {
         <div>
           <h1 className="text-2xl font-semibold">Analytics</h1>
           <p className="text-sm text-gray-500">
-            {tab === "ebay" ? "What sold, when, and to whom, from the eBay order reports of your stores." : "What you spent and kept, from QuickBooks."}
+            {tab === "ebay" ? "What sold, when, and to whom, from the eBay order reports of your stores." : tab === "amazon" ? "What sold on Amazon, with fees and estimated margin, from the Amazon order feed." : "What you spent and kept, from QuickBooks."}
           </p>
         </div>
         {tab === "ebay" && <button type="button" className={btn2Cls} onClick={() => setShowImport((v) => !v)}>{showImport ? "Hide data import" : "Add / update data"}</button>}
@@ -217,12 +218,14 @@ export default function AnalyticsPage() {
 
       {/* ---- the two top tabs */}
       <div role="tablist" className="flex gap-1 border-b border-gray-200">
-        {([["ebay", "eBay"], ["quickbooks", "QuickBooks"]] as [Tab, string][]).filter(([key]) => key !== "ebay" || !storesLoaded || ebayAvailable).map(([key, label]) => (
+        {([["ebay", "eBay"], ["amazon", "Amazon"], ["quickbooks", "QuickBooks"]] as [Tab, string][]).filter(([key]) => key !== "ebay" || !storesLoaded || ebayAvailable).map(([key, label]) => (
           <button
             key={key} type="button" role="tab" aria-selected={tab === key}
             onClick={() => go(key, key === "ebay" ? sub : "overview")}
-            className={`-mb-px border-b-2 px-4 py-2 text-sm font-semibold ${tab === key ? "border-black text-black" : "border-transparent text-gray-500 hover:text-black"}`}
+            style={key === "amazon" && tab === key ? { borderColor: AMAZON_COLOR } : undefined}
+            className={`-mb-px border-b-2 px-4 py-2 text-sm font-semibold ${tab === key ? (key === "amazon" ? "text-black" : "border-black text-black") : "border-transparent text-gray-500 hover:text-black"}`}
           >
+            {key === "amazon" && <span className="mr-1.5 inline-block h-2 w-2 rounded-full" style={{ background: AMAZON_COLOR }} />}
             {label}
           </button>
         ))}
@@ -237,8 +240,8 @@ export default function AnalyticsPage() {
 
       {tab === "ebay" && tablesReady && showImport && <ImportPanel stores={stores} onDone={() => { loadStores(); loadSummary(); }} />}
 
-      {/* ---- filters (the date range applies to both tabs, the store buttons only to eBay) */}
-      {(tab === "quickbooks" || (tablesReady && stores.length > 0)) && (
+      {/* ---- filters (the date range applies to every tab, the store buttons only to eBay) */}
+      {(tab === "quickbooks" || tab === "amazon" || (tab === "ebay" && tablesReady && stores.length > 0)) && (
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
             {tab === "ebay" && (
             <div className="flex flex-wrap gap-1 rounded-lg bg-gray-100 p-1">
@@ -474,6 +477,7 @@ export default function AnalyticsPage() {
         </>
       )}
 
+      {tab === "amazon" && <AmazonSection start={range.start} end={range.end} />}
       {tab === "quickbooks" && <QuickBooksSection start={range.start} end={range.end} />}
     </div>
   );
