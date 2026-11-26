@@ -10,3 +10,4 @@ openpyxl
 reportlab
 cryptography>=42
 pypdf
+paramiko
