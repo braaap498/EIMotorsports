@@ -786,11 +786,11 @@ _FIT_YEARS = re.compile(r"^((?:19|20)\d{2})(?:\s*(?:-|\u2013|to)\s*((?:19|20)\d{
 
 
 def _parse_fitment_cell(cell: str) -> tuple[dict, int]:
-    """-> ({(make key, model key): {"make": text, "model": text, "years": set}}, entries that could not be read)."""
+    """-> ({(make key, model key): {"make": text, "model": text, "years": set}}, the text of each entry that could not be read)."""
     from app.fitment_match import _ALIASES as MAKE_ALIASES, _norm
 
     out: dict = {}
-    bad = 0
+    bad: list[str] = []
     for part in re.split(r"\s*\|\s*", (cell or "").strip()):
         part = part.strip()
         if not part:
@@ -798,19 +798,19 @@ def _parse_fitment_cell(cell: str) -> tuple[dict, int]:
         bits = [b.strip() for b in part.split(":", 2)]
         m = _FIT_YEARS.match(bits[0]) if len(bits) == 3 else None
         if not m or not bits[1] or not bits[2]:
-            bad += 1
+            bad.append(part[:200])
             continue
         a = int(m.group(1))
         b = int(m.group(2) or a)
         if b < a:
             a, b = b, a
         if b - a > 80:
-            bad += 1
+            bad.append(part[:200])
             continue
         mk = _norm(MAKE_ALIASES.get(bits[1].lower(), bits[1]))
         key = (mk, _norm(bits[2]))
         if not key[0] or not key[1]:
-            bad += 1
+            bad.append(part[:200])
             continue
         e = out.setdefault(key, {"make": bits[1], "model": bits[2], "years": set()})
         e["years"].update(range(a, b + 1))
@@ -829,7 +829,8 @@ def _apply_fitment(db: Session, product_id: int, cell: str) -> dict:
     from app.fitment_research import _refresh, _slugify
 
     parsed, bad = _parse_fitment_cell(cell)
-    c = {"entries": len(parsed), "unreadable": bad, "makes_created": 0, "models_created": 0, "years_created": 0, "fitment_added": 0, "already_had": 0}
+    # unreadable_entries: the text of each entry that could not be read, so a person can add those machines by hand
+    c = {"entries": len(parsed), "unreadable": len(bad), "unreadable_entries": bad[:50], "makes_created": 0, "models_created": 0, "years_created": 0, "fitment_added": 0, "already_had": 0}
     if not parsed:
         return c
     makes = {_norm(r.name): r.id for r in db.execute(text("select id, name from vehicle_makes"))}

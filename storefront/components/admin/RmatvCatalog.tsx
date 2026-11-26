@@ -248,13 +248,13 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
     setBusyId(r.id);
     setFlash(null);
     try {
-      const m = await api<{ product_id: number; title: string; custom_label: string | null; photos: number; photos_saving: boolean; fitment: { entries?: number; unreadable?: number; makes_created?: number; models_created?: number; fitment_added?: number; error?: boolean } | null }>(`/rmatv/items/${r.id}/make-product`, { method: "POST" });
+      const m = await api<{ product_id: number; title: string; custom_label: string | null; photos: number; photos_saving: boolean; fitment: { entries?: number; unreadable?: number; unreadable_entries?: string[]; makes_created?: number; models_created?: number; fitment_added?: number; error?: boolean } | null }>(`/rmatv/items/${r.id}/make-product`, { method: "POST" });
       setFlash({
         kind: "info",
         text: `Made product #${m.product_id}: ${m.title}${m.custom_label ? ` (custom label ${m.custom_label})` : ". Its custom label was left blank: that number is already a label or cannot be one"}. ${
           m.photos ? `${m.photos} photo${m.photos === 1 ? "" : "s"} ${m.photos_saving ? "are being saved to storage" : "will be saved when the next photo run starts (Import tab, Photos)"}.` : "This part has no photo link."
         }${
-          m.fitment ? (m.fitment.error ? " The fitment could not be added; add it with the fitment tool." : ` Fitment: ${m.fitment.fitment_added ?? 0} vehicle-year${m.fitment.fitment_added === 1 ? "" : "s"} added${m.fitment.makes_created || m.fitment.models_created ? ` (new to the fitment tool: ${m.fitment.makes_created ?? 0} make${m.fitment.makes_created === 1 ? "" : "s"}, ${m.fitment.models_created ?? 0} model${m.fitment.models_created === 1 ? "" : "s"})` : ""}${m.fitment.unreadable ? `; ${m.fitment.unreadable} entr${m.fitment.unreadable === 1 ? "y" : "ies"} could not be read` : ""}.`) : ""
+          m.fitment ? (m.fitment.error ? " The fitment could not be added; add it with the fitment tool." : ` Fitment: ${m.fitment.fitment_added ?? 0} vehicle-year${m.fitment.fitment_added === 1 ? "" : "s"} added${m.fitment.makes_created || m.fitment.models_created ? ` (new to the fitment tool: ${m.fitment.makes_created ?? 0} make${m.fitment.makes_created === 1 ? "" : "s"}, ${m.fitment.models_created ?? 0} model${m.fitment.models_created === 1 ? "" : "s"})` : ""}${m.fitment.unreadable ? `; ${m.fitment.unreadable} entr${m.fitment.unreadable === 1 ? "y" : "ies"} could not be read${m.fitment.unreadable_entries?.length ? ` (add by hand: ${m.fitment.unreadable_entries.map((e) => `"${e}"`).join(", ")})` : ""}` : ""}.`) : ""
         } It is NOT published; set a price and category on the product.`,
       });
       setTick((x) => x + 1);
