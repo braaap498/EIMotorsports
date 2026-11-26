@@ -651,9 +651,9 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
             {data.total > limit && <Pager total={data.total} limit={limit} offset={offset} onChange={setOffset} />}
             <div className="overflow-x-auto">
               {/* fixed layout: every column keeps the same width on every page and filter; the name takes what is left */}
-              <table className="w-full min-w-[84rem] table-fixed text-left text-xs">
+              <table className="w-full min-w-[87rem] table-fixed text-left text-xs">
                 <colgroup>
-                  {["2.75rem", "9rem", "8rem", "9rem", "", "3.5rem", "5rem", "5rem", "5rem", "4rem", "7.5rem", "8rem", "6rem"].map((w, i) => (
+                  {["2.75rem", "9rem", "8rem", "12rem", "", "3.5rem", "5rem", "5rem", "5rem", "4rem", "7.5rem", "8rem", "6rem"].map((w, i) => (
                     <col key={i} style={w ? { width: w } : undefined} />
                   ))}
                 </colgroup>
@@ -703,7 +703,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                         {r.sku}
                         {!r.active && <span className="ml-1"><Badge tone="gray">retired</Badge></span>}
                       </td>
-                      <td className="truncate py-1 pr-3" title={r.mfr_number ?? ""}>{r.mfr_number ?? "—"}</td>
+                      <td className="break-all py-1 pr-3" title={r.mfr_number ?? ""}>{r.mfr_number ?? "—"}</td>
                       <td className="break-words py-1 pr-3">{r.name ?? "—"}</td>
                       <td className="whitespace-nowrap py-1 pr-3" title={uomName(r.unit_of_measure) ?? ""}>{r.unit_of_measure ?? ""}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right" title={r.map_price != null ? `MAP price (MSRP ${r.msrp != null ? money(r.msrp) : "none"})` : ""}>{money(r.list_price)}{r.map_price != null && <span className="text-gray-400">*</span>}</td>
