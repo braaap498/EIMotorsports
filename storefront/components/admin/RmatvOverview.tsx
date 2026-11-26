@@ -28,7 +28,7 @@ export default function RmatvOverview({ version }: { version: number }) {
     ["Changed in 7 days", n(t.changed_7d)], ["Changed in 30 days", n(t.changed_30d)],
   ];
   const gaps: [string, unknown][] = [
-    ["No barcode", t.no_barcode], ["No photo link", t.no_photo], ["No Mfr number", t.no_mfr_number], ["No name", t.no_name],
+    ["No UPC", t.no_barcode], ["No photo link", t.no_photo], ["No Mfr number", t.no_mfr_number], ["No name", t.no_name],
     ["No cost", t.no_cost], ["No list price", t.no_list_price], ["List price below cost", t.list_below_cost],
   ];
   return (

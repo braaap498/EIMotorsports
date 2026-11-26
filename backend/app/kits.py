@@ -708,7 +708,7 @@ def catalog_search(
     rows = db.execute(
         text(
             f"select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, s.list_price, coalesce(s.effective_cost, s.dealer_cost) as dealer_cost, "
-            f"s.qty_maine, s.qty_indiana, s.qty_nevada, coalesce(s.qty_other, 0) as qty_other, s.upc, s.active from supplier_items s "
+            f"s.qty_maine, s.qty_indiana, s.qty_nevada, coalesce(s.qty_other, 0) as qty_other, s.qty_utah, s.qty_kentucky, s.upc, s.active from supplier_items s "
             f"where {clause} order by {order} limit :n offset :o"
         ),
         params,

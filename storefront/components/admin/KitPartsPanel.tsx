@@ -41,7 +41,7 @@ type Vendor = { id: number; name: string; has_catalog: boolean; supplier?: strin
 type CatItem = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
   list_price: number | null; dealer_cost?: number | null; upc: string | null; in_stock_total: number;
-  qty_maine: number; qty_indiana: number; qty_nevada: number; qty_other?: number;
+  qty_maine: number; qty_indiana: number; qty_nevada: number; qty_other?: number; qty_utah?: number | null; qty_kentucky?: number | null;
 };
 type Brand = { name: string; count: number };
 type Listing = { id: number; store: string; item_id: string; status: string | null; in_sync: boolean };
@@ -653,7 +653,7 @@ export default function KitPartsPanel({
                             <td className="p-1">{highlight(it.name, q)}</td>
                             <td className="p-1 font-mono">{highlight(it.upc, q)}</td>
                             <td className="p-1">{it.dealer_cost != null ? `$${it.dealer_cost.toFixed(2)}` : ""}</td>
-                            <td className="p-1" title={supplier === "rmatv" ? `${it.qty_other ?? 0} in stock` : `ME ${it.qty_maine} · IN ${it.qty_indiana} · NV ${it.qty_nevada}`}>{it.in_stock_total}</td>
+                            <td className="p-1" title={supplier === "rmatv" ? `Utah ${it.qty_utah ?? 0} · Kentucky ${it.qty_kentucky ?? 0}` : `ME ${it.qty_maine} · IN ${it.qty_indiana} · NV ${it.qty_nevada}`}>{it.in_stock_total}{supplier === "rmatv" && <div className="text-[10px] text-gray-500">UT {it.qty_utah ?? 0} · KY {it.qty_kentucky ?? 0}</div>}</td>
                             <td className="p-1"><input type="number" min={1} className="w-14 rounded border px-1 py-1" value={addQty[it.id] ?? "1"} onChange={(e) => setAddQty((a) => ({ ...a, [it.id]: e.target.value }))} /></td>
                             <td className="p-1"><button type="button" className="rounded bg-gray-900 px-2 py-1 text-white" onClick={() => addFromCatalog(it)}>Add</button></td>
                           </tr>

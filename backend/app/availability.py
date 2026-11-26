@@ -172,6 +172,23 @@ def wh_sql(p: str, col: str) -> str:
     )
 
 
+RM_SUPPLIER = "rmatv"
+
+
+def wh_sql_for(p: str, col: str, supplier: str) -> str:
+    """Like wh_sql, but for the catalog of another supplier (Rocky Mountain: `qty_utah` / `qty_kentucky`). Counts only the product's
+    pieces that belong to that supplier; 0 when there are none or one of them has no live catalog item. Display only."""
+    return (
+        "(select case when count(*) = 0 or bool_or(si.id is null) then 0 else "
+        f"coalesce(min(cast(floor(cast(coalesce(si.{col}, 0) as numeric) "
+        "/ greatest(coalesce(k.quantity, 1), 1)) as integer)), 0) end "
+        "from product_kit_parts k "
+        f"join supplier_items si0 on si0.id = k.supplier_item_id and si0.supplier = '{supplier}' "
+        f"left join supplier_items si on si.id = si0.id and si.active "
+        f"where k.product_id = {p}.id)"
+    )
+
+
 def dropship_qty_sql(p: str = "p") -> str:
     """The number a DROP SHIP product or listing shows: our own shelf PLUS the distributor's stock (Indiana + Nevada; with several
     pieces the scarcest piece decides). Before, it was the lowest non-empty of the three."""
@@ -222,6 +239,9 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
         text(
             f"select p.id, {shelf_sql('p')} as qoh, {available_sql('p')} as own, {parts_count_sql('p')} as parts, "
             f"{dist_sql('p')} as dist, {wh_sql('p', 'qty_indiana')} as indiana, {wh_sql('p', 'qty_nevada')} as nevada, "
+            f"{wh_sql_for('p', 'qty_utah', RM_SUPPLIER)} as utah, {wh_sql_for('p', 'qty_kentucky', RM_SUPPLIER)} as kentucky, "
+            f"(select count(*) from product_kit_parts k join supplier_items sx on sx.id = k.supplier_item_id and sx.supplier = '{RM_SUPPLIER}' where k.product_id = p.id) as rm_parts, "
+            f"(select count(*) from product_kit_parts k join supplier_items sx on sx.id = k.supplier_item_id and sx.supplier = '{SUPPLIER}' where k.product_id = p.id) as ad_parts, "
             "coalesce(p.dropship_ok, false) as ds, "
             "(select count(*) from channel_listings cl where cl.product_id = p.id and coalesce(cl.dropship_ok, false)) as ds_listings "
             "from products p where p.id = :i"
@@ -300,6 +320,12 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
         "warehouses": whs,
         "indiana": int(r.indiana or 0),
         "nevada": int(r.nevada or 0),
+        # Rocky Mountain ATV stock for the product's Rocky Mountain parts (shown only; it does not change the drop ship number)
+        "rm_parts": int(r.rm_parts or 0),
+        "rm_utah": int(r.utah or 0),
+        "rm_kentucky": int(r.kentucky or 0),
+        "rm_total": int(r.utah or 0) + int(r.kentucky or 0),
+        "has_automatic": int(r.ad_parts or 0) > 0,
         "distributor": dist,
         "distributor_name": ", ".join(dist_names) or "Automatic Distributors",
         "parts": int(r.parts or 0),

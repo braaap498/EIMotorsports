@@ -978,6 +978,8 @@ def list_products(
             select p.id, p.sku as sku, p.custom_label_sku, p.ebay_item_id, p.title, p.slug, p.list_price, p.quantity_on_hand,
                    p.category_id, p.is_published, p.is_active, p.is_universal,
                    p.universal_in_vehicle_search, p.fitment_exempt,
+                   (select ph.image_key from product_photos ph where ph.product_id = p.id and not coalesce(ph.hidden, false) order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as _photo_key,
+                   (select ph.source_url from product_photos ph where ph.product_id = p.id and not coalesce(ph.hidden, false) order by ph.is_primary desc, ph.sort_order, ph.id limit 1) as _photo_src,
                    (select count(distinct v.model_id) from product_fitment pf join vehicles v on v.id = pf.vehicle_id where pf.product_id = p.id) as fitment_count,
                    (select count(*) from product_fitment pfy where pfy.product_id = p.id) as fitment_years,
                    case when nullif(btrim(coalesce(p.custom_label_sku, '')), '') is null
@@ -997,7 +999,13 @@ def list_products(
         ),
         params,
     ).all()
-    return {"total": total, "items": [dict(r._mapping) for r in rows]}
+    items = []
+    for r in rows:
+        d = dict(r._mapping)
+        d["thumb"] = thumb_url(d.pop("_photo_key", None)) or d.pop("_photo_src", None)  # the main photo, for the list's thumbnail
+        d.pop("_photo_src", None)
+        items.append(d)
+    return {"total": total, "items": items}
 
 
 @router.get("/products/filter-options")

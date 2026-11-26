@@ -90,7 +90,7 @@ export default function AvailabilityAdmin() {
               onChange={(e) => void save({ use_distributor_stock: e.target.checked })}
             />
             <span>
-              <span className="font-semibold">Count distributor stock</span> (Automatic Distributors, Indiana + Nevada). A single-part product is available if
+              <span className="font-semibold">Count distributor stock</span> (Automatic Distributors, Indiana + Nevada; the product screen also shows Rocky Mountain ATV's Utah + Kentucky stock, display only). A single-part product is available if
               we have it or the distributor does. A kit is available from our own shelf only, unless drop shipping is allowed for it below. When
               this is OFF, everything works from our own shelf count only, as before.
             </span>

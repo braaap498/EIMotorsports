@@ -80,7 +80,7 @@ const pct = (v: string | number | null | undefined) => (v == null ? "—" : `${N
 const when = (v: unknown) => (typeof v === "string" && v ? new Date(v).toLocaleString() : "—");
 
 const MISSING_LABEL: Record<string, string> = {
-  upc: "no barcode", mfr: "no manufacturer number", name: "no name", cost: "no cost", list: "no list price",
+  upc: "no UPC", mfr: "no manufacturer number", name: "no name", cost: "no cost", list: "no list price",
   below_cost: "list price below cost", photo: "no photo link", fitment: "no fitment",
 };
 
@@ -503,7 +503,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
             <Lbl text="Search (every word must match)">
               <input
                 className={inputCls}
-                placeholder="SKU, manufacturer number, name, brand or barcode — dashes and spaces don't matter"
+                placeholder="SKU, manufacturer number, name, brand or UPC — dashes and spaces don't matter"
                 value={qInput}
                 onChange={(e) => setQInput(e.target.value)}
               />
@@ -516,7 +516,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
               <option value="mfr">Manufacturer number</option>
               <option value="name">Name</option>
               <option value="brand">Brand</option>
-              <option value="upc">Barcode</option>
+              <option value="upc">UPC</option>
             </select>
           </Lbl>
           <Lbl text="Brand">
@@ -660,9 +660,9 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
             {data.total > limit && <Pager total={data.total} limit={limit} offset={offset} onChange={setOffset} />}
             <div className="overflow-x-auto">
               {/* fixed layout: every column keeps the same width on every page and filter; the name takes what is left */}
-              <table className="w-full min-w-[87rem] table-fixed text-left text-xs">
+              <table className="w-full min-w-[88rem] table-fixed text-left text-xs">
                 <colgroup>
-                  {["2.75rem", "9rem", "8rem", "12rem", "", "3.5rem", "5rem", "5rem", "5rem", "4rem", "7.5rem", "8rem", "6rem"].map((w, i) => (
+                  {["2.75rem", "9rem", "8rem", "12rem", "", "5rem", "5rem", "5rem", "4rem", "7.5rem", "10.5rem", "8rem", "6rem"].map((w, i) => (
                     <col key={i} style={w ? { width: w } : undefined} />
                   ))}
                 </colgroup>
@@ -673,12 +673,11 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                     <Th k="sku">SKU</Th>
                     <Th k="mfr">Mfr no.</Th>
                     <Th k="name">Name</Th>
-                    <Th k="uom">Unit</Th>
                     <Th k="list" right>List</Th>
                     <Th k="cost" right>Cost</Th>
                     <Th k="margin_pct" right title="(list − cost) / list">Margin</Th>
                     <Th k="stock" right title="At Rocky Mountain: Utah + Kentucky total (UT / KY shown under it); 10+ counts as 10">Stock</Th>
-                    <th className="whitespace-nowrap py-1 pr-3">Barcode</th>
+                    <th className="whitespace-nowrap py-1 pr-3">UPC</th>
                     <th className="whitespace-nowrap py-1 pr-3">Ours</th>
                     <Th k="updated">Changed</Th>
                   </tr>
@@ -719,7 +718,6 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                       </td>
                       <td className="break-all py-1 pr-3" title={r.mfr_number ?? ""}>{r.mfr_number ?? "—"}</td>
                       <td className="break-words py-1 pr-3">{r.name ?? "—"}</td>
-                      <td className="whitespace-nowrap py-1 pr-3" title={uomName(r.unit_of_measure) ?? ""}>{r.unit_of_measure ?? ""}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right" title={r.map_price != null ? `MAP price (MSRP ${r.msrp != null ? money(r.msrp) : "none"})` : ""}>{money(r.list_price)}{r.map_price != null && <span className="text-gray-400">*</span>}</td>
                       <td className="whitespace-nowrap py-1 pr-3 text-right" title={r.my_cost != null && r.standard_cost != null ? `Catalog price ${money(r.standard_cost)}` : ""}>{money(r.dealer_cost)}</td>
                       <td className="py-1 pr-3 text-right whitespace-nowrap" title={r.margin == null ? "" : `${money(r.margin)} per unit`}>
@@ -729,7 +727,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                         {n(r.qty_other)}
                         {(r.qty_utah != null || r.qty_kentucky != null) && <div className="text-[10px] font-normal text-gray-500">UT {n(r.qty_utah ?? 0)} · KY {n(r.qty_kentucky ?? 0)}</div>}
                       </td>
-                      <td className="truncate py-1 pr-3" title={r.upc ?? ""}>{r.upc ?? "—"}</td>
+                      <td className="whitespace-nowrap py-1 pr-3 font-mono" title={r.upc ?? ""}>{r.upc ?? "—"}</td>
                       <td className="truncate py-1 pr-3" onClick={(e) => e.stopPropagation()}>
                         {r.product_id ? (
                           <Link href={`/admin/products/${r.product_id}`} title={r.product_title ?? ""}>
@@ -780,7 +778,7 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
     ["Manufacturer number", (it.mfr_number as string) ?? "—"],
     ["Brand", it.manufacturer ? <button type="button" className="underline" onClick={() => onBrand(String(it.manufacturer))}>{String(it.manufacturer)} ({n(d.brand_part_count)} parts)</button> : "—"],
     ["Unit of measure", (it.unit_of_measure as string) ?? "—"],
-    ["Barcode (UPC)", (it.upc as string) ?? "—"],
+    ["UPC", (it.upc as string) ?? "—"],
     ["List price", it.map_price != null ? `${money(it.list_price as string | null)} (MAP price)` : money(it.list_price as string | null)],
     ["Your cost", money(it.dealer_cost as string | null)],
     ...(it.my_cost != null && it.standard_cost != null ? ([["Catalog (dealer) price", money(it.standard_cost as number)]] as [string, ReactNode][]) : []),

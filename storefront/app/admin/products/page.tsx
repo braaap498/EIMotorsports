@@ -16,6 +16,7 @@ type Row = {
   sku: string;
   custom_label_sku: string | null;
   title: string;
+  thumb?: string | null;
   slug: string;
   list_price: number | string | null;
   quantity_on_hand: number;
@@ -600,7 +601,15 @@ export default function ProductsPage() {
                   )}
                 </td>
                 <td className="px-3 py-2 font-medium">
-                  <Link href={`/admin/products/${p.id}`} className="hover:underline">{p.title}</Link>
+                  <div className="flex items-center gap-2">
+                    {p.thumb ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={p.thumb} alt="" loading="lazy" referrerPolicy="no-referrer" className="h-10 w-10 shrink-0 rounded border border-gray-100 bg-white object-contain" onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden"; }} />
+                    ) : (
+                      <div className="h-10 w-10 shrink-0 rounded border border-dashed border-gray-200" />
+                    )}
+                    <Link href={`/admin/products/${p.id}`} className="hover:underline">{p.title}</Link>
+                  </div>
                 </td>
                 <td className="px-3 py-2">{p.list_price != null ? Number(p.list_price).toFixed(2) : "—"}</td>
                 <td className="px-3 py-2">{p.quantity_on_hand}</td>

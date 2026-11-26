@@ -884,6 +884,73 @@ def _apply_fitment(db: Session, product_id: int, cell: str) -> dict:
     return c
 
 
+
+def _title_without_part_number(brand, name, mfr, sku) -> str:
+    """Title = brand + name, with the part number (manufacturer number or SKU) taken out of the name. Falls back to the SKU."""
+    from app.autodist import _nice_case
+    n = _nice_case(name) or ""
+    for pn in sorted({(mfr or "").strip(), (sku or "").strip()}, key=len, reverse=True):
+        if len(pn) >= 3:
+            n = re.sub(r"[\s#(\[-]*" + re.escape(pn) + r"[\s)\]-]*", " ", n, flags=re.I)
+    n = re.sub(r"\s{2,}", " ", n).strip(" -,/")
+    b = _nice_case(brand) or ""
+    parts = [b] if b and not n.lower().startswith(b.lower()) else []
+    if n:
+        parts.append(n)
+    return " ".join(parts)[:200].strip() or (sku or "")
+
+
+def _guess_category_and_type(db: Session, name: str):
+    """Best educated guess at (category_id, part_type name) from the part's name, using the store's own category tree and part
+    type list (read at run time). Category: the category whose name has the most words in common with the name (a whole-name
+    match wins). Part type: the longest type name found in the name among types that fit the category. Either may be None;
+    never raises, so a failed guess cannot block making the product."""
+    try:
+        words = lambda t: {w[:-1] if len(w) > 3 and w.endswith("s") else w for w in re.findall(r"[a-z0-9]+", (t or "").lower())} - {"and", "the", "for", "with", "kit", "set", "parts", "part", "other"}
+        nw = words(name)
+        low = (name or "").lower()
+        best, best_score = None, 0.0
+        try:  # first choice: the same category rules the Automatic Distributors page uses (whole name, keyword rules, word overlap)
+            from app.autodist import _load_categories, _pick_category
+
+            best = _pick_category(_load_categories(db), name or "")
+            best_score = 99.0 if best is not None else 0.0
+        except Exception:
+            db.rollback()
+            best, best_score = None, 0.0
+        for c in ([] if best is not None else db.execute(text("select id, name from categories")).all()):  # fallback: plain word overlap
+            cw = words(c.name)
+            if not cw:
+                continue
+            score = len(cw & nw) / len(cw) + (1.0 if c.name.lower() in low else 0) + 0.01 * len(cw & nw)
+            if len(cw & nw) and score > best_score:
+                best, best_score = c.id, score
+        ptype = None
+        rows = db.execute(text("select id, name from part_types")).all()
+        fits = None
+        if best is not None:
+            fits = {r.part_type_id for r in db.execute(text(
+                "with recursive a as (select id, parent_id from categories where id = :c union select c.id, c.parent_id from categories c join a on c.id = a.parent_id) "
+                "select ptc.part_type_id from part_type_categories ptc join a on a.id = ptc.category_id"), {"c": best})}
+        linked = {r.part_type_id for r in db.execute(text("select part_type_id from part_type_categories"))}
+        ok = lambda r: fits is None or r.id in fits or r.id not in linked
+        for r in sorted(rows, key=lambda r: -len(r.name)):  # 1. the whole type name is in the name
+            if r.name.lower() in low and ok(r):
+                ptype = r.name
+                break
+        if ptype is None:  # 2. every word of the type name (plural-insensitive) is in the name; most words first
+            for r in sorted(rows, key=lambda r: -len(words(r.name))):
+                tw = words(r.name)
+                if tw and tw <= nw and ok(r):
+                    ptype = r.name
+                    break
+        return best, ptype
+    except Exception:
+        db.rollback()
+        log.exception("could not guess the category / part type")
+        return None, None
+
+
 @router.post("/items/{item_id}/make-product", status_code=201)
 def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     """Make the single product for one Rocky Mountain part, the way the Automatic Distributors page does: a new product (not
@@ -892,11 +959,10 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
     become the product's photos and are downloaded into our own storage right after (see _store_photos). Refused only when
     the part's SINGLE product already exists; a kit that contains the part does not stop it."""
     from app.admin_catalog import slugify  # late imports: those modules import this one's helpers
-    from app.autodist import _product_title
     from app.kits import CLS_JOIN, CLS_MAX, SINGLES_CTE, TOKEN_RE, label_token_for, parts_mpn, single_pick
 
     it = db.execute(
-        text("select id, sku, mfr_number, manufacturer, name, dealer_cost, upc, images, fitment from supplier_items where id = :i and supplier = :s"),
+        text("select id, sku, mfr_number, manufacturer, name, dealer_cost, list_price, upc, images, fitment from supplier_items where id = :i and supplier = :s"),
         {"i": item_id, "s": SUPPLIER},
     ).first()
     if not it:
@@ -912,7 +978,17 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
     ).scalar()
     if dist is None:
         raise HTTPException(400, "Add Rocky Mountain ATV under Distributors first; the part entry needs it.")
-    title = (_product_title(it.manufacturer, it.name, it.mfr_number) or it.sku)[:200]
+    title = _title_without_part_number(it.manufacturer, it.name, it.mfr_number, it.sku)
+    import html as _html
+    desc = None  # the catalog Name goes into the Description (the editor stores HTML); same starter text as the Automatic page: name, brand, "confirm it fits"
+    if (it.name or "").strip():
+        try:
+            from app.autodist import _starter_description
+
+            desc = _starter_description(it.manufacturer, it.name.strip(), None, None, None, None)
+        except Exception:
+            desc = f"<p>{_html.escape(it.name.strip())}</p>"
+    cat_id, ptype = _guess_category_and_type(db, it.name or "")
     base = slugify(title) or slugify(f"part {it.sku}") or "part"
     slug, k = base, 1
     while db.execute(text("select 1 from products where slug = :s"), {"s": slug}).first():
@@ -922,11 +998,12 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
     try:
         pid = db.execute(
             text(
-                "insert into products (title, slug, manufacturer_part_number, barcode, cost, quantity_on_hand, condition, is_published, is_active, is_universal, show_part_number) "
-                "values (:title, :slug, :mpn, :bc, :cost, 0, 'New', false, true, false, false) returning id"
+                "insert into products (title, slug, manufacturer_part_number, barcode, cost, list_price, description, category_id, part_type, quantity_on_hand, condition, is_published, is_active, is_universal, show_part_number) "
+                "values (:title, :slug, :mpn, :bc, :cost, :lp, :desc, :cat, :pt, 0, 'New', false, true, false, false) returning id"
             ),
             {"title": title, "slug": slug, "mpn": (it.mfr_number or "").strip() or None,
-             "bc": re.sub(r"\D", "", it.upc or "") or None, "cost": it.dealer_cost},
+             "bc": re.sub(r"\D", "", it.upc or "") or None, "cost": it.dealer_cost,
+             "lp": it.list_price, "desc": desc, "cat": cat_id, "pt": ptype},
         ).scalar()
         db.execute(
             text(
@@ -974,7 +1051,7 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
     except Exception as e:
         db.rollback()
         raise HTTPException(500, f"Could not make the product: {str(e)[:300]}")
-    return {"product_id": pid, "title": title, "custom_label": label, "published": False,
+    return {"product_id": pid, "title": title, "custom_label": label, "published": False, "category_id": cat_id, "part_type": ptype,
             "photos": len(urls), "photos_saving": _start_photos() if urls else False, "fitment": fit}
 
 

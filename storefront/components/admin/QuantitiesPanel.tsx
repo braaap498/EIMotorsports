@@ -11,6 +11,12 @@ type Q = {
   kit_parts?: { part_number: string; need: number; on_our_shelf: number; kits: number; use_mfr_number?: boolean; mfr_number?: string | null }[];
   indiana: number;
   nevada: number;
+  // Rocky Mountain ATV parts on the product: Utah and Kentucky stock (display only)
+  rm_parts?: number;
+  rm_utah?: number;
+  rm_kentucky?: number;
+  rm_total?: number;
+  has_automatic?: boolean;
   distributor: number;
   distributor_name?: string;
   parts: number;
@@ -88,7 +94,9 @@ export default function QuantitiesPanel({
   if (err) return <p className="mt-3 text-xs text-amber-800">Quantities could not be loaded: {err}</p>;
   if (!q) return null;
 
-  const hasDist = q.parts > 0;
+  const hasRm = (q.rm_parts ?? 0) > 0;
+  const hasAuto = q.has_automatic ?? !hasRm; // older servers do not send the flag: treat the product as Automatic
+  const hasDist = q.parts > 0 && hasAuto;
   const row = "flex justify-between gap-4 py-0.5";
   return (
     <div className="mt-4 rounded border border-gray-200 bg-gray-50 p-3 text-sm">
@@ -191,8 +199,24 @@ export default function QuantitiesPanel({
                 <span>{q.nevada}</span>
               </div>
             </>
-          ) : (
+          ) : !hasRm ? (
             <div className="text-xs text-gray-500">No distributor part on this product.</div>
+          ) : null}
+          {hasRm && (
+            <div className={hasDist ? "mt-2" : ""}>
+              <div className={`${row} font-medium`}>
+                <span>Rocky Mountain ATV</span>
+                <span>{q.rm_total ?? 0}</span>
+              </div>
+              <div className={`${row} pl-3 text-xs text-gray-600`}>
+                <span>Rocky Mountain ATV · Utah</span>
+                <span>{q.rm_utah ?? 0}</span>
+              </div>
+              <div className={`${row} pl-3 text-xs text-gray-600`}>
+                <span>Rocky Mountain ATV · Kentucky</span>
+                <span>{q.rm_kentucky ?? 0}</span>
+              </div>
+            </div>
           )}
         </div>
       </div>
