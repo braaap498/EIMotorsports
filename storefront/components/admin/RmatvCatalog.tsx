@@ -775,7 +775,7 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
       "Margin",
       cost != null && list != null && list > 0 ? `${money(list - cost)} per unit (${(((list - cost) / list) * 100).toFixed(1)}% of list)` : "—",
     ],
-    ...(it.qty_utah != null || it.qty_kentucky != null ? ([["Stock in Utah", n(it.qty_utah ?? 0)], ["Stock in Kentucky", n(it.qty_kentucky ?? 0)]] as [string, ReactNode][]) : []),
+    ...(it.qty_utah != null || it.qty_kentucky != null ? ([["Stock in Utah", n(Number(it.qty_utah ?? 0))], ["Stock in Kentucky", n(Number(it.qty_kentucky ?? 0))]] as [string, ReactNode][]) : []),
     ["Stock at Rocky Mountain", `${n(total)}${cost != null ? ` (${money0(cost * total)} at cost)` : ""} — a part shown as 10+ counts as 10`],
     ["Status", it.active ? <Badge tone="green">active, in the files</Badge> : <Badge tone="gray">retired, left the files</Badge>],
     ["Last changed", when(it.updated_at)],
