@@ -16,7 +16,7 @@ import { Badge, Modal, Notice, Pager, btn2Cls, inputCls } from "./ui";
 
 type Totals = {
   total: number; active: number; retired: number; in_stock: number; out_of_stock: number;
-  units: number; in_utah?: number; in_kentucky?: number; units_utah?: number; units_kentucky?: number;
+  units: number; oem_parts?: number; in_utah?: number; in_kentucky?: number; units_utah?: number; units_kentucky?: number;
   stock_value_at_cost: string | number; stock_value_at_list: string | number; brands: number;
   no_barcode: number; no_fitment: number; no_mfr_number: number; no_name: number; no_cost: number; no_list_price: number; list_below_cost: number; no_photo: number;
   changed_7d: number; changed_30d: number; avg_margin_pct: string | number | null; last_seen: string | null;
@@ -34,7 +34,7 @@ type Overview = {
 type Row = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
   unit_of_measure: string | null; list_price: number | null; dealer_cost: number | null; standard_cost: number | null; my_cost: number | null; map_price: number | null;
-  qty_other: number; qty_utah: number | null; qty_kentucky: number | null; msrp: number | null; qty_total: number;
+  qty_other: number; qty_utah: number | null; qty_kentucky: number | null; is_oem?: boolean; msrp: number | null; qty_total: number;
   upc: string | null; images: string[] | null; active: boolean; updated_at: string | null; last_seen_at: string | null;
   margin: number | null; margin_pct: number | null;
   product_id: number | null; // the SINGLE product of this part (never a kit that contains it)
@@ -61,12 +61,12 @@ type Detail = {
 };
 
 type Filters = {
-  q: string; field: string; brand: string; status: string; stock: string; warehouse: string; uom: string;
+  q: string; field: string; brand: string; status: string; stock: string; warehouse: string; source: string; uom: string;
   min_qty: string; max_qty: string; min_cost: string; max_cost: string; min_list: string; max_list: string;
   min_margin_pct: string; max_margin_pct: string; missing: string; ours: string; changed_days: string; seen_days: string;
 };
 const EMPTY: Filters = {
-  q: "", field: "all", brand: "", status: "active", stock: "", warehouse: "", uom: "",
+  q: "", field: "all", brand: "", status: "active", stock: "", warehouse: "", source: "", uom: "",
   min_qty: "", max_qty: "", min_cost: "", max_cost: "", min_list: "", max_list: "",
   min_margin_pct: "", max_margin_pct: "", missing: "", ours: "", changed_days: "", seen_days: "",
 };
@@ -275,6 +275,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
   const activeChips: { label: string; clear: () => void }[] = [];
   if (f.brand) activeChips.push({ label: `Brand: ${f.brand}`, clear: () => set({ brand: "" }) });
   if (f.status !== "active") activeChips.push({ label: f.status === "all" ? "Including retired" : "Retired only", clear: () => set({ status: "active" }) });
+  if (f.source) activeChips.push({ label: f.source === "oem" ? "OEM parts only" : "Main catalog only", clear: () => set({ source: "" }) });
   if (f.warehouse) activeChips.push({ label: `Stock in ${f.warehouse === "utah" ? "Utah" : "Kentucky"}`, clear: () => set({ warehouse: "" }) });
   if (f.stock) activeChips.push({ label: f.stock === "in" ? "In stock" : "Out of stock", clear: () => set({ stock: "" }) });
   if (f.uom) activeChips.push({ label: `Unit: ${f.uom}`, clear: () => set({ uom: "" }) });
@@ -339,9 +340,10 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
           <p className="text-gray-500">Loading…</p>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-7">
               <Stat label="active parts" value={n(t.active)} sub={t.retired ? `${n(t.retired)} retired` : undefined} onClick={reset} />
               <Stat label="in stock at Rocky Mountain" value={n(t.in_stock)} onClick={() => set({ stock: "in", status: "active" })} />
+              <Stat label="OEM parts" value={n(t.oem_parts ?? 0)} onClick={() => set({ source: "oem", status: "active" })} />
               <Stat label="out of stock" value={n(t.out_of_stock)} onClick={() => set({ stock: "out", status: "active" })} />
               <Stat label="brands" value={n(t.brands)} onClick={() => setShowBrands(true)} />
               <Stat label="avg margin (list vs cost)" value={t.avg_margin_pct == null ? "—" : `${Number(t.avg_margin_pct).toFixed(1)}%`} />
@@ -538,6 +540,13 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
               <option value="out">Out of stock</option>
             </select>
           </Lbl>
+          <Lbl text="Source">
+            <select className={inputCls} value={f.source} onChange={(e) => set({ source: e.target.value })}>
+              <option value="">Main + OEM</option>
+              <option value="oem">OEM parts only</option>
+              <option value="main">Main catalog only</option>
+            </select>
+          </Lbl>
           <Lbl text="Warehouse">
             <select className={inputCls} value={f.warehouse} onChange={(e) => set({ warehouse: e.target.value })}>
               <option value="">Either</option>
@@ -701,6 +710,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                       <td className="truncate py-1 pr-3" title={r.manufacturer ?? ""}>{r.manufacturer ?? "—"}</td>
                       <td className="truncate py-1 pr-3 font-medium" title={r.sku}>
                         {r.sku}
+                        {r.is_oem && <span className="ml-1 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800">OEM</span>}
                         {!r.active && <span className="ml-1"><Badge tone="gray">retired</Badge></span>}
                       </td>
                       <td className="break-all py-1 pr-3" title={r.mfr_number ?? ""}>{r.mfr_number ?? "—"}</td>
@@ -782,7 +792,7 @@ function DetailModal({ d, onClose, onBrand, onOpen }: { d: Detail; onClose: () =
     ["Last seen in the files", when(it.last_seen_at)],
     ["First stored", when(it.created_at)],
   ];
-  const known = new Set(["id", "supplier", "sku", "mfr_number", "mfr_number_norm", "manufacturer", "name", "unit_of_measure", "list_price", "dealer_cost", "qty_maine", "qty_indiana", "qty_nevada", "qty_other", "qty_utah", "qty_kentucky", "msrp", "my_cost", "map_price", "standard_cost", "upc", "upc_norm", "images", "images_synced_at", "active", "updated_at", "last_seen_at", "created_at", "last_run_id"]);
+  const known = new Set(["id", "supplier", "sku", "mfr_number", "mfr_number_norm", "manufacturer", "name", "unit_of_measure", "list_price", "dealer_cost", "qty_maine", "qty_indiana", "qty_nevada", "qty_other", "qty_utah", "qty_kentucky", "is_oem", "msrp", "my_cost", "map_price", "standard_cost", "upc", "upc_norm", "images", "images_synced_at", "active", "updated_at", "last_seen_at", "created_at", "last_run_id"]);
   const extra = Object.entries(it).filter(([k, v]) => !known.has(k) && v != null && v !== "");
 
   const mini = (title: string, list: Mini[]) =>

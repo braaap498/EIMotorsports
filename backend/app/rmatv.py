@@ -104,6 +104,7 @@ def ensure_columns() -> None:
         db.execute(text("alter table supplier_items add column if not exists qty_other integer not null default 0"))
         db.execute(text("alter table supplier_items add column if not exists fitment text"))
         db.execute(text("alter table supplier_items add column if not exists qty_utah integer"))
+        db.execute(text("alter table supplier_items add column if not exists is_oem boolean not null default false"))
         db.execute(text("alter table supplier_items add column if not exists qty_kentucky integer"))
         db.execute(text("alter table supplier_items add column if not exists map_price numeric"))
         db.commit()
@@ -326,18 +327,18 @@ with incoming as (
   select * from unnest(
     cast(:sku as text[]), cast(:mfr as text[]), cast(:mfrn as text[]), cast(:brand as text[]),
     cast(:name as text[]), cast(:uom as text[]), cast(:lp as numeric[]), cast(:dc as numeric[]),
-    cast(:qo as integer[]), cast(:upc as text[]), cast(:upcn as text[]), cast(:imgs as text[]), cast(:fit as text[]), cast(:qu as integer[]), cast(:qk as integer[]), cast(:mp as numeric[])
+    cast(:qo as integer[]), cast(:upc as text[]), cast(:upcn as text[]), cast(:imgs as text[]), cast(:fit as text[]), cast(:qu as integer[]), cast(:qk as integer[]), cast(:mp as numeric[]), cast(:oem as boolean[])
   ) as t(sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure, list_price, dealer_cost,
-         qty_other, upc, upc_norm, imgs, fit, qu, qk, mp)
+         qty_other, upc, upc_norm, imgs, fit, qu, qk, mp, oem)
 ), up as (
   insert into supplier_items (supplier, sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure,
                               list_price, dealer_cost, qty_maine, qty_indiana, qty_nevada, qty_other, upc, upc_norm,
-                              last_run_id, images, images_synced_at, fitment, qty_utah, qty_kentucky, map_price)
+                              last_run_id, images, images_synced_at, fitment, qty_utah, qty_kentucky, map_price, is_oem)
   select :sup, sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure,
          list_price, dealer_cost, 0, 0, 0, qty_other, upc, upc_norm, :run,
          case when nullif(imgs, '') is null then null else string_to_array(imgs, chr(10)) end,
          case when nullif(imgs, '') is null then null else now() end,
-         nullif(fit, ''), qu, qk, mp
+         nullif(fit, ''), qu, qk, mp, oem
   from incoming
   on conflict (supplier, sku) do update set
     mfr_number = excluded.mfr_number, mfr_number_norm = excluded.mfr_number_norm,
@@ -347,7 +348,7 @@ with incoming as (
     last_seen_at = now(), last_run_id = excluded.last_run_id,
     images = coalesce(excluded.images, supplier_items.images),
     fitment = coalesce(excluded.fitment, supplier_items.fitment),
-    qty_utah = excluded.qty_utah, qty_kentucky = excluded.qty_kentucky,
+    qty_utah = excluded.qty_utah, qty_kentucky = excluded.qty_kentucky, is_oem = excluded.is_oem,
     map_price = coalesce(excluded.map_price, supplier_items.map_price),
     images_synced_at = case when excluded.images is not null then now() else supplier_items.images_synced_at end,
     updated_at = case
@@ -392,6 +393,7 @@ def upsert_rows(db: Session, run_id: int, rows: list[dict]) -> int:
             "qu": [r.get("qty_utah") for r in rows],
             "qk": [r.get("qty_kentucky") for r in rows],
             "mp": [r.get("map_price") for r in rows],
+            "oem": [bool(r.get("is_oem")) for r in rows],
         },
     ).scalar()
     return int(new_rows or 0)
@@ -622,7 +624,7 @@ def _like(word: str) -> str:
 
 
 def _filters(q, field, brand, status, stock, min_qty, max_qty, min_cost, max_cost, min_list, max_list,
-             min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days, warehouse=None) -> tuple[str, str, dict]:
+             min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days, warehouse=None, source=None) -> tuple[str, str, dict]:
     """(with-clause, where-clause, params) for the catalog browser. Every value is bound, never pasted in."""
     from app.kits import SINGLES_CTE, single_exists  # late import, like the other modules here
 
@@ -661,6 +663,10 @@ def _filters(q, field, brand, status, stock, min_qty, max_qty, min_cost, max_cos
         where.append("s.qty_other > 0")
     elif stock == "out":
         where.append("s.qty_other = 0")
+    if source == "oem":
+        where.append("s.is_oem")
+    elif source == "main":
+        where.append("not s.is_oem")
     if warehouse == "utah":
         where.append("s.qty_utah > 0")
     elif warehouse == "kentucky":
@@ -703,6 +709,7 @@ def items(
     status: str = Query("active", pattern="^(active|inactive|all)$"),
     stock: Optional[str] = Query(None, pattern="^(in|out)$", description="in = stock at Rocky Mountain, out = none"),
     warehouse: Optional[str] = Query(None, pattern="^(utah|kentucky)$", description="stock in this warehouse"),
+    source: Optional[str] = Query(None, pattern="^(oem|main)$", description="oem = parts only the OEM file has, main = the first catalog"),
     min_qty: Optional[int] = Query(None, ge=0),
     max_qty: Optional[int] = Query(None, ge=0),
     min_cost: Optional[float] = Query(None, ge=0),
@@ -728,7 +735,7 @@ def items(
 
     with_clause, clause, params = _filters(
         q, field, brand, status, stock, min_qty, max_qty, min_cost, max_cost, min_list, max_list,
-        min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days, warehouse,
+        min_margin_pct, max_margin_pct, uom, missing, ours, changed_days, seen_days, warehouse, source,
     )
     agg = db.execute(
         text(
@@ -744,7 +751,7 @@ def items(
         text(
             f"with {SINGLES_CTE} "
             f"select s.id, s.sku, s.mfr_number, s.manufacturer, s.name, s.unit_of_measure, {_LIST} as list_price, {_COST} as dealer_cost, "
-            "s.dealer_cost as standard_cost, s.my_cost, s.map_price, s.list_price as msrp, s.qty_other, s.qty_utah, s.qty_kentucky, s.qty_other as qty_total, s.upc, s.images, s.active, "
+            "s.dealer_cost as standard_cost, s.my_cost, s.map_price, s.list_price as msrp, s.qty_other, s.qty_utah, s.qty_kentucky, s.is_oem, s.qty_other as qty_total, s.upc, s.images, s.active, "
             f"s.updated_at, s.last_seen_at, ({_LIST} - {_COST}) as margin, "
             f"(({_LIST} - {_COST}) / nullif({_LIST}, 0) * 100) as margin_pct, "
             f"{single_pick('supplier')} as product_id, {single_count('supplier')} as products "
@@ -1353,6 +1360,7 @@ def _catalog_job(run_id: int) -> bool:
                         elif not first and row["sku"] in taken:
                             n["dupes"] += 1   # already stored from the main file, with fuller detail
                             continue
+                        row["is_oem"] = not first   # a part that only the second (OEM) file has
                         batch[row["sku"]] = row
                         if len(batch) >= SFTP_BATCH:
                             flush()
@@ -1804,6 +1812,7 @@ def catalog_overview(db: Session = Depends(get_db)):
             select count(*) as total, count(*) filter (where s.active) as active, count(*) filter (where not s.active) as retired,
                    count(*) filter (where s.active and s.qty_other > 0) as in_stock, count(*) filter (where s.active and s.qty_other = 0) as out_of_stock,
                    coalesce(sum(s.qty_other) filter (where s.active), 0) as units,
+                   count(*) filter (where s.active and s.is_oem) as oem_parts,
                    count(*) filter (where s.active and s.qty_utah > 0) as in_utah, count(*) filter (where s.active and s.qty_kentucky > 0) as in_kentucky,
                    coalesce(sum(s.qty_utah) filter (where s.active), 0) as units_utah, coalesce(sum(s.qty_kentucky) filter (where s.active), 0) as units_kentucky,
                    coalesce(sum({_COST} * s.qty_other) filter (where s.active), 0) as stock_value_at_cost,
