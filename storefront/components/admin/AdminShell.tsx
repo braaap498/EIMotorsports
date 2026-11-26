@@ -239,11 +239,13 @@ export default function AdminShell({ children }: { children: ReactNode }) {
       return;
     }
 
-    async function check(hasSession: boolean) {
+    async function check(hasSession: boolean, sessionEmail: string) {
       if (!hasSession) {
         if (active) setStatus("signedout");
         return;
       }
+      setEmail(sessionEmail); // shown on the "no admin access" screen, so it is clear which account is signed in
+      setProblem("");
       try {
         const me = await api<{ email: string | null; role: string; permissions?: string[]; password_days_left?: number | null }>("/me");
         if (!active) return;
@@ -251,6 +253,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         setRole(me.role);
         setPermissions(me.permissions ?? []);
         setDaysLeft(typeof me.password_days_left === "number" ? me.password_days_left : null);
+        if (!["owner", "admin", "staff"].includes(me.role)) setProblem(`This account's role is "${me.role}".`);
         setStatus(["owner", "admin", "staff"].includes(me.role) ? "ok" : "forbidden");
       } catch (e) {
         if (!active) return;
@@ -258,7 +261,10 @@ export default function AdminShell({ children }: { children: ReactNode }) {
         else if (e instanceof ApiError && e.status === 403 && /password has expired/.test(e.message)) {
           setProblem(e.message);
           setStatus("expired");
-        } else if (e instanceof ApiError && e.status === 403) setStatus("forbidden");
+        } else if (e instanceof ApiError && e.status === 403) {
+          setProblem(e.message); // the server's own reason (blocked device, network, disabled account...)
+          setStatus("forbidden");
+        }
         else if (e instanceof ApiError && e.status === 401) setStatus("signedout");
         else {
           setProblem(errMsg(e));
@@ -271,7 +277,7 @@ export default function AdminShell({ children }: { children: ReactNode }) {
     // The check is deferred because supabase-js must not be called from inside
     // this callback.
     const { data } = sb.auth.onAuthStateChange((_event, session) => {
-      setTimeout(() => check(!!session), 0);
+      setTimeout(() => check(!!session, session?.user?.email ?? ""), 0);
     });
     return () => {
       active = false;
@@ -292,7 +298,11 @@ export default function AdminShell({ children }: { children: ReactNode }) {
     return (
       <div className="mx-auto mt-24 w-full max-w-md space-y-4 p-4">
         {status === "forbidden" ? (
-          <Notice kind="error">This account does not have admin access.</Notice>
+          <Notice kind="error">
+            This account does not have admin access.
+            {email && <span className="mt-1 block">Signed in as <strong>{email}</strong>.</span>}
+            {problem && <span className="mt-1 block">Reason: {problem}</span>}
+          </Notice>
         ) : (
           <Notice kind="error">The admin could not start: {problem}</Notice>
         )}

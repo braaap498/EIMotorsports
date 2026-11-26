@@ -43,6 +43,7 @@ export default function FitmentPanel({
   const [busy, setBusy] = useState(false);
   const [kitOpen, setKitOpen] = useState(false);
   const [catalogFit, setCatalogFit] = useState<CatalogFit>(null);
+  const [unreadable, setUnreadable] = useState<{ sku: string; entries: string[] } | null>(null); // catalog entries to add by hand
 
   // pickers
   const [types, setTypes] = useState<Opt[]>([]);
@@ -168,8 +169,9 @@ export default function FitmentPanel({
   async function fromCatalog() {
     setBusy(true);
     setMsg(null);
+    setUnreadable(null);
     try {
-      const r = await api<{ sku: string; fitment_added: number; already_had: number; unreadable: number; makes_created: number; models_created: number; years_created: number }>(
+      const r = await api<{ sku: string; fitment_added: number; already_had: number; unreadable: number; unreadable_entries?: string[]; makes_created: number; models_created: number; years_created: number }>(
         `/products/${productId}/fitment/from-catalog`,
         { method: "POST" }
       );
@@ -181,7 +183,8 @@ export default function FitmentPanel({
         r.years_created && `${r.years_created} year${r.years_created === 1 ? "" : "s"}`,
       ].filter(Boolean);
       if (created.length) parts.push(`new to the fitment tool: ${created.join(", ")}`);
-      if (r.unreadable) parts.push(`${r.unreadable} entr${r.unreadable === 1 ? "y" : "ies"} could not be read`);
+      if (r.unreadable) parts.push(`${r.unreadable} entr${r.unreadable === 1 ? "y" : "ies"} could not be read (listed below; add ${r.unreadable === 1 ? "it" : "them"} by hand)`);
+      if (r.unreadable_entries?.length) setUnreadable({ sku: r.sku, entries: r.unreadable_entries });
       setMsg({ kind: "success", text: parts.join("; ") });
       loadFits();
     } catch (e) {
@@ -336,6 +339,22 @@ export default function FitmentPanel({
         <Notice kind="info">This product doesn&apos;t need vehicle fitment. It never appears in a vehicle search and is not on the needs-fitment list.</Notice>
       )}
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+      {unreadable && (
+        <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          <div className="mb-2 flex items-start justify-between gap-2">
+            <span className="font-medium">
+              Could not read {unreadable.entries.length === 1 ? "this entry" : `these ${unreadable.entries.length} entries`} in Rocky Mountain part {unreadable.sku}&apos;s fitment. Add {unreadable.entries.length === 1 ? "it" : "them"} with Add fitment below:
+            </span>
+            <button type="button" className="text-amber-700 hover:text-amber-950" onClick={() => setUnreadable(null)} aria-label="Dismiss">×</button>
+          </div>
+          <ul className="space-y-1">
+            {unreadable.entries.map((e, i) => (
+              <li key={i}><code className="rounded bg-white px-1.5 py-0.5 font-mono text-xs text-gray-800">{e}</code></li>
+            ))}
+          </ul>
+          <p className="mt-2 text-xs text-amber-800">Expected form: years:MAKE:MODEL, e.g. 2015-2020:HONDA:TRX420.</p>
+        </div>
+      )}
 
       {mayAdd && mode !== "not_vehicle" && kitPartCount > 1 && (
         <div className="space-y-2">
