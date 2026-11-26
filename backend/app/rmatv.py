@@ -70,6 +70,7 @@ import socket
 import stat as _stat
 import tempfile
 import threading
+from html.parser import HTMLParser
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
@@ -885,6 +886,106 @@ def _apply_fitment(db: Session, product_id: int, cell: str) -> dict:
 
 
 
+class _DetailsParser(HTMLParser):
+    """Collects the text under the page's "Details" heading as paragraphs and bullets, up to the next section (reviews, fits, etc.)."""
+
+    STOP = ("reviews", "fits", "other items of interest", "people who have viewed", "select options", "customer questions")
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.on = False
+        self.done = False
+        self.blocks: list[tuple[str, str]] = []  # ("p" | "li", text)
+        self._tag = None
+        self._buf: list[str] = []
+        self.full_text: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._tag = "skip"
+        elif tag in ("h1", "h2", "h3", "h4", "h5", "p", "li", "div", "span", "strong", "b") and self._tag != "skip":
+            if tag in ("h1", "h2", "h3", "h4", "h5", "p", "li"):
+                self._flush()
+                self._tag = tag
+        elif tag == "br":
+            self._flush()
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self._tag = None
+        elif tag in ("h1", "h2", "h3", "h4", "h5", "p", "li", "div"):
+            self._flush()
+
+    def handle_data(self, data):
+        if self._tag != "skip":
+            self._buf.append(data)
+
+    def _flush(self):
+        t = re.sub(r"\s+", " ", "".join(self._buf)).strip()
+        tag, self._tag, self._buf = self._tag, (None if self._tag == "skip" else self._tag), []
+        if tag == "skip" or not t:
+            return
+        self.full_text.append(t)
+        low = t.lower().rstrip(":")
+        if not self.on:
+            if low == "details":
+                self.on = True
+            return
+        if self.done:
+            return
+        if any(low.startswith(x) for x in self.STOP) or (tag and tag.startswith("h") and low != "details"):
+            self.done = True
+            return
+        t = t.lstrip("•*-– ").strip()
+        if t:
+            self.blocks.append(("li" if tag == "li" or t != t.lstrip() else "p", t))
+
+
+def _site_description(sku: str) -> Optional[str]:
+    """BEST EFFORT: the "Details" text of the part's page on Rocky Mountain's retail site (rockymountainatvmc.com), as the HTML the
+    description editor stores (<p> and <ul><li> only). Returns None on any problem (no network, blocked by their bot protection,
+    no page found, page does not mention the SKU, no Details section), and the caller then uses the catalog Name. One polite request
+    per search / page, short timeout, no attempt to get around a block. Turn off with RMATV_SITE_DESCRIPTION=0."""
+    import html as _html
+    from urllib.parse import quote
+    from urllib.request import Request, urlopen
+
+    if os.environ.get("RMATV_SITE_DESCRIPTION", "1") == "0" or not (sku or "").strip():
+        return None
+    base = os.environ.get("RMATV_SITE_BASE", "https://www.rockymountainatvmc.com").rstrip("/")
+    try:
+        for path in ("/search?term=", "/parts?term="):
+            req = Request(base + path + quote(sku.strip()), headers={"User-Agent": "Mozilla/5.0 (compatible; EIMotorsports-catalog/1.0)", "Accept": "text/html"})
+            with urlopen(req, timeout=6) as r:
+                raw = r.read(1_500_000).decode(r.headers.get_content_charset() or "utf-8", "replace")
+            if "_Incapsula_Resource" in raw and len(raw) < 5000:  # their bot protection answered instead of the page
+                log.info("rmatv site description: blocked by the site's bot protection")
+                return None
+            if not re.search(re.escape(sku.strip()), raw, re.I):
+                continue  # not the part's page (or no result)
+            ps = _DetailsParser()
+            ps.feed(raw)
+            ps._flush()
+            if not ps.blocks:
+                continue
+            out, in_list = [], False
+            for kind, t in ps.blocks[:20]:
+                if kind == "li" and not in_list:
+                    out.append("<ul>")
+                    in_list = True
+                elif kind == "p" and in_list:
+                    out.append("</ul>")
+                    in_list = False
+                out.append(f"<li>{_html.escape(t)}</li>" if kind == "li" else f"<p>{_html.escape(t)}</p>")
+            if in_list:
+                out.append("</ul>")
+            return "".join(out)[:8000] or None
+    except Exception as e:  # never let this block making the product
+        log.info("rmatv site description failed: %s", e)
+    return None
+
+
+
 def _title_without_part_number(brand, name, mfr, sku) -> str:
     """Title = brand + name, with the part number (manufacturer number or SKU) taken out of the name. Falls back to the SKU."""
     from app.autodist import _nice_case
@@ -980,14 +1081,11 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
         raise HTTPException(400, "Add Rocky Mountain ATV under Distributors first; the part entry needs it.")
     title = _title_without_part_number(it.manufacturer, it.name, it.mfr_number, it.sku)
     import html as _html
-    desc = None  # the catalog Name goes into the Description (the editor stores HTML); same starter text as the Automatic page: name, brand, "confirm it fits"
-    if (it.name or "").strip():
-        try:
-            from app.autodist import _starter_description
-
-            desc = _starter_description(it.manufacturer, it.name.strip(), None, None, None, None)
-        except Exception:
-            desc = f"<p>{_html.escape(it.name.strip())}</p>"
+    # Description: the "Details" text of the part's page on Rocky Mountain's site when it can be read; if that fails for any reason,
+    # the catalog Name (as a paragraph: the editor stores HTML)
+    desc = _site_description(it.sku)
+    if not desc and (it.name or "").strip():
+        desc = f"<p>{_html.escape(it.name.strip())}</p>"
     cat_id, ptype = _guess_category_and_type(db, it.name or "")
     base = slugify(title) or slugify(f"part {it.sku}") or "part"
     slug, k = base, 1
