@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Badge, Field, Notice, btnCls, btn2Cls, dangerCls, inputCls } from "./ui";
 import { useAccess } from "./AdminAccess";
+import KitFitmentReview from "./KitFitmentReview";
 import { MODE_FLAGS, MODE_OPTIONS, modeOf, type FitmentFlags } from "../../lib/fitmentMode";
 
 type FitYear = { vehicle_id: number; year: number; submodel: string | null };
@@ -22,10 +23,14 @@ export default function FitmentPanel({
   productId,
   flags,
   onFlagsChange,
+  kitPartCount = 0,
+  kitPartsDirty = false,
 }: {
   productId: number;
   flags: FitmentFlags;
   onFlagsChange: (v: FitmentFlags) => void;
+  kitPartCount?: number; // distributor parts on this product; the compare button only shows for 2 or more
+  kitPartsDirty?: boolean; // distributor parts changed but not saved yet
 }) {
   const { can } = useAccess();
   const mode = modeOf(flags);
@@ -35,6 +40,7 @@ export default function FitmentPanel({
   const [fits, setFits] = useState<FitModel[]>([]);
   const [msg, setMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [kitOpen, setKitOpen] = useState(false);
 
   // pickers
   const [types, setTypes] = useState<Opt[]>([]);
@@ -284,6 +290,22 @@ export default function FitmentPanel({
         <Notice kind="info">This product doesn&apos;t need vehicle fitment. It never appears in a vehicle search and is not on the needs-fitment list.</Notice>
       )}
       {msg && <Notice kind={msg.kind}>{msg.text}</Notice>}
+
+      {mayAdd && mode !== "not_vehicle" && kitPartCount > 1 && (
+        <div className="space-y-2">
+          {!kitOpen && (
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" className={btn2Cls} disabled={kitPartsDirty} onClick={() => setKitOpen(true)}>
+                Compare kit parts&apos; fitment
+              </button>
+              <span className="text-xs text-gray-500">
+                {kitPartsDirty ? "Save the distributor parts first." : `Finds the machines and years that all ${kitPartCount} parts fit, then lets you accept or reject each.`}
+              </span>
+            </div>
+          )}
+          {kitOpen && <KitFitmentReview productId={productId} onClose={() => setKitOpen(false)} onDone={loadFits} />}
+        </div>
+      )}
 
       {mayAdd && mode !== "not_vehicle" && addForm("top")}
 

@@ -722,7 +722,7 @@ export default function ProductForm({ productId }: { productId?: number }) {
         {!productId && <p className="text-xs text-gray-500">Fitment and photos can be added after the product is created.</p>}
       </form>
 
-      {productId && <FitmentPanel productId={productId} flags={flags} onFlagsChange={(v) => setFlags((f) => ({ ...f, ...v }))} />}
+      {productId && <FitmentPanel productId={productId} flags={flags} onFlagsChange={(v) => setFlags((f) => ({ ...f, ...v }))} kitPartCount={kitParts.length} kitPartsDirty={partsDirty} />}
 
       {productId && <PhotosPanel productId={productId} photos={photos} onChange={setPhotos} cardCls={card} onDirtyChange={setPhotosDirty} />}
 

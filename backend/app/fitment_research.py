@@ -508,3 +508,132 @@ def paste_apply(product_id: int, body: PasteApply, db: Session = Depends(get_db)
         db.rollback()
         raise
     return c
+
+
+# --------------------------------------------------------------------------
+# 5. kit parts: the vehicles/years that EVERY part of a kit fits
+# --------------------------------------------------------------------------
+# A distributor catalog carries no fitment, so the fitment of a kit's part is the fitment of our own SINGLE-part product(s)
+# that are that same distributor part (the same rule the kit's E&I shelf quantity uses, app/stock.py same_part_sql).
+# The kit fits a vehicle only when every one of its parts does, so the answer is the overlap (intersection) of those lists.
+# Read-only until the person has reviewed the overlap and sent back what they accepted.
+def _kit_common(db: Session, product_id: int) -> dict:
+    from app.stock import same_part_sql
+
+    if not db.execute(text("select 1 from products where id = :i"), {"i": product_id}).first():
+        raise HTTPException(404, "Product not found")
+    lines = db.execute(
+        text("select k.id, k.part_number, k.description from product_kit_parts k where k.product_id = :p order by k.sort_order, k.id"),
+        {"p": product_id},
+    ).all()
+    if len(lines) < 2:
+        raise HTTPException(400, "This product is not a kit: it needs two or more distributor parts.")
+
+    parts: list[dict] = []
+    sets: list[set[int]] = []        # one vehicle-id set per part that actually limits the kit
+    for ln in lines:
+        singles = db.execute(
+            text(
+                "select distinct p2.id, p2.title, p2.sku, coalesce(p2.is_universal, false) as is_universal, "
+                "(select count(*) from product_fitment pf where pf.product_id = p2.id) as fit_rows "
+                "from product_kit_parts k join product_kit_parts k2 on " + same_part_sql("k", "k2") + " "
+                "join products p2 on p2.id = k2.product_id "
+                "where k.id = :l and p2.id <> :p and (select count(*) from product_kit_parts k3 where k3.product_id = p2.id) = 1 "
+                "order by p2.id"
+            ),
+            {"l": ln.id, "p": product_id},
+        ).all()
+        ids = [s.id for s in singles]
+        vids: set[int] = set()
+        if ids:
+            vids = {r[0] for r in db.execute(
+                text("select distinct vehicle_id from product_fitment where product_id = any(cast(:ids as bigint[]))"), {"ids": ids})}
+        universal = any(s.is_universal and not s.fit_rows for s in singles)
+        if universal:
+            status = "universal"          # fits everything, so it does not narrow the kit
+        elif vids:
+            status = "ok"
+        elif singles:
+            status = "no_fitment"          # a single product exists but has no fitment yet
+        else:
+            status = "no_product"          # no single-part product of ours is this part
+        parts.append({
+            "line_id": ln.id, "part_number": ln.part_number, "description": ln.description, "status": status,
+            "vehicles": len(vids), "products": [{"id": s.id, "title": s.title, "sku": s.sku} for s in singles],
+        })
+        if status == "ok":
+            sets.append(vids)
+
+    out = {"parts": parts, "blocked": None, "models": [], "already_present": 0, "common_vehicles": 0}
+    bad = [p for p in parts if p["status"] in ("no_fitment", "no_product")]
+    if bad:
+        out["blocked"] = (
+            "These parts have no fitment to compare yet: "
+            + "; ".join(f"{p['part_number']} ({'no single-part product of yours matches it' if p['status'] == 'no_product' else 'its product has no fitment'})" for p in bad)
+            + ". Add fitment to them (or make their single-part products) first."
+        )
+        return out
+    if not sets:
+        out["blocked"] = "Every part is universal, so there is nothing to compare."
+        return out
+
+    common = set.intersection(*sets)
+    out["common_vehicles"] = len(common)
+    if not common:
+        return out
+    have = {r[0] for r in db.execute(text("select vehicle_id from product_fitment where product_id = :p"), {"p": product_id})}
+    rows = db.execute(
+        text(
+            "select v.id as vehicle_id, v.year, vm.id as model_id, vm.name as model, mk.name as make, vt.slug as vehicle_type "
+            "from vehicles v join vehicle_models vm on vm.id = v.model_id join vehicle_makes mk on mk.id = vm.make_id "
+            "left join vehicle_types vt on vt.id = vm.vehicle_type_id "
+            "where v.id = any(cast(:ids as bigint[])) order by mk.name, vm.name, v.year"
+        ),
+        {"ids": sorted(common)},
+    ).all()
+    models: dict[int, dict] = {}
+    for r in rows:
+        if r.vehicle_id in have:
+            out["already_present"] += 1
+            continue
+        m = models.setdefault(r.model_id, {"model_id": r.model_id, "make": r.make, "model": r.model, "vehicle_type": r.vehicle_type, "years": []})
+        m["years"].append({"vehicle_id": r.vehicle_id, "year": r.year})
+    out["models"] = list(models.values())
+    out["_common"] = common
+    return out
+
+
+@router.get("/kits/{product_id}/compare")
+@needs("fitment.view")
+def kit_compare(product_id: int, db: Session = Depends(get_db)):
+    """The review queue for a kit: one entry per machine whose years ALL the kit's parts fit and the kit does not have yet."""
+    res = _kit_common(db, product_id)
+    res.pop("_common", None)
+    return res
+
+
+class KitApply(BaseModel):
+    vehicle_ids: list[int] = []   # only the years the person accepted
+
+
+@router.post("/kits/{product_id}/apply")
+@needs("fitment.add")
+def kit_apply(product_id: int, body: KitApply, db: Session = Depends(get_db)):
+    """Adds the accepted years to the kit. Each id is checked again against the overlap as it is NOW, so a stale screen can
+    never add a vehicle that some part no longer fits. Existing fitment is never removed."""
+    res = _kit_common(db, product_id)
+    allowed = res.get("_common") or set()
+    ids = sorted({v for v in body.vehicle_ids if v in allowed})
+    if not ids:
+        return {"added": 0, "ignored": len(set(body.vehicle_ids)), "already_present": 0}
+    added = db.execute(
+        text(
+            "insert into product_fitment (product_id, vehicle_id, notes, source) "
+            "select :p, v.id, 'kit: every part fits', 'research' from vehicles v where v.id = any(cast(:ids as bigint[])) "
+            "and not exists (select 1 from product_fitment pf where pf.product_id = :p and pf.vehicle_id = v.id)"
+        ),
+        {"p": product_id, "ids": ids},
+    ).rowcount
+    _refresh(db)
+    db.commit()
+    return {"added": added, "ignored": len(set(body.vehicle_ids)) - len(ids), "already_present": len(ids) - added}
