@@ -254,6 +254,19 @@ function AutodistInner() {
     }
   }
 
+  async function productPriceSync() {
+    setBusy("prices");
+    setMsg(null);
+    try {
+      const r = await api<{ linked: number; changed: number }>("/autodist/products/sync-prices", { method: "POST" });
+      setMsg({ kind: "success", text: `Checked ${r.linked} product${r.linked === 1 ? "" : "s"}; updated the list price or cost on ${r.changed}.` });
+    } catch (e) {
+      setMsg({ kind: "error", text: errMsg(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function photoSync() {
     setBusy("photos");
     setMsg(null);
@@ -504,6 +517,9 @@ function AutodistInner() {
             </button>
             <button type="button" className={btn2Cls} disabled={busy !== "" || ftpRunning || !ftp?.configured} onClick={() => void photoSync()} title="Reads the big All Products file. Only needed now and then.">
               {busy === "photos" ? "Starting…" : "Update photo links"}
+            </button>
+            <button type="button" className={btn2Cls} disabled={busy !== ""} onClick={() => void productPriceSync()} title="Copies the catalog's list price and cost onto each part's single product (not kits)">
+              {busy === "prices" ? "Updating…" : "Update product prices now"}
             </button>
             <button type="button" className={btn2Cls} disabled={busy !== "" || !ftp?.configured} onClick={() => void ftpPeek()}>
               {busy === "peek" ? "Reading files…" : "Look inside the data files"}

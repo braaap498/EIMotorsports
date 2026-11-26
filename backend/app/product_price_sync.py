@@ -10,7 +10,8 @@ were made. This module copies them again whenever the catalog changes:
                           for Automatic: the catalog's effective cost)
 
 Rules:
-  * Only single-part products. A kit (several parts) is never touched: its price is not one part's price.
+  * Only the catalog part's SINGLE product (the one in the catalog's "Ours" column): no parts line or exactly one with quantity 1.
+    A kit that merely contains or links the part is never touched: its price is not one part's price.
   * A catalog value that is blank never wipes a price or cost already on the product.
   * Only rows whose value really changed are written (and get a new updated_at), so running it again is cheap and safe.
   * It overwrites the product's price with the catalog's: that is the point. Edit the price in the catalog file, not on the product.
@@ -42,6 +43,8 @@ with src as (
   from supplier_product_links l
   join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku
   where l.supplier = :sup
+    and (select count(*) from product_kit_parts z where z.product_id = l.product_id) <= 1
+    and not exists (select 1 from product_kit_parts z where z.product_id = l.product_id and coalesce(z.quantity, 1) <> 1)
   union
   -- both suppliers: the product's only Distributor parts entry (quantity 1) points at a part of this supplier
   select k.product_id, k.supplier_item_id

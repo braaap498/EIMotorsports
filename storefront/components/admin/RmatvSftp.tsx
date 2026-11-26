@@ -160,6 +160,7 @@ export default function RmatvSftp({ runs, onChanged }: { runs: Run[]; onChanged:
             <button type="button" className={btn2Cls} disabled={off || !status?.configured} onClick={() => void lookAtFiles()}>{busy === "peek" ? "Reading…" : "Look at the files"}</button>
             <button type="button" className={btn2Cls} disabled={off || !status?.configured || !cfg.price_file} title="Needs a price file chosen below" onClick={() => void start("price", "/rmatv/import/sftp-prices", "Price update started.")}>Pull my prices</button>
             <button type="button" className={btn2Cls} disabled={off || !status?.configured || !(cfg.photo_file || cfg.catalog_file)} title="Reads the photo links. Only needed now and then." onClick={() => void start("photo", "/rmatv/import/sftp-photos", "Reading photo links in the background.")}>Read photo links</button>
+            <button type="button" className={btn2Cls} disabled={busy !== ""} title="Copies the catalog's list price and cost onto each part's single product (not kits)" onClick={() => void act("prices", async () => api<{ linked: number; changed: number }>("/rmatv/products/sync-prices", { method: "POST" }), (r) => ({ kind: "success", text: `Checked ${r.linked} product${r.linked === 1 ? "" : "s"}; updated the list price or cost on ${r.changed}.` }))}>{busy === "prices" ? "Updating…" : "Update product prices now"}</button>
           </div>
 
           {check && (
