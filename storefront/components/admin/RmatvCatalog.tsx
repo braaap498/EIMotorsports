@@ -708,10 +708,14 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                         )}
                       </td>
                       <td className="truncate py-1 pr-3" title={r.manufacturer ?? ""}>{r.manufacturer ?? "—"}</td>
-                      <td className="truncate py-1 pr-3 font-medium" title={r.sku}>
-                        {r.sku}
-                        {r.is_oem && <span className="ml-1 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800">OEM</span>}
-                        {!r.active && <span className="ml-1"><Badge tone="gray">retired</Badge></span>}
+                      <td className="py-1 pr-3 font-medium" title={r.sku}>
+                        <div className="break-all">{r.sku}</div>
+                        {(r.is_oem || !r.active) && (
+                          <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                            {r.is_oem && <span className="whitespace-nowrap rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-800">OEM</span>}
+                            {!r.active && <Badge tone="gray">retired</Badge>}
+                          </div>
+                        )}
                       </td>
                       <td className="break-all py-1 pr-3" title={r.mfr_number ?? ""}>{r.mfr_number ?? "—"}</td>
                       <td className="break-words py-1 pr-3">{r.name ?? "—"}</td>
