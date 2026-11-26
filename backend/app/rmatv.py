@@ -127,6 +127,7 @@ FIELDS: list[tuple[str, str, bool]] = [
     ("list_price", "List / retail price (MSRP)", False),
     ("map_price", "MAP price (used as the list price when there is one)", False),
     ("qty", "Total quantity in stock (used only when the file has no Utah / Kentucky columns)", False),
+    ("warehouse", "Warehouse stock in one column (like UT:3|KY:5)", False),
     ("qty_ut", "Stock in Utah", False),
     ("qty_ky", "Stock in Kentucky", False),
     ("upc", "UPC / barcode", False),
@@ -149,6 +150,7 @@ _ALIASES: dict[str, list[str]] = {
     "dealer_cost": ["dealercost", "dealerprice", "dealernet", "yourcost", "yourprice", "customerprice", "netprice", "wholesaleprice", "wholesale", "yourdealerprice"],
     "list_price": ["listprice", "msrp", "retailprice", "retail", "suggestedretail"],
     "qty": ["totalqty", "qtyavailable", "quantityavailable", "availableqty", "availablequantity", "qtyonhand", "onhand", "quantityonhand", "instock", "stock", "qty", "quantity", "inventory", "available"],
+    "warehouse": ["warehouse", "warehouses", "warehouseqty", "warehousestock", "warehouseinventory", "stockbywarehouse", "inventorybywarehouse"],
     "qty_ut": ["qtyut", "qtyutah", "utahqty", "utqty", "utahstock", "utstock", "utah"],
     "qty_ky": ["qtyky", "qtykentucky", "kyqty", "kentuckyqty", "kentuckystock", "kystock", "kentucky"],
     "map_price": ["mapprice", "mappricing", "map", "minimumadvertisedprice"],
@@ -227,6 +229,21 @@ def _qty(value: Optional[str]) -> int:
         return 0
 
 
+def _parse_warehouses(cell: str) -> tuple[int, int]:
+    """'UT:3|KY:5' -> (3, 5). A warehouse left out of the cell has none (0); 'UT:10+' counts as 10. Also reads UTAH=3;KENTUCKY=5."""
+    ut = ky = 0
+    for part in re.split(r"[|;,/\r\n]+", cell or ""):
+        m = re.match(r"\s*([A-Za-z]+)\s*[:=]\s*(.+?)\s*$", part)
+        if not m:
+            continue
+        code, val = m.group(1).upper(), _qty(m.group(2))
+        if code in ("UT", "UTAH"):
+            ut += val
+        elif code in ("KY", "KENTUCKY"):
+            ky += val
+    return ut, ky
+
+
 def _split_urls(cell: str) -> list[str]:
     """A cell holding one or more photo links (separated by | ; , spaces or new lines) -> the http(s) links, in order, no repeats."""
     urls: list[str] = []
@@ -256,7 +273,10 @@ def clean_row(values: list[str], mapping: dict[str, int]) -> Optional[dict]:
     mfr = get("mfr_number") or None
     upc = get("upc") or None
     # two warehouses (Utah + Kentucky) when the file has them: the total is their sum; else the file's single total
-    if "qty_ut" in mapping or "qty_ky" in mapping:
+    if "warehouse" in mapping:
+        ut, ky = _parse_warehouses(get("warehouse"))
+        total = min(ut + ky, 100_000_000)
+    elif "qty_ut" in mapping or "qty_ky" in mapping:
         ut, ky = _qty(get("qty_ut")), _qty(get("qty_ky"))
         total = min(ut + ky, 100_000_000)
     else:
