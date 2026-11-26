@@ -652,6 +652,10 @@ def _sync_note(db: Session, *, summary: Optional[str] = None, error: Optional[st
     except Exception:
         db.rollback()
         log.warning("could not record the Automatic Distributors sync result (is sql/autodist_sync_settings.sql applied?)")
+    if summary and not error:
+        from app.product_price_sync import sync_after_import  # late import, like the others in this file
+
+        sync_after_import(db, SUPPLIER)   # the import changed the catalog: carry its list price / cost onto the linked products
 
 
 def _ftp_job(run_id: int) -> bool:
@@ -4412,3 +4416,18 @@ def catalog_overview(db: Session = Depends(get_db)):
         "price_bands": [{"band": b.band, "parts": b.parts} for b in bands],
         "units_of_measure": [dict(u._mapping) for u in uoms],
     }
+
+
+@router.post("/products/sync-prices")
+def sync_product_prices(db: Session = Depends(get_db)):
+    """Copy the catalog's list price and cost onto every single-part website product made from this catalog right now (this also
+    runs by itself after every feed import). Kits are never touched. A blank catalog value never wipes a price already on a product."""
+    from app.product_price_sync import sync_linked_product_prices
+
+    try:
+        res = sync_linked_product_prices(db, SUPPLIER)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not update the product prices: {str(e)[:300]}")
+    return res

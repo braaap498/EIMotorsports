@@ -1417,6 +1417,10 @@ def _sync_note(db: Session, *, summary: Optional[str] = None, error: Optional[st
     except Exception:
         db.rollback()
         log.warning("could not record the Rocky Mountain sync result")
+    if summary and not error:
+        from app.product_price_sync import sync_after_import  # late import, like the others in this file
+
+        sync_after_import(db, SUPPLIER)   # the import changed the catalog: carry its list price / cost onto the linked products
 
 
 def _set_run_note(db: Session, run_id: int, status: str, note: str) -> None:
@@ -2388,3 +2392,18 @@ def relink_apply(body: RelinkIn, db: Session = Depends(get_db), user: AuthUser =
             db.rollback()
             raise HTTPException(500, f"Could not move the links: {str(e)[:300]}")
     return {"moved": len(move), "products": len({r["product_id"] for r in move}), "left_alone": len(plan) - len(move)}
+
+
+@router.post("/products/sync-prices")
+def sync_product_prices(db: Session = Depends(get_db)):
+    """Copy the catalog's list price and cost onto every single-part website product made from this catalog right now (this also
+    runs by itself after every feed import). Kits are never touched. A blank catalog value never wipes a price already on a product."""
+    from app.product_price_sync import sync_linked_product_prices
+
+    try:
+        res = sync_linked_product_prices(db, SUPPLIER)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Could not update the product prices: {str(e)[:300]}")
+    return res
