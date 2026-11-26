@@ -18,7 +18,7 @@ type Totals = {
   total: number; active: number; retired: number; in_stock: number; out_of_stock: number;
   units: number;
   stock_value_at_cost: string | number; stock_value_at_list: string | number; brands: number;
-  no_barcode: number; no_mfr_number: number; no_name: number; no_cost: number; no_list_price: number; list_below_cost: number; no_photo: number;
+  no_barcode: number; no_fitment: number; no_mfr_number: number; no_name: number; no_cost: number; no_list_price: number; list_below_cost: number; no_photo: number;
   changed_7d: number; changed_30d: number; avg_margin_pct: string | number | null; last_seen: string | null;
 };
 type BrandRow = {
@@ -81,7 +81,7 @@ const when = (v: unknown) => (typeof v === "string" && v ? new Date(v).toLocaleS
 
 const MISSING_LABEL: Record<string, string> = {
   upc: "no barcode", mfr: "no manufacturer number", name: "no name", cost: "no cost", list: "no list price",
-  below_cost: "list price below cost", photo: "no photo link",
+  below_cost: "list price below cost", photo: "no photo link", fitment: "no fitment",
 };
 
 type SortKey =
@@ -248,11 +248,13 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
     setBusyId(r.id);
     setFlash(null);
     try {
-      const m = await api<{ product_id: number; title: string; custom_label: string | null; photos: number; photos_saving: boolean }>(`/rmatv/items/${r.id}/make-product`, { method: "POST" });
+      const m = await api<{ product_id: number; title: string; custom_label: string | null; photos: number; photos_saving: boolean; fitment: { entries?: number; unreadable?: number; makes_created?: number; models_created?: number; fitment_added?: number; error?: boolean } | null }>(`/rmatv/items/${r.id}/make-product`, { method: "POST" });
       setFlash({
         kind: "info",
         text: `Made product #${m.product_id}: ${m.title}${m.custom_label ? ` (custom label ${m.custom_label})` : ". Its custom label was left blank: that number is already a label or cannot be one"}. ${
           m.photos ? `${m.photos} photo${m.photos === 1 ? "" : "s"} ${m.photos_saving ? "are being saved to storage" : "will be saved when the next photo run starts (Import tab, Photos)"}.` : "This part has no photo link."
+        }${
+          m.fitment ? (m.fitment.error ? " The fitment could not be added; add it with the fitment tool." : ` Fitment: ${m.fitment.fitment_added ?? 0} vehicle-year${m.fitment.fitment_added === 1 ? "" : "s"} added${m.fitment.makes_created || m.fitment.models_created ? ` (new to the fitment tool: ${m.fitment.makes_created ?? 0} make${m.fitment.makes_created === 1 ? "" : "s"}, ${m.fitment.models_created ?? 0} model${m.fitment.models_created === 1 ? "" : "s"})` : ""}${m.fitment.unreadable ? `; ${m.fitment.unreadable} entr${m.fitment.unreadable === 1 ? "y" : "ies"} could not be read` : ""}.`) : ""
         } It is NOT published; set a price and category on the product.`,
       });
       setTick((x) => x + 1);
@@ -389,7 +391,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
               <div className="flex flex-wrap gap-2 text-xs">
                 {(
                   [
-                    ["upc", t.no_barcode], ["mfr", t.no_mfr_number], ["name", t.no_name], ["photo", t.no_photo],
+                    ["upc", t.no_barcode], ["mfr", t.no_mfr_number], ["name", t.no_name], ["photo", t.no_photo], ["fitment", t.no_fitment],
                     ["cost", t.no_cost], ["list", t.no_list_price], ["below_cost", t.list_below_cost],
                   ] as const
                 ).map(([k, c]) => (

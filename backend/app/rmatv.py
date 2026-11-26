@@ -6,7 +6,8 @@ Mounted at /admin/rmatv/* (owner/admin only).
   GET  /summary           what is stored, and the last imports
   GET  /brands            brands in the catalog, for the filter
   GET  /items             browse / search the stored parts (same filters as the Automatic Distributors catalog)
-  POST /items/{id}/make-product   make the part's single product; its photo links become the product's photos
+  POST /items/{id}/make-product   make the part's single product; its photo links become the product's photos and its fitment cell
+                          (year-year:MAKE:MODEL|...) becomes the product's fitment (makes/models/years added to the fitment tool only when new)
   POST /photos/store      download the photos of those products into our storage (background)   GET /photos/status
   GET/POST /relink        carry the products' links from the hand-typed saved parts (and dropped catalog parts) to the catalog parts
   POST /import/detect     which column of the file feeds which field (reads nothing, changes nothing)
@@ -99,6 +100,7 @@ def ensure_columns() -> None:
     db = _session_factory()()
     try:
         db.execute(text("alter table supplier_items add column if not exists qty_other integer not null default 0"))
+        db.execute(text("alter table supplier_items add column if not exists fitment text"))
         db.commit()
     except Exception:
         db.rollback()
@@ -123,12 +125,15 @@ FIELDS: list[tuple[str, str, bool]] = [
     ("upc", "UPC / barcode", False),
     ("unit_of_measure", "Unit of measure", False),
     ("images", "Photo link(s)", False),
+    ("fitment", "Fitment (year-year:MAKE:MODEL|...)", False),
 ]
 
 # Header names (case, spaces and punctuation ignored), best guess first. The lists do not overlap, so one column
 # never feeds two fields. A bare "Price" or "Cost" is NOT guessed: it could be retail or ours, so the person picks it.
 # a column of photo links (Rocky Mountain's own files call it PICTURE); the best guess first
 _IMAGE_ALIASES = ["picture", "pictureurl", "pictureurls", "pictures", "images", "imageurls", "imagelinks", "imageurl", "imagelink", "image", "photos", "photourls", "photourl", "photo"]
+# a column of fitment cells, e.g. "1979-1989:HONDA:XR80|1982-1985:HONDA:ATC 70"
+_FITMENT_ALIASES = ["fitment", "fitments", "vehiclefitment", "fitmentdata", "fitsvehicles", "fits", "compatibility", "compatiblevehicles", "applications", "application"]
 _ALIASES: dict[str, list[str]] = {
     "sku": ["prodno", "rmatvpartnumber", "rmatvpart", "rmatvsku", "rockymountainpartnumber", "partnumber", "partno", "partnum", "part", "sku", "itemnumber", "itemno", "item", "productnumber", "productno", "stocknumber"],
     "name": ["itemname", "productname", "name", "partname", "partdescription", "productdescription", "itemdescription", "description", "title"],
@@ -141,6 +146,7 @@ _ALIASES: dict[str, list[str]] = {
     "upc": ["upc", "upccode", "upcnumber", "barcode", "ean", "gtin", "upcean"],
     "unit_of_measure": ["unitofmeasure", "uom", "unit", "packagequantity"],
     "images": _IMAGE_ALIASES,
+    "fitment": _FITMENT_ALIASES,
 }
 FIELD_KEYS = {k for k, _, _ in FIELDS}
 
@@ -252,6 +258,7 @@ def clean_row(values: list[str], mapping: dict[str, int]) -> Optional[dict]:
         "qty_other": min(_qty(get("qty")) + _qty(get("qty_2")), 100_000_000),
         "upc": upc,
         "upc_norm": norm_upc(upc),
+        "fitment": get("fitment")[:20000],   # "" when the row has none: the fitment already stored is kept
         "images": "\n".join(_split_urls(get("images"))[:6]),   # "" when the row has none: the links already stored are kept
     }
 
@@ -280,17 +287,18 @@ with incoming as (
   select * from unnest(
     cast(:sku as text[]), cast(:mfr as text[]), cast(:mfrn as text[]), cast(:brand as text[]),
     cast(:name as text[]), cast(:uom as text[]), cast(:lp as numeric[]), cast(:dc as numeric[]),
-    cast(:qo as integer[]), cast(:upc as text[]), cast(:upcn as text[]), cast(:imgs as text[])
+    cast(:qo as integer[]), cast(:upc as text[]), cast(:upcn as text[]), cast(:imgs as text[]), cast(:fit as text[])
   ) as t(sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure, list_price, dealer_cost,
-         qty_other, upc, upc_norm, imgs)
+         qty_other, upc, upc_norm, imgs, fit)
 ), up as (
   insert into supplier_items (supplier, sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure,
                               list_price, dealer_cost, qty_maine, qty_indiana, qty_nevada, qty_other, upc, upc_norm,
-                              last_run_id, images, images_synced_at)
+                              last_run_id, images, images_synced_at, fitment)
   select :sup, sku, mfr_number, mfr_number_norm, manufacturer, name, unit_of_measure,
          list_price, dealer_cost, 0, 0, 0, qty_other, upc, upc_norm, :run,
          case when nullif(imgs, '') is null then null else string_to_array(imgs, chr(10)) end,
-         case when nullif(imgs, '') is null then null else now() end
+         case when nullif(imgs, '') is null then null else now() end,
+         nullif(fit, '')
   from incoming
   on conflict (supplier, sku) do update set
     mfr_number = excluded.mfr_number, mfr_number_norm = excluded.mfr_number_norm,
@@ -299,6 +307,7 @@ with incoming as (
     qty_other = excluded.qty_other, upc = excluded.upc, upc_norm = excluded.upc_norm,
     last_seen_at = now(), last_run_id = excluded.last_run_id,
     images = coalesce(excluded.images, supplier_items.images),
+    fitment = coalesce(excluded.fitment, supplier_items.fitment),
     images_synced_at = case when excluded.images is not null then now() else supplier_items.images_synced_at end,
     updated_at = case
       when not supplier_items.active
@@ -338,6 +347,7 @@ def upsert_rows(db: Session, run_id: int, rows: list[dict]) -> int:
             "upc": col("upc"),
             "upcn": col("upc_norm"),
             "imgs": [r.get("images") or "" for r in rows],
+            "fit": [r.get("fitment") or "" for r in rows],
         },
     ).scalar()
     return int(new_rows or 0)
@@ -555,6 +565,7 @@ _GAPS = {
     "list": "s.list_price is null",
     "below_cost": f"(s.list_price is not null and {_COST} is not null and s.list_price < {_COST})",
     "photo": "s.images is null",
+    "fitment": "s.fitment is null",
 }
 
 
@@ -649,7 +660,7 @@ def items(
     min_margin_pct: Optional[float] = Query(None, description="(list - cost) / list, in percent"),
     max_margin_pct: Optional[float] = Query(None),
     uom: Optional[str] = Query(None, max_length=40),
-    missing: Optional[str] = Query(None, pattern="^(upc|mfr|name|cost|list|below_cost|photo)$", description="data gaps to find"),
+    missing: Optional[str] = Query(None, pattern="^(upc|mfr|name|cost|list|below_cost|photo|fitment)$", description="data gaps to find"),
     ours: Optional[str] = Query(None, pattern="^(yes|no)$", description="the part already has its single product of ours"),
     changed_days: Optional[int] = Query(None, ge=1, le=3650, description="price / stock / details changed within N days"),
     seen_days: Optional[int] = Query(None, ge=1, le=3650, description="still in the feed as of N days ago"),
@@ -703,6 +714,117 @@ def items(
     return {"total": agg.total, "rows": rows, "summary": {k: (float(v) if isinstance(v, Decimal) else v) for k, v in agg._mapping.items()}}
 
 
+# --------------------------------------------------------------------------
+# fitment: the catalog's fitment cell -> the product's fitment
+# --------------------------------------------------------------------------
+# A cell looks like "1979-1989:HONDA:XR80|1982-1985:HONDA:ATC 70": entries separated by |, each "years:make:model" where years is
+# one year or a range. Making a product adds one product_fitment row per machine and year (the same rows the fitment tool's paste
+# makes, which also feed the eBay compatible vehicles). A make, model or year is added to the fitment tool ONLY when it is not
+# there yet (matched ignoring case, spaces and punctuation, with the tool's own make aliases). A new model takes the vehicle type
+# most of that make's models have (left blank when the make has none; the fitment tool lets you set it later).
+_FIT_YEARS = re.compile(r"^((?:19|20)\d{2})(?:\s*(?:-|\u2013|to)\s*((?:19|20)\d{2}))?$", re.I)
+
+
+def _parse_fitment_cell(cell: str) -> tuple[dict, int]:
+    """-> ({(make key, model key): {"make": text, "model": text, "years": set}}, entries that could not be read)."""
+    from app.fitment_match import _ALIASES as MAKE_ALIASES, _norm
+
+    out: dict = {}
+    bad = 0
+    for part in re.split(r"\s*\|\s*", (cell or "").strip()):
+        part = part.strip()
+        if not part:
+            continue
+        bits = [b.strip() for b in part.split(":", 2)]
+        m = _FIT_YEARS.match(bits[0]) if len(bits) == 3 else None
+        if not m or not bits[1] or not bits[2]:
+            bad += 1
+            continue
+        a = int(m.group(1))
+        b = int(m.group(2) or a)
+        if b < a:
+            a, b = b, a
+        if b - a > 80:
+            bad += 1
+            continue
+        mk = _norm(MAKE_ALIASES.get(bits[1].lower(), bits[1]))
+        key = (mk, _norm(bits[2]))
+        if not key[0] or not key[1]:
+            bad += 1
+            continue
+        e = out.setdefault(key, {"make": bits[1], "model": bits[2], "years": set()})
+        e["years"].update(range(a, b + 1))
+    return out, bad
+
+
+def _tidy_make(name: str) -> str:
+    """HONDA -> Honda, KTM stays KTM (a new make only; an existing make keeps its own spelling)."""
+    n = name.strip()
+    return n if not n.isupper() or len(n) <= 3 else n.title()
+
+
+def _apply_fitment(db: Session, product_id: int, cell: str) -> dict:
+    """Add the cell's fitment to the product. Does not commit (the caller's savepoint does)."""
+    from app.fitment_match import _ALIASES as MAKE_ALIASES, _norm
+    from app.fitment_research import _refresh, _slugify
+
+    parsed, bad = _parse_fitment_cell(cell)
+    c = {"entries": len(parsed), "unreadable": bad, "makes_created": 0, "models_created": 0, "years_created": 0, "fitment_added": 0, "already_had": 0}
+    if not parsed:
+        return c
+    makes = {_norm(r.name): r.id for r in db.execute(text("select id, name from vehicle_makes"))}
+    models_by_make: dict[int, dict[str, int]] = {}
+    for e in parsed.values():
+        mk_key = _norm(MAKE_ALIASES.get(e["make"].lower(), e["make"]))
+        make_id = makes.get(mk_key)
+        if not make_id:
+            nm = _tidy_make(e["make"])
+            base = _slugify(nm) or "make"
+            slug, k = base, 1
+            while db.execute(text("select 1 from vehicle_makes where slug = :s"), {"s": slug}).first():
+                k += 1
+                slug = f"{base}-{k}"
+            make_id = db.execute(text("insert into vehicle_makes (name, slug) values (:n, :s) returning id"), {"n": nm, "s": slug}).scalar()
+            makes[mk_key] = make_id
+            c["makes_created"] += 1
+        if make_id not in models_by_make:
+            models_by_make[make_id] = {_norm(r.name): r.id for r in db.execute(text("select id, name from vehicle_models where make_id = :m"), {"m": make_id})}
+        model_id = models_by_make[make_id].get(_norm(e["model"]))
+        if not model_id:
+            vt = db.execute(
+                text("select vehicle_type_id from vehicle_models where make_id = :m and vehicle_type_id is not null group by vehicle_type_id order by count(*) desc limit 1"),
+                {"m": make_id},
+            ).scalar()
+            base = _slugify(e["model"]) or "model"
+            slug, k = base, 1
+            while db.execute(text("select 1 from vehicle_models where make_id = :m and slug = :s"), {"m": make_id, "s": slug}).first():
+                k += 1
+                slug = f"{base}-{k}"
+            model_id = db.execute(
+                text("insert into vehicle_models (make_id, vehicle_type_id, name, slug) values (:m, :t, :n, :s) returning id"),
+                {"m": make_id, "t": vt, "n": e["model"].strip(), "s": slug},
+            ).scalar()
+            models_by_make[make_id][_norm(e["model"])] = model_id
+            c["models_created"] += 1
+        ys = ",".join(str(y) for y in sorted(e["years"]))
+        c["years_created"] += db.execute(
+            text("insert into vehicles (model_id, year) select :m, y from unnest(cast(string_to_array(:ys, ',') as int[])) as y "
+                 "where not exists (select 1 from vehicles v where v.model_id = :m and v.year = y)"),
+            {"m": model_id, "ys": ys},
+        ).rowcount
+        added = db.execute(
+            text("insert into product_fitment (product_id, vehicle_id, notes, source) "
+                 "select :p, v.id, :n, 'research' from vehicles v where v.model_id = :m "
+                 "and v.year = any(cast(string_to_array(:ys, ',') as int[])) "
+                 "and not exists (select 1 from product_fitment pf where pf.product_id = :p and pf.vehicle_id = v.id)"),
+            {"p": product_id, "m": model_id, "ys": ys, "n": "Rocky Mountain catalog"},
+        ).rowcount
+        c["fitment_added"] += added
+        c["already_had"] += len(e["years"]) - added
+    _refresh(db)
+    return c
+
+
 @router.post("/items/{item_id}/make-product", status_code=201)
 def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
     """Make the single product for one Rocky Mountain part, the way the Automatic Distributors page does: a new product (not
@@ -715,7 +837,7 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
     from app.kits import CLS_JOIN, CLS_MAX, SINGLES_CTE, TOKEN_RE, label_token_for, parts_mpn, single_pick
 
     it = db.execute(
-        text("select id, sku, mfr_number, manufacturer, name, dealer_cost, upc, images from supplier_items where id = :i and supplier = :s"),
+        text("select id, sku, mfr_number, manufacturer, name, dealer_cost, upc, images, fitment from supplier_items where id = :i and supplier = :s"),
         {"i": item_id, "s": SUPPLIER},
     ).first()
     if not it:
@@ -770,6 +892,15 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
                 text("insert into product_photos (product_id, source_url, is_primary, sort_order) values (:p, :u, :pr, :o)"),
                 {"p": pid, "u": url, "pr": i == 0, "o": i},
             )
+        # the part's fitment cell becomes the product's fitment (makes, models and years are created only when new to the fitment tool)
+        fit = None
+        if (it.fitment or "").strip():
+            try:
+                with db.begin_nested():
+                    fit = _apply_fitment(db, pid, it.fitment)
+            except Exception:
+                log.exception("could not add the Rocky Mountain fitment to product %s", pid)
+                fit = {"error": True}
         label = None
         tok = label_token_for(it.sku or "")
         if tok and TOKEN_RE.fullmatch(tok) and CLS_JOIN not in tok.lower() and len(tok) <= CLS_MAX and not db.execute(
@@ -785,7 +916,7 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
         db.rollback()
         raise HTTPException(500, f"Could not make the product: {str(e)[:300]}")
     return {"product_id": pid, "title": title, "custom_label": label, "published": False,
-            "photos": len(urls), "photos_saving": _start_photos() if urls else False}
+            "photos": len(urls), "photos_saving": _start_photos() if urls else False, "fitment": fit}
 
 
 # ==========================================================================
@@ -1626,6 +1757,7 @@ def catalog_overview(db: Session = Depends(get_db)):
                    count(distinct s.manufacturer) filter (where s.active) as brands,
                    count(*) filter (where s.active and s.upc_norm is null) as no_barcode,
                    count(*) filter (where s.active and s.images is null) as no_photo,
+                   count(*) filter (where s.active and s.fitment is null) as no_fitment,
                    count(*) filter (where s.active and s.mfr_number is null) as no_mfr_number,
                    count(*) filter (where s.active and s.name is null) as no_name,
                    count(*) filter (where s.active and {_COST} is null) as no_cost,
