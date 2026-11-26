@@ -3589,11 +3589,15 @@ def api_website_products_keep_mfr_label(body: KeepMfrIn, db: Session = Depends(g
 # shop and eBay listings no longer depend on the distributor's image server. The link is kept on the row as a record.
 # A photo that is turned off (hidden) is skipped. Only rows still missing a stored file are touched, so running it again
 # is harmless and a run that stopped part-way simply carries on.
+# Products made here (supplier_product_links) and products made by hand then linked to an Automatic Distributors part
+# (product_kit_parts; their photo links come from kits.copy_catalog_photos).
 _PHOTO_PENDING = (
     "from product_photos pp "
-    "join supplier_product_links l on l.product_id = pp.product_id and l.supplier = :s "
     "where pp.image_key is null and nullif(btrim(pp.source_url), '') is not null "
-    "and not pp.hidden and pp.source_url not ilike '%ebay%'"
+    "and not pp.hidden and pp.source_url not ilike '%ebay%' "
+    "and (exists (select 1 from supplier_product_links l where l.product_id = pp.product_id and l.supplier = :s) "
+    "     or exists (select 1 from product_kit_parts k join supplier_items si on si.id = k.supplier_item_id "
+    "                where k.product_id = pp.product_id and si.supplier = :s))"
 )
 _PHOTO_WORKERS = 6
 _photo_state: dict = {"running": False, "message": "", "done": 0, "total": 0, "stored": 0, "failed": 0, "errors": [], "finished_at": None}
@@ -3632,6 +3636,11 @@ def _store_product_photos(limit: int = 2000) -> dict:
     errors: list[str] = []
     total = 0
     try:
+        # linked products with no photo get their catalog part's photo links first, so they are saved in this same run
+        from app.kits import copy_catalog_photos
+
+        if copy_catalog_photos(db, SUPPLIER):
+            db.commit()
         rows = db.execute(
             text(f"select pp.id, pp.product_id, pp.source_url {_PHOTO_PENDING} order by pp.product_id, pp.sort_order, pp.id limit :lim"),
             {"s": SUPPLIER, "lim": limit},
@@ -3689,6 +3698,15 @@ def _store_product_photos(limit: int = 2000) -> dict:
         _photo_state.update(running=False, stored=stored, failed=failed, errors=errors, finished_at=time.time())
         gen.close()
     return {"total": total, "stored": stored, "failed": failed, "duplicates": dup, "message": _photo_state["message"]}
+
+
+def start_photo_download(limit: int = 500) -> bool:
+    """Start saving the pending photos into storage in the background (a no-op when a run, or product creation, is going).
+    True when one was started. Used after a product is linked to a catalog part (kits.start_photo_downloads)."""
+    if _prod_state["running"] or not _begin_photo_run():
+        return False
+    threading.Thread(target=_store_product_photos, args=(limit,), daemon=True, name="autodist-store-photos").start()
+    return True
 
 
 class StorePhotosIn(BaseModel):
@@ -3810,6 +3828,9 @@ def api_website_products_preview(db: Session = Depends(get_db)):
     ).scalar()
     try:
         pending = db.execute(text(f"select count(*) {_PHOTO_PENDING}"), {"s": SUPPLIER}).scalar()
+        from app.kits import catalog_photos_waiting
+
+        pending = int(pending or 0) + catalog_photos_waiting(db, SUPPLIER)  # linked products' photos, copied at the start of the run
     except Exception:
         db.rollback()  # product_photos.hidden is not there yet
         pending = None

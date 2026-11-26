@@ -2274,6 +2274,12 @@ def _store_photos(limit: int = 2000) -> dict:
     errors: list[str] = []
     total = 0
     try:
+        # products made by hand and then linked to a catalog part (Distributor parts, or /relink) have no photo yet: give them
+        # the part's photo links first (kits.copy_catalog_photos), so they are saved in this same run
+        from app.kits import copy_catalog_photos
+
+        if copy_catalog_photos(db, SUPPLIER):
+            db.commit()
         rows = db.execute(
             text(f"select pp.id, pp.product_id, pp.source_url {_PHOTO_PENDING} order by pp.product_id, pp.sort_order, pp.id limit :lim"),
             {"s": SUPPLIER, "lim": limit},
@@ -2354,7 +2360,9 @@ def photos_store(body: StorePhotosIn, user: AuthUser = Depends(require_admin)):
 
 @router.get("/photos/status")
 def photos_status(db: Session = Depends(get_db)):
-    pending = db.execute(text(f"select count(*) {_PHOTO_PENDING}"), {"s": SUPPLIER}).scalar() or 0
+    from app.kits import catalog_photos_waiting
+
+    pending = (db.execute(text(f"select count(*) {_PHOTO_PENDING}"), {"s": SUPPLIER}).scalar() or 0) + catalog_photos_waiting(db, SUPPLIER)
     return {**{k: v for k, v in _photo_state.items()}, "pending": int(pending)}
 
 
@@ -2470,7 +2478,15 @@ def relink_apply(body: RelinkIn, db: Session = Depends(get_db), user: AuthUser =
         except Exception as e:
             db.rollback()
             raise HTTPException(500, f"Could not move the links: {str(e)[:300]}")
-    return {"moved": len(move), "products": len({r["product_id"] for r in move}), "left_alone": len(plan) - len(move)}
+    # the moved products that have no photo get their new catalog part's photos, saved into our storage in the background
+    photos = 0
+    if move:
+        from app.kits import copy_catalog_photos
+
+        photos = copy_catalog_photos(db, SUPPLIER, sorted({r["product_id"] for r in move}))
+        db.commit()
+    return {"moved": len(move), "products": len({r["product_id"] for r in move}), "left_alone": len(plan) - len(move),
+            "photos_added": photos, "photos_saving": _start_photos() if photos else False}
 
 
 @router.post("/products/sync-prices")

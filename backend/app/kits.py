@@ -161,6 +161,84 @@ def single_pick(kind: str) -> str:
 
 def single_count(kind: str) -> str:
     return "(select count(*) from singles x where " + " or ".join(single_conds(kind)) + ")"
+
+
+# --------------------------------------------------------------------------
+# catalog photos for LINKED products (made by hand, then pointed at a catalog part)
+# --------------------------------------------------------------------------
+# A product made from a catalog part gets the part's photo links when it is made. A product made some other way and then linked
+# to a catalog part (Distributor parts on the product, or /rmatv/relink) had none, so it showed no photo. This gives it the same
+# thing: the part's photo links become product_photos rows (source_url only), and each supplier's photo download
+# (rmatv._store_photos, autodist._store_product_photos) then saves them into our storage and fills in image_key.
+# Only for a product with exactly ONE distributor part (a kit's photo is its own) and NO photo rows at all: a product that has any
+# photo, even one turned off, is never touched, so a picture someone uploaded or removed is never added back over.
+# one row per usable photo link of each such product, in the catalog's order (rn 1 = the main photo)
+_CATALOG_PHOTO_ROWS = """
+    select k.product_id, left(btrim(u.url), 500) as url,
+           row_number() over (partition by k.product_id order by u.ord) as rn
+    from product_kit_parts k
+    join supplier_items s on s.id = k.supplier_item_id
+    cross join lateral unnest(s.images) with ordinality as u(url, ord)
+    where s.supplier = :sup
+      and u.url ~* '^\\s*https?://'
+      and (select count(*) from product_kit_parts z where z.product_id = k.product_id) = 1
+      and not exists (select 1 from product_photos pp where pp.product_id = k.product_id)
+      and (cast(:ids as bigint[]) is null or k.product_id = any(cast(:ids as bigint[])))
+"""
+
+
+def catalog_photos_waiting(db: Session, supplier: str) -> int:
+    """How many photo links are waiting to be copied onto linked products (added to the "waiting photos" counts)."""
+    try:
+        with db.begin_nested():
+            return int(db.execute(text(f"select count(*) from ({_CATALOG_PHOTO_ROWS}) q"), {"sup": supplier, "ids": None}).scalar() or 0)
+    except Exception:
+        return 0
+
+
+def copy_catalog_photos(db: Session, supplier: str, product_ids: Optional[list[int]] = None) -> int:
+    """Copy the catalog part's photo links onto linked products that have no photos (see above). product_ids None = every such
+    product. Returns the number of photo rows added. No commit (the caller commits); never raises."""
+    try:
+        with db.begin_nested():
+            return int(db.execute(
+                text(
+                    "insert into product_photos (product_id, source_url, is_primary, sort_order) "
+                    f"select q.product_id, q.url, q.rn = 1, q.rn - 1 from ({_CATALOG_PHOTO_ROWS}) q"
+                ),
+                {"sup": supplier, "ids": [int(i) for i in product_ids] if product_ids is not None else None},
+            ).rowcount or 0)
+    except Exception:
+        log.exception("could not copy the %s catalog photos onto linked products", supplier)
+        return 0
+
+
+def catalog_photos_for_product(db: Session, product_id: int) -> dict[str, int]:
+    """After a product's distributor parts are saved: copy its catalog part's photo links when it has no photos.
+    -> {supplier: rows added} for the suppliers that added any. No commit; start_photo_downloads() after the commit."""
+    out = {}
+    for sup in ("rmatv", "autodist"):
+        n = copy_catalog_photos(db, sup, [product_id])
+        if n:
+            out[sup] = n
+    return out
+
+
+def start_photo_downloads(added: dict[str, int]) -> bool:
+    """Start the background download into storage for each supplier that just had photo links copied. Never raises."""
+    started = False
+    try:
+        if added.get("rmatv"):
+            from app.rmatv import _start_photos  # late imports: those modules import this one
+
+            started = _start_photos() or started
+        if added.get("autodist"):
+            from app.autodist import start_photo_download
+
+            started = start_photo_download() or started
+    except Exception:
+        log.exception("could not start the photo download")
+    return started
 # a part's stock across every warehouse column (Rocky Mountain has just the one, qty_other)
 _STOCK = "(coalesce(s.qty_maine, 0) + coalesce(s.qty_indiana, 0) + coalesce(s.qty_nevada, 0) + coalesce(s.qty_other, 0))"
 
@@ -1241,7 +1319,9 @@ def put_parts(product_id: int, body: PartsIn, db: Session = Depends(get_db)):
     if not db.execute(text("select 1 from products where id = :p"), {"p": product_id}).first():
         raise HTTPException(404, "Product not found")
     res = replace_parts(db, product_id, body.parts, body.label_by)
+    photos = catalog_photos_for_product(db, product_id)  # a product with no photo gets its catalog part's photos
     db.commit()
+    photos_saving = start_photo_downloads(photos) if photos else False
     listings = _linked_listings(db, product_id)
     return {
         "cls": res["cls"],
@@ -1254,6 +1334,8 @@ def put_parts(product_id: int, body: PartsIn, db: Session = Depends(get_db)):
         "availability": availability_of(db, product_id),
         # how many pieces are saved with "use the manu. part # for the custom label" ticked; the screen compares it with what it sent
         "label_use_mfr_count": int(db.execute(text("select count(*) from product_kit_parts where product_id = :p and coalesce(label_use_mfr, false)"), {"p": product_id}).scalar() or 0),
+        "photos_added": sum(photos.values()),
+        "photos_saving": photos_saving,
     }
 
 
