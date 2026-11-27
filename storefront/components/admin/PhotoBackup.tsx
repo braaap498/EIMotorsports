@@ -18,8 +18,9 @@ type Picker = (opts?: { mode?: "read" | "readwrite" }) => Promise<DirHandle>;
 type ListResult = { base_url: string; count: number; paths: string[] };
 
 // What /storage-backup/manifest must return. One row per product_photos row, plus the eBay map.
-// sku_folder is the by_sku folder name for that photo (for example EBAY-800799374319, or a product SKU
-// with "/" turned into "xx" like 9144PSxx125777xx120216).
+// sku is the product's EI number (its SKU), or null when the photo has no product yet. The by_sku folder is
+// named after it, with "/" turned into "xx" (9144PS/125777/120216 becomes 9144PSxx125777xx120216). Photos with
+// no product fall back to the listing folder in storage_path, such as EBAY-800799374319.
 type ManifestPhoto = {
   id: number;
   product_id: number | null;
@@ -29,7 +30,7 @@ type ManifestPhoto = {
   sort_order: number;
   created_at: string;
   image_key: string; // like "89/8986f63da8b6....jpg" (the file is full/<image_key>)
-  sku_folder: string;
+  sku: string | null;
 };
 type Manifest = { photos: ManifestPhoto[]; ebay: { item_number: string | number; custom_label_sku: string | number }[] };
 
@@ -108,17 +109,21 @@ function buildIndex(m: Manifest, withBySku: boolean): IndexFiles {
     },
   ];
 
-  // by_sku/<sku_folder>/<NN>_<first 8 of the photo's hash>.jpg, where NN is the photo's position (1, 2, 3...)
+  // by_sku/<EI number>/<NN>_<first 8 of the photo's hash>.jpg, where NN is the photo's position (1, 2, 3...)
   const bySku = new Map<string, string[]>();
   if (withBySku) {
     const seen = new Set<string>();
     for (const p of m.photos) {
-      if (!p.image_key || !p.sku_folder) continue;
+      if (!p.image_key) continue;
+      const sku = p.sku?.trim();
+      const listing = p.storage_path.startsWith("full/") ? "" : p.storage_path.split("/")[0];
+      const name = sku ? sku.replace(/\//g, "xx") : listing;
+      if (!name) continue;
       const file = p.image_key.split("/").pop() as string;
       const dot = file.lastIndexOf(".");
       const hash = (dot > 0 ? file.slice(0, dot) : file).slice(0, 8);
       const ext = dot > 0 ? file.slice(dot + 1) : "jpg";
-      const folder = p.sku_folder.replace(/[\\/:*?"<>|]/g, "_");
+      const folder = name.replace(/[\\:*?"<>|]/g, "_");
       const target = `by_sku/${folder}/${pad(p.sort_order + 1)}_${hash}.${ext}`;
       if (seen.has(target)) continue;
       seen.add(target);
@@ -149,7 +154,7 @@ export default function PhotoBackup() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [error, setError] = useState("");
   const [canPickFolder, setCanPickFolder] = useState(true); // checked in the browser after load
-  const [withBySku, setWithBySku] = useState(true);
+  const [bySkuOnly, setBySkuOnly] = useState(false);
   const stop = useRef(false);
 
   useEffect(() => {
@@ -169,8 +174,10 @@ export default function PhotoBackup() {
     try {
       setProgress("Getting the photo list…");
       const list = await api<ListResult>("/storage-backup/list");
-      const paths = list.paths;
-      const { index, note } = await loadIndex(withBySku);
+      const { index, note } = await loadIndex(bySkuOnly);
+      if (bySkuOnly && index.bySku.size === 0) throw new Error(note || "None of the by_sku photos matched the photo list, so there is nothing to copy.");
+      // In by_sku-only mode just the full photos that belong to a SKU are fetched; full and thumb are not saved.
+      const paths = bySkuOnly ? list.paths.filter((p) => index.bySku.has(p)) : list.paths;
 
       const dirs = new Map<string, Promise<DirHandle>>();
       const dirFor = (parts: string[]): Promise<DirHandle> => {
@@ -217,21 +224,27 @@ export default function PhotoBackup() {
       let done = 0;
 
       async function one(path: string) {
+        if (bySkuOnly) {
+          const missing: string[] = [];
+          for (const t of index.bySku.get(path) ?? []) if (!(await existing(t))) missing.push(t);
+          if (missing.length === 0) {
+            s.skipped++;
+            return;
+          }
+          const blob = await fetchPhoto(list.base_url, path); // fetched once, written to every SKU folder that needs it
+          for (const t of missing) await writeAt(t, blob);
+          s.copied++;
+          s.bySku += missing.length;
+          return;
+        }
         let blob: Blob | null = await existing(path);
         const already = !!blob;
         if (!blob) {
           blob = await fetchPhoto(list.base_url, path);
           await writeAt(path, blob);
         }
-        let extra = 0;
-        for (const t of index.bySku.get(path) ?? []) {
-          if (await existing(t)) continue;
-          await writeAt(t, blob);
-          extra++;
-        }
         if (already) s.skipped++;
         else s.copied++;
-        s.bySku += extra;
       }
 
       async function worker() {
@@ -272,8 +285,10 @@ export default function PhotoBackup() {
     try {
       setProgress("Getting the photo list…");
       const list = await api<ListResult>("/storage-backup/list");
-      const paths = list.paths;
-      const { index, note } = await loadIndex(withBySku);
+      const { index, note } = await loadIndex(bySkuOnly);
+      if (bySkuOnly && index.bySku.size === 0) throw new Error(note || "None of the by_sku photos matched the photo list, so there is nothing to copy.");
+      // In by_sku-only mode just the full photos that belong to a SKU are fetched; full and thumb are not saved.
+      const paths = bySkuOnly ? list.paths.filter((p) => index.bySku.has(p)) : list.paths;
       const d = new Date();
       const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
@@ -332,7 +347,7 @@ export default function PhotoBackup() {
             }
             const data = new Uint8Array(await blob.arrayBuffer());
             // Adding to the ZIP and saving a full one happen together, with no waiting between.
-            addEntry(path, data);
+            if (!bySkuOnly) addEntry(path, data);
             s.copied++;
             for (const t of index.bySku.get(path) ?? []) {
               addEntry(t, data);
@@ -381,21 +396,21 @@ export default function PhotoBackup() {
           </button>
         )}
         <label className="flex items-center gap-2 text-sm text-gray-700">
-          <input type="checkbox" checked={withBySku} onChange={(e) => setWithBySku(e.target.checked)} disabled={busy} />
-          Also make by_sku folders
+          <input type="checkbox" checked={bySkuOnly} onChange={(e) => setBySkuOnly(e.target.checked)} disabled={busy} />
+          Only make by_sku folders (skip full and thumb)
         </label>
       </div>
       {canPickFolder ? (
         <p className="text-xs text-gray-500">
-          Pick a folder (make a new one in the picker if you need to). Photos already in it are skipped, so running it again only adds what is missing. Along with
-          the full and thumb photos it writes product_photos.csv and ebay_label_import.csv (rewritten each run) and, if ticked, a by_sku folder with a copy of each
-          photo under its SKU, which takes extra disk space. Windows will not let a browser pick the Downloads folder itself, so choose or create a folder inside
+          Pick a folder (make a new one in the picker if you need to). Photos already in it are skipped, so running it again only adds what is missing. It writes
+          product_photos.csv and ebay_label_import.csv (rewritten each run) and either the full and thumb photos, or, if the box is ticked, only a by_sku folder
+          with each photo under its SKU (a photo used by several SKUs is saved once per SKU). Windows will not let a browser pick the Downloads folder itself, so choose or create a folder inside
           it, such as photo_backup.
         </p>
       ) : (
         <p className="text-xs text-gray-500">
           This browser cannot write to a folder, so the photos download as one or more ZIP files (photo_backup_date_part1.zip, and so on), with the two CSV files in
-          part 1. It downloads every photo each time. Unzip them all into the same backup folder, choosing merge if asked, with no extra folder level, and Chrome or
+          part 1. It downloads every photo each time. If the box is ticked, the ZIPs hold only the by_sku folders. Unzip them all into the same backup folder, choosing merge if asked, with no extra folder level, and Chrome or
           Edge will treat those photos as already backed up.
         </p>
       )}
