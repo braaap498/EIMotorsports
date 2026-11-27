@@ -127,9 +127,14 @@ export default function PartTypesPage() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h1 className="text-2xl font-semibold">Part types</h1>
-        <Link href="/admin/products" className="text-sm underline">
-          Back to products
-        </Link>
+        <div className="flex gap-4 text-sm">
+          <Link href="/admin/categories" className="underline">
+            Edit categories
+          </Link>
+          <Link href="/admin/products" className="underline">
+            Back to products
+          </Link>
+        </div>
       </div>
       <p className="text-sm text-gray-600">
         The standard list used by the Part type dropdown on each product. Renaming a type changes it on every product that uses it. Types are
