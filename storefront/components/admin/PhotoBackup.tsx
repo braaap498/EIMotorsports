@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Zip, ZipPassThrough } from "fflate";
 import { api, errMsg } from "../../lib/adminApi";
 import { Notice } from "./ui";
 
@@ -50,6 +49,93 @@ const WORKERS = 6;
 // Each ZIP is saved once it holds about this much photo data, so the browser never has to
 // keep the whole library in memory. A big library comes down as several ZIPs.
 const ZIP_PART_BYTES = 400 * 1024 * 1024;
+const ZIP_PART_FILES = 20000; // a ZIP also starts a new part at this many files
+
+// ---- a small ZIP writer (stored, not compressed: photos are already compressed), so no package is needed ----
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(data: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+class ZipBuilder {
+  private body: BlobPart[] = [];
+  private central: BlobPart[] = [];
+  private offset = 0;
+  private count = 0;
+  private enc = new TextEncoder();
+  private time: number;
+  private date: number;
+
+  constructor() {
+    const d = new Date();
+    this.time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    this.date = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+  }
+
+  add(path: string, data: Uint8Array) {
+    const name = this.enc.encode(path);
+    const crc = crc32(data);
+    const local = new Uint8Array(30 + name.length);
+    const l = new DataView(local.buffer);
+    l.setUint32(0, 0x04034b50, true);
+    l.setUint16(4, 20, true);
+    l.setUint16(6, 0x0800, true); // file names are UTF-8
+    l.setUint16(8, 0, true); // stored
+    l.setUint16(10, this.time, true);
+    l.setUint16(12, this.date, true);
+    l.setUint32(14, crc, true);
+    l.setUint32(18, data.length, true);
+    l.setUint32(22, data.length, true);
+    l.setUint16(26, name.length, true);
+    local.set(name, 30);
+
+    const cen = new Uint8Array(46 + name.length);
+    const c = new DataView(cen.buffer);
+    c.setUint32(0, 0x02014b50, true);
+    c.setUint16(4, 20, true);
+    c.setUint16(6, 20, true);
+    c.setUint16(8, 0x0800, true);
+    c.setUint16(10, 0, true);
+    c.setUint16(12, this.time, true);
+    c.setUint16(14, this.date, true);
+    c.setUint32(16, crc, true);
+    c.setUint32(20, data.length, true);
+    c.setUint32(24, data.length, true);
+    c.setUint16(28, name.length, true);
+    c.setUint32(42, this.offset, true);
+    cen.set(name, 46);
+
+    this.body.push(local as BlobPart, data as BlobPart);
+    this.central.push(cen);
+    this.offset += local.length + data.length;
+    this.count++;
+  }
+
+  finish(): Blob {
+    let cenSize = 0;
+    for (const c of this.central) cenSize += (c as Uint8Array).length;
+    const end = new Uint8Array(22);
+    const e = new DataView(end.buffer);
+    e.setUint32(0, 0x06054b50, true);
+    e.setUint16(8, this.count, true);
+    e.setUint16(10, this.count, true);
+    e.setUint32(12, cenSize, true);
+    e.setUint32(16, this.offset, true);
+    return new Blob([...this.body, ...this.central, end as BlobPart], { type: "application/zip" });
+  }
+}
 
 function getPicker(): Picker | undefined {
   return (window as unknown as { showDirectoryPicker?: Picker }).showDirectoryPicker;
@@ -295,40 +381,29 @@ export default function PhotoBackup() {
       const s: Summary = { total: paths.length, copied: 0, skipped: 0, failed: 0, firstErrors: [], stopped: false, zipParts: 0, bySku: 0, indexNote: note };
 
       // One ZIP being built. Photos are already compressed, so they are stored as they are.
-      let chunks: Uint8Array[] = [];
-      let zip: Zip;
+      let zip = new ZipBuilder();
       let dataBytes = 0;
       let filesInPart = 0;
-      let zipError: unknown = null;
 
       const startPart = () => {
-        chunks = [];
+        zip = new ZipBuilder();
         dataBytes = 0;
         filesInPart = 0;
-        zip = new Zip((err, chunk) => {
-          if (err) zipError = err;
-          else chunks.push(chunk);
-        });
       };
 
       const addEntry = (path: string, data: Uint8Array) => {
-        const entry = new ZipPassThrough(path);
-        zip.add(entry);
-        entry.push(data, true);
+        zip.add(path, data);
         filesInPart++;
         dataBytes += data.length;
       };
 
       const finishPart = () => {
         if (filesInPart === 0) return;
-        zip.end();
-        if (zipError) throw zipError;
         s.zipParts = (s.zipParts ?? 0) + 1;
-        saveBlob(new Blob(chunks as BlobPart[], { type: "application/zip" }), `photo_backup_${stamp}_part${s.zipParts}.zip`);
+        saveBlob(zip.finish(), `photo_backup_${stamp}_part${s.zipParts}.zip`);
         startPart();
       };
 
-      startPart();
       const enc = new TextEncoder();
       for (const f of index.csvs) addEntry(f.path, enc.encode(f.text)); // the CSV files go in the first ZIP
 
@@ -353,7 +428,7 @@ export default function PhotoBackup() {
               addEntry(t, data);
               s.bySku++;
             }
-            if (dataBytes >= ZIP_PART_BYTES) finishPart();
+            if (dataBytes >= ZIP_PART_BYTES || filesInPart >= ZIP_PART_FILES) finishPart();
           } catch (e) {
             s.failed++;
             if (s.firstErrors.length < 5) s.firstErrors.push(e instanceof Error ? e.message : String(e));
