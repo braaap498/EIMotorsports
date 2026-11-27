@@ -156,11 +156,13 @@ SPEC_BY_ENTITY = {s.entity: s for s in SPECS}
 TXN_TYPES = [s.entity for s in SPECS if s.kind == "txn"]  # names QuickBooks uses for deleted-transaction queries
 
 
-def _active_specs() -> list[Spec]:
+def _active_specs(only: Optional[set[str]] = None) -> list[Spec]:
+    """The kinds to read: everything, or what QB_ENTITIES allows, narrowed to `only` for a one-off picked sync."""
     wanted = {w.strip() for w in (os.environ.get("QB_ENTITIES") or "").split(",") if w.strip()}
-    if not wanted:
-        return SPECS
-    return [s for s in SPECS if s.entity in wanted]
+    specs = [s for s in SPECS if s.entity in wanted] if wanted else SPECS
+    if only:
+        specs = [s for s in specs if s.entity in only]
+    return specs
 
 
 # --------------------------------------------------------------------------
@@ -348,9 +350,35 @@ def _sync_enabled(db: Session, fresh: bool = False) -> bool:
     return value
 
 
+_ONLY_COL = {"ok": False}
+
+
+def _only_col_ready(db: Session) -> bool:
+    """True once qb_only_entities.sql has been run (it adds qb_control.only_entities)."""
+    if _ONLY_COL["ok"]:
+        return True
+    ok = bool(
+        db.execute(
+            text("select 1 from information_schema.columns where table_name = 'qb_control' and column_name = 'only_entities'")
+        ).first()
+    )
+    _ONLY_COL["ok"] = ok
+    return ok
+
+
 def _control(db: Session):
     db.execute(text("insert into qb_control (id) values (1) on conflict (id) do nothing"))
-    return db.execute(text("select sync_requested, full_resync from qb_control where id = 1")).first()
+    cols = "sync_requested, full_resync" + (", only_entities" if _only_col_ready(db) else "")
+    return db.execute(text(f"select {cols} from qb_control where id = 1")).first()
+
+
+def _requested_only(db: Session) -> Optional[set[str]]:
+    """The kinds picked for the manual sync that is about to run, or None for everything."""
+    if not _only_col_ready(db):
+        return None
+    raw = db.execute(text("select only_entities from qb_control where id = 1")).scalar()
+    names = {n.strip() for n in (raw or "").split(",") if n.strip()}
+    return names or None
 
 
 def _run(db: Session, ticket: str, open_only: bool = True):
@@ -368,13 +396,14 @@ def _add_error(db: Session, run_id: int, entity: Optional[str], message: str, co
     )
 
 
-def _build_plan(db: Session, full: bool) -> list[dict]:
+def _build_plan(db: Session, full: bool, only: Optional[set[str]] = None) -> list[dict]:
     state = {r.entity: r for r in db.execute(text("select * from qb_sync_state")).all()}
     now = datetime.now(timezone.utc)
     stale_after = timedelta(hours=full_refresh_hours())
     plan: list[dict] = [{"t": "company", "entity": "Company"}]
     any_previous = False
-    for s in _active_specs():
+    specs = _active_specs(only)
+    for s in specs:
         st = state.get(s.entity)
         if st and st.last_success_at:
             any_previous = True
@@ -388,7 +417,7 @@ def _build_plan(db: Session, full: bool) -> list[dict]:
         plan.append({"t": "q", "entity": s.entity, "mode": mode, "from": from_, "n": 0, "max_mod": None})
     # Transactions QuickBooks has deleted since the last time (only meaningful after a first read).
     if any_previous and not full:
-        active_txn = [s.entity for s in _active_specs() if s.kind == "txn"]
+        active_txn = [s.entity for s in specs if s.kind == "txn"]
         if active_txn:
             since = (now - timedelta(days=3)).date().isoformat()
             plan.append({"t": "del", "types": active_txn, "from": since})
@@ -439,7 +468,8 @@ def m_authenticate(db: Session, a: dict) -> str:
     if not go:
         db.commit()
         return _auth_result(secrets.token_urlsafe(8), "none")  # nothing to do right now
-    plan = _build_plan(db, full)
+    only = _requested_only(db) if trigger == "manual" else None  # a picked sync reads just those kinds
+    plan = _build_plan(db, full, only)
     ticket = secrets.token_urlsafe(24)
     db.execute(
         text(
@@ -447,7 +477,8 @@ def m_authenticate(db: Session, a: dict) -> str:
         ),
         {"t": ticket, "trg": trigger, "f": full, "p": json.dumps(plan)},
     )
-    db.execute(text("update qb_control set sync_requested = false, full_resync = false where id = 1"))
+    clear = "sync_requested = false, full_resync = false" + (", only_entities = null" if _only_col_ready(db) else "")
+    db.execute(text(f"update qb_control set {clear} where id = 1"))
     db.commit()
     return _auth_result(ticket, "")  # "" = use the company file that is open in QuickBooks
 
@@ -853,6 +884,37 @@ def _entity_summary(db: Session) -> list[dict]:
     return rows
 
 
+def _entities_with_all_kinds(db: Session) -> list[dict]:
+    """The saved-records summary plus a row for every kind we read, including kinds with no records yet,
+    so any kind can be picked for a sync. Each row says whether it is a list or a transaction kind."""
+    rows = [dict(r) for r in _entity_summary(db)]
+    have = {r["entity"] for r in rows}
+    state = {
+        r.entity: r
+        for r in db.execute(text("select entity, last_success_at, last_full_at, last_error from qb_sync_state")).all()
+    }
+    for sp in _active_specs():
+        if sp.entity in have:
+            continue
+        st = state.get(sp.entity)
+        rows.append(
+            {
+                "entity": sp.entity,
+                "records": 0,
+                "removed": 0,
+                "last_synced": None,
+                "last_success_at": st.last_success_at if st else None,
+                "last_full_at": st.last_full_at if st else None,
+                "last_error": st.last_error if st else None,
+            }
+        )
+    for r in rows:
+        sp = SPEC_BY_ENTITY.get(r["entity"])
+        r["kind"] = sp.kind if sp else None
+    rows.sort(key=lambda r: r["entity"])
+    return rows
+
+
 @admin_router.get("/status")
 def status(request: Request, db: Session = Depends(get_db)):
     configured = bool(os.environ.get("QBWC_USERNAME") and os.environ.get("QBWC_PASSWORD"))
@@ -871,7 +933,7 @@ def status(request: Request, db: Session = Depends(get_db)):
     db.commit()
     out["sync_enabled"] = _sync_enabled(db, fresh=True)
     out["sync_env_off"] = _env_off()
-    out["entities"] = _entity_summary(db)
+    out["entities"] = _entities_with_all_kinds(db)
     out["errors_by_entity"] = [
         dict(r._mapping)
         for r in db.execute(text("select entity, last_error from qb_sync_state where last_error is not null order by entity")).all()
@@ -898,6 +960,7 @@ def runs(limit: int = Query(20, le=100), db: Session = Depends(get_db)):
 
 class SyncIn(BaseModel):
     full: bool = False
+    entities: list[str] = []  # empty = every kind; otherwise only these kinds (needs qb_only_entities.sql)
 
 
 @admin_router.post("/sync-now")
@@ -906,14 +969,26 @@ def sync_now(body: SyncIn, db: Session = Depends(get_db), user: AuthUser = Depen
     if not _sync_enabled(db, fresh=True):
         raise HTTPException(409, "Syncing is switched off. Turn it on first, then request a sync.")
     _control(db)
-    db.execute(
-        text(
-            "update qb_control set sync_requested = true, full_resync = :f, requested_by = :u, requested_at = now() where id = 1"
-        ),
-        {"f": body.full, "u": user.email or user.user_id},
-    )
+    wanted = {e.strip() for e in body.entities if e and e.strip()}
+    if wanted:
+        known = {s.entity for s in SPECS}
+        allowed = {s.entity for s in _active_specs()}
+        unknown = sorted(wanted - known)
+        if unknown:
+            raise HTTPException(400, f"Unknown kinds: {', '.join(unknown)}")
+        blocked = sorted(wanted - allowed)
+        if blocked:
+            raise HTTPException(409, f"These kinds are switched off by the QB_ENTITIES setting: {', '.join(blocked)}")
+        if not _only_col_ready(db):
+            raise HTTPException(409, "Picking kinds needs one database change first: run qb_only_entities.sql, then try again.")
+    sets = "sync_requested = true, full_resync = :f, requested_by = :u, requested_at = now()"
+    params: dict[str, Any] = {"f": body.full, "u": user.email or user.user_id}
+    if _only_col_ready(db):
+        sets += ", only_entities = :o"  # also clears an earlier pick when this request picks nothing
+        params["o"] = ",".join(sorted(wanted)) or None
+    db.execute(text(f"update qb_control set {sets} where id = 1"), params)
     db.commit()
-    return {"ok": True, "full": body.full}
+    return {"ok": True, "full": body.full, "entities": sorted(wanted)}
 
 
 _LAST_PURCHASE_SQL = """

@@ -15,6 +15,7 @@ type EntityRow = {
   last_success_at: string | null;
   last_full_at: string | null;
   last_error: string | null;
+  kind?: "list" | "txn" | null;
 };
 type RunError = { entity: string | null; code: string | null; message: string; at: string };
 type Run = {
@@ -38,7 +39,7 @@ type Status = {
   entities_filter: string;
   full_refresh_hours: number;
   run_every_minutes: number;
-  control?: { sync_requested: boolean; full_resync: boolean };
+  control?: { sync_requested: boolean; full_resync: boolean; only_entities?: string | null };
   sync_enabled?: boolean;
   sync_env_off?: boolean;
   entities?: EntityRow[];
@@ -194,6 +195,7 @@ export default function QuickBooksPage() {
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
   const [showSetup, setShowSetup] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set()); // kinds ticked for a picked sync
   // collapsible sections (closed until opened)
   const [openSaved, setOpenSaved] = useState(false);
   const [openBrowse, setOpenBrowse] = useState(false);
@@ -257,14 +259,17 @@ export default function QuickBooksPage() {
     void loadList();
   }, [loadList]);
 
-  async function syncNow(full: boolean) {
+  async function syncNow(full: boolean, only: string[] = []) {
     setBusy(true);
     setError("");
     setInfo("");
     try {
-      await api("/quickbooks/sync-now", { method: "POST", body: { full } });
+      await api("/quickbooks/sync-now", { method: "POST", body: { full, entities: only } });
+      const what = only.length ? ` for ${only.length === 1 ? only[0] : `${only.length} kinds`} only` : "";
       setInfo(
-        full
+        only.length
+          ? `${full ? "Full re-read" : "Sync"} requested${what}. It starts the next time the Web Connector checks in (every ${every(status?.run_every_minutes ?? 60)} by default), or right away if you click Update Selected in the Web Connector on the QuickBooks PC.`
+          : full
           ? `Full re-read requested. It starts the next time the Web Connector checks in (every ${every(status?.run_every_minutes ?? 60)} by default), or right away if you click Update Selected in the Web Connector on the QuickBooks PC.`
           : `Sync requested. It starts the next time the Web Connector checks in (every ${every(status?.run_every_minutes ?? 60)} by default), or right away if you click Update Selected in the Web Connector on the QuickBooks PC.`,
       );
@@ -333,6 +338,20 @@ export default function QuickBooksPage() {
   const fullyRead = entities.filter((e) => e.last_full_at && !e.last_error).length;
   const totalRecords = entities.reduce((n, e) => n + e.records, 0);
   const pages = list ? Math.max(1, Math.ceil(list.total / PAGE)) : 1;
+
+  // Presets for ticking kinds in the saved-records table.
+  const SALES = ["SalesReceipt", "Invoice", "CreditMemo", "ReceivePayment", "Estimate", "SalesOrder", "Charge"];
+  const PURCHASES = ["Bill", "BillPaymentCheck", "BillPaymentCreditCard", "VendorCredit", "Check", "CreditCardCharge", "CreditCardCredit", "PurchaseOrder", "ItemReceipt"];
+  const pick = (test: (e: EntityRow) => boolean) => setPicked(new Set(entities.filter(test).map((e) => e.entity)));
+  const toggleKind = (name: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  const pickedList = entities.filter((e) => picked.has(e.entity)).map((e) => e.entity);
+  const syncBlocked = busy || status?.sync_enabled === false || !!status?.control?.sync_requested;
 
   return (
     <div className="space-y-6">
@@ -493,10 +512,52 @@ export default function QuickBooksPage() {
                   {fullyRead} of {entities.length} kinds fully read
                 </span>
               </summary>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-gray-600">Tick kinds to sync just those:</span>
+                <button type="button" className="rounded border border-gray-300 bg-white px-2 py-1" onClick={() => pick((e) => !!e.last_error)}>
+                  Problem kinds
+                </button>
+                <button type="button" className="rounded border border-gray-300 bg-white px-2 py-1" onClick={() => pick((e) => !e.last_full_at)}>
+                  Not fully read
+                </button>
+                <button type="button" className="rounded border border-gray-300 bg-white px-2 py-1" onClick={() => pick((e) => e.kind === "list")}>
+                  Lists
+                </button>
+                <button type="button" className="rounded border border-gray-300 bg-white px-2 py-1" onClick={() => pick((e) => SALES.includes(e.entity))}>
+                  Sales
+                </button>
+                <button type="button" className="rounded border border-gray-300 bg-white px-2 py-1" onClick={() => pick((e) => PURCHASES.includes(e.entity))}>
+                  Purchases &amp; payments
+                </button>
+                <button type="button" className="text-gray-600 underline" onClick={() => setPicked(new Set())} disabled={picked.size === 0}>
+                  Clear
+                </button>
+              </div>
+              {picked.size > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <button type="button" className={btnCls} disabled={syncBlocked} onClick={() => void syncNow(false, pickedList)}>
+                    Sync {pickedList.length} ticked
+                  </button>
+                  <button type="button" className={btn2Cls} disabled={syncBlocked} onClick={() => void syncNow(true, pickedList)}>
+                    Full re-read of {pickedList.length} ticked
+                  </button>
+                </div>
+              )}
+              {status.control?.sync_requested && status.control.only_entities && (
+                <p className="mt-2 text-xs text-gray-600">Waiting to run, only for: {status.control.only_entities.split(",").join(", ")}</p>
+              )}
               <div className="mt-2 overflow-x-auto rounded-lg border border-gray-200 bg-white">
                 <table className="w-full text-left text-sm">
                   <thead className="bg-gray-50 text-xs uppercase text-gray-500">
                     <tr>
+                      <th className="w-8 px-3 py-2">
+                        <input
+                          type="checkbox"
+                          aria-label="Tick all kinds"
+                          checked={entities.length > 0 && picked.size === entities.length}
+                          onChange={(ev) => setPicked(ev.target.checked ? new Set(entities.map((e) => e.entity)) : new Set())}
+                        />
+                      </th>
                       <th className="px-3 py-2">Kind</th>
                       <th className="px-3 py-2 text-right">Records</th>
                       <th className="px-3 py-2 text-right">Removed in QuickBooks</th>
@@ -508,6 +569,9 @@ export default function QuickBooksPage() {
                   <tbody className="divide-y divide-gray-100">
                     {entities.map((e) => (
                       <tr key={e.entity}>
+                        <td className="px-3 py-2">
+                          <input type="checkbox" aria-label={`Tick ${e.entity}`} checked={picked.has(e.entity)} onChange={() => toggleKind(e.entity)} />
+                        </td>
                         <td className="px-3 py-2 font-medium">{e.entity}</td>
                         <td className="px-3 py-2 text-right">{e.records.toLocaleString()}</td>
                         <td className="px-3 py-2 text-right text-gray-500">{e.removed || ""}</td>
