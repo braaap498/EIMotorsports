@@ -22,6 +22,8 @@ type Plan = {
   labels_to_reprint: number;
   warnings: string[];
   duplicates: { source: string; item_id: number; keeps: number | null; others: number[] }[];
+  manual?: { source: string; item_id: number; number: string | null; products: number[] }[];
+  manual_total?: number;
   duplicate_total: number;
   sample: { product_id: number; from: string | null; to: string }[];
 };
@@ -165,6 +167,18 @@ export default function SkuAssignPanel() {
                 {plan.duplicates.map((d) => (
                   <li key={d.source + d.item_id}>
                     {LABELS[d.source] ?? d.source} part {d.item_id}: keeps #{d.keeps}, others {d.others.map((o) => "#" + o).join(", ")}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          {(plan.manual_total ?? 0) > 0 && (
+            <details className="text-sm">
+              <summary className="cursor-pointer">{plan.manual_total} catalog parts that match a product only by manufacturer # (check by hand)</summary>
+              <ul className="mt-1 list-disc pl-5">
+                {(plan.manual ?? []).map((m) => (
+                  <li key={m.source + m.item_id}>
+                    {LABELS[m.source] ?? m.source} part {m.item_id} ({m.number ?? "no number"}): product {m.products.map((o) => "#" + o).join(", ")}
                   </li>
                 ))}
               </ul>

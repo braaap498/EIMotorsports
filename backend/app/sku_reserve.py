@@ -196,23 +196,48 @@ def _group(items: list, pairs) -> list:
     return [(i, sorted(got.get(i, ()))) for i in items]
 
 
+# False = a product that matches a part ONLY by manufacturer # is not given the part's number; it is listed for a manual check.
+MFR_AUTO = False
+
+
+def _tiered(items: list, pairs, manual: list, src: str) -> list:
+    """pairs = (item, product id, tier): tier 0 = the product points at the part, 1 = SKU / part # equal, 2 = manufacturer # equal.
+    The manufacturer # is only looked at when nothing matched before it. A part matched only that way goes to `manual`."""
+    by: dict = {}
+    for item, pid, tier in pairs:
+        by.setdefault(item, {}).setdefault(tier, set()).add(pid)
+    out = []
+    for i in items:
+        t = by.get(i, {})
+        first = min(t) if t else None
+        if first == 2 and not MFR_AUTO:
+            manual.append({"source": src, "item_id": i, "products": sorted(t[2])})
+            out.append((i, []))
+        else:
+            out.append((i, sorted(t[first]) if first is not None else []))
+    return out
+
+
 def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Optional[int] = None) -> dict:
     """A catalog part's product = the single product (never a kit) that
        - its one part line points at, or
-       - has no pointer to a different part and whose manufacturer part # or custom label equals the part's SKU or manufacturer #.
+       - has no pointer to a different part and whose manufacturer part # or custom label equals the part's SKU, or
+       - only if nothing matched the SKU: equals the part's manufacturer #. Such a part is NOT numbered automatically (MFR_AUTO);
+         it is listed in plan["manual"] for a manual check.
     (Barcode / UPC is not used.)"""
     active = " and s.active" if scope == "active" else ""
     sup = {}
+    manual: list = []  # parts that matched a product only by manufacturer #: checked by hand
     for src in SUPPLIER_ORDER:
         items = [r.id for r in db.execute(text(f"select s.id from supplier_items s where s.supplier = :src{active} order by s.sku, s.id"), {"src": src}).all()]
         pairs = db.execute(
             text(
                 f"with {_SINGLES} "
-                f"select s.id as item, k.pid from supplier_items s join keys k on k.k = {_N.format('s.sku')} "
+                f"select s.id as item, k.pid, 1 as tier from supplier_items s join keys k on k.k = {_N.format('s.sku')} "
                 f"where s.supplier = :src{active} and k.mi_id is null and (k.si_id is null or k.si_id = s.id) "
-                f"union select s.id, k.pid from supplier_items s join keys k on k.k = s.mfr_number_norm "
+                f"union select s.id, k.pid, 2 from supplier_items s join keys k on k.k = s.mfr_number_norm "
                 f"where s.supplier = :src{active} and k.mi_id is null and (k.si_id is null or k.si_id = s.id) "
-                f"union select s.id, x.id from supplier_items s join singles x on x.si_id = s.id where s.supplier = :src{active}"
+                f"union select s.id, x.id, 0 from supplier_items s join singles x on x.si_id = s.id where s.supplier = :src{active}"
             ),
             {"src": src},
         ).all()
@@ -225,7 +250,7 @@ def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Op
                 {"src": src},
             ).all()
         )
-        sup[src] = [(i, m or ([linked[i]] if linked.get(i) else [])) for i, m in _group(items, [(r.item, r.pid) for r in pairs])]
+        sup[src] = [(i, m or ([linked[i]] if linked.get(i) else [])) for i, m in _tiered(items, [(r.item, r.pid, r.tier) for r in pairs], manual, src)]
     hand = {}
     names = {}
     dists = db.execute(text("select id, name from po_distributors order by id")).all()
@@ -240,18 +265,24 @@ def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Op
         pairs = db.execute(
             text(
                 f"with {_SINGLES} "
-                f"select m.id as item, k.pid from manual_catalog_items m join keys k on (k.k = {_N.format('m.part_number')} or k.k = {_N.format('m.mfr_number')}) "
+                f"select m.id as item, k.pid, 1 as tier from manual_catalog_items m join keys k on k.k = {_N.format('m.part_number')} "
                 "where m.distributor_id = any(:d) and k.si_id is null and (k.mi_id is null or k.mi_id = m.id) "
-                "union select m.id, x.id from manual_catalog_items m join singles x on x.mi_id = m.id where m.distributor_id = any(:d)"
+                f"union select m.id, k.pid, 2 from manual_catalog_items m join keys k on k.k = {_N.format('m.mfr_number')} "
+                "where m.distributor_id = any(:d) and k.si_id is null and (k.mi_id is null or k.mi_id = m.id) "
+                "union select m.id, x.id, 0 from manual_catalog_items m join singles x on x.mi_id = m.id where m.distributor_id = any(:d)"
             ),
             {"d": d},
         ).all()
-        hand[src] = _group(items, [(r.item, r.pid) for r in pairs])
+        hand[src] = _tiered(items, [(r.item, r.pid, r.tier) for r in pairs], manual, src)
     products = db.execute(text("select id, sku from products order by id")).all()
     plan = assign_numbers(sup, hand, [p.id for p in products])
     cur = {p.id: p.sku for p in products}
     plan["current"] = cur
     plan["scope"] = scope
+    num_of = {(r["source"], r["supplier_item_id"] or r["manual_item_id"]): r["number"] for r in plan["rows"]}  # before any range cut
+    plan["manual"] = [{**m, "number": num_of.get((m["source"], m["item_id"]))} for m in manual]
+    if lo is not None and hi is not None:
+        plan["manual"] = [m for m in plan["manual"] if m["number"] is not None and lo <= m["number"] <= hi]
     if lo is not None and hi is not None:
         _restrict_to_range(db, plan, lo, hi)
     else:
@@ -289,6 +320,8 @@ def public_plan(plan: dict, db: Session) -> dict:
         warnings.append(f"{plan['shared']} catalog parts match a product that already took an earlier catalog's number; their numbers stay reserved.")
     if plan["duplicates"]:
         warnings.append(f"{len(plan['duplicates'])} catalog parts have more than one single product; the lowest id keeps the number. Merge the others.")
+    if plan["manual"]:
+        warnings.append(f"{len(plan['manual'])} catalog parts match a product only by manufacturer #, not by SKU. They are not numbered automatically: their numbers stay reserved and each needs a manual check (listed below).")
     if plan["displaced"]:
         warnings.append(f"{plan['displaced']} products hold numbers in this range (or temporary numbers) but belong elsewhere in the plan. They move to fresh numbers from {fmt(plan['fresh_from'])} up and get their proper numbers in a later run; their shelf labels change twice.")
     if labels:
@@ -298,6 +331,7 @@ def public_plan(plan: dict, db: Session) -> dict:
         "range": plan["range"], "displaced": plan["displaced"],
         "reserved_numbers": reserved, "last_number": fmt(plan.get("upper", plan["last"])), "ranges": {k: ([fmt(v[0]), fmt(v[1])] if v else None) for k, v in plan["ranges"].items()},
         "catalog_counts": plan["counts"], "distributors": plan["distributors"], "labels_to_reprint": labels, "warnings": warnings,
+        "manual": [{**m, "number": fmt(m["number"]) if m["number"] else None} for m in plan["manual"][:100]], "manual_total": len(plan["manual"]),
         "duplicates": plan["duplicates"][:100], "duplicate_total": len(plan["duplicates"]),
         "sample": [{"product_id": p, "from": plan["current"].get(p), "to": s} for p, s in list(ch.items())[:25]],
     }
