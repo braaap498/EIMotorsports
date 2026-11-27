@@ -45,7 +45,7 @@ export default function SkuAssignPanel() {
   const [plan, setPlan] = useState<Plan | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [snap, setSnap] = useState(false);
+  const [snap, setSnap] = useState(true);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [status, setStatus] = useState<Status | null>(null);
@@ -107,7 +107,7 @@ export default function SkuAssignPanel() {
     setBusy(true);
     setErr("");
     try {
-      await api("/cleanup/sku-catalog/apply", { method: "POST", body: JSON.stringify({ scope, confirm: "RENUMBER", update_snapshots: snap, ...(plan.range ? { number_from: plan.range[0], number_to: plan.range[1] } : {}) }) });
+      await api("/cleanup/sku-catalog/apply", { method: "POST", body: { scope, confirm: "RENUMBER", update_snapshots: snap, ...(plan.range ? { number_from: plan.range[0], number_to: plan.range[1] } : {}) } });
       watch();
     } catch (e) {
       setErr(errMsg(e));
