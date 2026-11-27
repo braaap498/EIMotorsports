@@ -77,6 +77,22 @@ export default function SiteHeader() {
   const track = (e: ReactPointerEvent) => {
     lastPointer.current = e.pointerType;
   };
+  // Category dropdown opens only after the mouse has rested on a category for half a second (a pass-through does nothing).
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearHover = () => {
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+  };
+  const hoverOpen = (id: number | null) => {
+    clearHover();
+    if (id === null) {
+      setOpenId(null);
+      return;
+    }
+    hoverTimer.current = setTimeout(() => setOpenId(id), 500);
+  };
   const [cartMenu, setCartMenu] = useState(false); // cart preview on hover
   const [preview, setPreview] = useState<Priced[] | null>(null);
 
@@ -390,7 +406,10 @@ export default function SiteHeader() {
       {tree.length > 0 && (
         <div
           className="relative bg-[#06bde7] text-[#04202b]"
-          onMouseLeave={() => setOpenId(null)}
+          onMouseLeave={() => {
+            clearHover();
+            setOpenId(null);
+          }}
           onKeyDown={(e) => e.key === "Escape" && setOpenId(null)}
         >
           {/* Desktop: top-level bar */}
@@ -399,9 +418,13 @@ export default function SiteHeader() {
               <Link
                 key={c.id}
                 href={href(c.slug)}
-                onMouseEnter={() => setOpenId(c.children.length ? c.id : null)}
+                onMouseEnter={() => hoverOpen(c.children.length ? c.id : null)}
+                onMouseLeave={clearHover}
                 onFocus={() => setOpenId(c.children.length ? c.id : null)}
-                onClick={() => setOpenId(null)}
+                onClick={() => {
+                  clearHover();
+                  setOpenId(null);
+                }}
                 aria-haspopup={c.children.length > 0}
                 aria-expanded={openId === c.id}
                 className={`whitespace-nowrap px-3 py-2 text-sm font-semibold hover:bg-black/10 ${openId === c.id ? "bg-black/10" : ""}`}
