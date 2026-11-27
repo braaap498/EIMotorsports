@@ -1191,6 +1191,9 @@ def make_product(item_id: int, db: Session = Depends(get_db), user: AuthUser = D
             {"p": pid, "d": dist, "si": it.id, "pn": it.sku,
              "desc": (" ".join(x for x in (it.manufacturer, it.name) if x))[:250] or None, "uc": it.dealer_cost},
         )
+        from app.sku_reserve import claim_for_item  # the number reserved for this catalog part (None = keep the database's)
+
+        claim_for_item(db, pid, SUPPLIER, it.id)
         follow = parts_mpn(db, pid)
         if follow:
             db.execute(text("update products set manufacturer_part_number = :m where id = :p"), {"m": follow, "p": pid})

@@ -588,6 +588,14 @@ def make_manual_product(item_id: int, db: Session = Depends(get_db)):
             ),
             {"p": pid, "d": m.distributor_id, "pn": m.part_number, "desc": (m.description or "").strip() or None, "uc": m.unit_cost, "mi": m.id},
         )
+        # a saved part of a hand-made catalog (Niche, Sinera) takes its reserved number (or the next free one of that block)
+        from app.sku_reserve import HAND_CATALOGS, claim_for_item
+
+        dname = db.execute(text("select name from po_distributors where id = :d"), {"d": m.distributor_id}).scalar() or ""
+        for src, pat in HAND_CATALOGS:
+            if re.search(pat, dname, re.I):
+                claim_for_item(db, pid, src, m.id)
+                break
         follow = parts_mpn(db, pid)
         if follow:
             db.execute(text("update products set manufacturer_part_number = :m where id = :p"), {"m": follow, "p": pid})

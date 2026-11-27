@@ -1794,3 +1794,41 @@ def merge_log(
         {"limit": limit, "sid": survivor_id},
     ).all()
     return [dict(r._mapping) for r in rows]
+
+
+# --------------------------------------------------------------------------
+# Catalog-ordered SKUs with reserved numbers (app/sku_reserve.py)
+# --------------------------------------------------------------------------
+# Automatic, then Rocky Mountain, then a block of 1000 each for Niche and Sinera, then everything else. Every product is renumbered.
+# /sku-catalog/plan is read only. /sku-catalog/apply starts a background run (typed confirmation); /sku-catalog/status is polled.
+from app import sku_reserve  # noqa: E402
+
+
+@router.get("/sku-catalog/plan")
+def sku_catalog_plan(scope: str = Query("all", pattern="^(all|active)$", description="'all' catalog rows or only 'active' ones"), db: Session = Depends(get_db)):
+    """Read only: what every catalog would get, how many numbers are reserved, how many products change."""
+    try:
+        out = sku_reserve.public_plan(sku_reserve.build_plan(db, scope), db)
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(409, str(e))
+    db.rollback()
+    return out
+
+
+class SkuCatalogApplyIn(BaseModel):
+    scope: str = Field("all", pattern="^(all|active)$")
+    confirm: str = Field(..., description="must be RENUMBER")
+    update_snapshots: bool = False  # also rewrite ebay_listings.sku (the copy saved at merge time)
+
+
+@router.post("/sku-catalog/apply")
+def sku_catalog_apply(body: SkuCatalogApplyIn, user: AuthUser = Depends(require_admin)):
+    if body.confirm.strip().upper() != "RENUMBER":
+        raise HTTPException(400, "Type RENUMBER to confirm.")
+    return sku_reserve.start_apply(body.scope, body.update_snapshots)
+
+
+@router.get("/sku-catalog/status")
+def sku_catalog_status():
+    return sku_reserve.get_state()

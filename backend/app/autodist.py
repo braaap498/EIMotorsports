@@ -3900,6 +3900,9 @@ def _insert_website_product(db: Session, r, cats: list, published: bool = True) 
             text("insert into supplier_product_links (supplier, supplier_sku, product_id) values (:s, :k, :p)"),
             {"s": SUPPLIER, "k": r.sku, "p": pid},
         )
+        from app.sku_reserve import claim_for_item  # the number reserved for this catalog part (None = keep the database's)
+
+        claim_for_item(db, pid, SUPPLIER, r.id)
         for i, url in enumerate(r.images or []):
             if not str(url or "").strip():
                 continue

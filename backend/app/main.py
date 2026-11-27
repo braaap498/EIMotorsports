@@ -62,6 +62,7 @@ from app.kits import router as kits_router
 from app.order_activity import ensure_tables as ensure_order_activity_tables
 from app.order_activity import router as order_activity_router
 from app.warehouse_stock import ensure_tables as ensure_warehouse_tables
+from app.sku_reserve import ensure_tables_startup as ensure_sku_reserve_tables
 from app.warehouse_stock import router as warehouse_stock_router
 from app.auth import AuthUser, password_days_left, require_staff
 from app.config import get_settings
@@ -208,6 +209,7 @@ def _order_activity_tables():
     """The order activity log's tables (History tab > Order activity)."""
     ensure_order_activity_tables()
     ensure_warehouse_tables()
+    ensure_sku_reserve_tables()
 
 
 @app.on_event("startup")

@@ -2,6 +2,7 @@
 
 import ClearableInput from "../../../components/admin/ClearableInput";
 import ClickRow from "../../../components/admin/ClickRow";
+import SkuAssignPanel from "../../../components/admin/SkuAssignPanel"; // one-time SKU renumber; remove when done
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errMsg } from "../../../lib/adminApi";
@@ -419,6 +420,7 @@ export default function ProductsPage() {
           </Link>
         )}
       </div>
+      <SkuAssignPanel /> {/* one-time SKU renumber; remove when done */}
       {error && <Notice kind="error">{error}</Notice>}
       {labelMsg && <Notice kind={labelMsg.kind}>{labelMsg.text}</Notice>}
 
