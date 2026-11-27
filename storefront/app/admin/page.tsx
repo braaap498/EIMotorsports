@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { api, errMsg } from "../../lib/adminApi";
 import { Notice } from "../../components/admin/ui";
 import { useAccess } from "../../components/admin/AdminAccess";
+import PhotoBackup from "../../components/admin/PhotoBackup";
 
 type Stats = { products: number; noFitment: number; untyped: number };
 
@@ -84,6 +85,7 @@ export default function AdminDashboard() {
           </Link>
         )}
       </div>
+      {isAdmin && <PhotoBackup />}
     </div>
   );
 }
