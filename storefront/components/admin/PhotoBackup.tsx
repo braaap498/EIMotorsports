@@ -16,6 +16,23 @@ type DirHandle = {
 type Picker = (opts?: { mode?: "read" | "readwrite" }) => Promise<DirHandle>;
 
 type ListResult = { base_url: string; count: number; paths: string[] };
+
+// What /storage-backup/manifest must return. One row per product_photos row, plus the eBay map.
+// sku_folder is the by_sku folder name for that photo (for example EBAY-800799374319, or a product SKU
+// with "/" turned into "xx" like 9144PSxx125777xx120216).
+type ManifestPhoto = {
+  id: number;
+  product_id: number | null;
+  storage_path: string;
+  source_url: string | null;
+  is_primary: boolean;
+  sort_order: number;
+  created_at: string;
+  image_key: string; // like "89/8986f63da8b6....jpg" (the file is full/<image_key>)
+  sku_folder: string;
+};
+type Manifest = { photos: ManifestPhoto[]; ebay: { item_number: string | number; custom_label_sku: string | number }[] };
+
 type Summary = {
   total: number;
   copied: number;
@@ -24,6 +41,8 @@ type Summary = {
   firstErrors: string[];
   stopped: boolean;
   zipParts?: number; // set when the backup was downloaded as ZIP files (Firefox, Safari)
+  bySku: number; // copies written into by_sku
+  indexNote: string; // set when the CSV files / by_sku could not be made
 };
 
 const WORKERS = 6;
@@ -56,12 +75,81 @@ async function fetchPhoto(base: string, path: string): Promise<Blob> {
   return res.blob();
 }
 
+// ---- index files (same columns and layout as the old script's output) ----
+
+function csvCell(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  const s = typeof v === "boolean" ? (v ? "True" : "False") : String(v);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function toCsv(header: string[], rows: unknown[][]): string {
+  return [header, ...rows].map((r) => r.map(csvCell).join(",")).join("\r\n") + "\r\n";
+}
+
+type IndexFiles = {
+  csvs: { path: string; text: string }[];
+  // photo path in the store (full/xx/hash.jpg) -> the by_sku copies to make from it
+  bySku: Map<string, string[]>;
+};
+
+function buildIndex(m: Manifest, withBySku: boolean): IndexFiles {
+  const csvs = [
+    {
+      path: "product_photos.csv",
+      text: toCsv(
+        ["id", "product_id", "storage_path", "source_url", "is_primary", "sort_order", "created_at", "image_key"],
+        m.photos.map((p) => [p.id, p.product_id, p.storage_path, p.source_url, p.is_primary, p.sort_order, p.created_at, p.image_key])
+      ),
+    },
+    {
+      path: "ebay_label_import.csv",
+      text: toCsv(["item_number", "custom_label_sku"], m.ebay.map((e) => [e.item_number, e.custom_label_sku])),
+    },
+  ];
+
+  // by_sku/<sku_folder>/<NN>_<first 8 of the photo's hash>.jpg, where NN is the photo's position (1, 2, 3...)
+  const bySku = new Map<string, string[]>();
+  if (withBySku) {
+    const seen = new Set<string>();
+    for (const p of m.photos) {
+      if (!p.image_key || !p.sku_folder) continue;
+      const file = p.image_key.split("/").pop() as string;
+      const dot = file.lastIndexOf(".");
+      const hash = (dot > 0 ? file.slice(0, dot) : file).slice(0, 8);
+      const ext = dot > 0 ? file.slice(dot + 1) : "jpg";
+      const folder = p.sku_folder.replace(/[\\/:*?"<>|]/g, "_");
+      const target = `by_sku/${folder}/${pad(p.sort_order + 1)}_${hash}.${ext}`;
+      if (seen.has(target)) continue;
+      seen.add(target);
+      const src = `full/${p.image_key}`;
+      const list = bySku.get(src);
+      if (list) list.push(target);
+      else bySku.set(src, [target]);
+    }
+  }
+  return { csvs, bySku };
+}
+
+async function loadIndex(withBySku: boolean): Promise<{ index: IndexFiles; note: string }> {
+  try {
+    const m = await api<Manifest>("/storage-backup/manifest");
+    return { index: buildIndex(m, withBySku), note: "" };
+  } catch (e) {
+    return {
+      index: { csvs: [], bySku: new Map() },
+      note: `The CSV files and by_sku folders were skipped because the photo index could not be loaded (${errMsg(e)}).`,
+    };
+  }
+}
+
 export default function PhotoBackup() {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [summary, setSummary] = useState<Summary | null>(null);
   const [error, setError] = useState("");
   const [canPickFolder, setCanPickFolder] = useState(true); // checked in the browser after load
+  const [withBySku, setWithBySku] = useState(true);
   const stop = useRef(false);
 
   useEffect(() => {
@@ -82,6 +170,8 @@ export default function PhotoBackup() {
       setProgress("Getting the photo list…");
       const list = await api<ListResult>("/storage-backup/list");
       const paths = list.paths;
+      const { index, note } = await loadIndex(withBySku);
+
       const dirs = new Map<string, Promise<DirHandle>>();
       const dirFor = (parts: string[]): Promise<DirHandle> => {
         const key = parts.join("/");
@@ -93,24 +183,21 @@ export default function PhotoBackup() {
         return p;
       };
 
-      const s: Summary = { total: paths.length, copied: 0, skipped: 0, failed: 0, firstErrors: [], stopped: false };
-      let next = 0;
-      let done = 0;
-
-      async function one(path: string) {
+      // The file at this path in the folder if it is there and not empty, otherwise null.
+      async function existing(path: string): Promise<File | null> {
+        const parts = path.split("/");
+        const file = parts.pop() as string;
+        try {
+          const f = await (await (await dirFor(parts)).getFileHandle(file)).getFile();
+          return f.size > 0 ? f : null;
+        } catch {
+          return null;
+        }
+      }
+      async function writeAt(path: string, blob: Blob) {
         const parts = path.split("/");
         const file = parts.pop() as string;
         const dir = await dirFor(parts);
-        try {
-          const existing = await (await dir.getFileHandle(file)).getFile();
-          if (existing.size > 0) {
-            s.skipped++;
-            return;
-          }
-        } catch {
-          // not there yet: copy it
-        }
-        const blob = await fetchPhoto(list.base_url, path);
         const w = await (await dir.getFileHandle(file, { create: true })).createWritable();
         try {
           await w.write(blob);
@@ -119,7 +206,32 @@ export default function PhotoBackup() {
           await w.abort?.().catch(() => {});
           throw e;
         }
-        s.copied++;
+      }
+
+      const s: Summary = { total: paths.length, copied: 0, skipped: 0, failed: 0, firstErrors: [], stopped: false, bySku: 0, indexNote: note };
+
+      // The CSV files are small and always rewritten, so they match the database as of this run.
+      for (const f of index.csvs) await writeAt(f.path, new Blob([f.text], { type: "text/csv" }));
+
+      let next = 0;
+      let done = 0;
+
+      async function one(path: string) {
+        let blob: Blob | null = await existing(path);
+        const already = !!blob;
+        if (!blob) {
+          blob = await fetchPhoto(list.base_url, path);
+          await writeAt(path, blob);
+        }
+        let extra = 0;
+        for (const t of index.bySku.get(path) ?? []) {
+          if (await existing(t)) continue;
+          await writeAt(t, blob);
+          extra++;
+        }
+        if (already) s.skipped++;
+        else s.copied++;
+        s.bySku += extra;
       }
 
       async function worker() {
@@ -161,10 +273,11 @@ export default function PhotoBackup() {
       setProgress("Getting the photo list…");
       const list = await api<ListResult>("/storage-backup/list");
       const paths = list.paths;
+      const { index, note } = await loadIndex(withBySku);
       const d = new Date();
       const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
-      const s: Summary = { total: paths.length, copied: 0, skipped: 0, failed: 0, firstErrors: [], stopped: false, zipParts: 0 };
+      const s: Summary = { total: paths.length, copied: 0, skipped: 0, failed: 0, firstErrors: [], stopped: false, zipParts: 0, bySku: 0, indexNote: note };
 
       // One ZIP being built. Photos are already compressed, so they are stored as they are.
       let chunks: Uint8Array[] = [];
@@ -183,6 +296,14 @@ export default function PhotoBackup() {
         });
       };
 
+      const addEntry = (path: string, data: Uint8Array) => {
+        const entry = new ZipPassThrough(path);
+        zip.add(entry);
+        entry.push(data, true);
+        filesInPart++;
+        dataBytes += data.length;
+      };
+
       const finishPart = () => {
         if (filesInPart === 0) return;
         zip.end();
@@ -193,6 +314,8 @@ export default function PhotoBackup() {
       };
 
       startPart();
+      const enc = new TextEncoder();
+      for (const f of index.csvs) addEntry(f.path, enc.encode(f.text)); // the CSV files go in the first ZIP
 
       let next = 0;
       let done = 0;
@@ -209,12 +332,12 @@ export default function PhotoBackup() {
             }
             const data = new Uint8Array(await blob.arrayBuffer());
             // Adding to the ZIP and saving a full one happen together, with no waiting between.
-            const entry = new ZipPassThrough(path);
-            zip.add(entry);
-            entry.push(data, true);
-            filesInPart++;
-            dataBytes += data.length;
+            addEntry(path, data);
             s.copied++;
+            for (const t of index.bySku.get(path) ?? []) {
+              addEntry(t, data);
+              s.bySku++;
+            }
             if (dataBytes >= ZIP_PART_BYTES) finishPart();
           } catch (e) {
             s.failed++;
@@ -257,28 +380,36 @@ export default function PhotoBackup() {
             Stop
           </button>
         )}
+        <label className="flex items-center gap-2 text-sm text-gray-700">
+          <input type="checkbox" checked={withBySku} onChange={(e) => setWithBySku(e.target.checked)} disabled={busy} />
+          Also make by_sku folders
+        </label>
       </div>
       {canPickFolder ? (
         <p className="text-xs text-gray-500">
-          Pick a folder (make a new one in the picker if you need to). Photos already in it are skipped, so running it again only adds what is missing. Windows
-          will not let a browser pick the Downloads folder itself, so choose or create a folder inside it, such as photo_backup.
+          Pick a folder (make a new one in the picker if you need to). Photos already in it are skipped, so running it again only adds what is missing. Along with
+          the full and thumb photos it writes product_photos.csv and ebay_label_import.csv (rewritten each run) and, if ticked, a by_sku folder with a copy of each
+          photo under its SKU, which takes extra disk space. Windows will not let a browser pick the Downloads folder itself, so choose or create a folder inside
+          it, such as photo_backup.
         </p>
       ) : (
         <p className="text-xs text-gray-500">
-          This browser cannot write to a folder, so the photos download as one or more ZIP files (photo_backup_date_part1.zip, and so on). It downloads every photo
-          each time. Unzip them all into the same backup folder, choosing merge if asked, with no extra folder level, and Chrome or Edge will treat those photos as
-          already backed up.
+          This browser cannot write to a folder, so the photos download as one or more ZIP files (photo_backup_date_part1.zip, and so on), with the two CSV files in
+          part 1. It downloads every photo each time. Unzip them all into the same backup folder, choosing merge if asked, with no extra folder level, and Chrome or
+          Edge will treat those photos as already backed up.
         </p>
       )}
       {progress && <p className="text-sm text-gray-700">{progress}</p>}
       {error && <Notice kind="error">{error}</Notice>}
       {summary && (
-        <Notice kind={summary.failed ? "error" : "success"}>
+        <Notice kind={summary.failed || summary.indexNote ? "error" : "success"}>
           {summary.stopped ? "Stopped. " : "Done. "}
           {summary.zipParts !== undefined
             ? `${summary.total} photo files in the store: ${summary.copied} saved into ${summary.zipParts} ZIP file${summary.zipParts === 1 ? "" : "s"}`
             : `${summary.total} photo files in the store: ${summary.copied} copied, ${summary.skipped} already in the folder`}
+          {summary.bySku ? `, plus ${summary.bySku} by_sku copies` : ""}
           {summary.failed ? `, ${summary.failed} failed (${summary.firstErrors.join("; ")}). Run it again to retry those.` : "."}
+          {summary.indexNote ? ` ${summary.indexNote}` : ""}
         </Notice>
       )}
     </div>
