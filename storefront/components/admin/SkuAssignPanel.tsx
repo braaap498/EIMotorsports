@@ -22,6 +22,7 @@ type Plan = {
   labels_to_reprint: number;
   warnings: string[];
   duplicates: { source: string; item_id: number; keeps: number | null; others: number[] }[];
+  slots?: { number: string; source: string; part_sku: string | null; part_mfr: string | null; product_id: number | null; product_now: string | null }[];
   manual?: { source: string; item_id: number; number: string | null; products: number[] }[];
   manual_total?: number;
   duplicate_total: number;
@@ -179,6 +180,19 @@ export default function SkuAssignPanel() {
                 {(plan.manual ?? []).map((m) => (
                   <li key={m.source + m.item_id}>
                     {LABELS[m.source] ?? m.source} part {m.item_id} ({m.number ?? "no number"}): product {m.products.map((o) => "#" + o).join(", ")}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+          {(plan.slots?.length ?? 0) > 0 && (
+            <details className="text-sm" open>
+              <summary className="cursor-pointer">Each number in this range: the catalog part and the product that gets it</summary>
+              <ul className="mt-1 pl-5">
+                {plan.slots!.map((x) => (
+                  <li key={x.number}>
+                    {x.number}: {LABELS[x.source] ?? x.source} part {x.part_sku ?? "(empty slot)"}
+                    {x.part_mfr ? ` (mfr ${x.part_mfr})` : ""} → {x.product_id ? `product #${x.product_id} (now ${x.product_now ?? "no number"})` : "no product yet, number reserved"}
                   </li>
                 ))}
               </ul>

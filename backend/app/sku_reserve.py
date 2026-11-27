@@ -326,7 +326,25 @@ def public_plan(plan: dict, db: Session) -> dict:
         warnings.append(f"{plan['displaced']} products hold numbers in this range (or temporary numbers) but belong elsewhere in the plan. They move to fresh numbers from {fmt(plan['fresh_from'])} up and get their proper numbers in a later run; their shelf labels change twice.")
     if labels:
         warnings.append(f"{labels} products have an auto shelf barcode that changes (EIB-); printed labels for them must be reprinted.")
+    slots = []
+    if plan["range"]:
+        rr = [r for r in plan["rows"]][:200]
+        sup_ids = [r["supplier_item_id"] for r in rr if r["supplier_item_id"]]
+        man_ids = [r["manual_item_id"] for r in rr if r["manual_item_id"]]
+        sup, man = {}, {}
+        if sup_ids:
+            sup = {x.id: x for x in db.execute(text("select id, sku, mfr_number from supplier_items where id = any(cast(:i as bigint[]))"), {"i": sup_ids}).all()}
+        if man_ids:
+            man = {x.id: x for x in db.execute(text("select id, part_number as sku, mfr_number from manual_catalog_items where id = any(cast(:i as bigint[]))"), {"i": man_ids}).all()}
+        for r in rr:
+            part = sup.get(r["supplier_item_id"]) if r["supplier_item_id"] else man.get(r["manual_item_id"])
+            slots.append({
+                "number": fmt(r["number"]), "source": r["source"], "part_sku": part.sku if part else None,
+                "part_mfr": part.mfr_number if part else None, "product_id": r["product_id"],
+                "product_now": plan["current"].get(r["product_id"]) if r["product_id"] else None,
+            })
     return {
+        "slots": slots,
         "scope": plan["scope"], "products": plan["in_range"], "will_change": len(ch), "unchanged": plan["in_range"] - (len(ch) - plan["displaced"]),
         "range": plan["range"], "displaced": plan["displaced"],
         "reserved_numbers": reserved, "last_number": fmt(plan.get("upper", plan["last"])), "ranges": {k: ([fmt(v[0]), fmt(v[1])] if v else None) for k, v in plan["ranges"].items()},
