@@ -1805,10 +1805,17 @@ from app import sku_reserve  # noqa: E402
 
 
 @router.get("/sku-catalog/plan")
-def sku_catalog_plan(scope: str = Query("all", pattern="^(all|active)$", description="'all' catalog rows or only 'active' ones"), db: Session = Depends(get_db)):
+def sku_catalog_plan(
+    scope: str = Query("all", pattern="^(all|active)$", description="'all' catalog rows or only 'active' ones"),
+    number_from: Optional[int] = Query(None, ge=1, description="only renumber the products planned for numbers from this one"),
+    number_to: Optional[int] = Query(None, ge=1, description="... up to this one"),
+    db: Session = Depends(get_db),
+):
     """Read only: what every catalog would get, how many numbers are reserved, how many products change."""
+    if (number_from is None) != (number_to is None):
+        raise HTTPException(400, "Give both ends of the number range, or neither.")
     try:
-        out = sku_reserve.public_plan(sku_reserve.build_plan(db, scope), db)
+        out = sku_reserve.public_plan(sku_reserve.build_plan(db, scope, number_from, number_to), db)
     except ValueError as e:
         db.rollback()
         raise HTTPException(409, str(e))
@@ -1819,6 +1826,8 @@ def sku_catalog_plan(scope: str = Query("all", pattern="^(all|active)$", descrip
 class SkuCatalogApplyIn(BaseModel):
     scope: str = Field("all", pattern="^(all|active)$")
     confirm: str = Field(..., description="must be RENUMBER")
+    number_from: Optional[int] = Field(None, ge=1)  # both or neither: only the products planned for these numbers
+    number_to: Optional[int] = Field(None, ge=1)
     update_snapshots: bool = False  # also rewrite ebay_listings.sku (the copy saved at merge time)
 
 
@@ -1826,7 +1835,9 @@ class SkuCatalogApplyIn(BaseModel):
 def sku_catalog_apply(body: SkuCatalogApplyIn, user: AuthUser = Depends(require_admin)):
     if body.confirm.strip().upper() != "RENUMBER":
         raise HTTPException(400, "Type RENUMBER to confirm.")
-    return sku_reserve.start_apply(body.scope, body.update_snapshots)
+    if (body.number_from is None) != (body.number_to is None):
+        raise HTTPException(400, "Give both ends of the number range, or neither.")
+    return sku_reserve.start_apply(body.scope, body.update_snapshots, body.number_from, body.number_to)
 
 
 @router.get("/sku-catalog/status")

@@ -99,7 +99,7 @@ def assign_numbers(supplier_items: dict, hand_items: dict, product_ids: list) ->
         for item_id, matches in supplier_items.get(src, []):
             owner = take(matches, n)
             if len(matches) > 1:
-                dups.append({"source": src, "item_id": item_id, "keeps": owner, "others": [m for m in matches if m != owner]})
+                dups.append({"source": src, "item_id": item_id, "keeps": owner, "number": n, "others": [m for m in matches if m != owner]})
             rows.append({"number": n, "source": src, "supplier_item_id": item_id, "manual_item_id": None, "block_index": None, "product_id": owner})
             n += 1
         ranges[src] = [start, n - 1] if n > start else None
@@ -113,7 +113,7 @@ def assign_numbers(supplier_items: dict, hand_items: dict, product_ids: list) ->
                 item_id, matches = items[i]
                 owner = take(matches, n)
                 if len(matches) > 1:
-                    dups.append({"source": src, "item_id": item_id, "keeps": owner, "others": [m for m in matches if m != owner]})
+                    dups.append({"source": src, "item_id": item_id, "keeps": owner, "number": n, "others": [m for m in matches if m != owner]})
                 rows.append({"number": n, "source": src, "supplier_item_id": None, "manual_item_id": item_id, "block_index": i, "product_id": owner})
             else:
                 rows.append({"number": n, "source": src, "supplier_item_id": None, "manual_item_id": None, "block_index": i, "product_id": None})
@@ -128,6 +128,46 @@ def assign_numbers(supplier_items: dict, hand_items: dict, product_ids: list) ->
     if n - 1 > MAX_PLAN:
         raise ValueError(f"The plan needs numbers up to {n - 1}; the limit is {MAX_PLAN} (EI-9xxxxxx is kept for the move). Use scope 'active'.")
     return {"rows": rows, "product_number": assigned, "duplicates": dups, "shared": shared, "ranges": ranges, "last": n - 1}
+
+
+_SKU_RE = re.compile(r"^EI-(\d{7})$", re.I)
+
+
+def _restrict_to_range(db: Session, plan: dict, lo: int, hi: int) -> None:
+    """Partial run: only products whose planned number is in [lo, hi] change. A product that sits on a number in the range
+    (or on a temporary number left by an interrupted run) but is planned outside it must make room: it takes a fresh number
+    above everything in use, and the next full run gives it its proper one."""
+    if lo < 1 or hi < lo:
+        raise ValueError("The number range must start at 1 or more and end at or after its start.")
+    if hi >= TEMP_BASE:
+        raise ValueError(f"The range must stay below {TEMP_BASE}.")
+    cur, pn = plan["current"], plan["product_number"]
+    changes = {pid: fmt(n) for pid, n in pn.items() if lo <= n <= hi and (cur.get(pid) or "").upper() != fmt(n)}
+    nums = {}
+    for pid, sku in cur.items():
+        m = _SKU_RE.match(sku or "")
+        if m:
+            nums[pid] = int(m.group(1))
+    displaced = sorted(pid for pid, k in nums.items() if (lo <= k <= hi or k >= TEMP_BASE) and not (lo <= pn.get(pid, 0) <= hi))
+    top = max([k for k in nums.values() if k < TEMP_BASE] + [hi])
+    bc = db.execute(
+        text("select max(case when code ~ '^EIB-[0-9]{1,7}$' and (length(substr(code, 5)) < 7 or substr(code, 5) < '9000000') "
+             "then cast(substr(code, 5) as integer) end) from product_barcodes")
+    ).scalar() or 0
+    top = max(top, bc)
+    first = top + 1
+    for pid in displaced:
+        top += 1
+        changes[pid] = fmt(top)
+    if top >= TEMP_BASE:
+        raise ValueError("Not enough free numbers below the temporary range for the products that have to move.")
+    plan.update(
+        changes=changes, range=[lo, hi], displaced=len(displaced), fresh_from=first if displaced else None,
+        upper=max(hi, top if displaced else 0),
+        rows=[r for r in plan["rows"] if lo <= r["number"] <= hi],
+        duplicates=[d for d in plan["duplicates"] if lo <= d["number"] <= hi],
+        in_range=sum(1 for n in pn.values() if lo <= n <= hi),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -156,7 +196,7 @@ def _group(items: list, pairs) -> list:
     return [(i, sorted(got.get(i, ()))) for i in items]
 
 
-def build_plan(db: Session, scope: str = "all") -> dict:
+def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Optional[int] = None) -> dict:
     """A catalog part's product = the single product (never a kit) that
        - its one part line points at, or
        - has no pointer to a different part and whose manufacturer part # or custom label equals the part's SKU or manufacturer #.
@@ -211,8 +251,12 @@ def build_plan(db: Session, scope: str = "all") -> dict:
     plan = assign_numbers(sup, hand, [p.id for p in products])
     cur = {p.id: p.sku for p in products}
     plan["current"] = cur
-    plan["changes"] = {pid: fmt(n) for pid, n in plan["product_number"].items() if (cur.get(pid) or "").upper() != fmt(n)}
     plan["scope"] = scope
+    if lo is not None and hi is not None:
+        _restrict_to_range(db, plan, lo, hi)
+    else:
+        plan["changes"] = {pid: fmt(n) for pid, n in plan["product_number"].items() if (cur.get(pid) or "").upper() != fmt(n)}
+        plan.update(range=None, displaced=0, fresh_from=None, in_range=len(plan["product_number"]))
     plan["distributors"] = names
     plan["counts"] = {s: len(v) for s, v in {**sup, **hand}.items()}
     return plan
@@ -229,23 +273,30 @@ def public_plan(plan: dict, db: Session) -> dict:
     reserved = sum(1 for r in plan["rows"] if r["product_id"] is None)
     warnings = []
     clash = db.execute(
-        text("select count(*) from product_barcodes where code ~ '^EIB-[0-9]{1,7}$' and not (kind = 'shelf' and is_auto) and cast(substr(code, 5) as integer) <= :n"),
-        {"n": plan["last"]},
+        text("select count(*) from product_barcodes where code ~ '^EIB-[0-9]{1,7}$' and not (kind = 'shelf' and is_auto) "
+             "and cast(substr(code, 5) as integer) between :lo and :n"),
+        {"n": plan.get("upper", plan["last"]), "lo": (plan["range"] or [1])[0]},
     ).scalar() or 0
     if clash:
         warnings.append(f"{clash} barcodes that are not auto shelf codes already look like EIB- numbers inside the plan range; if one equals a new number the run will stop. Fix or remove them first.")
     for src, _ in HAND_CATALOGS:
+        rg = plan["ranges"].get(src)
+        if plan["range"] and not (rg and rg[0] <= plan["range"][1] and rg[1] >= plan["range"][0]):
+            continue
         if not plan["distributors"].get(src):
             warnings.append(f"No distributor named like '{src}' was found; its block of {BLOCK_SIZE} is reserved with no parts.")
     if plan["shared"]:
         warnings.append(f"{plan['shared']} catalog parts match a product that already took an earlier catalog's number; their numbers stay reserved.")
     if plan["duplicates"]:
         warnings.append(f"{len(plan['duplicates'])} catalog parts have more than one single product; the lowest id keeps the number. Merge the others.")
+    if plan["displaced"]:
+        warnings.append(f"{plan['displaced']} products hold numbers in this range (or temporary numbers) but belong elsewhere in the plan. They move to fresh numbers from {fmt(plan['fresh_from'])} up and get their proper numbers in a later run; their shelf labels change twice.")
     if labels:
         warnings.append(f"{labels} products have an auto shelf barcode that changes (EIB-); printed labels for them must be reprinted.")
     return {
-        "scope": plan["scope"], "products": len(plan["product_number"]), "will_change": len(ch), "unchanged": len(plan["product_number"]) - len(ch),
-        "reserved_numbers": reserved, "last_number": fmt(plan["last"]), "ranges": {k: ([fmt(v[0]), fmt(v[1])] if v else None) for k, v in plan["ranges"].items()},
+        "scope": plan["scope"], "products": plan["in_range"], "will_change": len(ch), "unchanged": plan["in_range"] - (len(ch) - plan["displaced"]),
+        "range": plan["range"], "displaced": plan["displaced"],
+        "reserved_numbers": reserved, "last_number": fmt(plan.get("upper", plan["last"])), "ranges": {k: ([fmt(v[0]), fmt(v[1])] if v else None) for k, v in plan["ranges"].items()},
         "catalog_counts": plan["counts"], "distributors": plan["distributors"], "labels_to_reprint": labels, "warnings": warnings,
         "duplicates": plan["duplicates"][:100], "duplicate_total": len(plan["duplicates"]),
         "sample": [{"product_id": p, "from": plan["current"].get(p), "to": s} for p, s in list(ch.items())[:25]],
@@ -324,7 +375,7 @@ def get_state() -> dict:
     return s
 
 
-def start_apply(scope: str, update_snapshots: bool) -> dict:
+def start_apply(scope: str, update_snapshots: bool, lo: Optional[int] = None, hi: Optional[int] = None) -> dict:
     from fastapi import HTTPException
     from app.database import get_db
 
@@ -339,12 +390,12 @@ def start_apply(scope: str, update_snapshots: bool) -> dict:
             if busy:
                 raise HTTPException(409, f"Run {busy.id} is still active (its heartbeat is recent). Wait for it to finish or go stale.")
             db.execute(text("update sku_renumber_runs set status = 'stale' where status = 'running'"))
-            run_id = db.execute(text("insert into sku_renumber_runs (scope, phase, message) values (:s, 'planning', 'starting') returning id"), {"s": scope}).scalar()
+            run_id = db.execute(text("insert into sku_renumber_runs (scope, phase, message) values (:s, 'planning', 'starting') returning id"), {"s": scope if hi is None else f"{scope} {lo}-{hi}"}).scalar()
             db.commit()
         finally:
             db.close()
         _state.update(running=True, run_id=run_id, phase="planning", done=0, total=0, message="starting", error=None)
-    threading.Thread(target=_run, args=(run_id, scope, update_snapshots), daemon=True).start()
+    threading.Thread(target=_run, args=(run_id, scope, update_snapshots, lo, hi), daemon=True).start()
     return {"started": True, "run_id": run_id}
 
 
@@ -383,18 +434,21 @@ def _move_counter(db: Session, upto: int) -> str:
     return f"counter {seq} at {max(cur, upto)}"
 
 
-def _run(run_id: int, scope: str, update_snapshots: bool) -> None:
+def _run(run_id: int, scope: str, update_snapshots: bool, lo: Optional[int] = None, hi: Optional[int] = None) -> None:
     from app.database import get_db
 
     gen = get_db()
     db = next(gen)
     try:
         _beat(db, run_id, "planning", message="building the plan")
-        plan = build_plan(db, scope)
+        plan = build_plan(db, scope, lo, hi)
         db.rollback()
         rows, changes = plan["rows"], plan["changes"]
         # 1. reservations: replaced wholesale; matched products are already claimed
-        db.execute(text("delete from sku_reservations"))
+        if plan["range"]:
+            db.execute(text("delete from sku_reservations where number between :lo and :hi"), {"lo": plan["range"][0], "hi": plan["range"][1]})
+        else:
+            db.execute(text("delete from sku_reservations"))
         for i in range(0, len(rows), 2000):
             db.execute(
                 text("insert into sku_reservations (number, source, supplier_item_id, manual_item_id, block_index, product_id, claimed_at) "
@@ -402,7 +456,7 @@ def _run(run_id: int, scope: str, update_snapshots: bool) -> None:
                 rows[i:i + 2000],
             )
         db.commit()
-        note = _move_counter(db, plan["last"])
+        note = _move_counter(db, plan.get("upper", plan["last"]))
         ids = sorted(changes)
         total = len(ids) * 2
         _beat(db, run_id, "moving", 0, total, note)
@@ -446,7 +500,7 @@ def _run(run_id: int, scope: str, update_snapshots: bool) -> None:
             except Exception as e:
                 db.rollback()
                 msg = f"done; ebay_listings.sku was not updated ({str(e)[:120]})"
-        note2 = _move_counter(db, plan["last"])
+        note2 = _move_counter(db, plan.get("upper", plan["last"]))
         _beat(db, run_id, "done", message=f"{msg}; {note2}", status="done")
         _state["running"] = False
     except Exception as e:

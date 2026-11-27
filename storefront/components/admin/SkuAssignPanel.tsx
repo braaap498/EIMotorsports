@@ -11,6 +11,8 @@ type Plan = {
   scope: string;
   products: number;
   will_change: number;
+  range: [number, number] | null;
+  displaced: number;
   unchanged: number;
   reserved_numbers: number;
   last_number: string;
@@ -41,6 +43,8 @@ export default function SkuAssignPanel() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [snap, setSnap] = useState(false);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
   const [status, setStatus] = useState<Status | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -72,12 +76,23 @@ export default function SkuAssignPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.running]);
 
+  // blank both = every product; both filled = only the products planned for those numbers (e.g. 1 to 100)
+  const lo = parseInt(from, 10);
+  const hi = parseInt(to, 10);
+  const hasRange = from.trim() !== "" || to.trim() !== "";
+  const rangeOk = !hasRange || (Number.isInteger(lo) && Number.isInteger(hi) && lo >= 1 && hi >= lo);
+  const rangeQs = hasRange && rangeOk ? `&number_from=${lo}&number_to=${hi}` : "";
+
   async function preview() {
+    if (!rangeOk) {
+      setErr("Enter both ends of the number range (for example 1 and 100), or leave both blank for every product.");
+      return;
+    }
     setBusy(true);
     setErr("");
     setPlan(null);
     try {
-      setPlan(await api<Plan>(`/cleanup/sku-catalog/plan?scope=${scope}`));
+      setPlan(await api<Plan>(`/cleanup/sku-catalog/plan?scope=${scope}${rangeQs}`));
     } catch (e) {
       setErr(errMsg(e));
     } finally {
@@ -85,11 +100,11 @@ export default function SkuAssignPanel() {
     }
   }
   async function apply() {
-    if (!plan || !window.confirm(`Renumber ${plan.will_change} products now? Their SKUs and shelf barcodes change, and printed labels must be reprinted. Pause the catalog make-products jobs first.`)) return;
+    if (!plan || !window.confirm(`Renumber ${plan.will_change} products${plan.range ? ` (numbers ${plan.range[0]} to ${plan.range[1]})` : ""} now? Their SKUs and shelf barcodes change, and printed labels must be reprinted. Pause the catalog make-products jobs first.`)) return;
     setBusy(true);
     setErr("");
     try {
-      await api("/cleanup/sku-catalog/apply", { method: "POST", body: JSON.stringify({ scope, confirm: "RENUMBER", update_snapshots: snap }) });
+      await api("/cleanup/sku-catalog/apply", { method: "POST", body: JSON.stringify({ scope, confirm: "RENUMBER", update_snapshots: snap, ...(plan.range ? { number_from: plan.range[0], number_to: plan.range[1] } : {}) }) });
       watch();
     } catch (e) {
       setErr(errMsg(e));
@@ -111,6 +126,12 @@ export default function SkuAssignPanel() {
           <option value="all">All catalog rows</option>
           <option value="active">Active catalog rows only</option>
         </select>
+        <label className="flex items-center gap-1 text-sm">
+          Numbers
+          <input className={inputCls + " w-24"} inputMode="numeric" placeholder="from" value={from} onChange={(e) => { setFrom(e.target.value); setPlan(null); }} disabled={running} />
+          to
+          <input className={inputCls + " w-24"} inputMode="numeric" placeholder="to" value={to} onChange={(e) => { setTo(e.target.value); setPlan(null); }} disabled={running} />
+        </label>
         <button className={btn2Cls} onClick={preview} disabled={busy || running}>
           {busy ? "Working…" : "Preview SKU plan (changes nothing)"}
         </button>
@@ -131,7 +152,7 @@ export default function SkuAssignPanel() {
             ))}
           </div>
           <p className="text-sm">
-            {plan.products} products: <b>{plan.will_change}</b> change, {plan.unchanged} stay. {plan.reserved_numbers} numbers stay reserved. Highest number {plan.last_number}.
+            {plan.range ? `Numbers ${plan.range[0]} to ${plan.range[1]}: ` : ""}{plan.products} products: <b>{plan.will_change}</b> change, {plan.unchanged} stay. {plan.reserved_numbers} numbers stay reserved. Highest number {plan.last_number}.
             {" "}Shelf labels to reprint: <b>{plan.labels_to_reprint}</b>.
           </p>
           {plan.warnings.map((w) => (
@@ -165,7 +186,7 @@ export default function SkuAssignPanel() {
             </label>
             <div className="flex flex-wrap items-center gap-2">
               <button className={dangerCls} onClick={apply} disabled={busy || running}>
-                Apply: renumber all products
+                {plan.range ? `Apply: numbers ${plan.range[0]} to ${plan.range[1]} only` : "Apply: renumber all products"}
               </button>
             </div>
             <p className="text-xs text-gray-500">Pause the catalog make-products jobs first. If a run is interrupted, press Preview and Apply again; it picks up where it stopped.</p>
