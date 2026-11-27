@@ -350,6 +350,32 @@ def claim_for_item(db: Session, product_id: int, source: str, item_id: int) -> O
         return None  # a reservation problem must never stop a product from being made
 
 
+def reserved_numbers(db: Session, source: str, item_ids: list) -> dict:
+    """{catalog part id: 'EI-0000123'} for the parts in item_ids whose number is reserved and has no product yet.
+    source = 'autodist' / 'rmatv' (supplier_items ids) or 'manual' (manual_catalog_items ids, any hand catalog).
+    Read only; any problem (for example the table not made yet) gives {} so a catalog page never breaks over it."""
+    ids = [int(i) for i in item_ids if i]
+    if not ids:
+        return {}
+    try:
+        if source == "manual":
+            r = db.execute(
+                text("select manual_item_id as item, min(number) as number from sku_reservations "
+                     "where manual_item_id = any(cast(:i as bigint[])) and product_id is null group by 1"),
+                {"i": ids},
+            ).all()
+        else:
+            r = db.execute(
+                text("select supplier_item_id as item, min(number) as number from sku_reservations "
+                     "where source = :s and supplier_item_id = any(cast(:i as bigint[])) and product_id is null group by 1"),
+                {"s": source, "i": ids},
+            ).all()
+        return {x.item: fmt(x.number) for x in r}
+    except Exception:
+        db.rollback()
+        return {}
+
+
 # --------------------------------------------------------------------------
 # applying (background)
 # --------------------------------------------------------------------------

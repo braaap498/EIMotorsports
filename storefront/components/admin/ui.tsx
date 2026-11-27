@@ -44,11 +44,12 @@ export function Notice({
   return <p className={`rounded border px-3 py-2 text-sm ${color}`}>{children}</p>;
 }
 
-export function Badge({ children, tone = "gray" }: { children: ReactNode; tone?: "gray" | "green" | "amber" | "blue" }) {
+export function Badge({ children, tone = "gray" }: { children: ReactNode; tone?: "gray" | "green" | "amber" | "blue" | "yellow" }) {
   const color = {
     gray: "bg-gray-100 text-gray-700",
     green: "bg-green-100 text-green-800",
     amber: "bg-amber-100 text-amber-800",
+    yellow: "bg-yellow-100 text-yellow-800",
     blue: "bg-blue-100 text-blue-800",
   }[tone];
   return <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${color}`}>{children}</span>;

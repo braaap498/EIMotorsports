@@ -1683,6 +1683,12 @@ def items(
         r["ours"] = list(mine.values())
         r.pop("upc_norm", None)
         r.pop("mfr_number_norm", None)
+    # A part with none of our products yet may still have its EI- number reserved (shown in yellow).
+    from app.sku_reserve import reserved_numbers  # late import, like the other modules here
+
+    held = reserved_numbers(db, "autodist", [r["id"] for r in rows if not r["ours"]])
+    for r in rows:
+        r["reserved_sku"] = held.get(r["id"]) if not r["ours"] else None
     return {"total": agg.total, "rows": rows, "summary": dict(agg._mapping)}
 
 

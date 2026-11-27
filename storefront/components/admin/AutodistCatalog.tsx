@@ -39,7 +39,7 @@ type Row = {
   unit_of_measure: string | null; list_price: string | null; dealer_cost: string | null;
   qty_indiana: number; qty_nevada: number; qty_total: number;
   upc: string | null; images: string[] | null; active: boolean; updated_at: string | null; last_seen_at: string | null;
-  margin: string | null; margin_pct: string | number | null; ours: Mine[];
+  margin: string | null; margin_pct: string | number | null; ours: Mine[]; reserved_sku?: string | null;
 };
 type Summary = {
   total: number; in_stock: number; brands: number; min_cost: string | null; max_cost: string | null;
@@ -700,6 +700,10 @@ export default function AutodistCatalog({ hasData, search }: { hasData: boolean;
                           </Link>
                         ) : r.ours.length > 1 ? (
                           <Badge tone="green">{`${r.ours.length} products`}</Badge>
+                        ) : r.reserved_sku ? (
+                          <span title="This number is reserved for the product that is made from this part">
+                            <Badge tone="yellow">{r.reserved_sku}</Badge>
+                          </span>
                         ) : (
                           ""
                         )}

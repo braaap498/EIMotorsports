@@ -40,6 +40,7 @@ type Row = {
   product_id: number | null; // the SINGLE product of this part (never a kit that contains it)
   product_title: string | null;
   product_sku: string | null; // the EI- number
+  reserved_sku?: string | null; // the EI- number held for this part while it has no product yet
   products: number;
 };
 type Summary = {
@@ -735,6 +736,12 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                             {r.products > 1 && <span className="ml-1 text-gray-500">+{r.products - 1}</span>}
                           </Link>
                         ) : (
+                          <>
+                          {r.reserved_sku && (
+                            <span className="mr-1" title="This number is reserved for the product that is made from this part">
+                              <Badge tone="yellow">{r.reserved_sku}</Badge>
+                            </span>
+                          )}
                           <button
                             type="button"
                             className="rounded border border-gray-300 px-1.5 py-0 text-xs hover:bg-gray-50 disabled:opacity-50"
@@ -744,6 +751,7 @@ export default function RmatvCatalog({ hasData, version }: { hasData: boolean; v
                           >
                             Make product
                           </button>
+                          </>
                         )}
                       </td>
                       <td className="py-1 pr-3 whitespace-nowrap text-gray-500">{r.updated_at ? new Date(r.updated_at).toLocaleDateString() : "—"}</td>

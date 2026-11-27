@@ -28,6 +28,7 @@ type Part = {
   product_id: number | null;
   product_title: string | null;
   product_sku: string | null; // the EI- number
+  reserved_sku?: string | null; // the EI- number held for this part while it has no product yet
   products: number;
 };
 type Flash = { kind: "success" | "error" | "info"; text: string } | null;
@@ -522,6 +523,10 @@ export default function ManualParts({ dist }: { dist: Dist }) {
                           </Link>
                           {p.products > 1 && <span className="ml-2"><Badge tone="gray">+{p.products - 1} more</Badge></span>}
                         </>
+                      ) : p.reserved_sku ? (
+                        <span title="This number is reserved for the product that is made from this part">
+                          <Badge tone="yellow">{p.reserved_sku}</Badge>
+                        </span>
                       ) : (
                         <span className="text-gray-400">—</span>
                       )}

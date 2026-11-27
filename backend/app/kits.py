@@ -356,11 +356,15 @@ def manual_catalog(
         db.rollback()
         return {"items": [], "total": 0}
     photos = product_main_photos(db, ids)
+    from app.sku_reserve import reserved_numbers  # a part with no product yet can still have its EI- number reserved
+
+    held = reserved_numbers(db, "manual", [r.id for r in rows if not r.product_id])
     return {
         "total": int(total or 0),
         "items": [
             {
                 "id": r.id,
+                "reserved_sku": held.get(r.id) if not r.product_id else None,
                 "sku": r.part_number,  # the column is called SKU, as in the Automatic Distributors catalog
                 "part_number": r.part_number,
                 "mfr_number": r.mfr_number,

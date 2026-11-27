@@ -771,6 +771,11 @@ def items(
         titles = {t.id: (t.title, t.sku_display) for t in db.execute(text("select id, title, sku_display from products where id = any(cast(:i as bigint[]))"), {"i": ids}).all()}
     for d in rows:
         d["product_title"], d["product_sku"] = titles.get(d["product_id"]) or (None, None)
+    from app.sku_reserve import reserved_numbers  # a part with no product yet can still have its EI- number reserved
+
+    held = reserved_numbers(db, "rmatv", [d["id"] for d in rows if not d["product_id"]])
+    for d in rows:
+        d["reserved_sku"] = held.get(d["id"]) if not d["product_id"] else None
     return {"total": agg.total, "rows": rows, "summary": {k: (float(v) if isinstance(v, Decimal) else v) for k, v in agg._mapping.items()}}
 
 
