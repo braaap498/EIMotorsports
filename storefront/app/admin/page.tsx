@@ -73,7 +73,7 @@ export default function AdminDashboard() {
           </Link>
         ))}
       </div>
-      <div className="flex gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         {can("products.create") && (
           <Link href="/admin/products/new" className="rounded bg-black px-4 py-2 text-sm font-semibold text-white">
             Add product
@@ -84,8 +84,8 @@ export default function AdminDashboard() {
             Manage models &amp; years
           </Link>
         )}
+        {isAdmin && <PhotoBackup />}
       </div>
-      {isAdmin && <PhotoBackup />}
     </div>
   );
 }

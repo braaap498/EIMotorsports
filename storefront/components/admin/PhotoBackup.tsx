@@ -240,7 +240,6 @@ export default function PhotoBackup() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [error, setError] = useState("");
   const [canPickFolder, setCanPickFolder] = useState(true); // checked in the browser after load
-  const [bySkuOnly, setBySkuOnly] = useState(false);
   const stop = useRef(false);
 
   useEffect(() => {
@@ -260,10 +259,10 @@ export default function PhotoBackup() {
     try {
       setProgress("Getting the photo list…");
       const list = await api<ListResult>("/storage-backup/list");
-      const { index, note } = await loadIndex(bySkuOnly);
-      if (bySkuOnly && index.bySku.size === 0) throw new Error(note || "None of the by_sku photos matched the photo list, so there is nothing to copy.");
-      // In by_sku-only mode just the full photos that belong to a SKU are fetched; full and thumb are not saved.
-      const paths = bySkuOnly ? list.paths.filter((p) => index.bySku.has(p)) : list.paths;
+      const { index, note } = await loadIndex(true);
+      if (index.bySku.size === 0) throw new Error(note || "None of the by_sku photos matched the photo list, so there is nothing to copy.");
+      // Only the full photos that belong to a SKU are fetched, and each is saved under its SKU folder.
+      const paths = list.paths.filter((p) => index.bySku.has(p));
 
       const dirs = new Map<string, Promise<DirHandle>>();
       const dirFor = (parts: string[]): Promise<DirHandle> => {
@@ -310,27 +309,16 @@ export default function PhotoBackup() {
       let done = 0;
 
       async function one(path: string) {
-        if (bySkuOnly) {
-          const missing: string[] = [];
-          for (const t of index.bySku.get(path) ?? []) if (!(await existing(t))) missing.push(t);
-          if (missing.length === 0) {
-            s.skipped++;
-            return;
-          }
-          const blob = await fetchPhoto(list.base_url, path); // fetched once, written to every SKU folder that needs it
-          for (const t of missing) await writeAt(t, blob);
-          s.copied++;
-          s.bySku += missing.length;
+        const missing: string[] = [];
+        for (const t of index.bySku.get(path) ?? []) if (!(await existing(t))) missing.push(t);
+        if (missing.length === 0) {
+          s.skipped++;
           return;
         }
-        let blob: Blob | null = await existing(path);
-        const already = !!blob;
-        if (!blob) {
-          blob = await fetchPhoto(list.base_url, path);
-          await writeAt(path, blob);
-        }
-        if (already) s.skipped++;
-        else s.copied++;
+        const blob = await fetchPhoto(list.base_url, path); // fetched once, written to every SKU folder that needs it
+        for (const t of missing) await writeAt(t, blob);
+        s.copied++;
+        s.bySku += missing.length;
       }
 
       async function worker() {
@@ -371,10 +359,10 @@ export default function PhotoBackup() {
     try {
       setProgress("Getting the photo list…");
       const list = await api<ListResult>("/storage-backup/list");
-      const { index, note } = await loadIndex(bySkuOnly);
-      if (bySkuOnly && index.bySku.size === 0) throw new Error(note || "None of the by_sku photos matched the photo list, so there is nothing to copy.");
-      // In by_sku-only mode just the full photos that belong to a SKU are fetched; full and thumb are not saved.
-      const paths = bySkuOnly ? list.paths.filter((p) => index.bySku.has(p)) : list.paths;
+      const { index, note } = await loadIndex(true);
+      if (index.bySku.size === 0) throw new Error(note || "None of the by_sku photos matched the photo list, so there is nothing to copy.");
+      // Only the full photos that belong to a SKU are fetched, and each is saved under its SKU folder.
+      const paths = list.paths.filter((p) => index.bySku.has(p));
       const d = new Date();
       const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
@@ -422,7 +410,6 @@ export default function PhotoBackup() {
             }
             const data = new Uint8Array(await blob.arrayBuffer());
             // Adding to the ZIP and saving a full one happen together, with no waiting between.
-            if (!bySkuOnly) addEntry(path, data);
             s.copied++;
             for (const t of index.bySku.get(path) ?? []) {
               addEntry(t, data);
@@ -459,49 +446,38 @@ export default function PhotoBackup() {
     else await backupToZip();
   }
 
+  // Sits in a row of buttons; progress and results drop onto their own line below.
   return (
-    <div className="space-y-2 rounded-lg border border-gray-200 bg-white p-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <button type="button" onClick={() => void start()} disabled={busy} className="rounded bg-black px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">
-          {busy ? "Backing up…" : canPickFolder ? "Back up photos to a folder" : "Download photos as ZIP"}
+    <>
+      <button
+        type="button"
+        onClick={() => void start()}
+        disabled={busy}
+        className="rounded border border-gray-300 bg-white px-4 py-2 text-sm font-medium disabled:opacity-50"
+      >
+        {busy ? "Backing up…" : canPickFolder ? "Back up photos to a folder" : "Download photos as ZIP"}
+      </button>
+      {busy && (
+        <button type="button" onClick={() => (stop.current = true)} className="rounded border border-gray-300 bg-white px-3 py-2 text-sm">
+          Stop
         </button>
-        {busy && (
-          <button type="button" onClick={() => (stop.current = true)} className="rounded border border-gray-300 bg-white px-3 py-2 text-sm">
-            Stop
-          </button>
-        )}
-        <label className="flex items-center gap-2 text-sm text-gray-700">
-          <input type="checkbox" checked={bySkuOnly} onChange={(e) => setBySkuOnly(e.target.checked)} disabled={busy} />
-          Only make by_sku folders (skip full and thumb)
-        </label>
-      </div>
-      {canPickFolder ? (
-        <p className="text-xs text-gray-500">
-          Pick a folder (make a new one in the picker if you need to). Photos already in it are skipped, so running it again only adds what is missing. It writes
-          product_photos.csv and ebay_label_import.csv (rewritten each run) and either the full and thumb photos, or, if the box is ticked, only a by_sku folder
-          with each photo under its SKU (a photo used by several SKUs is saved once per SKU). Windows will not let a browser pick the Downloads folder itself, so choose or create a folder inside
-          it, such as photo_backup.
-        </p>
-      ) : (
-        <p className="text-xs text-gray-500">
-          This browser cannot write to a folder, so the photos download as one or more ZIP files (photo_backup_date_part1.zip, and so on), with the two CSV files in
-          part 1. It downloads every photo each time. If the box is ticked, the ZIPs hold only the by_sku folders. Unzip them all into the same backup folder, choosing merge if asked, with no extra folder level, and Chrome or
-          Edge will treat those photos as already backed up.
-        </p>
       )}
-      {progress && <p className="text-sm text-gray-700">{progress}</p>}
-      {error && <Notice kind="error">{error}</Notice>}
-      {summary && (
-        <Notice kind={summary.failed || summary.indexNote ? "error" : "success"}>
-          {summary.stopped ? "Stopped. " : "Done. "}
-          {summary.zipParts !== undefined
-            ? `${summary.total} photo files in the store: ${summary.copied} saved into ${summary.zipParts} ZIP file${summary.zipParts === 1 ? "" : "s"}`
-            : `${summary.total} photo files in the store: ${summary.copied} copied, ${summary.skipped} already in the folder`}
-          {summary.bySku ? `, plus ${summary.bySku} by_sku copies` : ""}
-          {summary.failed ? `, ${summary.failed} failed (${summary.firstErrors.join("; ")}). Run it again to retry those.` : "."}
-          {summary.indexNote ? ` ${summary.indexNote}` : ""}
-        </Notice>
+      {(progress || error || summary) && (
+        <div className="basis-full space-y-2">
+          {progress && <p className="text-sm text-gray-700">{progress}</p>}
+          {error && <Notice kind="error">{error}</Notice>}
+          {summary && (
+            <Notice kind={summary.failed || summary.indexNote ? "error" : "success"}>
+              {summary.stopped ? "Stopped. " : "Done. "}
+              {summary.zipParts !== undefined
+                ? `${summary.bySku} photos saved into ${summary.zipParts} ZIP file${summary.zipParts === 1 ? "" : "s"}`
+                : `${summary.bySku} photos added to by_sku${summary.skipped ? `, ${summary.skipped} already complete` : ""}`}
+              {summary.failed ? `, ${summary.failed} failed (${summary.firstErrors.join("; ")}). Run it again to retry those.` : "."}
+              {summary.indexNote ? ` ${summary.indexNote}` : ""}
+            </Notice>
+          )}
+        </div>
       )}
-    </div>
+    </>
   );
 }
