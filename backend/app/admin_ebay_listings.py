@@ -38,6 +38,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.availability import dropship_qty_sql as _dropship_qty_sql
@@ -629,6 +630,100 @@ def repo_set_status(body: RepoStatusIn, db: Session = Depends(get_db)):
     db.commit()
     _counts_cache.clear()
     return {"store": who["store"], "status": body.status, "changed": res.rowcount, "asked": len(ids)}
+
+
+class ListingDeleteIn(BaseModel):
+    listing_ids: list[int]
+    include_active: bool = False  # also delete listings our records still show as active (they stay live on eBay)
+    confirm: Optional[int] = None  # delete only: the number of listings the preview said would be deleted
+
+
+def _listing_delete_check(db: Session, listing_ids: list[int], include_active: bool) -> dict:
+    """What deleting these listing records would do. Changes nothing, and never calls eBay."""
+    ids = sorted({i for i in listing_ids if isinstance(i, int)})
+    if not ids:
+        raise HTTPException(400, "Pick at least one listing.")
+    if len(ids) > 200:
+        raise HTTPException(400, "Pick 200 listings or fewer at a time.")
+    rows = db.execute(
+        text(
+            f"""
+            select cl.id as listing_id, cl.store, cl.status, {_DIGITS} as item_id, p.id as product_id, p.sku_display as sku,
+                   {_L_TITLE} as title,
+                   (select count(*) from channel_listings x where x.product_id = cl.product_id and x.id <> cl.id) as other_listings
+            from channel_listings cl {_LISTING_JOINS}
+            where cl.id = any(cast(:ids as bigint[]))
+            order by cl.id
+            """
+        ),
+        {"ids": ids},
+    ).all()
+    seen: set[int] = set()
+    deletable, skipped = [], []
+    for r in rows:
+        if r.listing_id in seen:  # a title table with two rows for one item must not repeat a listing
+            continue
+        seen.add(r.listing_id)
+        active = (r.status or "").strip().lower() == "active"
+        item = {
+            "listing_id": r.listing_id, "store": r.store, "item_id": r.item_id, "title": r.title, "status": (r.status or "").strip() or None,
+            "active": active, "product_id": r.product_id, "sku": r.sku, "other_listings": int(r.other_listings or 0),
+        }
+        (skipped if (active and not include_active) else deletable).append(item)
+    return {"requested": len(ids), "missing": [i for i in ids if i not in seen], "deletable": deletable, "skipped_active": skipped}
+
+
+@router.post("/repo/delete/preview")
+def repo_delete_preview(body: ListingDeleteIn, db: Session = Depends(get_db)):
+    """Step 1 of deleting listing records: say what would be deleted. Changes nothing."""
+    return _listing_delete_check(db, body.listing_ids, body.include_active)
+
+
+@router.post("/repo/delete")
+def repo_delete(body: ListingDeleteIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Step 2: delete the listing RECORDS the preview listed (the channel_listings row, plus that item's unsent edits and its
+    saved eBay copy). NOTHING is sent to eBay: a listing that is live on eBay stays live there. Listings our records show as
+    active are skipped unless include_active is true. The caller sends back the count it was shown (confirm), so a selection
+    that changed in the meantime is refused. All or nothing."""
+    check = _listing_delete_check(db, body.listing_ids, body.include_active)
+    todo = check["deletable"]
+    if not todo:
+        raise HTTPException(409, "None of the ticked listings can be deleted (active ones are skipped unless you allow them). Nothing was changed.")
+    if body.confirm != len(todo):
+        db.rollback()
+        raise HTTPException(409, f"{len(todo)} listings can be deleted now, not {body.confirm}. Nothing was changed. Preview again.")
+    ids = [t["listing_id"] for t in todo]
+    try:
+        for t in todo:
+            for sql in (
+                "delete from ebay_listing_drafts where lower(store) = lower(:s) and cast(item_id as text) = :i",
+                "delete from ebay_listings where cast(ebay_item_id as text) = :i",
+            ):
+                try:
+                    with db.begin_nested():
+                        db.execute(text(sql), {"s": t["store"], "i": t["item_id"]})
+                except DBAPIError as e:
+                    if getattr(getattr(e, "orig", None), "pgcode", None) not in ("42P01", "42703"):  # no such table / column here
+                        raise
+        gone = db.execute(text("delete from channel_listings where id = any(cast(:ids as bigint[])) returning id"), {"ids": ids}).all()
+        pids = sorted({t["product_id"] for t in todo if t["product_id"]})
+        bare = db.execute(
+            text("select p.id, p.sku_display as sku from products p where p.id = any(cast(:p as bigint[])) "
+                 "and not exists (select 1 from channel_listings x where x.product_id = p.id) order by p.id"),
+            {"p": pids},
+        ).all() if pids else []
+        db.commit()
+    except DBAPIError as e:
+        db.rollback()
+        first = str(getattr(e, "orig", e)).strip().splitlines()
+        raise HTTPException(409, f"The database still has records that point at one of these listings, so nothing was deleted. ({(first[0] if first else 'database error')[:200]})")
+    _counts_cache.clear()
+    log.warning("eBay listing records deleted by %s (nothing sent to eBay): %s", user.email,
+                [(t["listing_id"], t["store"], t["item_id"], t["title"]) for t in todo])
+    return {
+        "deleted": len(gone), "skipped_active": len(check["skipped_active"]),
+        "products_without_listings": [{"id": b.id, "sku": b.sku} for b in bare],
+    }
 
 
 class RelinkIn(BaseModel):

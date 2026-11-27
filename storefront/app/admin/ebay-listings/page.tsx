@@ -50,6 +50,8 @@ type RepoItem = {
   is_product_source: boolean;
   url: string;
 };
+type DelItem = { listing_id: number; store: string; item_id: string; title: string | null; status: string | null; active: boolean; product_id: number | null; sku: string | null; other_listings: number };
+type ListingDeletePreview = { requested: number; missing: number[]; deletable: DelItem[]; skipped_active: DelItem[] };
 type RepoResp = {
   store: string;
   seller: string;
@@ -125,6 +127,13 @@ export default function EbayLiveListingsPage() {
   const [allMatch, setAllMatch] = useState<RepoItem[] | null>(null); // every listing matching the current search, loaded by "select all matching"
   const [loadingAll, setLoadingAll] = useState(false);
   const [actMsg, setActMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  // delete the ticked listing RECORDS (our database only; nothing is sent to eBay): preview first, then a typed confirmation
+  const [delOpen, setDelOpen] = useState(false);
+  const [delBusy, setDelBusy] = useState(false);
+  const [delErr, setDelErr] = useState("");
+  const [delPv, setDelPv] = useState<ListingDeletePreview | null>(null);
+  const [delTyped, setDelTyped] = useState("");
+  const [delActive, setDelActive] = useState(false);
   const [relink, setRelink] = useState<RepoItem | null>(null); // the listing whose product is being changed
   const [relinkTo, setRelinkTo] = useState<PickRow | null>(null); // the product chosen, waiting for the confirm
   const [relinkBusy, setRelinkBusy] = useState(false);
@@ -470,6 +479,52 @@ export default function EbayLiveListingsPage() {
     setActMsg({ kind: failed.length ? "error" : "success", text });
     setBusy("");
     await loadRepo(repo.offset);
+  }
+
+  async function loadDeletePreview(includeActive: boolean) {
+    setDelBusy(true);
+    setDelErr("");
+    try {
+      setDelPv(await api<ListingDeletePreview>("/ebay-listings/repo/delete/preview", {
+        method: "POST", body: { listing_ids: [...picked], include_active: includeActive },
+      }));
+    } catch (e) {
+      setDelErr(errMsg(e));
+    } finally {
+      setDelBusy(false);
+    }
+  }
+
+  function openDelete() {
+    if (picked.size === 0) return;
+    setDelOpen(true);
+    setDelPv(null);
+    setDelTyped("");
+    setDelActive(false);
+    void loadDeletePreview(false);
+  }
+
+  async function confirmDelete() {
+    if (!repo || !delPv || delPv.deletable.length === 0 || delTyped.trim().toUpperCase() !== "DELETE") return;
+    setDelBusy(true);
+    setDelErr("");
+    try {
+      const r = await api<{ deleted: number; skipped_active: number; products_without_listings: { id: number; sku: string | null }[] }>(
+        "/ebay-listings/repo/delete",
+        { method: "POST", body: { listing_ids: [...picked], include_active: delActive, confirm: delPv.deletable.length } },
+      );
+      const bare = r.products_without_listings;
+      setActMsg({
+        kind: "success",
+        text: `Deleted ${r.deleted} listing record${r.deleted === 1 ? "" : "s"} from the website. Nothing was changed on eBay.${r.skipped_active ? ` ${r.skipped_active} active listing${r.skipped_active === 1 ? " was" : "s were"} left alone.` : ""}${bare.length ? ` Now without any listing: ${bare.slice(0, 5).map((b) => b.sku || `#${b.id}`).join(", ")}${bare.length > 5 ? ` and ${bare.length - 5} more` : ""}. You can delete ${bare.length === 1 ? "that product" : "those products"} from the Products page.` : ""}`,
+      });
+      setDelOpen(false);
+      await loadRepo(repo.offset);
+    } catch (e) {
+      setDelErr(errMsg(e));
+    } finally {
+      setDelBusy(false);
+    }
   }
 
   // Set the ticked listings to quantity 0 ON EBAY. The listing stays alive (hidden from search while eBay's out-of-stock setting
@@ -1232,10 +1287,82 @@ export default function EbayLiveListingsPage() {
                   End listing on eBay ({nActivePicked})
                 </button>
               )}
+              <button type="button" className={`${btn2Cls} text-red-700`} disabled={busy === "status"} onClick={() => openDelete()} title="Deletes the website's record of the listing. Nothing is sent to eBay: a listing that is live there stays live. A preview and a typed confirmation come first.">
+                Delete ({pickedItems.length})
+              </button>
               <button type="button" className="text-xs underline" onClick={() => { setPicked(new Set()); setAllMatch(null); setGroupDone(""); setPriceOpen(false); }}>
                 Clear
               </button>
               <span className="text-xs text-gray-500">Sends to eBay one at a time (needs live pushes ON for each store involved).</span>
+            </div>
+          )}
+          {delOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+              <div className="flex max-h-[90vh] w-full max-w-2xl flex-col space-y-3 overflow-hidden rounded-lg bg-white p-4 shadow-xl">
+                <h2 className="text-lg font-semibold text-red-700">Delete listing records</h2>
+                <Notice kind="error">This removes the listing from this website&apos;s database only. It does NOT end or delete anything on eBay.</Notice>
+                {!delPv && delBusy && <p className="text-sm text-gray-600">Checking what would be deleted&hellip;</p>}
+                {delPv && (
+                  <div className="min-h-0 flex-1 space-y-3 overflow-y-auto text-sm">
+                    {delPv.deletable.length > 0 ? (
+                      <div>
+                        <p className="font-medium">These {delPv.deletable.length} listing record{delPv.deletable.length === 1 ? "" : "s"} will be deleted:</p>
+                        <ul className="mt-1 max-h-48 space-y-0.5 overflow-y-auto rounded border border-gray-200 bg-gray-50 p-2">
+                          {delPv.deletable.map((d) => (
+                            <li key={d.listing_id}>
+                              <span className="font-mono text-xs text-gray-500">{d.item_id}</span> {d.title || "(no title)"}
+                              <span className="text-xs text-gray-500"> · {d.store} · {d.status || "no status"}{d.sku ? ` · product ${d.sku}` : ""}</span>
+                              {d.active && <span className="text-xs font-medium text-red-700"> · STILL ACTIVE: stays live on eBay</span>}
+                            </li>
+                          ))}
+                        </ul>
+                        <p className="mt-1 text-xs text-gray-600">
+                          Also removed: each listing&apos;s unsent edits and its saved eBay copy. The product, its photos and its stock are kept
+                          (delete the product afterwards from the Products page if you want it gone). This cannot be undone.
+                        </p>
+                      </div>
+                    ) : (
+                      <Notice kind="error">None of the ticked listings will be deleted.</Notice>
+                    )}
+                    {delPv.skipped_active.length > 0 && (
+                      <div className="space-y-1">
+                        <p className="font-medium text-amber-800">{delPv.skipped_active.length} still marked active, so they are being left alone:</p>
+                        <ul className="max-h-32 space-y-0.5 overflow-y-auto rounded border border-amber-200 bg-amber-50 p-2">
+                          {delPv.skipped_active.map((d) => (
+                            <li key={d.listing_id}>
+                              <span className="font-mono text-xs text-gray-500">{d.item_id}</span> {d.title || "(no title)"}
+                              <span className="text-xs text-amber-800"> · {d.store}</span>
+                            </li>
+                          ))}
+                        </ul>
+                        <p className="text-xs text-gray-600">Best: use End listing on eBay first, then delete the record.</p>
+                        <label className="flex items-start gap-2 text-xs">
+                          <input type="checkbox" className="mt-0.5" checked={delActive} disabled={delBusy}
+                            onChange={(e) => { setDelActive(e.target.checked); setDelTyped(""); void loadDeletePreview(e.target.checked); }} />
+                          <span>Delete these records anyway. The listings stay live on eBay, and a later eBay sync or import may add them back.</span>
+                        </label>
+                      </div>
+                    )}
+                    {delPv.missing.length > 0 && <p className="text-xs text-gray-500">{delPv.missing.length} ticked listing(s) no longer exist.</p>}
+                    {delPv.deletable.length > 0 && (
+                      <label className="block text-sm font-medium text-gray-700">
+                        <span className="mb-1 block">Type DELETE to confirm</span>
+                        <input className={`${inputCls} w-48`} value={delTyped} autoFocus placeholder="DELETE" onChange={(e) => setDelTyped(e.target.value)} disabled={delBusy} />
+                      </label>
+                    )}
+                  </div>
+                )}
+                {delErr && <Notice kind="error">{delErr}</Notice>}
+                <div className="flex justify-end gap-2">
+                  <button type="button" className="rounded border border-gray-300 px-3 py-2 text-sm" disabled={delBusy} onClick={() => setDelOpen(false)}>Cancel</button>
+                  {delPv && delPv.deletable.length > 0 && (
+                    <button type="button" className="rounded bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-50"
+                      disabled={delBusy || delTyped.trim().toUpperCase() !== "DELETE"} onClick={() => void confirmDelete()}>
+                      {delBusy ? "Working…" : `Delete ${delPv.deletable.length} record${delPv.deletable.length === 1 ? "" : "s"}`}
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           )}
           {picked.size > 0 && priceOpen && (
