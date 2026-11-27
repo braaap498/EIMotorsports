@@ -571,6 +571,18 @@ def _run(run_id: int, scope: str, update_snapshots: bool, lo: Optional[int] = No
             done += len(part)
             _beat(db, run_id, "moving", done, total, "final numbers")
         msg = "done"
+        # A SKU-shaped value (EI-0000123) is not an eBay item number. If one was left in ebay_item_id it is the product's old SKU,
+        # and it would keep the product turning up when someone searches for that number. Clear it on the products just renumbered.
+        try:
+            for i in range(0, len(ids), CHUNK):
+                db.execute(
+                    text("update products set ebay_item_id = null where id = any(cast(:ids as bigint[])) and ebay_item_id ~* '^EI-[0-9]+$'"),
+                    {"ids": ids[i:i + CHUNK]},
+                )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            msg = f"done; old SKUs left in ebay_item_id were not cleared ({str(e)[:120]})"
         if update_snapshots:
             try:
                 db.execute(text("update ebay_listings e set sku = p.sku from products p where e.product_id = p.id and e.sku is not null and e.sku <> p.sku"))
