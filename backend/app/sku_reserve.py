@@ -530,7 +530,7 @@ def _run(run_id: int, scope: str, update_snapshots: bool, lo: Optional[int] = No
         for i in range(0, len(rows), 2000):
             db.execute(
                 text("insert into sku_reservations (number, source, supplier_item_id, manual_item_id, block_index, product_id, claimed_at) "
-                     "values (:number, :source, :supplier_item_id, :manual_item_id, :block_index, :product_id, case when :product_id is null then null else now() end)"),
+                     "values (:number, :source, :supplier_item_id, :manual_item_id, :block_index, :product_id, case when cast(:product_id as bigint) is null then null else now() end)"),
                 rows[i:i + 2000],
             )
         db.commit()
