@@ -11,6 +11,13 @@ import { MODE_OPTIONS, STATUS_LABEL, type FitmentMode, type FitmentStatus } from
 import { saveNav } from "../../../lib/listNav";
 import { loadSaved, saveSaved } from "../../../lib/savedState";
 
+type DeletePreview = {
+  requested: number;
+  missing: number[];
+  deletable: { id: number; sku: string; title: string; label: string | null; published: boolean; photos: number; fitment: number; kit_parts: number; supplier_links: number }[];
+  blocked: { id: number; sku: string; title: string; reasons: Record<string, number> }[];
+};
+
 type Row = {
   id: number;
   sku: string;
@@ -111,7 +118,7 @@ function FitmentCell({ p }: { p: Row }) {
 }
 
 export default function ProductsPage() {
-  const { can } = useAccess();
+  const { can, isAdmin } = useAccess();
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
   const [exact, setExact] = useState(false); // search text must equal a whole title / item number / label / SKU / part #
@@ -143,6 +150,12 @@ export default function ProductsPage() {
   const [lblBusy, setLblBusy] = useState(false);
   const [lblErr, setLblErr] = useState("");
   const [bulkMsg, setBulkMsg] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  // delete the ticked products: preview first, then a typed confirmation
+  const [delOpen, setDelOpen] = useState(false);
+  const [delBusy, setDelBusy] = useState(false);
+  const [delErr, setDelErr] = useState("");
+  const [delPv, setDelPv] = useState<DeletePreview | null>(null);
+  const [delTyped, setDelTyped] = useState("");
 
   const mayChangeFitment = can("fitment.add");
   const orderedCats = useMemo(() => orderCategories(cats), [cats]);
@@ -296,6 +309,42 @@ export default function ProductsPage() {
       setLblErr(errMsg(e));
     } finally {
       setLblBusy(false);
+    }
+  }
+
+  async function openDelete() {
+    if (sel.size === 0) return;
+    setDelOpen(true);
+    setDelPv(null);
+    setDelTyped("");
+    setDelErr("");
+    setDelBusy(true);
+    try {
+      setDelPv(await api<DeletePreview>("/products/bulk-delete/preview", { method: "POST", body: { ids: [...sel] } }));
+    } catch (e) {
+      setDelErr(errMsg(e));
+    } finally {
+      setDelBusy(false);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!delPv || delPv.deletable.length === 0 || delTyped.trim().toUpperCase() !== "DELETE") return;
+    setDelBusy(true);
+    setDelErr("");
+    try {
+      const r = await api<{ deleted: number; skipped: number }>("/products/bulk-delete", {
+        method: "POST",
+        body: { ids: [...sel], confirm: delPv.deletable.length },
+      });
+      setBulkMsg({ kind: "success", text: `Deleted ${r.deleted} product${r.deleted === 1 ? "" : "s"}${r.skipped ? `; ${r.skipped} could not be deleted and were left alone` : ""}.` });
+      setDelOpen(false);
+      setSel(new Set());
+      load();
+    } catch (e) {
+      setDelErr(errMsg(e));
+    } finally {
+      setDelBusy(false);
     }
   }
 
@@ -463,7 +512,7 @@ export default function ProductsPage() {
       {mayChangeFitment && data.total > 0 && !bulkOpen && (
         <div>
           <button type="button" className="text-sm text-blue-700 underline" onClick={() => setBulkOpen(true)}>
-            Bulk change how products match vehicles&hellip;
+            Bulk change or delete products&hellip;
           </button>
         </div>
       )}
@@ -491,6 +540,11 @@ export default function ProductsPage() {
             <button type="button" className={btnCls} disabled={bulkBusy || sel.size === 0} title="Temporary: give the ticked products a custom label (the popup shows how many are ticked)" onClick={() => { setLblErr(""); setLblOpen(true); }}>
               Set custom label&hellip;
             </button>
+            {isAdmin && (
+              <button type="button" className="rounded border border-red-300 bg-white px-3 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50" disabled={bulkBusy || sel.size === 0} title="Shows what would be deleted first; nothing is deleted until you confirm" onClick={() => void openDelete()}>
+                Delete {sel.size} ticked&hellip;
+              </button>
+            )}
             {sel.size > 0 && (
               <button type="button" className="text-xs text-blue-700 underline" onClick={() => setSel(new Set())}>
                 Clear ticks
@@ -501,6 +555,75 @@ export default function ProductsPage() {
             {MODE_OPTIONS.find((o) => o.value === bulkMode)?.help} To mark everything in a category at once, pick the category above, then use &ldquo;Apply to all&rdquo;. Nothing changes until you confirm.
           </p>
           {bulkMsg && <Notice kind={bulkMsg.kind}>{bulkMsg.text}</Notice>}
+        </div>
+      )}
+
+      {delOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true">
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col space-y-3 overflow-hidden rounded-lg bg-white p-4 shadow-xl">
+            <h2 className="text-lg font-semibold text-red-700">Delete products</h2>
+            {!delPv && delBusy && <p className="text-sm text-gray-600">Checking what would be deleted&hellip;</p>}
+            {delPv && (
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto text-sm">
+                {delPv.deletable.length > 0 ? (
+                  <div>
+                    <p className="font-medium">These {delPv.deletable.length} product{delPv.deletable.length === 1 ? "" : "s"} will be permanently deleted:</p>
+                    <ul className="mt-1 max-h-48 space-y-0.5 overflow-y-auto rounded border border-gray-200 bg-gray-50 p-2">
+                      {delPv.deletable.map((d) => (
+                        <li key={d.id}>
+                          <span className="font-mono text-xs text-gray-500">#{d.id} {d.sku}</span> {d.title}
+                          <span className="text-xs text-gray-500">
+                            {d.label ? ` · label ${d.label}` : ""}{d.published ? " · published" : ""}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-1 text-xs text-gray-600">
+                      Deleted with them: {delPv.deletable.reduce((a, d) => a + d.photos, 0)} photo record(s), {delPv.deletable.reduce((a, d) => a + d.fitment, 0)} fitment row(s),
+                      {" "}{delPv.deletable.reduce((a, d) => a + d.kit_parts, 0)} distributor/kit part row(s) and {delPv.deletable.reduce((a, d) => a + d.supplier_links, 0)} catalog link(s)
+                      (a catalog part can then be made into a product again). This cannot be undone.
+                    </p>
+                  </div>
+                ) : (
+                  <Notice kind="error">None of the ticked products can be deleted.</Notice>
+                )}
+                {delPv.blocked.length > 0 && (
+                  <div>
+                    <p className="font-medium text-amber-800">{delPv.blocked.length} will NOT be deleted (they have history or are still live):</p>
+                    <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto rounded border border-amber-200 bg-amber-50 p-2">
+                      {delPv.blocked.map((b) => (
+                        <li key={b.id}>
+                          <span className="font-mono text-xs text-gray-500">#{b.id} {b.sku}</span> {b.title}
+                          <span className="text-xs text-amber-800"> · {Object.entries(b.reasons).map(([k, v]) => `${v} ${k}`).join(", ")}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-1 text-xs text-gray-600">For these, unpublish or deactivate the product instead.</p>
+                  </div>
+                )}
+                {delPv.missing.length > 0 && <p className="text-xs text-gray-500">{delPv.missing.length} ticked product(s) no longer exist.</p>}
+                {delPv.deletable.length > 0 && (
+                  <Field label="Type DELETE to confirm">
+                    <input className={`${inputCls} w-48`} value={delTyped} autoFocus placeholder="DELETE" onChange={(e) => setDelTyped(e.target.value)} disabled={delBusy} />
+                  </Field>
+                )}
+              </div>
+            )}
+            {delErr && <Notice kind="error">{delErr}</Notice>}
+            <div className="flex justify-end gap-2">
+              <button type="button" className="rounded border border-gray-300 px-3 py-2 text-sm" disabled={delBusy} onClick={() => setDelOpen(false)}>Cancel</button>
+              {delPv && delPv.deletable.length > 0 && (
+                <button
+                  type="button"
+                  className="rounded bg-red-700 px-3 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-50"
+                  disabled={delBusy || delTyped.trim().toUpperCase() !== "DELETE"}
+                  onClick={() => void confirmDelete()}
+                >
+                  {delBusy ? "Deleting…" : `Delete ${delPv.deletable.length} product${delPv.deletable.length === 1 ? "" : "s"}`}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

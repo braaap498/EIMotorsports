@@ -18,20 +18,21 @@ Notes on how the data is shaped:
     it is refreshed after every change here; if it is a plain view nothing is
     needed.
 """
+import logging
 import re
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
-from app.auth import AuthUser, current_user, has_perm, needs, require_route_access
+from app.auth import AuthUser, current_user, has_perm, needs, require_admin, require_route_access
 from app.database import get_db
 from app.images import thumb_url
 from app.permissions import FIELD_PERMS, label_for
-from app.kits import KitPartIn, mpn_locked, parts_mpn, replace_parts
+from app.kits import KitPartIn, catalog_photos_for_product, mpn_locked, parts_mpn, replace_parts, start_photo_downloads
 from app.part_types import canonical_part_type
 from app.skus import PLACEHOLDER_SKU, SKU_PREFIX, clean_ebay_item_id, shelf_code_for
 from app.sanitize import clean_description
@@ -40,6 +41,7 @@ from app.sanitize import clean_description
 # "/admin" and the staff check. require_route_access then makes each route
 # admin-only unless it is marked with @needs(...).
 router = APIRouter(tags=["admin"], dependencies=[Depends(require_route_access)])
+log = logging.getLogger(__name__)
 
 # Who may read the vehicle / category lists (the product and fitment screens need them).
 READ_LISTS = ("products.view", "fitment.view")
@@ -1175,6 +1177,119 @@ def set_fitment_mode(body: FitmentModeIn, db: Session = Depends(get_db)):
     return {"updated": n, "mode": body.mode}
 
 
+# --------------------------------------------------------------------------
+# delete products (admin only; always previewed first)
+# --------------------------------------------------------------------------
+# A product is NOT deleted while anything below still points at it: this is history (orders, sales, stock movements, purchase
+# orders) or something live (a marketplace listing, stock on hand). Those products are listed in the preview with the reason
+# and skipped. Unpublish or deactivate them instead. Each query returns (product_id, n).
+_DELETE_BLOCKERS: list[tuple[str, str]] = [
+    ("customer orders", "select product_id, count(*) as n from order_items where product_id = any(:ids) group by product_id"),
+    ("sales", "select product_id, count(*) as n from sales_transactions where product_id = any(:ids) group by product_id"),
+    ("stock movements", "select product_id, count(*) as n from inventory_transactions where product_id = any(:ids) group by product_id"),
+    ("purchase order lines", "select product_id, count(*) as n from purchase_order_lines where product_id = any(:ids) group by product_id"),
+    ("purchase order lines", "select product_id, count(*) as n from po_lines where product_id = any(:ids) group by product_id"),
+    ("marketplace listings", "select product_id, count(*) as n from channel_listings where product_id = any(:ids) group by product_id"),
+    ("linked eBay listings", "select product_id, count(*) as n from ebay_listings where product_id = any(:ids) group by product_id"),
+    ("eBay order lines", "select product_id, count(*) as n from ebay_order_lines where product_id = any(:ids) group by product_id"),
+    ("stock reservations", "select product_id, count(*) as n from stock_reservations where product_id = any(:ids) group by product_id"),
+    ("warehouse stock on hand", "select product_id, sum(quantity) as n from warehouse_stock where product_id = any(:ids) and quantity > 0 group by product_id"),
+]
+# Descriptive rows that go with the product. Deleted explicitly (a table this database does not have is skipped).
+_DELETE_WITH_PRODUCT = [
+    "product_fitment", "product_photos", "product_item_specifics", "product_kit_parts", "product_barcodes",
+    "supplier_product_links", "fitment_proposals", "inventory_label_checks", "warehouse_stock",
+]
+
+
+def _missing_table(e: DBAPIError) -> bool:
+    return getattr(getattr(e, "orig", None), "pgcode", None) == "42P01"  # undefined_table
+
+
+def _delete_check(db: Session, ids: list[int]) -> dict:
+    """What a delete of these products would do. Changes nothing."""
+    ids = sorted(set(ids))
+    prods = db.execute(
+        text(
+            "select p.id, p.sku_display, p.title, p.custom_label_sku, p.is_published, coalesce(p.quantity_on_hand, 0) as qoh, "
+            "  (select count(*) from product_photos x where x.product_id = p.id) as photos, "
+            "  (select count(*) from product_fitment x where x.product_id = p.id) as fitment, "
+            "  (select count(*) from product_kit_parts x where x.product_id = p.id) as kit_parts, "
+            "  (select count(*) from supplier_product_links x where x.product_id = p.id) as supplier_links "
+            "from products p where p.id = any(:ids) order by p.id"
+        ),
+        {"ids": ids},
+    ).all()
+    reasons: dict[int, dict[str, int]] = {p.id: {} for p in prods}
+    for p in prods:
+        if p.qoh and p.qoh > 0:
+            reasons[p.id]["stock on hand"] = int(p.qoh)
+    for label, sql in _DELETE_BLOCKERS:
+        try:
+            with db.begin_nested():
+                rows = db.execute(text(sql), {"ids": ids}).all()
+        except DBAPIError as e:
+            if _missing_table(e):
+                continue  # this database has no such table, so nothing can point from it
+            raise HTTPException(500, f"Could not check {label} before deleting, so nothing was deleted.")
+        for r in rows:
+            if r.product_id in reasons and r.n:
+                reasons[r.product_id][label] = reasons[r.product_id].get(label, 0) + int(r.n)
+    deletable, blocked = [], []
+    for p in prods:
+        row = {"id": p.id, "sku": p.sku_display, "title": p.title, "label": p.custom_label_sku, "published": bool(p.is_published)}
+        if reasons[p.id]:
+            blocked.append({**row, "reasons": reasons[p.id]})
+        else:
+            deletable.append({**row, "photos": int(p.photos), "fitment": int(p.fitment), "kit_parts": int(p.kit_parts),
+                              "supplier_links": int(p.supplier_links)})
+    found = {p.id for p in prods}
+    return {"requested": len(ids), "missing": [i for i in ids if i not in found], "deletable": deletable, "blocked": blocked}
+
+
+class BulkDeleteIn(BaseModel):
+    ids: list[int] = Field(..., min_length=1, max_length=200)  # ticked products only; there is no "delete the whole list"
+    confirm: Optional[int] = None  # delete only: the number of products the preview said would be deleted
+
+
+@router.post("/products/bulk-delete/preview")
+def bulk_delete_preview(body: BulkDeleteIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Step 1: say what would be deleted and what cannot be. Changes nothing."""
+    return _delete_check(db, body.ids)
+
+
+@router.post("/products/bulk-delete")
+def bulk_delete(body: BulkDeleteIn, db: Session = Depends(get_db), user: AuthUser = Depends(require_admin)):
+    """Step 2: delete the products the preview listed as deletable. The caller must send back the count it was shown (confirm),
+    so a selection that changed in the meantime is refused. Products with history or live listings are skipped, never deleted.
+    All or nothing: one database error undoes the whole delete."""
+    check = _delete_check(db, body.ids)
+    todo = [d["id"] for d in check["deletable"]]
+    if not todo:
+        raise HTTPException(409, "None of the ticked products can be deleted. Nothing was changed.")
+    if body.confirm != len(todo):
+        conflict(db, f"{len(todo)} products can be deleted now, not {body.confirm}. Nothing was changed. Preview again.")
+    try:
+        for table in _DELETE_WITH_PRODUCT:
+            try:
+                with db.begin_nested():
+                    db.execute(text(f"delete from {table} where product_id = any(:ids)"), {"ids": todo})
+            except DBAPIError as e:
+                if getattr(getattr(e, "orig", None), "pgcode", None) not in ("42P01", "42703"):  # no such table / column here
+                    raise
+        gone = db.execute(text("delete from products where id = any(:ids) returning id"), {"ids": todo}).all()
+        finish(db, refresh=True)
+    except (IntegrityError, DBAPIError) as e:
+        db.rollback()
+        detail = str(getattr(e, "orig", e)).strip().splitlines()[0][:200] if str(getattr(e, "orig", e)).strip() else "database error"
+        raise HTTPException(409, f"The database still has records that point at one of these products, so nothing was deleted. ({detail})")
+    log.warning(
+        "products deleted by %s: %s", user.email,
+        [(d["id"], d["sku"], d["label"], d["title"]) for d in check["deletable"]],
+    )
+    return {"deleted": len(gone), "skipped": len(check["blocked"]), "blocked": check["blocked"]}
+
+
 @router.get("/products/{product_id}")
 @needs(*READ_LISTS)
 def get_product(product_id: int, db: Session = Depends(get_db), user: AuthUser = Depends(current_user)):
@@ -1254,7 +1369,10 @@ def create_product(body: ProductCreate, db: Session = Depends(get_db), user: Aut
         if not has_perm(user, "products.edit_details") and not has_perm(user, "products.create"):
             conflict(db, "You don't have permission to set kit parts.")
         cls = replace_parts(db, new_id, kit_parts, label_by)["cls"]  # builds and stores the custom label
+    photos = catalog_photos_for_product(db, new_id) if kit_parts else {}  # one catalog part: its photos become the product's
     finish(db, refresh=True)
+    if photos:
+        start_photo_downloads(photos)
     return {"id": new_id, "slug": fields["slug"], "custom_label_sku": cls}
 
 
