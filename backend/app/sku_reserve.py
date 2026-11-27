@@ -503,6 +503,16 @@ def _move_counter(db: Session, upto: int) -> str:
     d = db.execute(text("select column_default from information_schema.columns where table_name = 'products' and column_name = 'sku' limit 1")).scalar() or ""
     m = re.search(r"nextval\('([^']+)'", d)
     if not m:
+        # the default may call a function (next_product_sku()) that itself calls nextval('public.some_seq'): look inside it
+        f = re.search(r"([A-Za-z_][A-Za-z0-9_.]*)\(\)", d)
+        if f:
+            try:
+                body = db.execute(text("select pg_get_functiondef(cast(:f as regprocedure))"), {"f": f.group(1) + "()"}).scalar() or ""
+                m = re.search(r"nextval\('([^']+)'", body)
+            except Exception:
+                db.rollback()
+                m = None
+    if not m:
         return f"products.sku default is not a plain sequence ({d[:80] or 'none'}): the counter was NOT moved. Move it by hand past EI-{upto:07d}."
     seq = m.group(1)
     cur = db.execute(text("select last_value from " + re.sub(r"[^A-Za-z0-9_.\"]", "", seq))).scalar() or 0
