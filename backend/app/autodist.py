@@ -4013,6 +4013,50 @@ def _part_rows(db: Session, raw: str):
     return rows
 
 
+# Which existing single-item products made `have_single` true for a catalog part, and why. Uses the same four rules as
+# _NEW_PRODUCT_CTE (UPC, part number, custom label = the Automatic SKU, custom label = the part number). Unlike the batch
+# it also reports unpublished and inactive products, so the screen can link to one that the product list hides by default.
+_SINGLE_MATCH_SQL = f"""
+select id, title, sku_display, is_published, is_active, matched_on from (
+  select p.id, p.title, p.sku_display, coalesce(p.is_published, false) as is_published, coalesce(p.is_active, true) as is_active,
+         case
+           when cast(:upc as text) is not null and nullif(ltrim(regexp_replace(coalesce(p.barcode, ''), '[^0-9]', '', 'g'), '0'), '') = cast(:upc as text)
+             then 'UPC'
+           when cast(:mpn as text) is not null
+                and nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') = cast(:mpn as text)
+             then 'part number'
+           when nullif(btrim(p.custom_label_sku), '') is not null and upper(btrim(p.custom_label_sku)) = upper(cast(:sku as text))
+             then 'custom label'
+           when cast(:mpn as text) is not null and length(btrim(coalesce(p.custom_label_sku, ''))) >= 4
+                and upper(regexp_replace(coalesce(p.custom_label_sku, ''), '[^A-Za-z0-9]', '', 'g')) = cast(:mpn as text)
+             then 'custom label'
+         end as matched_on
+  from products p
+  where nullif(btrim(p.custom_label_sku), '') is null
+     or array_length(regexp_split_to_array(btrim(p.custom_label_sku), 'xx', 'i'), 1) <= 1
+) m
+where matched_on is not null
+order by id
+limit 5
+"""
+
+
+def _existing_singles(db: Session, r) -> list:
+    try:
+        rows = db.execute(
+            text(_SINGLE_MATCH_SQL),
+            {"upc": r.upc_norm or None, "mpn": r.mfr_number_norm or None, "sku": r.sku},
+        ).all()
+    except Exception:
+        db.rollback()
+        return []
+    return [
+        {"id": x.id, "title": x.title, "sku": x.sku_display, "is_published": bool(x.is_published),
+         "is_active": bool(x.is_active), "matched_on": x.matched_on}
+        for x in rows
+    ]
+
+
 @router.get("/api/website-products/lookup")
 def api_website_products_lookup(sku: str, db: Session = Depends(get_db)):
     out = []
@@ -4031,6 +4075,7 @@ def api_website_products_lookup(sku: str, db: Session = Depends(get_db)):
             "photos": len([u for u in (r.images or []) if str(u or "").strip()]),
             "product_id": prod.id if prod else None, "product_title": prod.title if prod else None,
             "have_single": bool(r.have_single and not prod),
+            "existing": _existing_singles(db, r) if (r.have_single and not prod) else [],
         })
     return {"items": out}
 
@@ -4057,7 +4102,9 @@ def api_website_products_create_one(body: MakeOneIn, db: Session = Depends(get_d
     if prod:
         raise HTTPException(409, f"{r.sku} already has a website product: #{prod.id} {prod.title}")
     if r.have_single and not body.force:
-        raise HTTPException(409, "A single-item product with the same UPC or part number already exists. Make it anyway to create a second one.")
+        found = _existing_singles(db, r)
+        where = f" (#{found[0]['id']} {found[0]['title']})" if found else ""
+        raise HTTPException(409, f"A single-item product with the same UPC or part number already exists{where}. Make it anyway to create a second one.")
     try:
         try:
             cats = _load_categories(db)

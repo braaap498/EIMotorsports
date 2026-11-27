@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { api, errMsg } from "../../lib/adminApi";
 import { Notice, btnCls, inputCls } from "./ui";
 
@@ -28,10 +29,11 @@ type Preview = {
   photos: PhotoState;
 };
 type WrongLabel = { id: number; sku: string; title: string; label: string; automatic_sku: string; mfr_number: string | null; has_listings: boolean; has_part: boolean };
+type ExistingProduct = { id: number; title: string; sku: string | null; is_published: boolean; is_active: boolean; matched_on: string };
 type OnePart = {
   sku: string; manufacturer: string | null; mfr_number: string | null; name: string | null; title: string;
   price: number | null; cost: number | null; qty: number; active: boolean; photos: number;
-  product_id: number | null; product_title: string | null; have_single: boolean;
+  product_id: number | null; product_title: string | null; have_single: boolean; existing?: ExistingProduct[];
 };
 const money = (x: number | null) => (x == null ? "no price" : `$${x.toFixed(2)}`);
 const n = (x: number | null | undefined) => (x ?? 0).toLocaleString("en-US");
@@ -304,7 +306,21 @@ export default function AutodistProducts() {
               <div className="text-xs text-amber-700">Already a website product: #{p.product_id} {p.product_title}</div>
             ) : (
               <div className="flex flex-wrap items-center gap-2">
-                {p.have_single && <span className="text-xs text-amber-700">A single-item product with this UPC or part number already exists.</span>}
+                {p.have_single && (
+                  <div className="w-full space-y-0.5 text-xs text-amber-700">
+                    <div>A single-item product with this UPC or part number already exists{p.existing?.length ? ":" : "."}</div>
+                    {p.existing?.map((e) => (
+                      <div key={e.id}>
+                        <Link href={`/admin/products/${e.id}`} target="_blank" rel="noreferrer" className="font-medium underline">
+                          #{e.id} {e.title}
+                        </Link>
+                        {" · "}{!e.is_active ? "inactive" : e.is_published ? "published" : "not published"}
+                        {" · matched on "}{e.matched_on}
+                        {e.matched_on === "custom label" && " (the catalog's \"Ours\" column does not check labels)"}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <button type="button" className={btnCls} disabled={oneBusy || running} onClick={() => void makeOne(p, p.have_single)}>
                   {p.have_single ? "Make it anyway" : "Make website product"}
                 </button>
