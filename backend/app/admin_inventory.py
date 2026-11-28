@@ -78,7 +78,7 @@ from app.images import thumb_url
 from app import amazon_sales
 from app.ebay_sales import _ensure_tracking_cols, lower_hold_marks, queue_stock_push, take_stock_for_reference
 from app.skus import PLACEHOLDER_SKU, shelf_code_for
-from app.stock import available_sql, lock_products, reserved_paid_sql, set_aside_sql
+from app.stock import available_sql, lock_products, reserved_paid_sql, set_aside_sql, take_kit_components
 
 # No prefix for "/admin": main.py mounts this inside admin_router. require_route_access makes
 # every route admin-only unless it carries a @needs(...) marker.
@@ -1840,6 +1840,7 @@ def _take_stock_for_pick(db: Session, order, merged: dict[int, dict], user: Auth
                 {"p": pid, "d": after - before, "ref": f"Picked for order {order.order_number}", "by": user.email},
             )
             lower_hold_marks(db, pid)  # a listing held at 0 must still rise when stock is received later
+        take_kit_components(db, pid, take, order.order_number, user.email)  # a kit's parts come off the single-part products
         if res.quantity - take > 0:
             db.execute(
                 text("update stock_reservations set quantity = quantity - :t where id = :id"),

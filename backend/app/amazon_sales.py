@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 from app.amazon_core import MARKETPLACES, _row, sp_get
 from app.auth import AuthUser, needs, require_admin, require_route_access
 from app.database import _session_factory, get_db
-from app.stock import lock_products
+from app.stock import lock_products, take_kit_components
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/amazon-sales", tags=["admin-amazon-sales"], dependencies=[Depends(require_admin)])
@@ -549,6 +549,7 @@ def pick_line(line_id: int, db: Session = Depends(get_db), user: AuthUser = Depe
             text("insert into inventory_transactions (product_id, transaction_type, quantity_change, reference, legacy_created_by) values (:p, 'Adjustment', :d, :r, :by)"),
             {"p": ln.product_id, "d": after - before, "r": f"Picked for Amazon order {ln.amazon_order_id}", "by": user.email},
         )
+    take_kit_components(db, ln.product_id, take, ln.amazon_order_id, user.email)  # a kit's parts come off the single-part products
     db.execute(text("delete from stock_reservations where id = :i"), {"i": res.id})
     db.execute(text("update amazon_order_lines set state = 'picked' where id = :l"), {"l": line_id})
     order_activity.log_action(db, user, "picked", "Amazon", ln.amazon_order_id, f"{take} unit(s) (marked picked without scanning)")
@@ -713,6 +714,7 @@ def take_stock_for_reference(db: Session, reference: str, merged: dict, email: s
                     text("insert into inventory_transactions (product_id, transaction_type, quantity_change, reference, legacy_created_by) values (:p, 'Adjustment', :d, :r, :by)"),
                     {"p": pid, "d": after - before, "r": f"Picked for Amazon order {ln.amazon_order_id}", "by": email},
                 )
+            take_kit_components(db, pid, take, ln.amazon_order_id, email)  # a kit's parts come off the single-part products
             if int(res.quantity) - take > 0:
                 db.execute(text("update stock_reservations set quantity = quantity - :t where id = :i"), {"t": take, "i": res.id})
             else:

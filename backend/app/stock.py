@@ -14,9 +14,13 @@ THE THREE NUMBERS
 Every change to a product's reservations happens while that product's row is locked
 (select ... for update, always in id order), so two checkouts can never both take the last unit.
 """
+import logging
+
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+log = logging.getLogger(__name__)
 
 # Stripe refuses a checkout session that lasts under 30 minutes, so the hold is a little longer.
 CHECKOUT_MINUTES = 32
@@ -105,6 +109,109 @@ def lock_products(db: Session, ids) -> dict:
         {"ids": ids},
     ).all()
     return {r.id: r for r in rows}
+
+
+def allocate_pieces(need: int, cands: list) -> list:
+    """Pure helper. cands = [(product id, pieces per unit, units on hand, units free)] best first; returns [(product id, units to take)].
+    Takes as many whole units as needed (rounded up when a unit holds several pieces), never more than a product has on hand."""
+    out, left = [], int(need)
+    for pid, per, onhand, _free in cands:
+        if left <= 0:
+            break
+        take = min(-(-left // max(int(per), 1)), max(int(onhand), 0))
+        if take > 0:
+            out.append((pid, take))
+            left -= take * max(int(per), 1)
+    return out
+
+
+def take_kit_components(db: Session, kit_id: int, units: int, ref: str, by: str) -> list:
+    """A kit was picked: its parts leave the shelf. A kit has no stock of its own (kit_shelf_sql works its count out from the single-part
+    products that ARE each of its distributor parts), so the parts it used come off THOSE products: for every part line, units x its quantity
+    in pieces, taken from the matching single-part products (most free stock first), each logged in the inventory history. Then the eBay
+    and Amazon quantities of those products, and of every other product that uses the same parts, are queued so they show what is left.
+    Does nothing for a product that is not a kit. Never raises: a problem here is logged and must not undo the pick. Does not commit.
+    Returns the ids of the products that gave up stock."""
+    touched: list = []
+    try:
+        if int(units) <= 0:
+            return touched
+        with db.begin_nested():
+            lines = db.execute(
+                text("select id, greatest(coalesce(quantity, 1), 1) as qty from product_kit_parts where product_id = :k order by sort_order, id"),
+                {"k": kit_id},
+            ).all()
+            if len(lines) < 2:
+                return touched
+            kit_sku = db.execute(text("select sku_display from products where id = :k"), {"k": kit_id}).scalar() or f"#{kit_id}"
+            related: set = set()
+            for ln in lines:
+                found = db.execute(
+                    text(
+                        "select distinct k2.product_id as id, greatest(coalesce(k2.quantity, 1), 1) as per, "
+                        "(select count(*) from product_kit_parts k3 where k3.product_id = k2.product_id) as n "
+                        "from product_kit_parts k join product_kit_parts k2 on " + same_part_sql("k", "k2") + " "
+                        "where k.id = :kl and k2.product_id <> :kit"
+                    ),
+                    {"kl": ln.id, "kit": kit_id},
+                ).all()
+                related.update(r.id for r in found)
+                singles = {r.id: int(r.per) for r in found if int(r.n) == 1}  # the products that ARE this part
+                if not singles:
+                    continue
+                locked = lock_products(db, singles)  # row locks in id order; quantities read AFTER the lock
+                aside = {
+                    r.id: int(r.aside)
+                    for r in db.execute(
+                        text(f"select p.id, {set_aside_sql('p')} as aside from products p where p.id = any(cast(:i as bigint[]))"),
+                        {"i": sorted(singles)},
+                    ).all()
+                }
+                cands = sorted(
+                    ((pid, singles[pid], int(locked[pid].quantity_on_hand or 0), int(locked[pid].quantity_on_hand or 0) - aside.get(pid, 0)) for pid in singles if pid in locked),
+                    key=lambda c: (-c[3], c[0]),
+                )
+                for pid, take in allocate_pieces(int(ln.qty) * int(units), cands):
+                    before = int(locked[pid].quantity_on_hand or 0)
+                    after = db.execute(
+                        text("update products set quantity_on_hand = greatest(0, coalesce(quantity_on_hand, 0) - :t), updated_at = now() where id = :id returning quantity_on_hand"),
+                        {"t": take, "id": pid},
+                    ).scalar()
+                    if after != before:
+                        db.execute(
+                            text(
+                                "insert into inventory_transactions (product_id, transaction_type, quantity_change, reference, legacy_created_by) "
+                                "values (:p, 'Adjustment', :d, :ref, :by)"
+                            ),
+                            {"p": pid, "d": after - before, "ref": f"Used in kit {kit_sku}, picked for order {ref}", "by": by},
+                        )
+                        try:
+                            from app.ebay_sales import lower_hold_marks  # late import: ebay_sales imports this module
+
+                            lower_hold_marks(db, pid)
+                        except Exception:
+                            pass
+                        touched.append(pid)
+            related.update(touched)
+        if touched:
+            try:
+                from app.ebay_sales import queue_stock_push
+
+                queue_stock_push(db, sorted(related))  # their listings must show what is left
+            except Exception:
+                log.exception("could not queue eBay quantity updates after a kit was picked")
+            try:
+                from app.amazon_listings import enqueue_product as amazon_enqueue
+
+                for pid in sorted(related):
+                    with db.begin_nested():
+                        amazon_enqueue(db, pid)
+            except Exception:
+                log.exception("could not queue Amazon quantity updates after a kit was picked")
+    except Exception:
+        log.exception("could not take a picked kit's parts off the shelf (kit %s)", kit_id)
+        return []
+    return touched
 
 
 def place_holds(db: Session, order_id: int, wanted: dict[int, int]) -> None:

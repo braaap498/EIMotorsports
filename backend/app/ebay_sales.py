@@ -55,7 +55,7 @@ from app.auth import AuthUser, current_user, needs, require_admin, require_route
 from app import order_activity
 from app.database import _session_factory, get_db
 from app.ebay_edit import NS, _ensure_zero_table, _failed, _first_message, _read_item, _trading
-from app.stock import available_sql, lock_products
+from app.stock import available_sql, lock_products, take_kit_components
 
 log = logging.getLogger(__name__)
 
@@ -1213,6 +1213,7 @@ def _take_line(db: Session, line, pid: int, take: int, email: str, ref: str) -> 
                 text("update sales_transactions set inventory_transaction_id = coalesce(inventory_transaction_id, :t) where id = :s"),
                 {"t": tid, "s": line.sales_transaction_id},
             )
+    take_kit_components(db, pid, take, ref, email)  # a kit has no stock of its own: its parts come off the single-part products
     if res.quantity - take > 0:
         db.execute(text("update stock_reservations set quantity = quantity - :t where id = :id"), {"t": take, "id": res.id})
     else:
