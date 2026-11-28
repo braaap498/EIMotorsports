@@ -502,7 +502,18 @@ def api_zero(
         where.append(f"({listing_cond} or p.is_published = true)")
     if q and q.strip():
         for i, w in enumerate(q.split()[:5]):
-            where.append(f"(p.title ilike :w{i} or p.sku_display ilike :w{i} or p.custom_label_sku ilike :w{i} or p.manufacturer_part_number ilike :w{i})")
+            # The product's own label, and also the label eBay shows on any of its listings (merged products can have
+            # several different ones): the label last sent, the saved eBay report / lookup copies, and the listing records.
+            listing_label = (
+                "exists (select 1 from channel_listings c3 where c3.product_id = p.id and ("
+                f"c3.cls_pushed ilike :w{i} "
+                "or exists (select 1 from ebay_report_rows r3 where r3.item_id = regexp_replace(cast(c3.external_id as text), '[^0-9]', '', 'g') "
+                f"and r3.custom_label_sku ilike :w{i}) "
+                "or exists (select 1 from ebay_api_details a3 where a3.item_id = regexp_replace(cast(c3.external_id as text), '[^0-9]', '', 'g') "
+                f"and a3.custom_label_sku ilike :w{i}))) "
+                f"or exists (select 1 from ebay_listings e3 where e3.product_id = p.id and e3.custom_label_sku ilike :w{i})"
+            )
+            where.append(f"(p.title ilike :w{i} or p.sku_display ilike :w{i} or p.custom_label_sku ilike :w{i} or p.manufacturer_part_number ilike :w{i} or {listing_label})")
             params[f"w{i}"] = f"%{w}%"
     cond = " and ".join(where)
     total = int(db.execute(text(f"select count(*) from products p where {cond}"), params).scalar() or 0)
@@ -679,7 +690,10 @@ def api_products(
     """Products that have an active eBay listing, with those listings underneath, for the Drop ship page.
     show: all | on (some listing ticked) | off (none ticked) | zero (nothing can be sold now)."""
     params: dict = {}
-    where = [f"exists (select 1 from channel_listings cl where cl.product_id = p.id and {_ACTIVE_LISTING})"]
+    searching = bool(q and q.strip())
+    # Without a search: products with an active listing. With a search: any product with an eBay listing, so a product whose
+    # listings have all ended can still be found (they show as ended, with no Drop ship tick).
+    where = [f"exists (select 1 from channel_listings cl where cl.product_id = p.id{'' if searching else f' and {_ACTIVE_LISTING}'})"]
     ticked = f"(coalesce(p.dropship_ok, false) or exists (select 1 from channel_listings c2 where c2.product_id = p.id and c2.dropship_ok and {_ACTIVE_LISTING.replace('cl.', 'c2.')}))"
     if show == "on":
         where.append(ticked)
@@ -689,7 +703,22 @@ def api_products(
         where.append(f"{effective_sql('p', ignore_switch=True)} <= 0")
     if q and q.strip():
         for i, w in enumerate(q.split()[:5]):
-            where.append(f"(p.title ilike :w{i} or p.sku_display ilike :w{i} or p.custom_label_sku ilike :w{i} or p.manufacturer_part_number ilike :w{i})")
+            # The product's own label, and also the label eBay shows on any of its listings (merged products can have
+            # several different ones): the label last sent, the saved eBay report / lookup copies, and the listing records.
+            listing_label = (
+                "exists (select 1 from channel_listings c3 where c3.product_id = p.id and ("
+                f"c3.cls_pushed ilike :w{i} "
+                "or exists (select 1 from ebay_report_rows r3 where r3.item_id = regexp_replace(cast(c3.external_id as text), '[^0-9]', '', 'g') "
+                f"and r3.custom_label_sku ilike :w{i}) "
+                "or exists (select 1 from ebay_api_details a3 where a3.item_id = regexp_replace(cast(c3.external_id as text), '[^0-9]', '', 'g') "
+                f"and a3.custom_label_sku ilike :w{i}))) "
+                f"or exists (select 1 from ebay_listings e3 where e3.product_id = p.id and e3.custom_label_sku ilike :w{i})"
+            )
+            item_number = (
+                "exists (select 1 from channel_listings c4 where c4.product_id = p.id "
+                f"and regexp_replace(cast(c4.external_id as text), '[^0-9]', '', 'g') ilike :w{i})"
+            )
+            where.append(f"(p.title ilike :w{i} or p.sku_display ilike :w{i} or p.custom_label_sku ilike :w{i} or p.manufacturer_part_number ilike :w{i} or {listing_label} or {item_number})")
             params[f"w{i}"] = f"%{w}%"
     cond = " and ".join(where)
     total = int(db.execute(text(f"select count(*) from products p where {cond}"), params).scalar() or 0)
@@ -708,27 +737,29 @@ def api_products(
         for l in db.execute(
             text(
                 "select cl.id, cl.product_id, cl.store, regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item_id, "
-                f"coalesce(cl.dropship_ok, false) as dropship_ok, coalesce(cl.pieces_per_sale, 1) as pieces_per_sale "
-                f"from channel_listings cl where cl.product_id in :ids and {_ACTIVE_LISTING} "
-                "order by cl.store, cl.id"
+                f"coalesce(cl.dropship_ok, false) as dropship_ok, coalesce(cl.pieces_per_sale, 1) as pieces_per_sale, "
+                f"cl.status, ({_ACTIVE_LISTING}) as is_active "
+                f"from channel_listings cl where cl.product_id in :ids{'' if searching else f' and {_ACTIVE_LISTING}'} "
+                f"order by (not ({_ACTIVE_LISTING})), cl.store, cl.id"
             ).bindparams(bindparam("ids", expanding=True)),
             {"ids": ids},
         ).all():
             listings.setdefault(l.product_id, []).append(
                 {"listing_id": l.id, "store": l.store, "item_id": l.item_id, "dropship_ok": bool(l.dropship_ok),
-                 "pieces_per_sale": pieces_of(l.pieces_per_sale)}
+                 "pieces_per_sale": pieces_of(l.pieces_per_sale), "status": (l.status or "").lower() or "unknown",
+                 "active": bool(l.is_active)}
             )
     items = []
     for r in rows:
         ls = listings.get(r.id, [])
-        for x in ls:   # what the listing shows on eBay: units (drop ship adds the distributor's) / pieces per sale, rounded down
+        for x in (y for y in ls if y["active"]):   # what the listing shows on eBay: units (drop ship adds the distributor's) / pieces per sale, rounded down
             x["listing_qty"] = packs(int(r.own) + (int(r.distributor) if (r.dropship_ok or x["dropship_ok"]) else 0), x["pieces_per_sale"])
         items.append(
             {
                 "product_id": r.id, "sku": r.sku, "title": r.title, "custom_label": r.custom_label_sku,
                 "on_hand": int(r.on_hand), "own_available": int(r.own), "distributor": int(r.distributor),
                 "piece_count": int(r.parts), "dropship_ok": bool(r.dropship_ok), "has_prev": bool(r.has_prev), "has_distributor": bool(r.linked),
-                "ticked": sum(1 for x in ls if x["dropship_ok"]), "listings": ls,
+                "ticked": sum(1 for x in ls if x["dropship_ok"] and x["active"]), "listings": ls,
             }
         )
     return {"total": total, "page": page, "per_page": per_page, "items": items, "settings": _settings(db)}
