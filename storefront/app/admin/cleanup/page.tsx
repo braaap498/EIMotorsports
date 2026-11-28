@@ -904,6 +904,7 @@ export default function PartsCleanupPage() {
   const [searchedExact, setSearchedExact] = useState(false);
   const [unmergedMode, setUnmergedMode] = useState(false); // list came from the "Find unmerged" button
   const [commaMode, setCommaMode] = useState(false); // list came from the "Labels with a comma" button
+  const [missingMode, setMissingMode] = useState(false); // list came from the "Missing custom labels" button
   const [items, setItems] = useState<Item[]>([]);
   const [total, setTotal] = useState(0);
   const [searching, setSearching] = useState(false);
@@ -954,6 +955,7 @@ export default function PartsCleanupPage() {
       setSearchedExact(false);
       setUnmergedMode(true);
       setCommaMode(false);
+      setMissingMode(false);
       setListMode("title");
       setNotFound([]);
       setSelected(new Set());
@@ -976,6 +978,7 @@ export default function PartsCleanupPage() {
       setSearchedExact(exact);
       setUnmergedMode(false);
       setCommaMode(false);
+      setMissingMode(false);
       setListMode("title");
       setNotFound([]);
       setSelected(new Set());
@@ -998,6 +1001,30 @@ export default function PartsCleanupPage() {
       setSearchedExact(false);
       setUnmergedMode(false);
       setCommaMode(true);
+      setMissingMode(false);
+      setListMode("title");
+      setNotFound([]);
+      setSelected(new Set());
+      setKeeper(null);
+    } catch (e) {
+      setSearchErr(errMsg(e));
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  const runFindMissing = useCallback(async () => {
+    setSearching(true);
+    setSearchErr("");
+    try {
+      const r = await api<SearchResp>("/cleanup/missing-labels");
+      setItems(r.items);
+      setTotal(r.total);
+      setSearchedQ("products with no custom label");
+      setSearchedExact(false);
+      setUnmergedMode(false);
+      setCommaMode(false);
+      setMissingMode(true);
       setListMode("title");
       setNotFound([]);
       setSelected(new Set());
@@ -1051,7 +1078,7 @@ export default function PartsCleanupPage() {
         setSearchErr(errMsg(e));
       }
     } else if (searchedQ) {
-      await (unmergedMode ? runFindUnmerged() : commaMode ? runFindCommas() : runSearch(searchedQ, searchedExact));
+      await (unmergedMode ? runFindUnmerged() : commaMode ? runFindCommas() : missingMode ? runFindMissing() : runSearch(searchedQ, searchedExact));
     }
   }
 
@@ -1068,6 +1095,7 @@ export default function PartsCleanupPage() {
     setTotal(0);
     setSearchedQ("");
     setCommaMode(false);
+    setMissingMode(false);
     setListMode("title");
     setNotFound([]);
     setSelected(new Set());
@@ -1247,6 +1275,15 @@ export default function PartsCleanupPage() {
               >
                 {searching ? "Searching…" : "Labels with a comma"}
               </button>
+              <button
+                type="button"
+                className={`${btnCls} w-48`}
+                disabled={searching}
+                title="Lists every product that has no custom label. No search words needed."
+                onClick={runFindMissing}
+              >
+                {searching ? "Searching…" : "Missing custom labels"}
+              </button>
             </form>
 
             <form
@@ -1281,8 +1318,9 @@ export default function PartsCleanupPage() {
             <>
               {listMode === "title" && total > items.length && (
                 <Notice>
-                  Showing the first {items.length} of {total} matches. Add more words to the search so every duplicate
-                  is in the list before you tick them.
+                  {missingMode
+                    ? `Showing the first ${items.length} of ${total} products with no custom label.`
+                    : `Showing the first ${items.length} of ${total} matches. Add more words to the search so every duplicate is in the list before you tick them.`}
                 </Notice>
               )}
               <div className="flex flex-wrap items-center gap-3 text-sm">

@@ -415,6 +415,31 @@ def comma_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get_db
     return {"total": len(rows), "shown": len(rows), "items": [dict(r._mapping) for r in rows]}
 
 
+@router.get("/missing-labels")
+def missing_labels(limit: int = Query(1500, le=3000), db: Session = Depends(get_db)):
+    """No search term. Lists products that have NO custom label (empty or only spaces). Read-only."""
+    where = "nullif(btrim(coalesce(p.custom_label_sku, '')), '') is null"
+    total = db.execute(text(f"select count(*) from products p where {where}")).scalar() or 0
+    rows = db.execute(
+        text(
+            f"""
+            select p.id, p.ebay_item_id, p.custom_label_sku, p.title, p.list_price, p.quantity_on_hand, p.is_published,
+                   (select count(*) from channel_listings cl where cl.product_id = p.id) as listing_count,
+                   (select count(*) from product_fitment pf where pf.product_id = p.id) as fitment_count,
+                   (select coalesce(sum(l.merged_count), 0) from part_merge_log l
+                     where l.survivor_product_id = p.id) as prior_merges,
+                   {_PN_SUBQUERY} as part_number
+            from products p
+            where {where}
+            order by p.title, p.id
+            limit :limit
+            """
+        ),
+        {"limit": limit},
+    ).all()
+    return {"total": int(total), "shown": len(rows), "items": [dict(r._mapping) for r in rows]}
+
+
 @router.get("/by-items")
 def by_items(
     ids: str = Query(..., min_length=1, description="comma / space separated eBay item numbers, e.g. EBAY-178554199250"),
