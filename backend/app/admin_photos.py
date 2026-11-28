@@ -161,6 +161,7 @@ def _tidy(db: Session, product_id: int, first_ids: list[int] | None = None) -> N
 # A product made from (or linked to) exactly ONE distributor catalog part shows that part's picture in the catalog. When the part
 # has no picture of its own and the product has one (uploaded, or taken from another product), the product's main photo is saved
 # onto the catalog part (supplier_items.images), so the catalog shows it too. A part that already has pictures is never changed,
+# (a part whose only picture is one we saved from a product follows the product's main photo when that changes)
 # and a product with several parts (a kit) is skipped, because its main photo is the kit's, not one part's.
 _MAIN_TO_CATALOG = """
 with parts as (
@@ -179,7 +180,10 @@ with parts as (
 )
 update supplier_items s set images = array[cast(:base as text) || '/full/' || m.image_key], images_synced_at = now()
 from single g join main m on m.pid = g.pid
-where s.id = g.sid and (s.images is null or cardinality(s.images) = 0)
+where s.id = g.sid
+  and (s.images is null or cardinality(s.images) = 0
+       or (cardinality(s.images) = 1 and s.images[1] like cast(:base as text) || '/full/%'))  -- empty, or only a picture saved from a product
+  and s.images is distinct from array[cast(:base as text) || '/full/' || m.image_key]
 """
 
 
