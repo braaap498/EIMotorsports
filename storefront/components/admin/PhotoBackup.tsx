@@ -31,7 +31,9 @@ type ManifestPhoto = {
   image_key: string; // like "89/8986f63da8b6....jpg" (the file is full/<image_key>)
   sku: string | null;
 };
-type Manifest = { photos: ManifestPhoto[]; ebay: { item_number: string | number; custom_label_sku: string | number }[] };
+// A photo from an eBay listing's own saved set (ebay_listings.photos), for the SKU that listing belongs to.
+type ListingPhoto = { sku: string; image_key: string; is_primary: boolean; sort_order: number; item: string };
+type Manifest = { photos: ManifestPhoto[]; ebay: { item_number: string | number; custom_label_sku: string | number }[]; listing_photos?: ListingPhoto[] };
 
 type Summary = {
   total: number;
@@ -195,25 +197,43 @@ function buildIndex(m: Manifest, withBySku: boolean): IndexFiles {
     },
   ];
 
-  // by_sku/<EI number>/<NN>_<first 8 of the photo's hash>.jpg, where NN is the photo's position (1, 2, 3...)
+  // by_sku/<EI number>/<NN>_<first 8 of the photo's hash>.jpg, where NN is the photo's position (1, 2, 3...).
+  // Every photo a SKU has goes in: its own photos, the photos saved on each of its eBay listings, and unlinked
+  // photos stored under its listings' item numbers. The same picture (same file) is saved once per SKU folder.
   const bySku = new Map<string, string[]>();
   if (withBySku) {
-    const seen = new Set<string>();
+    type Cand = { folder: string; key: string; primary: boolean; order: number; src: number };
+    const cands: Cand[] = [];
     for (const p of m.photos) {
       if (!p.image_key) continue;
       const sku = p.sku?.trim();
       const listing = p.storage_path.startsWith("full/") ? "" : p.storage_path.split("/")[0];
       const name = sku ? sku.replace(/\//g, "xx") : listing;
       if (!name) continue;
-      const file = p.image_key.split("/").pop() as string;
+      cands.push({ folder: name.replace(/[\\:*?"<>|]/g, "_"), key: p.image_key, primary: p.is_primary, order: p.sort_order, src: 0 });
+    }
+    for (const l of m.listing_photos ?? []) {
+      const sku = l.sku?.trim();
+      if (!sku || !l.image_key) continue;
+      cands.push({ folder: sku.replace(/\//g, "xx").replace(/[\\:*?"<>|]/g, "_"), key: l.image_key, primary: l.is_primary, order: l.sort_order, src: 1 });
+    }
+    // The product's own photos win over listing copies, then the main photo, then the saved order.
+    cands.sort((a, b) => a.src - b.src || Number(b.primary) - Number(a.primary) || a.order - b.order);
+    const seen = new Set<string>(); // folder + photo file: one copy per SKU folder
+    const taken = new Set<string>(); // target paths
+    for (const c of cands) {
+      const once = `${c.folder}\u0000${c.key}`;
+      if (seen.has(once)) continue;
+      seen.add(once);
+      const file = c.key.split("/").pop() as string;
       const dot = file.lastIndexOf(".");
       const hash = (dot > 0 ? file.slice(0, dot) : file).slice(0, 8);
       const ext = dot > 0 ? file.slice(dot + 1) : "jpg";
-      const folder = name.replace(/[\\:*?"<>|]/g, "_");
-      const target = `by_sku/${folder}/${pad(p.sort_order + 1)}_${hash}.${ext}`;
-      if (seen.has(target)) continue;
-      seen.add(target);
-      const src = `full/${p.image_key}`;
+      let n = c.order + 1;
+      let target = `by_sku/${c.folder}/${pad(n)}_${hash}.${ext}`;
+      while (taken.has(target)) target = `by_sku/${c.folder}/${pad(++n)}_${hash}.${ext}`;
+      taken.add(target);
+      const src = `full/${c.key}`;
       const list = bySku.get(src);
       if (list) list.push(target);
       else bySku.set(src, [target]);

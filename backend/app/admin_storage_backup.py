@@ -15,6 +15,7 @@ paths are the bucket paths of every photo the site refers to (product photos, ha
   full/<key>
   thumb/<key without extension>.webp
 """
+import json
 import logging
 import re
 
@@ -69,7 +70,12 @@ def manifest(db: Session = Depends(get_db)):
         text(
             "select pp.id, pp.product_id, pp.storage_path, pp.source_url, coalesce(pp.is_primary, false) as is_primary, "
             "       coalesce(pp.sort_order, 0) as sort_order, pp.created_at, pp.image_key, "
-            "       nullif(btrim(cast(p.sku_display as text)), '') as sku "
+            "       coalesce(nullif(btrim(cast(p.sku_display as text)), ''), "
+            "         (select nullif(btrim(cast(p2.sku_display as text)), '') from channel_listings cl "
+            "            join products p2 on p2.id = cl.product_id "
+            "           where pp.product_id is null "
+            "             and regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') = substring(pp.storage_path from '^EBAY-([0-9]+)/') "
+            "           limit 1)) as sku "
             "from product_photos pp left join products p on p.id = pp.product_id "
             "where nullif(btrim(pp.image_key), '') is not null "
             "order by pp.product_id nulls last, pp.sort_order, pp.id"
@@ -99,4 +105,40 @@ def manifest(db: Session = Depends(get_db)):
             ebay.append({"item_number": str(r[0]), "custom_label_sku": "" if r[1] is None else str(r[1])})
     except Exception:
         db.rollback()  # the table may not exist yet; the photo CSV is still useful
-    return {"photos": photos, "ebay": ebay}
+    # Each eBay listing also keeps its own saved photo set (ebay_listings.photos). A SKU's folder gets those too.
+    listing_photos: list[dict] = []
+    try:
+        for r in db.execute(
+            text(
+                "select el.ebay_item_id, nullif(btrim(cast(p.sku_display as text)), '') as sku, el.photos "
+                "from ebay_listings el join products p on p.id = el.product_id "
+                "where el.photos is not null"
+            )
+        ).all():
+            raw = r.photos
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except ValueError:
+                    continue
+            if not isinstance(raw, list) or not r.sku:
+                continue
+            for n, e in enumerate(raw):
+                if not isinstance(e, dict):
+                    continue
+                key = str(e.get("image_key") or "").strip()
+                if not key or ".." in key or key.startswith("/") or not _SAFE.match(key):
+                    continue
+                so = e.get("sort_order")
+                listing_photos.append(
+                    {
+                        "sku": r.sku,
+                        "image_key": key,
+                        "is_primary": e.get("is_primary") is True,
+                        "sort_order": int(so) if isinstance(so, (int, float)) else n,
+                        "item": str(r.ebay_item_id),
+                    }
+                )
+    except Exception:
+        db.rollback()  # the table or its photos column may not exist; the product photos are still returned
+    return {"photos": photos, "ebay": ebay, "listing_photos": listing_photos}
