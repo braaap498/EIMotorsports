@@ -49,6 +49,7 @@ from app.admin_photos import ensure_columns as ensure_photo_columns
 from app.admin_purchase_orders import ensure_po_types
 from app.availability import ensure_tables as ensure_availability_tables
 from app.availability import router as availability_router
+from app.dashboard_alerts import router as dashboard_alerts_router
 from app.availability import start_background as start_availability
 from app.admin_photos import router as admin_photos_router
 from app.admin_purchase_orders import router as admin_purchase_orders_router
@@ -66,6 +67,9 @@ from app.order_activity import router as order_activity_router
 from app.warehouse_stock import ensure_tables as ensure_warehouse_tables
 from app.sku_reserve import ensure_tables_startup as ensure_sku_reserve_tables
 from app.warehouse_stock import router as warehouse_stock_router
+from app.scan_pair import ensure_tables as ensure_scan_pair_tables
+from app.scan_pair import public_router as scan_pair_public_router
+from app.scan_pair import router as scan_pair_router
 from app.auth import AuthUser, password_days_left, require_staff
 from app.config import get_settings
 from app.database import get_db
@@ -167,9 +171,11 @@ admin_router.include_router(admin_quickbooks_router)
 admin_router.include_router(admin_inventory_router)
 admin_router.include_router(order_activity_router)
 admin_router.include_router(warehouse_stock_router)
+admin_router.include_router(scan_pair_router)
 admin_router.include_router(admin_purchase_orders_router)
 admin_router.include_router(admin_photos_router)
 admin_router.include_router(availability_router)
+admin_router.include_router(dashboard_alerts_router)
 admin_router.include_router(admin_users_router)
 admin_router.include_router(admin_about_router)
 admin_router.include_router(admin_reviews_router)
@@ -183,6 +189,7 @@ admin_router.include_router(analytics_qb_router)
 admin_router.include_router(analytics_insights_router)
 
 app.include_router(admin_router)
+app.include_router(scan_pair_public_router)  # phone scanning: the secret link in the QR code is the permission
 app.include_router(ebay_sales_public_router)  # optional outside pinger, protected by EBAY_POLL_SECRET
 app.include_router(fitment_router)
 app.include_router(store_extras_router)
@@ -214,6 +221,12 @@ def _order_activity_tables():
     ensure_order_activity_tables()
     ensure_warehouse_tables()
     ensure_sku_reserve_tables()
+
+
+@app.on_event("startup")
+def _scan_pair_tables():
+    """Scanning with a phone: the pairing tables (the Phone button on a scan box)."""
+    ensure_scan_pair_tables()
 
 
 @app.on_event("startup")
