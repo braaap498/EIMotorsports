@@ -12,6 +12,9 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 type Phase = "checking" | "ready" | "scanning" | "sent" | "ended";
 
+// While the camera is on, check in with the server this often: each check-in keeps the link open (see app/scan_pair.py).
+const HEARTBEAT_MS = 60_000;
+
 export default function PhoneScanPage({ token }: { token: string }) {
   const [phase, setPhase] = useState<Phase>("checking");
   const [last, setLast] = useState("");
@@ -65,6 +68,32 @@ export default function PhoneScanPage({ token }: { token: string }) {
     },
     [token]
   );
+
+  // Keep the link open for as long as the camera is on (scanning, or the moment after a scan). With the camera off the link
+  // is left to run out on its own, so a forgotten phone does not keep it alive.
+  const cameraOn = phase === "scanning" || phase === "sent";
+  useEffect(() => {
+    if (!cameraOn) return;
+    let stopped = false;
+    const ping = async () => {
+      try {
+        const r = await fetch(`${API}/scan-pair/${encodeURIComponent(token)}`, { cache: "no-store" });
+        if (!stopped && r.status === 410) setPhase("ended");
+      } catch {
+        /* no signal for a moment: try again at the next check-in */
+      }
+    };
+    const timer = setInterval(() => void ping(), HEARTBEAT_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void ping(); // the phone was asleep: check in as soon as it wakes
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [cameraOn, token]);
 
   // After "sent" show the code for a moment, then open the camera again for the next one.
   useEffect(() => {

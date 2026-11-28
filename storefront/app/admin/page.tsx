@@ -6,6 +6,7 @@ import { api, errMsg } from "../../lib/adminApi";
 import { Notice } from "../../components/admin/ui";
 import { useAccess } from "../../components/admin/AdminAccess";
 import PhotoBackup from "../../components/admin/PhotoBackup";
+import DashboardAlerts from "../../components/admin/DashboardAlerts";
 
 type Stats = { products: number; noFitment: number; untyped: number };
 
@@ -63,6 +64,7 @@ export default function AdminDashboard() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold">Dashboard</h1>
+      {can("products.view", "inventory.ship", "inventory.purchase") && <DashboardAlerts />}
       {error && <Notice kind="error">{error}</Notice>}
       <div className="grid gap-4 sm:grid-cols-3">
         {cards.map((c) => (

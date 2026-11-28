@@ -184,7 +184,7 @@ export default function PhonePairing({ onCode, onClose }: { onCode: (code: strin
             {error ? "Close" : "Done with phone"}
           </button>
         </div>
-        <p className="text-xs text-gray-500">The link works only for this scan box and stops when you press Done or after 6 hours.</p>
+        <p className="text-xs text-gray-500">The link works only for this scan box and stops when you press Done, or about an hour after the phone camera was last on.</p>
       </div>
     </div>
   );

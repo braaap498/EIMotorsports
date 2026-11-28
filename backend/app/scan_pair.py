@@ -11,7 +11,9 @@ same place a typed or Zebra-scanned code goes, so a scan lands in the screen (an
   POST   /scan-pair/{token}/scan              phone: send one code {code}
 
 The link is a random 192-bit secret that only lets whoever holds it SEND CODES into that one pairing. It stops working when the computer
-closes it or after PAIR_HOURS. Tables are created at startup (ensure_tables), never in a request.
+closes it, or when it has had no phone activity for IDLE_MINUTES (after PAIR_HOURS if the phone never connects). While the phone's
+camera is on, the phone page checks in every minute and each check-in (and each scan) pushes the end time out again, up to MAX_HOURS
+after the pairing was made. Tables are created at startup (ensure_tables), never in a request.
 """
 import logging
 import re
@@ -28,9 +30,11 @@ from app.database import _session_factory, get_db
 
 log = logging.getLogger(__name__)
 
-PAIR_HOURS = 6
+PAIR_HOURS = 6        # a new pairing is good this long if the phone never connects
+IDLE_MINUTES = 60     # once the phone is in use: the link ends this long after the phone's last check-in or scan
+MAX_HOURS = 24        # ...but never lives longer than this from the moment it was made
 MAX_CODE = 200
-MAX_SCANS_PER_PAIR = 5000
+MAX_SCANS_PER_PAIR = 20000
 MAX_SCANS_PER_MINUTE = 120
 SCAN_PERMS = ("inventory.receive", "inventory.ship", "inventory.barcodes", "inventory.adjust")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -84,6 +88,18 @@ def _live(db: Session, token: str):
     ).first()
 
 
+def _touch(db: Session, token: str) -> None:
+    """The phone is alive: note it, and push the end time out (never earlier than it already was, never past MAX_HOURS)."""
+    db.execute(
+        text(
+            "update scan_pair set phone_seen_at = now(), "
+            "expires_at = greatest(expires_at, least(created_at + make_interval(hours => cast(:mh as integer)), "
+            "now() + make_interval(mins => cast(:im as integer)))) where token = :t"
+        ),
+        {"t": token, "mh": MAX_HOURS, "im": IDLE_MINUTES},
+    )
+
+
 # --------------------------------------------------------------------------
 # the computer
 # --------------------------------------------------------------------------
@@ -135,10 +151,11 @@ class ScanIn(BaseModel):
 
 @public_router.get("/{token}")
 def phone_status(token: str, db: Session = Depends(get_db)):
-    """The phone page asks this when it opens: is the link still good? Also tells the computer the phone has connected."""
+    """The phone page asks this when it opens, and every minute while its camera is on: is the link still good? Each ask also
+    tells the computer the phone has connected and keeps the link open."""
     if not _live(db, token):
         raise HTTPException(410, "This link has ended. Make a new QR code on the computer.")
-    db.execute(text("update scan_pair set phone_seen_at = now() where token = :t"), {"t": token})
+    _touch(db, token)
     db.commit()
     return {"ok": True}
 
@@ -161,6 +178,6 @@ def phone_scan(token: str, body: ScanIn, db: Session = Depends(get_db)):
     sid = db.execute(
         text("insert into scan_pair_scans (token, code) values (:t, :c) returning id"), {"t": token, "c": code}
     ).scalar()
-    db.execute(text("update scan_pair set phone_seen_at = now() where token = :t"), {"t": token})
+    _touch(db, token)
     db.commit()
     return {"ok": True, "id": int(sid), "code": code}

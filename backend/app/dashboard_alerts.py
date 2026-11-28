@@ -10,6 +10,7 @@ LEVELS (the colors on the Dashboard)
   info      blue    the guard rail or another automatic rule did something
 
 EVERY check is independent: one that fails (a table that does not exist yet, a slow query) is logged and skipped, it never hides the others.
+The response lists the ones that failed ("failed"), and the Dashboard shows them, so a broken check is not mistaken for "nothing to report".
 Nothing here changes data.
 
 THE KIT-PART MESSAGE
@@ -238,13 +239,15 @@ CHECKS = (_urgent_orders, _dropship_problems, _dropship_health, _kit_parts_low, 
 @needs(*READ)
 def alerts(db: Session = Depends(get_db)):
     out: list[dict] = []
+    failed: list[str] = []  # checks that could not run: the Dashboard says so, so "no messages" is never a silent failure
     for fn in CHECKS:
         try:
             a = fn(db)
             if a:
                 out.append(a)
-        except Exception:
+        except Exception as e:
             db.rollback()
             log.exception("dashboard check %s failed", fn.__name__)
+            failed.append(f"{fn.__name__.lstrip('_')}: {(str(e).strip().splitlines() or [type(e).__name__])[0][:160]}")
     out.sort(key=lambda a: ORDER.get(a["level"], 9))
-    return {"alerts": out}
+    return {"alerts": out, "failed": failed}
