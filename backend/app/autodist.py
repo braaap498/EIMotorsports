@@ -1373,6 +1373,52 @@ _MPN = (
     "  and s.name = 'Manufacturer Part Number' order by s.sort_order, s.id limit 1))"
 )
 
+# A product that matches a catalog part only by manufacturer part # may belong to a DIFFERENT catalog part: 09.601 (Automatic) and
+# 09-601 (Sinera) are the same text once punctuation is removed. Same rule as app/sku_reserve.py: such a product is not listed as
+# "ours" for this part. Kept when (a) its part line points at this part, (b) its custom label is this part's SKU, or (c) it matched
+# by barcode. Dropped when its part line points at another part, or its part # / label equals a hand catalog (Niche, Sinera ...) part #.
+def _other_catalog_info(db: Session, product_ids: list) -> dict:
+    ids = sorted({int(i) for i in product_ids if i})
+    if not ids:
+        return {}
+    try:
+        rows = db.execute(
+            text(
+                f"""
+                select x.id, x.label_n, x.sup_ids, x.manual_ptr,
+                       exists (select 1 from manual_catalog_items m
+                               where length(upper(regexp_replace(coalesce(m.part_number, ''), '[^A-Za-z0-9]', '', 'g'))) >= 3
+                                 and upper(regexp_replace(coalesce(m.part_number, ''), '[^A-Za-z0-9]', '', 'g')) in (x.mpn_n, x.label_n)) as hand
+                from (
+                  select p.id,
+                         nullif(upper(regexp_replace(coalesce(p.custom_label_sku, ''), '[^A-Za-z0-9]', '', 'g')), '') as label_n,
+                         nullif(upper(regexp_replace(coalesce({_MPN}, ''), '[^A-Za-z0-9]', '', 'g')), '') as mpn_n,
+                         coalesce((select array_agg(z.supplier_item_id) from product_kit_parts z
+                                   where z.product_id = p.id and z.supplier_item_id is not null), cast('{{}}' as bigint[])) as sup_ids,
+                         exists (select 1 from product_kit_parts z where z.product_id = p.id and z.manual_item_id is not null) as manual_ptr
+                  from products p where p.id = any(cast(:ids as bigint[]))
+                ) x
+                """
+            ),
+            {"ids": ids},
+        ).all()
+    except Exception:
+        db.rollback()
+        return {}  # a display nicety must never break the catalog page
+    return {r.id: {"label_n": r.label_n, "sup_ids": set(r.sup_ids or []), "manual_ptr": bool(r.manual_ptr), "hand": bool(r.hand)} for r in rows}
+
+
+def _belongs_elsewhere(info: Optional[dict], item_id: int, item_sku: Optional[str], by: str) -> bool:
+    if not info or by == "barcode":
+        return False
+    if item_id in info["sup_ids"]:
+        return False
+    sku_n = norm_part(item_sku)
+    if sku_n and sku_n == info["label_n"]:
+        return False
+    return bool(info["manual_ptr"] or info["sup_ids"] or info["hand"])
+
+
 _MATCH = f"""
 with prod as (
   select p.id, p.sku_display as sku, p.title,
@@ -1683,6 +1729,9 @@ def items(
         r["ours"] = list(mine.values())
         r.pop("upc_norm", None)
         r.pop("mfr_number_norm", None)
+    info = _other_catalog_info(db, [m["id"] for r in rows for m in r["ours"] if m["by"] != "barcode"])
+    for r in rows:
+        r["ours"] = [m for m in r["ours"] if not _belongs_elsewhere(info.get(m["id"]), r["id"], r["sku"], m["by"])]
     # A part with none of our products yet may still have its EI- number reserved (shown in yellow).
     from app.sku_reserve import reserved_numbers  # late import, like the other modules here
 
@@ -1742,6 +1791,8 @@ def item_detail(item_id: int, db: Session = Depends(get_db)):
             d.pop("upc_n", None)
             d.pop("mpn_n", None)
             mine.append(d)
+        info = _other_catalog_info(db, [m["id"] for m in mine if m["by"] != "barcode"])
+        mine = [m for m in mine if not _belongs_elsewhere(info.get(m["id"]), item_id, item.get("sku"), m["by"])]
 
     cols = "id, sku, mfr_number, manufacturer, name, list_price, effective_cost as dealer_cost, qty_indiana, qty_nevada, upc, active"
     same_upc = []
