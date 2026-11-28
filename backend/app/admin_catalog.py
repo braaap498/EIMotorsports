@@ -1110,18 +1110,13 @@ class BulkLabelIn(BaseModel):
 @needs("products.edit_details")
 def bulk_label(body: BulkLabelIn, db: Session = Depends(get_db)):
     """Temporary tool on the Products list: give the ticked products one custom label. Products that already have a label
-    are skipped unless replace is true. Refused when a product that is NOT ticked already uses the label, and when it
-    would go on more than one product without allow_shared. Nothing is sent to eBay."""
+    are skipped unless replace is true. Refused when it would go on more than one product without allow_shared.
+    Can be run in batches: products that were labelled in an earlier batch (and are not ticked now) may already use
+    the same label; they are merged later. Nothing is sent to eBay."""
     label = body.label.strip()
     if not label or not re.fullmatch(r"[A-Za-z0-9\-_.]+", label):
         raise HTTPException(422, "A custom label can only use letters, numbers, - _ and . (no spaces).")
     ids = list(dict.fromkeys(body.ids))
-    other = db.execute(
-        text("select id, sku_display from products where lower(btrim(custom_label_sku)) = lower(:l) and id <> all(:ids) limit 1"),
-        {"l": label, "ids": ids},
-    ).first()
-    if other:
-        raise HTTPException(409, f"Product {other.sku_display or other.id} (not ticked) already uses the label {label}.")
     rows = db.execute(
         text("select id, custom_label_sku from products where id = any(:ids)"), {"ids": ids}
     ).all()

@@ -303,7 +303,7 @@ export default function ProductsPage() {
       });
       setBulkMsg({ kind: "success", text: `Custom label ${r.label} set on ${r.updated} product${r.updated === 1 ? "" : "s"}${r.skipped_with_label ? `; ${r.skipped_with_label} already had a label and were left alone` : ""}. Nothing was sent to eBay.` });
       setLblOpen(false);
-      setLblText("");
+      // The label text is kept on purpose: the next batch can use the same label (the products are merged later).
       setSel(new Set());
       load();
     } catch (e) {
