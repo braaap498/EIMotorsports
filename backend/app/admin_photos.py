@@ -155,6 +155,46 @@ def _tidy(db: Session, product_id: int, first_ids: list[int] | None = None) -> N
             text("update product_photos set is_primary = :m, sort_order = :o where id = :id"),
             {"m": pid == main, "o": position, "id": pid},
         )
+    _main_to_catalog(db, product_id)  # a catalog part with no picture gets this product's main one
+
+
+# A product made from (or linked to) exactly ONE distributor catalog part shows that part's picture in the catalog. When the part
+# has no picture of its own and the product has one (uploaded, or taken from another product), the product's main photo is saved
+# onto the catalog part (supplier_items.images), so the catalog shows it too. A part that already has pictures is never changed,
+# and a product with several parts (a kit) is skipped, because its main photo is the kit's, not one part's.
+_MAIN_TO_CATALOG = """
+with parts as (
+  select l.product_id as pid, s.id as sid
+  from supplier_product_links l join supplier_items s on s.supplier = l.supplier and s.sku = l.supplier_sku
+  union
+  select k.product_id, k.supplier_item_id from product_kit_parts k where k.supplier_item_id is not null
+), single as (
+  select pid, min(sid) as sid from parts group by pid having count(distinct sid) = 1
+), main as (
+  select distinct on (pp.product_id) pp.product_id as pid, pp.image_key
+  from product_photos pp
+  where pp.image_key is not null and not coalesce(pp.hidden, false)
+    and (cast(:p as bigint) is null or pp.product_id = cast(:p as bigint))
+  order by pp.product_id, pp.is_primary desc, pp.sort_order, pp.id
+)
+update supplier_items s set images = array[cast(:base as text) || '/full/' || m.image_key], images_synced_at = now()
+from single g join main m on m.pid = g.pid
+where s.id = g.sid and (s.images is null or cardinality(s.images) = 0)
+"""
+
+
+def _main_to_catalog(db: Session, product_id: int | None = None) -> int:
+    """Save the main photo of a product onto its catalog part when the part has no picture (see above). product_id None = every
+    product. Returns the number of catalog parts that got a picture. No commit; never raises."""
+    try:
+        base = (full_url("k") or "")[: -len("/full/k")]
+        if not base:
+            return 0
+        with db.begin_nested():
+            return int(db.execute(text(_MAIN_TO_CATALOG), {"p": product_id, "base": base}).rowcount or 0)
+    except Exception:
+        log.exception("could not save the main photo onto the catalog part")
+        return 0
 
 
 def _listing(db: Session, product_id: int) -> dict:
@@ -447,3 +487,12 @@ def attach_photos(product_id: int, body: AttachPhotos, db: Session = Depends(get
     _tidy(db, product_id)
     db.commit()
     return {**_listing(db, product_id), "added": added, "skipped": skipped}
+
+
+@router.post("/photos/catalog-backfill")
+@needs("products.photos")
+def catalog_backfill(db: Session = Depends(get_db)):
+    """One-off: give every catalog part that has no picture the main photo of its single product (see _main_to_catalog)."""
+    n = _main_to_catalog(db)
+    db.commit()
+    return {"ok": True, "catalog_parts_updated": n}

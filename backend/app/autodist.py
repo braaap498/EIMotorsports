@@ -1104,7 +1104,7 @@ with incoming as (
   select * from unnest(cast(:sku as text[]), cast(:imgs as text[])) as t(sku, imgs)
 ), up as (
   update supplier_items s set
-    images = case when i.imgs = '' then null else string_to_array(i.imgs, chr(10)) end,
+    images = case when i.imgs = '' then s.images else string_to_array(i.imgs, chr(10)) end,  -- an empty file entry keeps the picture we already have (for example one saved from a product)
     images_synced_at = now()
   from incoming i
   where s.supplier = :sup and s.sku = i.sku
