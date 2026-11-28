@@ -1053,7 +1053,7 @@ export default function EbayLiveListingsPage() {
           void loadRepo(0);
         }}
       >
-        <label className="block w-64 text-sm font-medium text-gray-700">
+        <label className="block w-64 shrink-0 text-sm font-medium text-gray-700">
           <span className="mb-1 block">Store</span>
           <select
             className={inputCls}
@@ -1072,7 +1072,7 @@ export default function EbayLiveListingsPage() {
             ))}
           </select>
         </label>
-        <label className="block text-sm font-medium text-gray-700">
+        <label className="block w-44 shrink-0 text-sm font-medium text-gray-700">
           <span className="mb-1 block">Show</span>
           <select
             className={inputCls}
@@ -1099,7 +1099,7 @@ export default function EbayLiveListingsPage() {
             })()}
           </select>
         </label>
-        <label className="block w-full max-w-full text-sm font-medium text-gray-700 sm:w-[28rem]">
+        <label className="block w-full max-w-full text-sm font-medium text-gray-700 sm:w-[28rem] sm:shrink-0">
           <span className="mb-1 block whitespace-nowrap">Search title, item number, custom label or SKU</span>
           <ClearableInput
             className={inputCls}
