@@ -1314,8 +1314,19 @@ def get_kit(product_id: int, db: Session = Depends(get_db), user: AuthUser = Dep
     for l in listings:
         # in sync when we pushed this label, or the label eBay already shows (last report / eBay lookup) is it
         l["in_sync"] = bool(cls) and ((l["cls_pushed"] or "") == cls or (l.get("ebay_label") or "") == cls)
+    # Seller Hub > Listings > Inventory records (the saved copy) that do not show the label yet. Looks only, sends nothing.
+    inventory_pending = 0
+    if cls and listings:
+        try:
+            from app.ebay_sm_label import sync_inventory  # imported here: it pulls in the eBay stack
+
+            inventory_pending = sum(1 for r in sync_inventory(db, user, product_id, False) if r.get("status") == "would_change")
+        except Exception:
+            db.rollback()
+            log.warning("could not check the inventory records for product %s", product_id, exc_info=True)
     return {
         "cls": cls,
+        "inventory_pending": inventory_pending,
         "parts": _parts_of(db, product_id, see_cost=has_perm(user, "products.edit_price")),
         "listings": listings,
         "can_sync": user.role in ("owner", "admin"),

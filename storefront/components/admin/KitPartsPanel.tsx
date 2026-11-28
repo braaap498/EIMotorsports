@@ -161,6 +161,8 @@ export default function KitPartsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirty]);
   const [savedCls, setSavedCls] = useState<string | null>(null);
+  // Seller Hub inventory records that do not show the label yet (from the saved copy; nothing is read from eBay)
+  const [invPending, setInvPending] = useState(0);
   // the parts as last saved, so Cancel changes can put them back
   const [savedParts, setSavedParts] = useState<KitPart[]>([]);
 
@@ -200,8 +202,9 @@ export default function KitPartsPanel({
   // existing product: load what is saved
   useEffect(() => {
     if (!productId) return;
-    api<{ cls: string | null; parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[]; can_sync: boolean; mpn?: string | null; mpn_locked?: boolean; availability?: Availability | null }>(`/kits/${productId}`)
+    api<{ cls: string | null; parts: (Omit<KitPart, "key"> & { id: number })[]; listings: Listing[]; can_sync: boolean; inventory_pending?: number; mpn?: string | null; mpn_locked?: boolean; availability?: Availability | null }>(`/kits/${productId}`)
       .then((r) => {
+        setInvPending(r.inventory_pending ?? 0);
         const loaded = r.parts.map((p) => ({ ...p, key: `p${p.id}`, description: p.description ?? "" }));
         onChange(loaded);
         setSavedParts(loaded);
@@ -216,6 +219,25 @@ export default function KitPartsPanel({
       .catch((e) => setMsg({ kind: "error", text: errMsg(e) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [productId]);
+
+  // The label can be changed in the product form's own box. Read the listings' and inventory records' state again then,
+  // so the Send button appears (label differs from eBay) or goes away (eBay already shows it). Parts are not touched.
+  useEffect(() => {
+    if (!productId) return;
+    let alive = true;
+    api<{ cls: string | null; listings: Listing[]; can_sync: boolean; inventory_pending?: number }>(`/kits/${productId}`)
+      .then((r) => {
+        if (!alive) return;
+        setListings(r.listings);
+        setCanSync(r.can_sync);
+        setSavedCls(r.cls);
+        setInvPending(r.inventory_pending ?? 0);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [productId, currentCls]);
 
   const built = useMemo(() => previewCls(parts, labelBy), [parts, labelBy]);
   const keptCls = (currentCls ?? savedCls ?? "").trim();
@@ -395,8 +417,9 @@ export default function KitPartsPanel({
       const r = await api<{ cls: string; results: SyncResult[]; inventory?: SmResult[] }>(`/kits/${productId}/sync`, { method: "POST" });
       setResults2(r.results);
       setSmRes(r.inventory ?? null);
-      const fresh = await api<{ listings: Listing[] }>(`/kits/${productId}`);
+      const fresh = await api<{ listings: Listing[]; inventory_pending?: number }>(`/kits/${productId}`);
       setListings(fresh.listings);
+      setInvPending(fresh.inventory_pending ?? 0);
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -411,6 +434,7 @@ export default function KitPartsPanel({
     try {
       const r = await api<{ results: SmResult[] }>("/ebay-edit/sm-label", { method: "POST", body: { product_id: productId, apply } });
       setSmRes(r.results);
+      setInvPending(r.results.filter((x) => x.status === "would_change").length);
     } catch (e) {
       setMsg({ kind: "error", text: errMsg(e) });
     } finally {
@@ -458,7 +482,7 @@ export default function KitPartsPanel({
   const pending = listings.filter((l) => !l.in_sync).length;
   // The label in the box above may be typed but not saved yet; Send always sends the saved one.
   const labelSaved = (currentCls ?? savedCls ?? "").trim() === (savedCls ?? "").trim();
-  const showSend = !dirty && labelSaved && !!savedCls && listings.length > 0 && pending > 0 && canSync;
+  const showSend = !dirty && labelSaved && !!savedCls && listings.length > 0 && (pending > 0 || invPending > 0) && canSync;
   const small = "rounded border border-gray-300 px-2 py-1 text-xs";
 
   return (
@@ -764,7 +788,7 @@ export default function KitPartsPanel({
           )}
           {listings.length > 0 && (
             <p className="text-xs text-gray-600">
-              {listings.length} eBay listing{listings.length === 1 ? "" : "s"} linked; {listings.length - pending} show this label{pending ? `, ${pending} not confirmed yet` : ""}.
+              {listings.length} eBay listing{listings.length === 1 ? "" : "s"} linked; {listings.length - pending} show this label{pending ? `, ${pending} not confirmed yet` : ""}{invPending ? `; ${invPending} eBay inventory record${invPending === 1 ? "" : "s"} do not show it yet` : ""}.
             </p>
           )}
           {!disabled && !dirty && labelSaved && !!savedCls && listings.length > 0 && canSync && (
