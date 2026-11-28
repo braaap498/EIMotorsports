@@ -31,9 +31,10 @@ type Overview = {
   price_bands: { band: string; parts: number }[];
   units_of_measure: { uom: string; unset: boolean; parts: number }[];
 };
-// use_mfr: the product's part is set to "use the manu. part # for the custom label", so its manufacturer number is shown instead of our SKU
+// A product of ours is always shown by its own SKU (EI-0000123). A part set to "use the manu. part # for the custom label" changes the
+// custom label only; its manufacturer number must never stand in for our SKU here (it looks like a different part).
 type Mine = { id: number; sku: string; title: string; on_hand: number; by: string; use_mfr?: boolean; mfr_no?: string | null };
-const mineName = (m: { sku: string; use_mfr?: boolean; mfr_no?: string | null }) => (m.use_mfr && m.mfr_no ? m.mfr_no : m.sku);
+const mineName = (m: { sku: string }) => m.sku;
 type Row = {
   id: number; sku: string; mfr_number: string | null; manufacturer: string | null; name: string | null;
   unit_of_measure: string | null; list_price: string | null; dealer_cost: string | null;
