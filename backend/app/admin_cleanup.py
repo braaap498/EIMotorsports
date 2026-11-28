@@ -1550,10 +1550,14 @@ def price_differences(limit: int = Query(500, le=2000), db: Session = Depends(ge
 _BLANK_DESC = "nullif(btrim(coalesce(p.description, '')), '') is null"
 _BLANK_COND = "nullif(btrim(coalesce(p.condition::text, '')), '') is null"
 _NO_SPECS = "not exists (select 1 from product_item_specifics s where s.product_id = p.id)"
-# every product that has an eBay listing and is missing its description, its condition or its item specifics
+# Only a LIVE listing can be read from eBay, so only products with an active listing are counted here. A product whose
+# listings have all ended can never be filled by this screen (eBay answers "deleted", error 17), and trying would only
+# use up the daily eBay call allowance (error 518). Fill those by hand on the product page.
+_ACTIVE_CL = "lower(coalesce(cl.status, '')) = 'active'"
+# every product that has an active eBay listing and is missing its description, its condition or its item specifics
 _MERGED_BLANK = (
     f"from products p where ({_BLANK_DESC} or {_BLANK_COND} or {_NO_SPECS}) "
-    "and exists (select 1 from channel_listings cl where cl.product_id = p.id)"
+    f"and exists (select 1 from channel_listings cl where cl.product_id = p.id and {_ACTIVE_CL})"
 )
 
 
@@ -1610,7 +1614,7 @@ def fill_descriptions(body: FillDescIn, db: Session = Depends(get_db), user: Aut
                 "select coalesce(nullif(btrim(cl.store), ''), :main) as store, "
                 "       regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item "
                 "from channel_listings cl join products p on p.id = cl.product_id "
-                "where cl.product_id = :p "
+                f"where cl.product_id = :p and {_ACTIVE_CL} "
                 "order by (regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') "
                 "          = regexp_replace(coalesce(p.ebay_item_id, ''), '[^0-9]', '', 'g')) desc, "
                 "         (lower(coalesce(cl.status, '')) = 'active') desc, cl.id limit 6"
