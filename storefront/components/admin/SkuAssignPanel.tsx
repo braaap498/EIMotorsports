@@ -38,7 +38,7 @@ type Status = {
   last_run?: { id: number; status: string; phase: string | null; done: number; total: number; message: string | null };
 };
 
-const LABELS: Record<string, string> = { autodist: "Automatic", rmatv: "Rocky Mountain", niche: "Niche (block of 1000)", sinera: "Sinera (block of 1000)", other: "Kits and all other products (from 5,000,000)" };
+const LABELS: Record<string, string> = { autodist: "Automatic", rmatv: "Rocky Mountain", niche: "Niche (block of 1000)", sinera: "Sinera (block of 1000)", kits2: "Kits of 2 parts (from 5,000,000)", kits3: "Kits of 3 parts (from 6,000,000)", kits4plus: "Kits of 4 or more parts (from 7,000,000)", other: "All other products (from 8,000,000)" };
 // every other hand-made catalog is a block of 1000 named after its distributor
 const labelFor = (k: string, names?: string[]) => LABELS[k] ?? (k.startsWith("hand") ? `${(names ?? []).join(", ") || k} (block of 1000)` : k);
 
@@ -123,8 +123,9 @@ export default function SkuAssignPanel() {
     <section className="space-y-3 rounded-lg border-2 border-amber-400 bg-white p-4">
       <h2 className="text-lg font-semibold">Catalog-ordered SKUs</h2>
       <p className="text-sm text-gray-600">
-        Numbers go to Automatic first, then Rocky Mountain, then a block of 1000 each for Niche, Sinera and every other hand-made catalog. Kits and
-        every other product start at 5,000,000, so there is room below for more distributors; a new kit gets the next number. A catalog part
+        Numbers go to Automatic first, then Rocky Mountain, then a block of 1000 each for Niche, Sinera and every other hand-made catalog. Kits
+        follow, a million numbers each: 2 parts from 5,000,000, 3 parts from 6,000,000, 4 or more from 7,000,000, then every other product from 8,000,000.
+        That leaves room below for more distributors, and a new kit gets the next number of its group. A catalog part
         with no product reserves its number until the product is made. Every product is renumbered, so its EIB- shelf label changes too.
       </p>
       <div className="flex flex-wrap items-center gap-3">

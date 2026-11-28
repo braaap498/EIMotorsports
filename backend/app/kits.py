@@ -1263,6 +1263,9 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
                 )
     except Exception:
         log.exception("could not set the product's manufacturer from its parts")
+    from app.sku_reserve import assign_kit_number  # a product that is now a kit takes the next number of its group (2 / 3 / 4+ parts)
+
+    assign_kit_number(db, product_id)
     existing = _product_cls(db, product_id)
     if existing:
         return {"cls": existing, "cls_changed": False, "duplicates": []}

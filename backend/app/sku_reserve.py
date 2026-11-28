@@ -3,9 +3,12 @@ Catalog-ordered SKUs with reserved numbers.
 
 Order of numbers: Automatic (autodist) items, Rocky Mountain (rmatv) items, a block of 1000 for Niche, a block of 1000 for
 Sinera, then a block of 1000 for every other hand-made catalog (a distributor with saved parts and no loaded catalog), each new one
-after the last. Everything below KIT_BASE (5,000,000) is for catalogs, so there is room for more distributors. From KIT_BASE up
-come the kits and every other product that is not a catalog part (eBay-only, duplicates of a catalog part), by product id; the
-database counter is moved to continue from there, so a new kit gets the next number.
+after the last. Everything below KIT_BASE (5,000,000) is for catalogs, so there is room for more distributors. Then the kits, a
+million numbers each, by product id inside the group:
+    5,000,000  kits of 2 parts      6,000,000  kits of 3 parts      7,000,000  kits of 4 or more parts
+    8,000,000  every other product that is not a catalog part (eBay-only, duplicates of a catalog part, one part at quantity 2 ...)
+The database counter is moved to continue from 8,000,000. A product that becomes a kit later takes the next number of its group
+(assign_kit_number, called when its parts are saved).
 
   * A catalog part that has a single product gives that product the part's number.
   * A catalog part with no product reserves its number (sku_reservations, product_id null). The product gets it when it is
@@ -32,7 +35,17 @@ from app.skus import SKU_PREFIX, SHELF_PREFIX
 HAND_CATALOGS = [("niche", r"niche"), ("sinera", r"sinera")]  # (source, regex on po_distributors.name): the first two blocks, always there
 HAND_PREFIX = "hand"           # source of every other hand-made catalog: "hand<distributor id>"
 BLOCK_SIZE = 1000
-KIT_BASE = 5_000_000           # kits and every other non-catalog product start here; below it are the catalogs, with room to add more
+KIT_BASE = 5_000_000           # kits of 2 parts start here; below it are the catalogs, with room to add more
+KIT_STEP = 1_000_000           # each kit group (2 parts, 3 parts, 4 or more) gets this many numbers
+OTHER_BASE = KIT_BASE + 3 * KIT_STEP   # 8,000,000: every other product, and where the database counter continues
+KIT_GROUPS = [("kits2", KIT_BASE), ("kits3", KIT_BASE + KIT_STEP), ("kits4plus", KIT_BASE + 2 * KIT_STEP)]
+
+
+def kit_group(lines: int) -> Optional[tuple]:
+    """(source name, first number) of the kit group for a product with this many part lines; None below 2 lines."""
+    if lines < 2:
+        return None
+    return KIT_GROUPS[min(lines, 4) - 2]
 SUPPLIER_ORDER = ["autodist", "rmatv"]
 TEMP_BASE = 9_000_000          # temporary numbers: EI-9000001 ...; the plan must stay below this
 MAX_PLAN = TEMP_BASE - 1
@@ -100,12 +113,13 @@ def ensure_tables_startup() -> None:
 # --------------------------------------------------------------------------
 # the number plan: pure function (testable without a database)
 # --------------------------------------------------------------------------
-def assign_numbers(supplier_items: dict, hand_items: dict, product_ids: list) -> dict:
+def assign_numbers(supplier_items: dict, hand_items: dict, product_ids: list, kit_lines: Optional[dict] = None) -> dict:
     """
     supplier_items: {'autodist': [(item_id, [matching product ids]), ...], 'rmatv': [...]}   in catalog order
     hand_items:     {'niche': [(item_id, [matching product ids]), ...], 'sinera': [...], 'hand7': [...]}   in manual_catalog_items.id order;
                     one block of 1000 per entry, in the order of the dict
     product_ids:    every product id.
+    kit_lines:      {product id: number of part lines} for the products with 2 or more lines (they are numbered by group).
     Returns {'rows': [reservation dicts], 'product_number': {pid: n}, 'duplicates': [...], 'shared': int, 'ranges': {...}}
     """
     n = 1
@@ -146,13 +160,26 @@ def assign_numbers(supplier_items: dict, hand_items: dict, product_ids: list) ->
         ranges[src] = [start, n - 1]
     if n > KIT_BASE:
         raise ValueError(f"The catalogs reach {n - 1}, past the start of the kit range ({KIT_BASE}). Raise KIT_BASE in sku_reserve.py.")
-    n = KIT_BASE  # everything that is not a catalog part (kits first of all) starts here, so there is room below for more catalogs
-    start = n
+    kit_lines = kit_lines or {}
+    members: dict = {g: [] for g, _ in KIT_GROUPS}
+    members["other"] = []
     for pid in sorted(product_ids):
-        if pid not in assigned:
+        if pid in assigned:
+            continue
+        g = kit_group(kit_lines.get(pid, 0))
+        members[g[0] if g else "other"].append(pid)
+    last = n - 1
+    for g, base in KIT_GROUPS + [("other", OTHER_BASE)]:
+        n = base
+        for pid in members[g]:
             assigned[pid] = n
             n += 1
-    ranges["other"] = [start, n - 1] if n > start else None
+        if n - base > KIT_STEP:
+            raise ValueError(f"{g} needs {n - base} numbers; its group holds {KIT_STEP}.")
+        ranges[g] = [base, n - 1] if n > base else None
+        if n > base:
+            last = n - 1
+    n = last + 1
     if n - 1 > MAX_PLAN:
         raise ValueError(f"The plan needs numbers up to {n - 1}; the limit is {MAX_PLAN} (EI-9xxxxxx is kept for the move). Use scope 'active'.")
     return {"rows": rows, "product_number": assigned, "duplicates": dups, "shared": shared, "ranges": ranges, "last": n - 1}
@@ -351,7 +378,8 @@ def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Op
     manual = [{**m, "products": [p for p in m["products"] if not (strong.get(p, set()) - {m["source"]})]} for m in manual]
     manual = [m for m in manual if m["products"]]
     products = db.execute(text("select id, sku from products order by id")).all()
-    plan = assign_numbers(sup, hand, [p.id for p in products])
+    kit_lines = {r.product_id: int(r.n) for r in db.execute(text("select product_id, count(*) as n from product_kit_parts group by product_id having count(*) >= 2")).all()}
+    plan = assign_numbers(sup, hand, [p.id for p in products], kit_lines)
     cur = {p.id: p.sku for p in products}
     plan["current"] = cur
     plan["scope"] = scope
@@ -523,6 +551,37 @@ def reserve_manual_item(db: Session, item_id: int) -> Optional[str]:
         return None
 
 
+def assign_kit_number(db: Session, product_id: int) -> Optional[str]:
+    """A product that has just become a kit (2 or more part lines) and still holds a number from the database counter takes the
+    next free number of its group: 2 parts from 5,000,000, 3 parts from 6,000,000, 4 or more from 7,000,000. A product that
+    already holds a catalog number or a kit number keeps it (its part count changing later does not renumber it). Does nothing
+    until the tool has been run once. Never raises: saving parts must not fail over this."""
+    try:
+        with db.begin_nested():
+            if not db.execute(text("select 1 from sku_reservations limit 1")).first():
+                return None
+            cur = db.execute(text("select sku from products where id = :p"), {"p": product_id}).scalar()
+            m = _SKU_RE.match(cur or "")
+            num = int(m.group(1)) if m else 0
+            if m and not (num == 0 or OTHER_BASE <= num < TEMP_BASE):
+                return None  # already in a catalog range or a kit group (or mid-move: EI-9xxxxxx)
+            lines = db.execute(text("select count(*) from product_kit_parts where product_id = :p"), {"p": product_id}).scalar() or 0
+            g = kit_group(int(lines))
+            if not g:
+                return None
+            db.execute(text("select pg_advisory_xact_lock(7240002)"))  # two kits saved at once must not take the same number
+            top = db.execute(
+                text("select max(n) from (select case when sku ~ '^EI-[0-9]{7}$' then cast(substr(sku, 4) as integer) end as n from products) t where n >= :lo and n < :hi"),
+                {"lo": g[1], "hi": g[1] + KIT_STEP},
+            ).scalar()
+            nxt = (top + 1) if top else g[1]
+            if nxt >= g[1] + KIT_STEP:
+                return None
+            return fmt(nxt) if _set_sku(db, product_id, fmt(nxt)) else None
+    except Exception:
+        return None
+
+
 def reserved_numbers(db: Session, source: str, item_ids: list) -> dict:
     """{catalog part id: 'EI-0000123'} for the parts in item_ids whose number is reserved and has no product yet.
     source = 'autodist' / 'rmatv' (supplier_items ids) or 'manual' (manual_catalog_items ids, any hand catalog).
@@ -644,9 +703,9 @@ def _move_counter(db: Session, upto: int) -> str:
 
 
 def _counter_floor(plan: dict) -> int:
-    """The database counter must always continue from the kit range, even after a partial run: a new kit gets the next number
-    after KIT_BASE, never one inside a catalog's range."""
-    return max(plan.get("upper", plan["last"]), KIT_BASE - 1)
+    """The database counter must always continue from OTHER_BASE, even after a partial run: a new product never gets a number
+    inside a catalog's range or a kit group."""
+    return max(plan.get("upper", plan["last"]), OTHER_BASE - 1)
 
 
 def _run(run_id: int, scope: str, update_snapshots: bool, lo: Optional[int] = None, hi: Optional[int] = None) -> None:
