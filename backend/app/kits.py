@@ -421,6 +421,9 @@ def add_manual_item(body: ManualItemIn, db: Session = Depends(get_db), user: Aut
         {"d": dist.id, "pn": number, "pnorm": norm, "mfr": (body.mfr_number or "").strip() or None,
          "brand": (body.manufacturer or "").strip() or None, "desc": (body.description or "").strip() or None, "uc": cost},
     ).first()
+    from app.sku_reserve import reserve_manual_item  # the part takes the next free number of its catalog's block right away
+
+    reserve_manual_item(db, row.id)
     db.commit()
     return {"id": row.id, "part_number": row.part_number, "mfr_number": row.mfr_number, "manufacturer": row.manufacturer, "description": row.description,
             "unit_cost": float(row.unit_cost) if row.unit_cost is not None and has_perm(user, "products.edit_price") else None,
@@ -593,13 +596,12 @@ def make_manual_product(item_id: int, db: Session = Depends(get_db)):
             {"p": pid, "d": m.distributor_id, "pn": m.part_number, "desc": (m.description or "").strip() or None, "uc": m.unit_cost, "mi": m.id},
         )
         # a saved part of a hand-made catalog (Niche, Sinera) takes its reserved number (or the next free one of that block)
-        from app.sku_reserve import HAND_CATALOGS, claim_for_item
+        from app.sku_reserve import claim_for_item, hand_source_for
 
         dname = db.execute(text("select name from po_distributors where id = :d"), {"d": m.distributor_id}).scalar() or ""
-        for src, pat in HAND_CATALOGS:
-            if re.search(pat, dname, re.I):
-                claim_for_item(db, pid, src, m.id)
-                break
+        src = hand_source_for(dname, m.distributor_id)  # niche, sinera, or hand<distributor id>
+        if src:
+            claim_for_item(db, pid, src, m.id)
         follow = parts_mpn(db, pid)
         if follow:
             db.execute(text("update products set manufacturer_part_number = :m where id = :p"), {"m": follow, "p": pid})
@@ -1220,6 +1222,11 @@ def replace_parts(db: Session, product_id: int, parts: list[KitPartIn], label_by
                     {"d": c["distributor_id"], "pn": c["part_number"], "pnorm": _norm(c["part_number"]), "mfr": c["mfr_number"],
                      "brand": c["manufacturer"], "desc": c["description"], "uc": c["unit_cost"]},
                 )
+                from app.sku_reserve import reserve_manual_item  # a newly remembered part takes the next free number of its block
+
+                _iid = db.execute(text("select id from manual_catalog_items where distributor_id = :d and part_norm = :n"), {"d": c["distributor_id"], "n": _norm(c["part_number"])}).scalar()
+                if _iid:
+                    reserve_manual_item(db, _iid)
         except Exception:
             log.exception("could not remember a typed distributor part")
     # The product's Manufacturer part # follows its pieces. What was just saved on the pieces wins: the number still stored on the

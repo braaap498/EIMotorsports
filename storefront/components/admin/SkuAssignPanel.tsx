@@ -38,7 +38,9 @@ type Status = {
   last_run?: { id: number; status: string; phase: string | null; done: number; total: number; message: string | null };
 };
 
-const LABELS: Record<string, string> = { autodist: "Automatic", rmatv: "Rocky Mountain", niche: "Niche (block of 1000)", sinera: "Sinera (block of 1000)", other: "All other products" };
+const LABELS: Record<string, string> = { autodist: "Automatic", rmatv: "Rocky Mountain", niche: "Niche (block of 1000)", sinera: "Sinera (block of 1000)", other: "Kits and all other products (from 5,000,000)" };
+// every other hand-made catalog is a block of 1000 named after its distributor
+const labelFor = (k: string, names?: string[]) => LABELS[k] ?? (k.startsWith("hand") ? `${(names ?? []).join(", ") || k} (block of 1000)` : k);
 
 export default function SkuAssignPanel() {
   const [scope, setScope] = useState<"all" | "active">("all");
@@ -121,7 +123,8 @@ export default function SkuAssignPanel() {
     <section className="space-y-3 rounded-lg border-2 border-amber-400 bg-white p-4">
       <h2 className="text-lg font-semibold">Catalog-ordered SKUs</h2>
       <p className="text-sm text-gray-600">
-        Numbers go to Automatic first, then Rocky Mountain, then a block of 1000 each for Niche and Sinera, then every other product. A catalog part
+        Numbers go to Automatic first, then Rocky Mountain, then a block of 1000 each for Niche, Sinera and every other hand-made catalog. Kits and
+        every other product start at 5,000,000, so there is room below for more distributors; a new kit gets the next number. A catalog part
         with no product reserves its number until the product is made. Every product is renumbered, so its EIB- shelf label changes too.
       </p>
       <div className="flex flex-wrap items-center gap-3">
@@ -146,7 +149,7 @@ export default function SkuAssignPanel() {
           <div className="grid gap-2 text-sm sm:grid-cols-2">
             {Object.entries(plan.ranges).map(([k, v]) => (
               <div key={k} className="rounded border border-gray-200 p-2">
-                <div className="font-medium">{LABELS[k] ?? k}</div>
+                <div className="font-medium">{labelFor(k, plan.distributors[k])}</div>
                 <div className="text-gray-600">
                   {v ? `${v[0]} to ${v[1]}` : "no numbers"}
                   {plan.catalog_counts[k] != null ? ` · ${plan.catalog_counts[k]} catalog parts` : ""}
@@ -167,7 +170,7 @@ export default function SkuAssignPanel() {
               <ul className="mt-1 list-disc pl-5">
                 {plan.duplicates.map((d) => (
                   <li key={d.source + d.item_id}>
-                    {LABELS[d.source] ?? d.source} part {d.item_id}: keeps #{d.keeps}, others {d.others.map((o) => "#" + o).join(", ")}
+                    {labelFor(d.source, plan.distributors[d.source])} part {d.item_id}: keeps #{d.keeps}, others {d.others.map((o) => "#" + o).join(", ")}
                   </li>
                 ))}
               </ul>
@@ -179,7 +182,7 @@ export default function SkuAssignPanel() {
               <ul className="mt-1 list-disc pl-5">
                 {(plan.manual ?? []).map((m) => (
                   <li key={m.source + m.item_id}>
-                    {LABELS[m.source] ?? m.source} part {m.item_id} ({m.number ?? "no number"}): product {m.products.map((o) => "#" + o).join(", ")}
+                    {labelFor(m.source, plan.distributors[m.source])} part {m.item_id} ({m.number ?? "no number"}): product {m.products.map((o) => "#" + o).join(", ")}
                   </li>
                 ))}
               </ul>
@@ -191,7 +194,7 @@ export default function SkuAssignPanel() {
               <ul className="mt-1 pl-5">
                 {plan.slots!.map((x) => (
                   <li key={x.number}>
-                    {x.number}: {LABELS[x.source] ?? x.source} part {x.part_sku ?? "(empty slot)"}
+                    {x.number}: {labelFor(x.source, plan.distributors[x.source])} part {x.part_sku ?? "(empty slot)"}
                     {x.part_mfr ? ` (mfr ${x.part_mfr})` : ""} → {x.product_id ? `product #${x.product_id} (now ${x.product_now ?? "no number"})` : "no product yet, number reserved"}
                   </li>
                 ))}

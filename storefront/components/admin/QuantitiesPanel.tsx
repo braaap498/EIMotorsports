@@ -253,8 +253,10 @@ export default function QuantitiesPanel({
           {!q.drop_ship && q.drop_ship_listings > 0 ? ` ${q.drop_ship_listings} eBay listing${q.drop_ship_listings === 1 ? " is" : "s are"} set to drop ship and show the distributor's usable stock while it can fill a sale.` : ""}
         </p>
         {(q.ebay_listings ?? []).length > 0 && (
-          <div className="mt-2 border-t border-gray-200 pt-2">
-            <div className="text-xs font-semibold uppercase text-gray-500">Quantity eBay shows</div>
+          <details className="mt-2 border-t border-gray-200 pt-2">
+            <summary className="cursor-pointer text-xs font-semibold uppercase text-gray-500">
+              Quantity eBay shows ({(q.ebay_listings ?? []).length} listing{(q.ebay_listings ?? []).length === 1 ? "" : "s"})
+            </summary>
             {(q.ebay_listings ?? []).map((l) => (
               <div key={l.listing_id} className={`${row} text-xs text-gray-700`}>
                 <span>
@@ -269,7 +271,7 @@ export default function QuantitiesPanel({
               </div>
             ))}
             <p className="text-xs text-gray-500">The number the quantity updates send to eBay: units available divided by pieces per sale, rounded down.</p>
-          </div>
+          </details>
         )}
       </div>
     </div>

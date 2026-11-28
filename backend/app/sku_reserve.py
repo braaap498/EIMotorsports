@@ -2,11 +2,16 @@
 Catalog-ordered SKUs with reserved numbers.
 
 Order of numbers: Automatic (autodist) items, Rocky Mountain (rmatv) items, a block of 1000 for Niche, a block of 1000 for
-Sinera, then every other product (kits, eBay-only, duplicates of a catalog part) by product id.
+Sinera, then a block of 1000 for every other hand-made catalog (a distributor with saved parts and no loaded catalog), each new one
+after the last. Everything below KIT_BASE (5,000,000) is for catalogs, so there is room for more distributors. From KIT_BASE up
+come the kits and every other product that is not a catalog part (eBay-only, duplicates of a catalog part), by product id; the
+database counter is moved to continue from there, so a new kit gets the next number.
 
   * A catalog part that has a single product gives that product the part's number.
   * A catalog part with no product reserves its number (sku_reservations, product_id null). The product gets it when it is
     made (claim_for_item, called right after the insert in autodist.py, rmatv.py and kits.py).
+  * A part saved to a hand-made catalog takes the next free number of its block at once (reserve_manual_item); the first part of a
+    new hand-made catalog opens a new block of 1000 after the last one. Nothing is reserved until the first run of this tool.
   * "The product of a catalog part" = kits.single_conds(); never a kit that merely contains the part.
 
 build_plan() and public_plan() are read only. start_apply() runs in the background: reservations written, counter moved
@@ -24,8 +29,10 @@ from sqlalchemy.orm import Session
 
 from app.skus import SKU_PREFIX, SHELF_PREFIX
 
-HAND_CATALOGS = [("niche", r"niche"), ("sinera", r"sinera")]  # (source, regex on po_distributors.name)
+HAND_CATALOGS = [("niche", r"niche"), ("sinera", r"sinera")]  # (source, regex on po_distributors.name): the first two blocks, always there
+HAND_PREFIX = "hand"           # source of every other hand-made catalog: "hand<distributor id>"
 BLOCK_SIZE = 1000
+KIT_BASE = 5_000_000           # kits and every other non-catalog product start here; below it are the catalogs, with room to add more
 SUPPLIER_ORDER = ["autodist", "rmatv"]
 TEMP_BASE = 9_000_000          # temporary numbers: EI-9000001 ...; the plan must stay below this
 MAX_PLAN = TEMP_BASE - 1
@@ -34,6 +41,24 @@ CHUNK = 400
 
 def fmt(n: int) -> str:
     return f"{SKU_PREFIX}{n:07d}"
+
+
+_LOADED_CATALOG = re.compile(r"autodist|automatic distributors|rocky\s*mountain\s*atv|rmatv", re.I)  # same names as kits.supplier_for
+
+
+def is_hand_source(source: str) -> bool:
+    return source in {s for s, _ in HAND_CATALOGS} or (source or "").startswith(HAND_PREFIX)
+
+
+def hand_source_for(name: Optional[str], distributor_id: int) -> Optional[str]:
+    """The block a hand-made catalog's parts belong to: 'niche', 'sinera' (by name) or 'hand<id>'. None for a distributor whose
+    catalog is loaded here (Automatic, Rocky Mountain): its parts come from the catalog, not from saved parts."""
+    if _LOADED_CATALOG.search(name or ""):
+        return None
+    for src, pat in HAND_CATALOGS:
+        if re.search(pat, name or "", re.I):
+            return src
+    return f"{HAND_PREFIX}{distributor_id}"
 
 
 # --------------------------------------------------------------------------
@@ -78,7 +103,8 @@ def ensure_tables_startup() -> None:
 def assign_numbers(supplier_items: dict, hand_items: dict, product_ids: list) -> dict:
     """
     supplier_items: {'autodist': [(item_id, [matching product ids]), ...], 'rmatv': [...]}   in catalog order
-    hand_items:     {'niche': [(item_id, [matching product ids]), ...], 'sinera': [...]}      in manual_catalog_items.id order
+    hand_items:     {'niche': [(item_id, [matching product ids]), ...], 'sinera': [...], 'hand7': [...]}   in manual_catalog_items.id order;
+                    one block of 1000 per entry, in the order of the dict
     product_ids:    every product id.
     Returns {'rows': [reservation dicts], 'product_number': {pid: n}, 'duplicates': [...], 'shared': int, 'ranges': {...}}
     """
@@ -103,8 +129,7 @@ def assign_numbers(supplier_items: dict, hand_items: dict, product_ids: list) ->
             rows.append({"number": n, "source": src, "supplier_item_id": item_id, "manual_item_id": None, "block_index": None, "product_id": owner})
             n += 1
         ranges[src] = [start, n - 1] if n > start else None
-    for src, _pat in HAND_CATALOGS:
-        items = hand_items.get(src, [])
+    for src, items in hand_items.items():  # block order = the order of the dict
         if len(items) > BLOCK_SIZE:
             raise ValueError(f"{src} has {len(items)} saved parts, more than its block of {BLOCK_SIZE}.")
         start = n
@@ -119,6 +144,9 @@ def assign_numbers(supplier_items: dict, hand_items: dict, product_ids: list) ->
                 rows.append({"number": n, "source": src, "supplier_item_id": None, "manual_item_id": None, "block_index": i, "product_id": None})
             n += 1
         ranges[src] = [start, n - 1]
+    if n > KIT_BASE:
+        raise ValueError(f"The catalogs reach {n - 1}, past the start of the kit range ({KIT_BASE}). Raise KIT_BASE in sku_reserve.py.")
+    n = KIT_BASE  # everything that is not a catalog part (kits first of all) starts here, so there is room below for more catalogs
     start = n
     for pid in sorted(product_ids):
         if pid not in assigned:
@@ -235,6 +263,32 @@ def _drop_cross_catalog(rows: list, src: str, strong: dict) -> list:
     return out
 
 
+def hand_sources(db: Session) -> list:
+    """[(source, [po_distributors rows])] in block order: Niche, Sinera, then the other hand-made catalogs. A block that already
+    exists keeps its place (read from sku_reservations), a new one goes after the last, by distributor id. A distributor is a
+    hand-made catalog when it has saved parts and no catalog loaded here."""
+    groups: dict = {src: [] for src, _ in HAND_CATALOGS}
+    for d in db.execute(text("select d.id, d.name from po_distributors d where exists (select 1 from manual_catalog_items m where m.distributor_id = d.id) order by d.id")).all():
+        src = hand_source_for(d.name, d.id)
+        if src:
+            groups.setdefault(src, []).append(d)
+    # Niche/Sinera are matched by name even when they have no saved parts yet (their block is reserved empty)
+    for d in db.execute(text("select id, name from po_distributors order by id")).all():
+        src = hand_source_for(d.name, d.id)
+        if src in {s for s, _ in HAND_CATALOGS} and d not in groups[src]:
+            groups[src].append(d)
+    try:
+        placed = dict(db.execute(text("select source, min(number) from sku_reservations where source like :p group by source"), {"p": HAND_PREFIX + "%"}).all())
+    except Exception:
+        db.rollback()
+        placed = {}
+    for src in placed:
+        groups.setdefault(src, [])  # a block that exists stays, even if its distributor has lost all saved parts
+    fixed = [s for s, _ in HAND_CATALOGS]
+    others = sorted((s for s in groups if s not in fixed), key=lambda s: (placed.get(s, 10**12), groups[s][0].id if groups[s] else 0, s))
+    return [(s, groups[s]) for s in fixed + others]
+
+
 def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Optional[int] = None) -> dict:
     """A catalog part's product = the single product (never a kit) that
        - its one part line points at, or
@@ -273,9 +327,7 @@ def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Op
         sup[src] = [(i, m, t) if m else (i, [linked[i]] if linked.get(i) else [], 3 if linked.get(i) else None) for i, m, t in got]
     hand = {}
     names = {}
-    dists = db.execute(text("select id, name from po_distributors order by id")).all()
-    for src, pat in HAND_CATALOGS:
-        dist = [r for r in dists if re.search(pat, r.name or "", re.I)]
+    for src, dist in hand_sources(db):
         names[src] = [d.name for d in dist]
         if not dist:
             hand[src] = []
@@ -402,7 +454,7 @@ def claim_for_item(db: Session, product_id: int, source: str, item_id: int) -> O
     """Called right after a catalog product is inserted. Gives it the number reserved for that catalog part (None = no
     reservation, the database's number stays). For Niche/Sinera a part saved after the plan takes the next free number of the block."""
     try:
-        col = "manual_item_id" if source in {s for s, _ in HAND_CATALOGS} else "supplier_item_id"
+        col = "manual_item_id" if is_hand_source(source) else "supplier_item_id"
         r = db.execute(
             text(f"select number from sku_reservations where source = :s and {col} = :i and product_id is null order by number limit 1 for update"),
             {"s": source, "i": item_id},
@@ -424,6 +476,51 @@ def claim_for_item(db: Session, product_id: int, source: str, item_id: int) -> O
         return sku
     except Exception:
         return None  # a reservation problem must never stop a product from being made
+
+
+def _free_slot(db: Session, source: str):
+    return db.execute(
+        text("select number from sku_reservations where source = :s and manual_item_id is null and product_id is null order by number limit 1 for update"),
+        {"s": source},
+    ).first()
+
+
+def reserve_manual_item(db: Session, item_id: int) -> Optional[str]:
+    """A part was just saved to a hand-made catalog: it takes the next free number of its block right away, so its number follows
+    the order the parts were saved and shows on the catalog before a product exists. The first part of a distributor that has no
+    block yet opens one: the next 1000 numbers after the last block. Does nothing until the tool has been run once (no reservations
+    yet), when the block is full, or when there is no room left below KIT_BASE. Never raises: saving a part must not fail over this."""
+    try:
+        with db.begin_nested():
+            m = db.execute(
+                text("select m.id, m.distributor_id, d.name from manual_catalog_items m join po_distributors d on d.id = m.distributor_id where m.id = :i"),
+                {"i": item_id},
+            ).first()
+            src = hand_source_for(m.name, m.distributor_id) if m else None
+            if not src:
+                return None
+            have = db.execute(text("select number from sku_reservations where manual_item_id = :i limit 1"), {"i": item_id}).first()
+            if have:
+                return fmt(have.number)
+            db.execute(text("select pg_advisory_xact_lock(7240001)"))  # two parts saved at once must not open the same block
+            r = _free_slot(db, src)
+            if not r:
+                if db.execute(text("select 1 from sku_reservations where source = :s limit 1"), {"s": src}).first():
+                    return None  # its block is full
+                top = db.execute(text("select max(number) from sku_reservations where number < :k"), {"k": KIT_BASE}).scalar()
+                if not top or top + BLOCK_SIZE >= KIT_BASE:
+                    return None  # numbers not assigned yet, or no room left below the kits
+                db.execute(
+                    text("insert into sku_reservations (number, source, block_index) select cast(:a as integer) + g, :s, g from generate_series(0, cast(:n as integer)) g"),
+                    {"a": top + 1, "s": src, "n": BLOCK_SIZE - 1},
+                )
+                r = _free_slot(db, src)
+            if not r:
+                return None
+            db.execute(text("update sku_reservations set manual_item_id = :i where number = :n"), {"i": item_id, "n": r.number})
+            return fmt(r.number)
+    except Exception:
+        return None
 
 
 def reserved_numbers(db: Session, source: str, item_ids: list) -> dict:
@@ -546,6 +643,12 @@ def _move_counter(db: Session, upto: int) -> str:
     return f"counter {seq} at {max(cur, upto)}"
 
 
+def _counter_floor(plan: dict) -> int:
+    """The database counter must always continue from the kit range, even after a partial run: a new kit gets the next number
+    after KIT_BASE, never one inside a catalog's range."""
+    return max(plan.get("upper", plan["last"]), KIT_BASE - 1)
+
+
 def _run(run_id: int, scope: str, update_snapshots: bool, lo: Optional[int] = None, hi: Optional[int] = None) -> None:
     from app.database import get_db
 
@@ -568,7 +671,7 @@ def _run(run_id: int, scope: str, update_snapshots: bool, lo: Optional[int] = No
                 rows[i:i + 2000],
             )
         db.commit()
-        note = _move_counter(db, plan.get("upper", plan["last"]))
+        note = _move_counter(db, _counter_floor(plan))
         ids = sorted(changes)
         total = len(ids) * 2
         _beat(db, run_id, "moving", 0, total, note)
@@ -624,7 +727,7 @@ def _run(run_id: int, scope: str, update_snapshots: bool, lo: Optional[int] = No
             except Exception as e:
                 db.rollback()
                 msg = f"done; ebay_listings.sku was not updated ({str(e)[:120]})"
-        note2 = _move_counter(db, plan.get("upper", plan["last"]))
+        note2 = _move_counter(db, _counter_floor(plan))
         _beat(db, run_id, "done", message=f"{msg}; {note2}", status="done")
         _state["running"] = False
     except Exception as e:
