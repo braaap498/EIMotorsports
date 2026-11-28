@@ -44,7 +44,7 @@ type CatItem = {
   qty_maine: number; qty_indiana: number; qty_nevada: number; qty_other?: number; qty_utah?: number | null; qty_kentucky?: number | null;
 };
 type Brand = { name: string; count: number };
-type Listing = { id: number; store: string; item_id: string; status: string | null; in_sync: boolean };
+type Listing = { id: number; store: string; item_id: string; status: string | null; in_sync: boolean; ebay_label?: string | null };
 type SyncResult = { store: string; item_id: string; status: string; detail: string };
 type SmResult = { store: string; sm_product_id: string; name: string; before: string; after: string; status: string; detail: string };
 
@@ -790,6 +790,20 @@ export default function KitPartsPanel({
             <p className="text-xs text-gray-600">
               {listings.length} eBay listing{listings.length === 1 ? "" : "s"} linked; {listings.length - pending} show this label{pending ? `, ${pending} not confirmed yet` : ""}{invPending ? `; ${invPending} eBay inventory record${invPending === 1 ? "" : "s"} do not show it yet` : ""}.
             </p>
+          )}
+          {listings.length > 0 && (
+            <details className="text-xs text-gray-700">
+              <summary className="cursor-pointer select-none text-gray-600 underline">Show the linked eBay listings</summary>
+              <ul className="mt-1 max-h-60 space-y-0.5 overflow-y-auto rounded border border-gray-200 p-2">
+                {listings.map((l) => (
+                  <li key={l.id}>
+                    <span className="font-mono">{l.item_id}</span> · {l.store || "(no store)"} · {l.status || "status unknown"}
+                    {l.ebay_label ? ` · label on eBay: ${l.ebay_label}` : ""}
+                    {l.in_sync ? "" : " · label not confirmed"}
+                  </li>
+                ))}
+              </ul>
+            </details>
           )}
           {!disabled && !dirty && labelSaved && !!savedCls && listings.length > 0 && canSync && (
             <div className="space-y-2 rounded border border-gray-200 p-3">
