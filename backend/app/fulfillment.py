@@ -80,6 +80,13 @@ def distributor_availability(db: Session, product_ids) -> dict[int, dict]:
     if not ids:
         return out
     max_h = _env_num("FULFILL_FEED_MAX_HOURS", 48)
+    from app.availability import guard, get_setting, SAFETY_DEFAULT, SAFETY_MAX
+
+    try:
+        safety = min(SAFETY_MAX, max(0.0, float(get_setting(db, "dropship_safety_pct", str(SAFETY_DEFAULT)))))
+    except Exception:
+        db.rollback()
+        safety = float(SAFETY_DEFAULT)
     rows = db.execute(
         text(
             """
@@ -100,15 +107,25 @@ def distributor_availability(db: Session, product_ids) -> dict[int, dict]:
         by.setdefault(r.product_id, []).append(r)
     for pid, parts in by.items():
         kits: list[int] = []
+        kits_i: list[int] = []
+        kits_n: list[int] = []
         unknown: list[str] = []
         for r in parts:
             per = max(1, int(r.per_kit or 1))
             if r.sid is None or r.active is False or r.age_h is None or float(r.age_h) > max_h:
                 unknown.append(str(r.part_number))
                 kits.append(0)
+                kits_i.append(0)
+                kits_n.append(0)
                 continue
             kits.append((int(r.indiana) + int(r.nevada)) // per)
+            kits_i.append(int(r.indiana) // per)
+            kits_n.append(int(r.nevada) // per)
         avail = min(kits) if kits else 0
+        # "usable" = what the listing guard rail leaves (app/availability.py): the same percentage and one-warehouse rule the listing
+        # quantities use (the better of Indiana and Nevada alone). A ticked listing whose usable count is too small for the line is
+        # NOT drop shipped: the line is filled from OUR shelf when it covers it.
+        usable = guard(min(kits_i) if kits_i else 0, min(kits_n) if kits_n else 0, safety)
         if unknown:
             detail = "the distributor's stock is unknown for part " + ", ".join(unknown)
         elif len(parts) == 1:
@@ -116,7 +133,7 @@ def distributor_availability(db: Session, product_ids) -> dict[int, dict]:
             detail = f"the distributor shows {avail} (Indiana {int(r.indiana)}, Nevada {int(r.nevada)})"
         else:
             detail = f"the distributor can supply {avail} complete kit{'s' if avail != 1 else ''} (limited by the scarcest part)"
-        out[pid] = {"available": avail, "detail": detail, "unknown": bool(unknown)}
+        out[pid] = {"available": avail, "usable": usable, "detail": detail, "unknown": bool(unknown)}
     return out
 
 

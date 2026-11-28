@@ -1,8 +1,12 @@
 """
 What is AVAILABLE to sell, counting the distributor's stock as well as our own shelf. Mounted at /admin/availability/* (admin only).
 
-DROP SHIP NUMBER: a product or listing marked DROP SHIP shows our shelf PLUS the distributor's stock (Indiana + Nevada), dropship_qty_sql.
-A product NOT marked drop ship shows our shelf only (minus what is set aside).
+DROP SHIP NUMBER: a product or listing marked DROP SHIP shows ONE source at a time, never a total (dropship_qty_sql):
+  1. the better distributor warehouse (Indiana or Nevada) after the safety margin, while it can fill at least one sale;
+  2. otherwise OUR shelf (drop shipping is off for that listing for now: it sells from our stock and orders ship from us);
+  3. otherwise 0.
+It switches back to the distributor by itself when the distributor restocks. A product NOT marked drop ship shows our shelf only
+(minus what is set aside).
 
 THE RULE (a product or listing marked DROP SHIP counts the distributor's stock; everything else is OUR SHELF ONLY: the shelf count
 minus what is set aside. The master switch "Count distributor stock" no longer adds distributor stock to an unmarked product)
@@ -11,7 +15,8 @@ minus what is set aside. The master switch "Count distributor stock" no longer a
                the scarcest piece decides: min over the pieces of floor(stock / pieces needed per product)
   NOT marked drop ship    available = own only (single part or kit)
   marked drop ship        products.dropship_ok = all its listings, channel_listings.dropship_ok = just that one listing.
-                          The number is our shelf plus the distributor's stock (dropship_qty_sql).
+                          The number is ONE source: the better distributor warehouse's usable stock while it can fill a sale,
+                          else our shelf (dropship_qty_sql). Our shelf and the distributor are never added together.
   A piece with no live catalog item (not linked, or the item is inactive) counts as 0 distributor stock.
 
 WHO USES IT
@@ -189,10 +194,80 @@ def wh_sql_for(p: str, col: str, supplier: str) -> str:
     )
 
 
-def dropship_qty_sql(p: str = "p") -> str:
-    """The number a DROP SHIP product or listing shows: our own shelf PLUS the distributor's stock (Indiana + Nevada; with several
-    pieces the scarcest piece decides). Before, it was the lowest non-empty of the three."""
-    return f"({available_sql(p)} + {dist_sql(p)})"
+# --------------------------------------------------------------------------
+# THE GUARD RAIL (safety margin on the distributor's stock) AND THE ORDER OF SOURCES
+# --------------------------------------------------------------------------
+# The distributor's numbers can change under us (other dealers order), so a listing never offers all of what it shows. A percentage
+# of each warehouse's stock is held back (default 25, the setting "dropship_safety_pct", 0 to 90). What is left is the USABLE count:
+#       usable = floor(warehouse stock x (100 - percent) / 100)
+# With 25%: 6 at a warehouse -> 4 usable, so a 5-pack listing cannot be filled from it. 8 -> 6 (one 5-pack), 1 -> 0, 2 -> 1.
+#
+# A DROP SHIP listing shows ONE source at a time and never a total. Sources in order (n = pieces per sale of the listing):
+#   1. the better distributor warehouse: max(usable Indiana, usable Nevada). One order is filled from one place, so a buyer can never
+#      take more than one warehouse can send. When that warehouse falls under the safety line the other warehouse's count takes over
+#      (it is the bigger one by then), so the number simply steps from one warehouse to the next.
+#   2. OUR shelf, only when no warehouse can fill one sale (usable < n). Drop shipping is then OFF for that listing: it sells from our
+#      stock, and orders are filled from our shelf (see dropship_auto._ours_instead). It comes back by itself when the distributor restocks.
+#   3. 0 when neither can fill one sale.
+# Our shelf and the distributor are never added, and our shelf is never shown while a warehouse can still fill a sale.
+SAFETY_DEFAULT = 25
+SAFETY_MAX = 90
+
+
+def safety_pct_sql() -> str:
+    """SQL numeric: the percent of the distributor's stock held back (0 to 90). A value that is not a number counts as the default."""
+    raw = _setting_sql("dropship_safety_pct", str(SAFETY_DEFAULT))
+    return f"(case when {raw} ~ '^[0-9]+([.][0-9]+)?$' then least({SAFETY_MAX}, cast({raw} as numeric)) else {SAFETY_DEFAULT} end)"
+
+
+def usable_sql(expr: str) -> str:
+    """SQL integer: `expr` (a stock count) after the guard rail, never below 0."""
+    return f"cast(greatest(0, floor(cast(({expr}) as numeric) * (100 - {safety_pct_sql()}) / 100.0)) as integer)"
+
+
+def dist_usable_sql(p: str = "p") -> str:
+    """What the distributor can be counted on for product `p` after the guard rail: the BETTER warehouse alone (Indiana or Nevada).
+    The scarcest piece decides within each warehouse, as everywhere else."""
+    return f"greatest({usable_sql(wh_sql(p, 'qty_indiana'))}, {usable_sql(wh_sql(p, 'qty_nevada'))})"
+
+
+def usable_units(x, pct: float) -> int:
+    """The Python twin of usable_sql: a stock count after the guard rail, never below 0."""
+    import math
+
+    return max(0, int(math.floor(max(0, int(x or 0)) * (100.0 - float(pct)) / 100.0 + 1e-9)))
+
+
+def guard(indiana: int, nevada: int, pct: float) -> int:
+    """The Python twin of dist_usable_sql, for code that already has the numbers (they must be kit counts: the scarcest piece
+    decided): the better of the two warehouses after the guard rail."""
+    return max(usable_units(indiana, pct), usable_units(nevada, pct))
+
+
+def pick_source(own: int, du: int, pieces: int = 1, drop_ship: bool = True) -> tuple[int, str]:
+    """The Python twin of dropship_qty_sql / effective_sql for one listing: (units shown, source), source being 'distributor',
+    'our shelf' or 'none'. `du` is the distributor's usable count (dist_usable_sql), `own` our shelf, `pieces` the pieces per sale.
+    Not drop ship: our shelf only."""
+    n = pieces_of(pieces)
+    own, du = max(0, int(own or 0)), max(0, int(du or 0))
+    if not drop_ship:
+        return own, ("our shelf" if own >= n else "none")
+    if du >= n:
+        return du, "distributor"
+    return own, ("our shelf" if own >= n else "none")
+
+
+def pieces_sql(alias: str = "cl") -> str:
+    """SQL integer: pieces per sale of a channel_listings row `alias`, at least 1."""
+    return f"greatest(coalesce({alias}.pieces_per_sale, 1), 1)"
+
+
+def dropship_qty_sql(p: str = "p", pieces: str = "1") -> str:
+    """The number (in UNITS) a DROP SHIP product or listing shows: ONE source, never a total. The better distributor warehouse's usable
+    stock (guard rail applied) while it can fill at least one sale (`pieces` = pieces per sale, an SQL expression such as
+    pieces_sql('cl'); 1 when not given), else OUR shelf, which is 0 when we have none. Divide by the pieces per sale afterwards."""
+    du = dist_usable_sql(p)
+    return f"(case when {du} >= {pieces} then {du} else {available_sql(p)} end)"
 
 
 def extra_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False, flag: str = "dropship_ok") -> str:
@@ -203,12 +278,14 @@ def extra_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False, fla
     return f"(case when {p}.{flag} or {ovr} then {dist_sql(p)} else 0 end)"
 
 
-def effective_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False, flag: str = "dropship_ok") -> str:
-    """SQL: what can be sold from product `p` now. A product or listing marked DROP SHIP shows the lowest non-empty of our shelf,
-    Indiana and Nevada (dropship_qty_sql); anything else is our own count plus the distributor's where the rule allows."""
+def effective_sql(p: str = "p", ovr: str = "false", ignore_switch: bool = False, flag: str = "dropship_ok", pieces: str = "1") -> str:
+    """SQL: the UNITS that can be sold from product `p` now. A product or listing marked DROP SHIP shows one source (dropship_qty_sql:
+    the better distributor warehouse, else our shelf); anything else is our own count. `pieces` is the listing's pieces per sale as
+    an SQL expression (see pieces_sql): pass it whenever the result is divided by pieces afterwards, so a multi-pack the distributor
+    cannot fill falls back to our shelf instead of showing 0."""
     return (
-        f"(case when {p}.{flag} or {ovr} then {dropship_qty_sql(p)} "
-        f"else {available_sql(p)} + {extra_sql(p, ovr, ignore_switch, flag)} end)"
+        f"(case when {p}.{flag} or {ovr} then {dropship_qty_sql(p, pieces)} "
+        f"else {available_sql(p)} end)"   # not marked drop ship: our shelf only (what the distributor adds is 0 there)
     )
 
 
@@ -243,7 +320,9 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
             f"(select count(*) from product_kit_parts k join supplier_items sx on sx.id = k.supplier_item_id and sx.supplier = '{RM_SUPPLIER}' where k.product_id = p.id) as rm_parts, "
             f"(select count(*) from product_kit_parts k join supplier_items sx on sx.id = k.supplier_item_id and sx.supplier = '{SUPPLIER}' where k.product_id = p.id) as ad_parts, "
             "coalesce(p.dropship_ok, false) as ds, "
-            "(select count(*) from channel_listings cl where cl.product_id = p.id and coalesce(cl.dropship_ok, false)) as ds_listings "
+            "(select count(*) from channel_listings cl where cl.product_id = p.id and coalesce(cl.dropship_ok, false)) as ds_listings, "
+            f"{dist_usable_sql('p')} as dist_usable, {effective_sql('p', 'true')} as eff_ds, {effective_sql('p', 'false')} as eff_own, "
+            f"{safety_pct_sql()} as safety_pct "
             "from products p where p.id = :i"
         ),
         {"i": product_id},
@@ -313,6 +392,33 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
                 )
         except Exception:
             db.rollback()
+    # WHAT EACH EBAY LISTING OF THIS PRODUCT SHOWS: units from ONE source (a drop ship listing: the better distributor warehouse while it can
+    # fill a sale, else our shelf) divided by its pieces per sale, rounded down. This is the number the quantity queue sends to eBay.
+    ebay_listings: list[dict] = []
+    try:
+        for l in db.execute(
+            text(
+                "select cl.id, cl.store, regexp_replace(cast(cl.external_id as text), '[^0-9]', '', 'g') as item_id, "
+                "coalesce(cl.dropship_ok, false) as ds, coalesce(cl.pieces_per_sale, 1) as pieces "
+                f"from channel_listings cl where cl.product_id = :i and {_ACTIVE_LISTING} order by cl.store, cl.id"
+            ),
+            {"i": product_id},
+        ).all():
+            ds_l = bool(r.ds or l.ds)
+            # ONE source: the better warehouse while it can fill a sale of this listing, else our shelf (never added together)
+            units, source = pick_source(int(r.own or 0), int(r.dist_usable or 0), l.pieces, ds_l)
+            ebay_listings.append(
+                {
+                    "listing_id": l.id, "store": l.store, "item_id": l.item_id, "drop_ship": ds_l,
+                    "pieces_per_sale": pieces_of(l.pieces), "units_available": units, "shows": packs(units, l.pieces),
+                    "source": source,
+                    # a drop ship listing that is selling from our shelf because the distributor cannot fill a sale: drop ship is paused for it
+                    "drop_ship_paused": bool(ds_l and source != "distributor"),
+                }
+            )
+    except Exception:
+        db.rollback()
+    ds_any = bool(r.ds) or any(x["drop_ship"] for x in ebay_listings)
     return {
         "kit_parts": kit_parts,
         "ei_total": int(r.qoh),
@@ -327,12 +433,18 @@ def product_quantities(product_id: int, db: Session = Depends(get_db)):
         "rm_total": int(r.utah or 0) + int(r.kentucky or 0),
         "has_automatic": int(r.ad_parts or 0) > 0,
         "distributor": dist,
+        "distributor_usable": int(r.dist_usable or 0),   # what the guard rail leaves of the distributor's stock
+        "safety_pct": float(r.safety_pct),
         "distributor_name": ", ".join(dist_names) or "Automatic Distributors",
         "parts": int(r.parts or 0),
         "is_kit": int(r.parts or 0) > 1,
         "drop_ship": bool(r.ds),
         "drop_ship_listings": int(r.ds_listings or 0),
-        "total_available": int(r.own) + (dist if r.ds else 0),
+        "total_available": int(r.eff_ds if r.ds else r.eff_own),
+        # a kit made from our own parts: the kits we can assemble right now (our shelf, minus what is set aside) and what eBay shows for each listing
+        "kits_we_can_assemble": int(r.own) if int(r.parts or 0) > 1 else None,
+        "ebay_listings": ebay_listings,
+        "any_drop_ship": ds_any,
     }
 
 
@@ -374,10 +486,12 @@ def listing_override(db: Session, store: str, item_id: str) -> bool:
         return False
 
 
-def effective(db: Session, product_id: int, listing_dropship: bool = False) -> int:
+def effective(db: Session, product_id: int, listing_dropship: bool = False, pieces: int = 1) -> int:
+    """Units available for product `product_id`. Pass the listing's `pieces` (per sale) when the result is divided by it afterwards, so a
+    multi-pack that the distributor cannot fill falls back to our shelf (drop ship paused) instead of showing 0."""
     return int(
         db.execute(
-            text(f"select {effective_sql('p', 'true' if listing_dropship else 'false')} from products p where p.id = :p"),
+            text(f"select {effective_sql('p', 'true' if listing_dropship else 'false', pieces=str(pieces_of(pieces)))} from products p where p.id = :p"),
             {"p": product_id},
         ).scalar()
         or 0
@@ -433,7 +547,8 @@ def listing_pieces(db: Session, store: str, item_id: str) -> int:
 
 def listing_quantity(db: Session, product_id: int, store: str, item_id: str, listing_dropship: bool = False) -> int:
     """The quantity to show on this eBay listing: units available (drop ship counted when the listing allows it) / its pieces per sale."""
-    return packs(effective(db, product_id, listing_dropship), listing_pieces(db, store, item_id))
+    n = listing_pieces(db, store, item_id)
+    return packs(effective(db, product_id, listing_dropship, n), n)
 
 
 # --------------------------------------------------------------------------
@@ -443,6 +558,18 @@ class SettingsIn(BaseModel):
     use_distributor_stock: Optional[bool] = None
     auto_raise: Optional[bool] = None
     display_default: Optional[str] = Field(None, pattern="^(available|count)$")
+    # GUARD RAIL: percent of the distributor's stock a listing never offers (0 = off, 90 = most it can hold back)
+    safety_pct: Optional[int] = Field(None, ge=0, le=SAFETY_MAX)
+    # dashboard message about a kit part running low on our shelf AND at the distributor: kits our shelf can still make / units at the distributor
+    alert_kit_own_max: Optional[int] = Field(None, ge=0, le=1000)
+    alert_kit_dist_max: Optional[int] = Field(None, ge=0, le=100000)
+
+
+def _int_setting(db: Session, key: str, default: int) -> int:
+    try:
+        return max(0, int(float(get_setting(db, key, str(default)))))
+    except (TypeError, ValueError):
+        return default
 
 
 def _settings(db: Session) -> dict:
@@ -450,6 +577,9 @@ def _settings(db: Session) -> dict:
         "use_distributor_stock": get_setting(db, "use_distributor_stock", "off") == "on",
         "auto_raise": get_setting(db, "auto_raise", "off") == "on",
         "display_default": get_setting(db, "stock_display_default", "available"),
+        "safety_pct": min(SAFETY_MAX, _int_setting(db, "dropship_safety_pct", SAFETY_DEFAULT)),
+        "alert_kit_own_max": _int_setting(db, "alert_kit_own_max", 3),
+        "alert_kit_dist_max": _int_setting(db, "alert_kit_dist_max", 10),
     }
 
 
@@ -466,8 +596,29 @@ def api_put_settings(body: SettingsIn, db: Session = Depends(get_db), user: Auth
         set_setting(db, "auto_raise", "on" if body.auto_raise else "off")
     if body.display_default is not None:
         set_setting(db, "stock_display_default", body.display_default)
+    for field, key in (
+        ("safety_pct", "dropship_safety_pct"),
+        ("alert_kit_own_max", "alert_kit_own_max"), ("alert_kit_dist_max", "alert_kit_dist_max"),
+    ):
+        v = getattr(body, field)
+        if v is not None:
+            set_setting(db, key, str(v))
     db.commit()
+    if body.safety_pct is not None:
+        # the numbers just changed for every drop ship listing: look at them now instead of waiting for the next timer round
+        threading.Thread(target=_reconcile_now, name="availability-now", daemon=True).start()
     return _settings(db)
+
+
+def _reconcile_now() -> None:
+    db = _session_factory()()
+    try:
+        reconcile(db)
+    except Exception:
+        db.rollback()
+        log.exception("availability check after a setting change failed")
+    finally:
+        db.close()
 
 
 # --------------------------------------------------------------------------
@@ -726,7 +877,8 @@ def api_products(
         text(
             f"select p.id, p.sku_display as sku, p.title, p.custom_label_sku, {shelf_sql('p')} as on_hand, "
             f"{available_sql('p')} as own, {parts_count_sql('p')} as parts, {dist_sql('p')} as distributor, "
-            f"coalesce(p.dropship_ok, false) as dropship_ok, (p.dropship_prev is not null) as has_prev, coalesce({linked_sql('p')}, false) as linked "
+            f"coalesce(p.dropship_ok, false) as dropship_ok, (p.dropship_prev is not null) as has_prev, coalesce({linked_sql('p')}, false) as linked, "
+            f"{dist_usable_sql('p')} as dist_usable "
             f"from products p where {cond} order by p.title, p.id limit :lim offset :off"
         ),
         {**params, "lim": per_page, "off": (page - 1) * per_page},
@@ -752,12 +904,16 @@ def api_products(
     items = []
     for r in rows:
         ls = listings.get(r.id, [])
-        for x in (y for y in ls if y["active"]):   # what the listing shows on eBay: units (drop ship adds the distributor's) / pieces per sale, rounded down
-            x["listing_qty"] = packs(int(r.own) + (int(r.distributor) if (r.dropship_ok or x["dropship_ok"]) else 0), x["pieces_per_sale"])
+        for x in (y for y in ls if y["active"]):   # what the listing shows on eBay: ONE source's units / pieces per sale, rounded down
+            ds_l = bool(r.dropship_ok or x["dropship_ok"])
+            units, source = pick_source(int(r.own), int(r.dist_usable or 0), x["pieces_per_sale"], ds_l)
+            x["listing_qty"] = packs(units, x["pieces_per_sale"])
+            x["source"] = source                                    # 'distributor', 'our shelf' or 'none'
+            x["drop_ship_paused"] = bool(ds_l and source != "distributor")   # ticked, but the distributor cannot fill a sale: selling from our shelf
         items.append(
             {
                 "product_id": r.id, "sku": r.sku, "title": r.title, "custom_label": r.custom_label_sku,
-                "on_hand": int(r.on_hand), "own_available": int(r.own), "distributor": int(r.distributor),
+                "on_hand": int(r.on_hand), "own_available": int(r.own), "distributor": int(r.distributor), "distributor_usable": int(r.dist_usable or 0),
                 "piece_count": int(r.parts), "dropship_ok": bool(r.dropship_ok), "has_prev": bool(r.has_prev), "has_distributor": bool(r.linked),
                 "ticked": sum(1 for x in ls if x["dropship_ok"] and x["active"]), "listings": ls,
             }

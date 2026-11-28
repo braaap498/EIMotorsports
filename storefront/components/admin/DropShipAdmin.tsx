@@ -17,8 +17,15 @@ import AmazonAddressJobs from "./AmazonAddressJobs";
 
 type Health = { ticked: number; warnings: string[] };
 type Settings = { manual_checks: boolean; last_scan_at: string | null; last_scan_note: string | null };
-type Avail = { use_distributor_stock: boolean; auto_raise: boolean; display_default: string };
-type Listing = { listing_id: number; store: string; item_id: string; dropship_ok: boolean; pieces_per_sale: number; listing_qty?: number; status?: string; active?: boolean };
+type Avail = {
+  use_distributor_stock: boolean;
+  auto_raise: boolean;
+  display_default: string;
+  safety_pct: number; // guard rail: % of the distributor's stock a listing never offers
+  alert_kit_own_max: number; // dashboard message: kits our shelf can still make from a part
+  alert_kit_dist_max: number; // ...and kits' worth the distributor has of it
+};
+type Listing = { listing_id: number; store: string; item_id: string; dropship_ok: boolean; pieces_per_sale: number; listing_qty?: number; source?: "distributor" | "our shelf" | "none"; drop_ship_paused?: boolean; status?: string; active?: boolean };
 type Item = {
   product_id: number;
   sku: string | null;
@@ -27,6 +34,7 @@ type Item = {
   on_hand: number;
   own_available: number;
   distributor: number;
+  distributor_usable?: number;
   piece_count: number;
   dropship_ok: boolean;
   has_prev: boolean;
@@ -189,9 +197,11 @@ export default function DropShipAdmin() {
               <span>
                 <span className="font-medium">Count distributor stock</span>
                 <span className="block text-xs text-gray-500">
-                  Automatic Distributors, Indiana + Nevada. A single-part product is available if we have it or the distributor does. A kit is
-                  available from our shelf only, unless it is ticked below. When this is OFF everything works from our own shelf count. If neither
-                  we nor the distributor has it, the listing is 0.
+                  Watches every product with an eBay listing, not only the ticked ones, and sends listing quantities when they change (a check
+                  about every 10 minutes). A product or listing ticked Drop ship shows ONE source at a time, never a total: the better
+                  distributor warehouse (Indiana or Nevada, after the safety margin below) while it can fill a sale, then our own shelf once it
+                  cannot (drop ship is paused for that listing and it ships from us), then 0. Anything unticked uses our own shelf only, and a kit
+                  uses the kits our own parts can make.
                 </span>
               </span>
             </label>
@@ -202,6 +212,7 @@ export default function DropShipAdmin() {
                 <span className="block text-xs text-gray-500">When the distributor gets stock back, a listing that went to 0 goes back up. When OFF it stays at 0.</span>
               </span>
             </label>
+            <GuardRail avail={avail} busy={busy !== ""} save={saveAvail} />
           </>
         )}
       </div>
@@ -213,6 +224,68 @@ export default function DropShipAdmin() {
       </div>
 
       {tab === "products" ? <ProductsTab avail={avail} setMsg={setMsg} /> : tab === "activity" ? <DropShipActivity /> : <OrdersTab busy={busy} run={run} setMsg={setMsg} />}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ the guard rail (safety margin) */
+
+function GuardRail({ avail, busy, save }: { avail: Avail; busy: boolean; save: (patch: Partial<Avail>) => Promise<void> }) {
+  const [pct, setPct] = useState(String(avail.safety_pct));
+  const [own, setOwn] = useState(String(avail.alert_kit_own_max));
+  const [dist, setDist] = useState(String(avail.alert_kit_dist_max));
+  useEffect(() => {
+    setPct(String(avail.safety_pct));
+    setOwn(String(avail.alert_kit_own_max));
+    setDist(String(avail.alert_kit_dist_max));
+  }, [avail.safety_pct, avail.alert_kit_own_max, avail.alert_kit_dist_max]);
+  const n = Number(pct);
+  const okPct = pct.trim() !== "" && Number.isInteger(n) && n >= 0 && n <= 90;
+  const example = okPct ? Math.floor((6 * (100 - n)) / 100) : null;
+  const whole = (v: string) => v.trim() !== "" && Number.isInteger(Number(v)) && Number(v) >= 0;
+  return (
+    <div className="space-y-3 rounded border border-blue-200 bg-blue-50 p-3">
+      <div>
+        <span className="font-medium">Safety margin (guard rail)</span>
+        <p className="text-xs text-gray-600">
+          The distributor&rsquo;s numbers can change under us, so a drop ship listing never offers all of them. This percent of the distributor&rsquo;s stock is held back (rounded in our
+          favor). Once what is left at both warehouses is too small for one sale, drop ship pauses for that listing: it shows our own shelf (or 0) and orders ship from us, until the distributor restocks. Example: the distributor shows 6 and a 5-pack is listed &rarr; with{" "}
+          {okPct ? `${n}%` : "this %"} the usable count is {example ?? "?"}, so the 5-pack shows {example !== null && example >= 5 ? "1" : "0"}.
+        </p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <input className={`${inputCls} w-20`} inputMode="numeric" value={pct} disabled={busy} onChange={(e) => setPct(e.target.value)} aria-label="Safety margin percent" />
+          <span className="text-sm">% held back (0 = off, up to 90)</span>
+          <button type="button" className={btn2Cls} disabled={busy || !okPct || n === avail.safety_pct} onClick={() => void save({ safety_pct: n })}>
+            Save
+          </button>
+          {!okPct && <span className="text-xs text-red-700">Enter a whole number from 0 to 90.</span>}
+        </div>
+      </div>
+      <div>
+        <span className="font-medium">Which number a drop ship listing shows</span>
+        <p className="text-xs text-gray-600">
+          One source at a time, never added together. First the better of Indiana and Nevada (after the safety margin). When that warehouse falls to the safety line, the other
+          warehouse&rsquo;s count takes over. When neither can fill a sale the listing uses our own shelf, and shows 0 if we are out too.
+        </p>
+      </div>
+      <div>
+        <span className="font-medium">Dashboard message: a kit part running low</span>
+        <p className="text-xs text-gray-600">Shown when one part of a kit is at or under both numbers: kits our shelf can still make from it, and kits&rsquo; worth at the distributor.</p>
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
+          <input className={`${inputCls} w-16`} inputMode="numeric" value={own} disabled={busy} onChange={(e) => setOwn(e.target.value)} aria-label="Kits our shelf can make" />
+          kits on our shelf and
+          <input className={`${inputCls} w-16`} inputMode="numeric" value={dist} disabled={busy} onChange={(e) => setDist(e.target.value)} aria-label="Kits worth at the distributor" />
+          at the distributor
+          <button
+            type="button"
+            className={btn2Cls}
+            disabled={busy || !whole(own) || !whole(dist) || (Number(own) === avail.alert_kit_own_max && Number(dist) === avail.alert_kit_dist_max)}
+            onClick={() => void save({ alert_kit_own_max: Number(own), alert_kit_dist_max: Number(dist) })}
+          >
+            Save
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -324,7 +397,7 @@ function ProductsTab({ avail, setMsg }: { avail: Avail | null; setMsg: (m: { kin
                   <span className="block font-medium">{it.title}</span>
                   <span className="block text-xs text-gray-500">
                     {it.sku}
-                    {it.custom_label ? ` · ${it.custom_label}` : ""} · shelf {it.on_hand} · distributor {it.distributor}
+                    {it.custom_label ? ` · ${it.custom_label}` : ""} · shelf {it.on_hand} · distributor {it.distributor}{typeof it.distributor_usable === "number" && it.distributor_usable !== it.distributor ? ` (${it.distributor_usable} usable after the safety margin)` : ""}
                   </span>
                 </span>
                 <span className="flex flex-wrap justify-end gap-1">
@@ -363,6 +436,7 @@ function ProductsTab({ avail, setMsg }: { avail: Avail | null; setMsg: (m: { kin
                       </span>
                       <span className="text-xs text-gray-500">
                         {typeof l.listing_qty === "number" ? `shows ${l.listing_qty} on eBay` : ""}
+                        {l.dropship_ok || it.dropship_ok ? (l.source === "distributor" ? " · from the distributor" : l.source === "our shelf" ? " · drop ship paused, using our shelf" : l.source === "none" ? " · drop ship paused, nothing to sell" : "") : ""}
                       </span>
                     </div>
                   ))}

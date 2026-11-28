@@ -127,6 +127,40 @@ def _settings(db: Session) -> dict:
     return {"manual_checks": bool(r.manual_checks), "last_scan_at": r.last_scan_at, "last_scan_note": r.last_scan_note}
 
 
+def _units_needed(db: Session, channel: str, order_ref: str, lines) -> dict[int, int]:
+    """{product id: UNITS the order takes}: quantity bought x the listing's pieces per sale, summed over the order's lines of that product.
+    The distributor's numbers and our shelf are counted in units, so a 5-pack line needs 5, not 1. If the lines cannot be read that way
+    it falls back to the plain quantities."""
+    try:
+        with db.begin_nested():
+            if channel == "amazon":
+                rows = db.execute(
+                    text(
+                        "select l.product_id, coalesce(sum(l.quantity * coalesce(l.pieces_per_sale, 1)), 0) as u from amazon_order_lines l "
+                        "where l.amazon_order_id = :o and l.product_id is not null group by l.product_id"
+                    ),
+                    {"o": order_ref},
+                ).all()
+            else:
+                rows = db.execute(
+                    text(
+                        f"select l.product_id, coalesce(sum({line_units_sql('l')}), 0) as u from ebay_order_lines l "
+                        "where l.ebay_order_id = :o and l.product_id is not null group by l.product_id"
+                    ),
+                    {"o": order_ref},
+                ).all()
+        got = {int(r.product_id): int(r.u) for r in rows if int(r.u or 0) > 0}
+        if got:
+            return got
+    except Exception:
+        log.exception("could not read the units of order %s; using the quantities bought", order_ref)
+    out: dict[int, int] = {}
+    for l in lines:
+        if l.product_id is not None:
+            out[int(l.product_id)] = out.get(int(l.product_id), 0) + int(l.quantity or 1)
+    return out
+
+
 def _flagged_short_lines(db: Session, order_id: str, honor_decision: bool = False) -> list[int]:
     """Products on this eBay order that are to be drop shipped: the listing the buyer bought from is ticked Drop ship (our shelf does
     not matter), and the product is matched to the distributor's catalog. A flag on another listing of the same product does not
@@ -147,10 +181,15 @@ def _flagged_short_lines(db: Session, order_id: str, honor_decision: bool = Fals
     # or its stock is unknown) and OUR shelf covers the line, it is not drop shipped: it stays a normal order we fill ourselves.
     avail = fulfillment.distributor_availability(db, [l.product_id for l in lines if l.product_id is not None])
 
+    units = _units_needed(db, "ebay", _o.ebay_order_id, lines)
+
     def _ours_instead(l) -> bool:
-        need = int(l.quantity or 1)
+        # DROP SHIP PAUSES for this line when the distributor cannot fill it: the line needs `need` UNITS (quantity x pieces per sale)
+        # and the distributor's usable count (the better warehouse after the safety margin) is below that. When our own shelf covers it,
+        # the line is filled from our shelf instead of using up the distributor's last units (the listing shows our shelf meanwhile).
+        need = units.get(int(l.product_id), int(l.quantity or 1))
         a = avail.get(int(l.product_id))
-        return (a is None or int(a["available"]) < need) and int(l.on_hand or 0) >= need
+        return (a is None or int(a.get("usable", a["available"])) < need) and int(l.on_hand or 0) >= need
 
     picks = {
         int(l.product_id)
@@ -403,10 +442,15 @@ def _amazon_flagged_lines(db: Session, order_id: str, honor_decision: bool = Fal
         approved = (fulfillment.decisions_for(db, [k]).get(k) or {}).get("decision") == "dropship"
     avail = fulfillment.distributor_availability(db, [l.product_id for l in lines if l.product_id is not None])
 
+    units = _units_needed(db, "amazon", o.amazon_order_id, lines)
+
     def _ours_instead(l) -> bool:
-        need = int(l.quantity or 1)
+        # DROP SHIP PAUSES for this line when the distributor cannot fill it: the line needs `need` UNITS (quantity x pieces per sale)
+        # and the distributor's usable count (the better warehouse after the safety margin) is below that. When our own shelf covers it,
+        # the line is filled from our shelf instead of using up the distributor's last units (the listing shows our shelf meanwhile).
+        need = units.get(int(l.product_id), int(l.quantity or 1))
         a = avail.get(int(l.product_id))
-        return (a is None or int(a["available"]) < need) and int(l.on_hand or 0) >= need
+        return (a is None or int(a.get("usable", a["available"])) < need) and int(l.on_hand or 0) >= need
 
     picks = {
         int(l.product_id)

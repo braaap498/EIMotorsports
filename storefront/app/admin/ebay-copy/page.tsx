@@ -54,6 +54,9 @@ type Preview = {
   quantity: number;
   quantity_own?: number;
   quantity_distributor?: number;
+  quantity_distributor_usable?: number;
+  quantity_source?: string;
+  safety_pct?: number;
   quantity_indiana?: number;
   quantity_nevada?: number;
   distributor_counted?: boolean;
@@ -650,7 +653,7 @@ function CopyEditor({ id }: { id: number }) {
           {pv.warnings.map((e, i) => <Notice key={i}>{e.message} (eBay {e.code})</Notice>)}
           {pv.ok && (
             <p>
-              eBay accepts this listing. Quantity {pv.quantity}{pv.quantity_own !== undefined ? (pv.distributor_counted ? ` (lowest of the sources that have stock: our shelf ${pv.quantity_own}, Indiana ${pv.quantity_indiana ?? 0}, Nevada ${pv.quantity_nevada ?? 0})` : ` (${pv.quantity_own} on our shelf, distributor not counted)`) : ""}.
+              eBay accepts this listing. Quantity {pv.quantity}{pv.quantity_own !== undefined ? (pv.distributor_counted ? ` (${pv.quantity_source === "distributor" ? "from the distributor" : pv.quantity_source === "our shelf" ? "from our shelf, the distributor cannot fill a sale" : "nothing available"}; our shelf ${pv.quantity_own}; distributor Indiana ${pv.quantity_indiana ?? 0}, Nevada ${pv.quantity_nevada ?? 0}, ${pv.quantity_distributor_usable ?? 0} usable after the ${pv.safety_pct ?? 0}% safety margin)` : ` (${pv.quantity_own} on our shelf, distributor not counted)`) : ""}.
               {pv.fees.length > 0 ? ` Fees: ${pv.fees.map((f) => `${f.name} ${f.amount}`).join(", ")}.` : " No listing fee shown."}
             </p>
           )}

@@ -18,6 +18,11 @@ type Q = {
   rm_total?: number;
   has_automatic?: boolean;
   distributor: number;
+  distributor_usable?: number;
+  safety_pct?: number;
+  kits_we_can_assemble?: number | null;
+  ebay_listings?: { listing_id: number; store: string; item_id: string; drop_ship: boolean; pieces_per_sale: number; units_available: number; shows: number; source?: "distributor" | "our shelf" | "none"; drop_ship_paused?: boolean }[];
+  any_drop_ship?: boolean;
   distributor_name?: string;
   parts: number;
   is_kit: boolean;
@@ -176,6 +181,12 @@ export default function QuantitiesPanel({
               ))}
             </>
           )}
+          {q.is_kit && typeof q.kits_we_can_assemble === "number" && (
+            <div className={`${row} mt-1 border-t border-gray-200 pt-1 font-medium`}>
+              <span>Kits we can assemble now (not set aside for orders)</span>
+              <span>{q.kits_we_can_assemble}</span>
+            </div>
+          )}
           {q.ei_total !== q.own_available && (
             <div className={`${row} pl-3 text-xs text-gray-600`}>
               <span>Available (not set aside for orders)</span>
@@ -198,6 +209,14 @@ export default function QuantitiesPanel({
                 <span>{q.distributor_name ? `${q.distributor_name} · Nevada` : "Nevada"}</span>
                 <span>{q.nevada}</span>
               </div>
+              {typeof q.distributor_usable === "number" && (q.safety_pct ?? 0) > 0 && (
+                <div className={`${row} pl-3 text-xs text-gray-600`}>
+                  <span>
+                    Usable after the {q.safety_pct}% safety margin (better warehouse alone)
+                  </span>
+                  <span>{q.distributor_usable}</span>
+                </div>
+              )}
             </>
           ) : !hasRm ? (
             <div className="text-xs text-gray-500">No distributor part on this product.</div>
@@ -227,10 +246,31 @@ export default function QuantitiesPanel({
         </div>
         <p className="text-xs text-gray-500">
           {q.drop_ship
-            ? "Drop ship is on: our shelf plus the distributor. This is what the website and eBay use."
-            : "Drop ship is off: our shelf only. This is what the website and eBay use."}
-          {!q.drop_ship && q.drop_ship_listings > 0 ? ` ${q.drop_ship_listings} eBay listing${q.drop_ship_listings === 1 ? " is" : "s are"} set to drop ship and use our shelf plus the distributor.` : ""}
+            ? "Drop ship is on: the better distributor warehouse's usable stock while it can fill a sale, otherwise our shelf (never added together). This is what the website and eBay use."
+            : q.is_kit
+              ? "Drop ship is off: the kits we can assemble from our own parts. This is what the website and eBay use."
+              : "Drop ship is off: our shelf only. This is what the website and eBay use."}
+          {!q.drop_ship && q.drop_ship_listings > 0 ? ` ${q.drop_ship_listings} eBay listing${q.drop_ship_listings === 1 ? " is" : "s are"} set to drop ship and show the distributor's usable stock while it can fill a sale.` : ""}
         </p>
+        {(q.ebay_listings ?? []).length > 0 && (
+          <div className="mt-2 border-t border-gray-200 pt-2">
+            <div className="text-xs font-semibold uppercase text-gray-500">Quantity eBay shows</div>
+            {(q.ebay_listings ?? []).map((l) => (
+              <div key={l.listing_id} className={`${row} text-xs text-gray-700`}>
+                <span>
+                  {l.store} · item {l.item_id}
+                  {l.pieces_per_sale > 1 ? ` · ${l.pieces_per_sale} per sale` : ""}
+                  {l.drop_ship ? (l.drop_ship_paused ? " · drop ship paused, using our shelf" : " · drop ship, from the distributor") : ""}
+                </span>
+                <span className="font-medium">
+                  {l.shows}
+                  {l.pieces_per_sale > 1 ? ` (${l.units_available} units)` : ""}
+                </span>
+              </div>
+            ))}
+            <p className="text-xs text-gray-500">The number the quantity updates send to eBay: units available divided by pieces per sale, rounded down.</p>
+          </div>
+        )}
       </div>
     </div>
   );

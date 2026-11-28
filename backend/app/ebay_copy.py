@@ -567,7 +567,9 @@ def _product_label(db: Session, product_id: int) -> str:
 def _quantity(db: Session, store: str, product_id: int, dropship: bool = False, pieces: int = 1) -> int:
     """The quantity to list: units available / pieces per sale (a 3-pack of a one-part product needs 3 units for each one shown)."""
     pieces = max(1, int(pieces or 1))
-    units = db.execute(text(f"select {effective_sql('p', 'true' if dropship else 'false')} from products p where p.id = :p"), {"p": product_id}).scalar()
+    units = db.execute(
+        text(f"select {effective_sql('p', 'true' if dropship else 'false', pieces=str(pieces))} from products p where p.id = :p"), {"p": product_id}
+    ).scalar()
     avail = int(units or 0) // pieces
     if avail < 1 and pieces > 1 and int(units or 0) > 0:
         raise HTTPException(
@@ -579,7 +581,7 @@ def _quantity(db: Session, store: str, product_id: int, dropship: bool = False, 
         raise HTTPException(
             409,
             "Nothing is available to sell for this part (our stock on hand minus parts set aside"
-            + (", Indiana and Nevada are all at 0" if dropship else "") + "), and eBay "
+            + (", and the distributor has nothing usable after the safety margin" if dropship else "") + "), and eBay "
             "needs at least 1 to list. "
             + ("Check that the product has its distributor part linked (Autodist page > Add distributor parts) and that the warehouses have stock. "
                if dropship else "Tick Drop ship to count the distributor's warehouses, or receive stock first. ")
@@ -601,12 +603,19 @@ def _ready(store: str, d: dict) -> None:
 
 
 def _quantity_parts(db: Session, product_id: int, dropship: bool = False, pieces: int = 1) -> dict:
-    """Where the quantity comes from. A drop ship listing shows the lowest of our shelf (on hand minus set aside), Indiana and Nevada,
-    not counting any that is at 0; otherwise it is our shelf only."""
+    """Where the quantity comes from. A drop ship listing shows ONE source, never a total: the better distributor warehouse (Indiana or
+    Nevada, after the safety margin, see app/availability.py) while it can fill a sale, else our shelf (on hand minus set aside);
+    otherwise it is our shelf only."""
     from app.availability import wh_sql
 
     own = int(db.execute(text(f"select {available_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
-    total = int(db.execute(text(f"select {effective_sql('p', 'true' if dropship else 'false')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
+    total = int(
+        db.execute(
+            text(f"select {effective_sql('p', 'true' if dropship else 'false', pieces=str(max(1, int(pieces or 1))))} from products p where p.id = :p"),
+            {"p": product_id},
+        ).scalar()
+        or 0
+    )
     ind = int(db.execute(text(f"select {wh_sql('p', 'qty_indiana')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
     nev = int(db.execute(text(f"select {wh_sql('p', 'qty_nevada')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
     note = ""
@@ -627,7 +636,23 @@ def _quantity_parts(db: Session, product_id: int, dropship: bool = False, pieces
                 note = "The distributor's warehouses (Indiana + Nevada) show no stock for this part right now."
         except Exception:
             db.rollback()
+    # the guard rail: what the distributor's stock is worth after the safety margin (app/availability.py), which is what a drop ship listing really uses
+    from app.availability import dist_usable_sql, safety_pct_sql
+
+    usable = int(db.execute(text(f"select {dist_usable_sql('p')} from products p where p.id = :p"), {"p": product_id}).scalar() or 0)
+    pct = float(db.execute(text(f"select {safety_pct_sql()}")).scalar() or 0)
+    n_pieces = max(1, int(pieces or 1))
+    if not dropship:
+        source = "our shelf" if own >= n_pieces else "none"
+    elif usable >= n_pieces:
+        source = "distributor"
+    else:
+        source = "our shelf" if own >= n_pieces else "none"
+        if (ind + nev) > 0 and not note:
+            note = (f"The distributor shows {ind} in Indiana and {nev} in Nevada, but after the safety margin ({pct:g}% held back) "
+                    f"neither can fill a sale of {n_pieces}, so drop ship is paused for this listing and it uses our shelf.")
     return {"quantity_own": own, "quantity_indiana": ind, "quantity_nevada": nev, "quantity_distributor": ind + nev,
+            "quantity_distributor_usable": usable, "safety_pct": pct, "quantity_source": source,
             "distributor_counted": bool(dropship), "distributor_note": note,
             "units_available": total, "pieces_per_sale": max(1, int(pieces or 1)), "listing_quantity": total // max(1, int(pieces or 1))}
 
