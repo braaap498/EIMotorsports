@@ -8,6 +8,7 @@ import { api, errMsg } from "../../../lib/adminApi";
 import { Badge, Notice, Pager, btn2Cls, inputCls } from "../ui";
 import { SortTh, useSort } from "../SortHeader";
 import ProductPicker, { type PickRow } from "./ProductPicker";
+import ScanAdjust from "./ScanAdjust";
 
 type Row = {
   id: number;
@@ -47,6 +48,7 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [picked, setPicked] = useState<PickRow | null>(null);
   const [qty, setQty] = useState("");
   const [busy, setBusy] = useState(false);
@@ -197,6 +199,11 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
         <button type="button" className={btn2Cls} onClick={load}>
           Refresh
         </button>
+        {canEdit && !isAll && (
+          <button type="button" className={btn2Cls} onClick={() => setScanning((s) => !s)}>
+            {scanning ? "Close scan" : "Scan to adjust"}
+          </button>
+        )}
         {canEdit && !isMain && !isAll && (
           <button type="button" className={btn2Cls} onClick={() => setAdding((a) => !a)}>
             {adding ? "Close" : "Add part"}
@@ -205,6 +212,8 @@ export default function WarehouseStock({ warehouseId, name, isMain, canEdit, act
       </div>
 
       {error && <Notice kind="error">{error}</Notice>}
+
+      {scanning && canEdit && !isAll && <ScanAdjust warehouseId={warehouseId as number} name={name} onChanged={load} />}
 
       {adding && (
         <div className="space-y-3 rounded border border-gray-200 bg-white p-3">
