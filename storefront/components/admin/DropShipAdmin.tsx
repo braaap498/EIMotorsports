@@ -18,7 +18,7 @@ import AmazonAddressJobs from "./AmazonAddressJobs";
 type Health = { ticked: number; warnings: string[] };
 type Settings = { manual_checks: boolean; last_scan_at: string | null; last_scan_note: string | null };
 type Avail = { use_distributor_stock: boolean; auto_raise: boolean; display_default: string };
-type Listing = { listing_id: number; store: string; item_id: string; dropship_ok: boolean; pieces_per_sale: number; listing_qty?: number };
+type Listing = { listing_id: number; store: string; item_id: string; dropship_ok: boolean; pieces_per_sale: number; listing_qty?: number; status?: string; active?: boolean };
 type Item = {
   product_id: number;
   sku: string | null;
@@ -295,7 +295,7 @@ function ProductsTab({ avail, setMsg }: { avail: Avail | null; setMsg: (m: { kin
         </select>
         <input
           className={`${inputCls} w-64`}
-          placeholder="Search title, SKU, label"
+          placeholder="Search title, SKU, label, item number"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { setApplied(q); setOffset(0); } }}
@@ -315,7 +315,7 @@ function ProductsTab({ avail, setMsg }: { avail: Avail | null; setMsg: (m: { kin
       <div className="space-y-2">
         {data?.items.map((it) => {
           const isOpen = open.has(it.product_id);
-          const n = it.listings.length;
+          const n = it.listings.filter((l) => l.active !== false).length; // ended listings cannot be drop shipped
           return (
             <div key={it.product_id} className="rounded border border-gray-200 bg-white text-sm">
               <button type="button" className="flex w-full items-start gap-2 p-3 text-left" onClick={() => toggleOpen(it.product_id)} aria-expanded={isOpen}>
@@ -335,7 +335,12 @@ function ProductsTab({ avail, setMsg }: { avail: Avail | null; setMsg: (m: { kin
               </button>
               {isOpen && (
                 <div className="space-y-2 border-t border-gray-100 p-3">
-                  {it.listings.map((l) => (
+                  {n === 0 && it.listings.length > 0 && <p className="text-xs text-gray-500">All of this product&rsquo;s eBay listings have ended, so there is nothing to tick.</p>}
+                  {it.listings.map((l) => l.active === false ? (
+                    <div key={l.listing_id} className="text-gray-500">
+                      {l.store} · item {l.item_id} · <Badge tone="gray">{l.status ?? "ended"}</Badge> (no Drop ship tick: the listing is not live)
+                    </div>
+                  ) : (
                     <div key={l.listing_id} className="grid grid-cols-1 items-center gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1fr)_15rem_8rem]">
                       <label className="flex items-center gap-2">
                         <input type="checkbox" checked={l.dropship_ok} disabled={busy || (!it.has_distributor && !l.dropship_ok)} title={!it.has_distributor && !l.dropship_ok ? "No Automatic Distributors part is linked to this product" : ""} onChange={(e) => void tickListing(l, e.target.checked)} />
