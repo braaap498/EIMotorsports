@@ -186,7 +186,11 @@ def _dt(s: Optional[str]) -> Optional[datetime]:
 def _from_date(last_modified: Optional[str]) -> Optional[str]:
     """Day to start reading from: the day before the newest record we have (re-reading a day is harmless)."""
     d = _dt(last_modified)
-    return (d - timedelta(days=1)).date().isoformat() if d else None
+    if not d or d.year < 1990:
+        # Some built-in list records (terms, ship methods, types ...) carry a 1970 "modified" time. Asking QuickBooks
+        # for records modified since 1969-12-30 is refused (3020), so no usable date means "read the whole list".
+        return None
+    return (d - timedelta(days=1)).date().isoformat()
 
 
 def _local(tag: str) -> str:
@@ -569,6 +573,14 @@ _UPSERT = text(
 def _finish_step_ok(db: Session, run, step: dict) -> None:
     """A step read everything it asked for: update the marks and, after a full read, mark
     records QuickBooks no longer has."""
+    if step["t"] == "company":
+        db.execute(
+            text(
+                "insert into qb_sync_state (entity, last_full_at, last_success_at, last_error) values ('Company', now(), now(), null) "
+                "on conflict (entity) do update set last_full_at = now(), last_success_at = now(), last_error = null"
+            )
+        )
+        return
     if step["t"] != "q":
         return
     ent = step["entity"]
@@ -579,7 +591,7 @@ def _finish_step_ok(db: Session, run, step: dict) -> None:
             {"e": ent, "s": run.started_at},
         )
     prev = db.execute(text("select last_modified from qb_sync_state where entity = :e"), {"e": ent}).scalar()
-    cands = [d for d in (_dt(prev), _dt(step.get("max_mod"))) if d]
+    cands = [d for d in (_dt(prev), _dt(step.get("max_mod"))) if d and d.year >= 1990]
     newest = max(cands).isoformat() if cands else None
     db.execute(
         text(
@@ -939,7 +951,7 @@ def status(request: Request, db: Session = Depends(get_db)):
         for r in db.execute(text("select entity, last_error from qb_sync_state where last_error is not null order by entity")).all()
     ]
     last = db.execute(
-        text("select id, started_at, finished_at, status, trigger, full_resync, step, jsonb_array_length(plan) as steps, company_file, qbxml_version, counts, errors from qb_runs order by id desc limit 1")
+        text("select id, started_at, finished_at, status, trigger, full_resync, step, jsonb_array_length(plan) as steps, (plan -> step) ->> 'entity' as current_entity, company_file, qbxml_version, counts, errors from qb_runs order by id desc limit 1")
     ).first()
     out["last_run"] = dict(last._mapping) if last else None
     return out
@@ -970,6 +982,8 @@ def sync_now(body: SyncIn, db: Session = Depends(get_db), user: AuthUser = Depen
         raise HTTPException(409, "Syncing is switched off. Turn it on first, then request a sync.")
     _control(db)
     wanted = {e.strip() for e in body.entities if e and e.strip()}
+    picked_company = "Company" in wanted
+    wanted.discard("Company")  # the company record is read at the start of every sync; it is not a kind to pick
     if wanted:
         known = {s.entity for s in SPECS}
         allowed = {s.entity for s in _active_specs()}
@@ -985,10 +999,21 @@ def sync_now(body: SyncIn, db: Session = Depends(get_db), user: AuthUser = Depen
     params: dict[str, Any] = {"f": body.full, "u": user.email or user.user_id}
     if _only_col_ready(db):
         sets += ", only_entities = :o"  # also clears an earlier pick when this request picks nothing
-        params["o"] = ",".join(sorted(wanted)) or None
+        params["o"] = ",".join(sorted(wanted)) or ("Company" if picked_company else None)  # "Company" alone = read just the company record
     db.execute(text(f"update qb_control set {sets} where id = 1"), params)
     db.commit()
     return {"ok": True, "full": body.full, "entities": sorted(wanted)}
+
+
+@admin_router.post("/cancel-request")
+def cancel_request(db: Session = Depends(get_db)):
+    """Withdraw a sync that was requested but has not started (the Web Connector has not checked in yet)."""
+    _need_tables(db)
+    _control(db)
+    clear = "sync_requested = false, full_resync = false" + (", only_entities = null" if _only_col_ready(db) else "")
+    db.execute(text(f"update qb_control set {clear} where id = 1"))
+    db.commit()
+    return {"ok": True}
 
 
 _LAST_PURCHASE_SQL = """
