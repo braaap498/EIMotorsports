@@ -200,9 +200,11 @@ def _group(items: list, pairs) -> list:
 MFR_AUTO = False
 
 
-def _tiered(items: list, pairs, manual: list, src: str) -> list:
+def _tiered(items: list, pairs, manual: list, src: str, strong: dict) -> list:
     """pairs = (item, product id, tier): tier 0 = the product points at the part, 1 = SKU / part # equal, 2 = manufacturer # equal.
-    The manufacturer # is only looked at when nothing matched before it. A part matched only that way goes to `manual`."""
+    The manufacturer # is only looked at when nothing matched before it. A part matched only that way goes to `manual`.
+    Returns (item, product ids, tier of the match or None). `strong` collects {product id: {catalogs}} for tier 0/1 matches:
+    a product held that way by one catalog must never be given to a different catalog by a weaker match (see _drop_cross_catalog)."""
     by: dict = {}
     for item, pid, tier in pairs:
         by.setdefault(item, {}).setdefault(tier, set()).add(pid)
@@ -210,11 +212,26 @@ def _tiered(items: list, pairs, manual: list, src: str) -> list:
     for i in items:
         t = by.get(i, {})
         first = min(t) if t else None
+        if first is not None and first <= 1:
+            for pid in t[first]:
+                strong.setdefault(pid, set()).add(src)
         if first == 2 and not MFR_AUTO:
             manual.append({"source": src, "item_id": i, "products": sorted(t[2])})
-            out.append((i, []))
+            out.append((i, [], None))
         else:
-            out.append((i, sorted(t[first]) if first is not None else []))
+            out.append((i, sorted(t[first]) if first is not None else [], first))
+    return out
+
+
+def _drop_cross_catalog(rows: list, src: str, strong: dict) -> list:
+    """rows = (item, product ids, tier). A weak match (manufacturer #, or a supplier_product_links row; tier 2 or 3) may not take a
+    product that another catalog holds by a pointer or an equal SKU / part #. 09-601 (Sinera part #) and 09.601 (Automatic mfr #)
+    look the same once punctuation is removed, but the product belongs to Sinera."""
+    out = []
+    for i, pids, tier in rows:
+        if tier is not None and tier >= 2:
+            pids = [p for p in pids if not (strong.get(p, set()) - {src})]
+        out.append((i, pids))
     return out
 
 
@@ -227,6 +244,7 @@ def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Op
     (Barcode / UPC is not used.)"""
     active = " and s.active" if scope == "active" else ""
     sup = {}
+    strong: dict = {}  # product id -> catalogs that hold it by a pointer or an equal SKU / part #
     manual: list = []  # parts that matched a product only by manufacturer #: checked by hand
     for src in SUPPLIER_ORDER:
         items = [r.id for r in db.execute(text(f"select s.id from supplier_items s where s.supplier = :src{active} order by s.sku, s.id"), {"src": src}).all()]
@@ -250,7 +268,9 @@ def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Op
                 {"src": src},
             ).all()
         )
-        sup[src] = [(i, m or ([linked[i]] if linked.get(i) else [])) for i, m in _tiered(items, [(r.item, r.pid, r.tier) for r in pairs], manual, src)]
+        got = _tiered(items, [(r.item, r.pid, r.tier) for r in pairs], manual, src, strong)
+        # a supplier_product_links row is the weakest match (tier 3): it is not checked against the part lines at all
+        sup[src] = [(i, m, t) if m else (i, [linked[i]] if linked.get(i) else [], 3 if linked.get(i) else None) for i, m, t in got]
     hand = {}
     names = {}
     dists = db.execute(text("select id, name from po_distributors order by id")).all()
@@ -273,7 +293,11 @@ def build_plan(db: Session, scope: str = "all", lo: Optional[int] = None, hi: Op
             ),
             {"d": d},
         ).all()
-        hand[src] = _tiered(items, [(r.item, r.pid, r.tier) for r in pairs], manual, src)
+        hand[src] = _tiered(items, [(r.item, r.pid, r.tier) for r in pairs], manual, src, strong)
+    sup = {k: _drop_cross_catalog(v, k, strong) for k, v in sup.items()}
+    hand = {k: _drop_cross_catalog(v, k, strong) for k, v in hand.items()}
+    manual = [{**m, "products": [p for p in m["products"] if not (strong.get(p, set()) - {m["source"]})]} for m in manual]
+    manual = [m for m in manual if m["products"]]
     products = db.execute(text("select id, sku from products order by id")).all()
     plan = assign_numbers(sup, hand, [p.id for p in products])
     cur = {p.id: p.sku for p in products}
